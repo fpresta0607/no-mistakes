@@ -522,7 +522,7 @@ func FetchRemoteBranchToRef(ctx context.Context, dir, remote, branch, localRef s
 // ref without touching FETCH_HEAD or ordinary remote-tracking refs.
 func FetchRemoteBranchToPrivateRef(ctx context.Context, dir, remote, branch, localRef string) error {
 	refspec := fmt.Sprintf("+refs/heads/%s:%s", branch, localRef)
-	_, err := Run(ctx, dir, "fetch", "--no-tags", "--no-write-fetch-head", remote, refspec)
+	_, err := Run(ctx, dir, "fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", remote, refspec)
 	return err
 }
 

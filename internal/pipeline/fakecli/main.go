@@ -52,6 +52,8 @@ func handleFakeCLI(mode string) {
 		fakeRecordSuccessHandler()
 	case "git-passthrough":
 		fakeGitPassthroughHandler(args)
+	case "git-trusted-config-second-read-error":
+		fakeGitTrustedConfigSecondReadError(args)
 	case "git-move-head-passthrough":
 		fakeGitMoveHeadPassthroughHandler(args)
 	case "git-intervening-push-passthrough":
@@ -220,6 +222,57 @@ func fakeGitCommitErrorHandler(args []string) {
 func fakeGitPassthroughHandler(args []string) {
 	realGit := os.Getenv("FAKE_CLI_REAL_GIT")
 	fakeGitForward(args, realGit)
+}
+
+func fakeGitTrustedConfigSecondReadError(args []string) {
+	object := os.Getenv("FAKE_CLI_TRUSTED_OBJECT")
+	if object == "" {
+		fmt.Fprintln(os.Stderr, "trusted-read fixture: missing object")
+		os.Exit(74)
+	}
+	commandArgs := args
+	if len(commandArgs) > 0 && strings.HasPrefix(commandArgs[0], "--git-dir=") {
+		commandArgs = commandArgs[1:]
+	}
+	if len(commandArgs) == 2 && commandArgs[0] == "show" && commandArgs[1] == object {
+		tracePath := os.Getenv("FAKE_CLI_TRUSTED_READ_TRACE")
+		data, err := os.ReadFile(tracePath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintln(os.Stderr, "trusted-read fixture: read trace:", err)
+			os.Exit(74)
+		}
+		isRefused := len(data) != 0
+		cwd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "trusted-read fixture: cwd:", err)
+			os.Exit(74)
+		}
+		record, err := json.Marshal(struct {
+			Args      []string `json:"args"`
+			Directory string   `json:"directory"`
+			IsRefused bool     `json:"is_refused"`
+		}{args, cwd, isRefused})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "trusted-read fixture: encode trace:", err)
+			os.Exit(74)
+		}
+		file, err := os.OpenFile(tracePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "trusted-read fixture: open trace:", err)
+			os.Exit(74)
+		}
+		_, writeErr := file.Write(append(record, '\n'))
+		closeErr := file.Close()
+		if writeErr != nil || closeErr != nil {
+			fmt.Fprintln(os.Stderr, "trusted-read fixture: save trace:", writeErr, closeErr)
+			os.Exit(74)
+		}
+		if isRefused {
+			fmt.Fprintln(os.Stderr, "trusted-read fixture: pinned YAML second read refused")
+			os.Exit(73)
+		}
+	}
+	fakeGitForward(args, os.Getenv("FAKE_CLI_REAL_GIT"))
 }
 
 func fakeGitMoveHeadPassthroughHandler(args []string) {
