@@ -599,6 +599,18 @@ func TestPushStep_AttestsHeadBeforePush(t *testing.T) {
 		"FAKE_CLI_PR_TITLE=fix: existing pr",
 		"FAKE_CLI_LOG="+logFile,
 	)
+	gitBinary, err := testgit.RealGit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := fakeCLIBinDir(t)
+	linkTestBinary(t, binDir, "git")
+	linkTestBinary(t, binDir, "gh")
+	sctx.Env = append(sctx.Env,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"FAKE_CLI_MODE=ci-gh-with-intervening-push",
+		"FAKE_CLI_REAL_GIT="+gitBinary,
+	)
 
 	if _, err := (&PushStep{}).Execute(sctx); err != nil {
 		t.Fatalf("push step failed: %v", err)
@@ -607,6 +619,22 @@ func TestPushStep_AttestsHeadBeforePush(t *testing.T) {
 	remoteHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature")
 	if remoteHead != newHead {
 		t.Fatalf("remote head = %s, want %s", remoteHead, newHead)
+	}
+	commands, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hasPlainPush := false
+	for _, command := range strings.Split(string(commands), "\n") {
+		if strings.Contains(command, " push ") {
+			if strings.Contains(command, "--force") || strings.Contains(command, "+"+newHead) {
+				t.Fatalf("additive existing-PR refresh requested a force push: %s", command)
+			}
+			hasPlainPush = true
+		}
+	}
+	if !hasPlainPush {
+		t.Fatalf("did not observe the real plain-push path: %s", commands)
 	}
 
 	updated := readFakeGHBodyArg(t, logFile)
