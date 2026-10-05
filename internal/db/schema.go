@@ -382,5 +382,5 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN launch_assertion TEXT`,
 	`ALTER TABLE runs ADD COLUMN launch_assertion_proof TEXT`,
 	`CREATE TRIGGER IF NOT EXISTS runs_launch_assertion_immutable BEFORE UPDATE OF launch_assertion ON runs WHEN NEW.launch_assertion IS NOT OLD.launch_assertion BEGIN SELECT RAISE(ABORT, 'run launch assertion is immutable'); END`,
-	`CREATE TRIGGER IF NOT EXISTS runs_launch_assertion_proof_immutable BEFORE UPDATE OF launch_assertion_proof ON runs WHEN NEW.launch_assertion_proof IS NOT OLD.launch_assertion_proof AND (OLD.launch_assertion IS NULL OR OLD.launch_assertion_proof IS NOT NULL OR NEW.launch_assertion_proof IS NULL) BEGIN SELECT RAISE(ABORT, 'run launch proof is immutable'); END`,
+	`CREATE TRIGGER IF NOT EXISTS runs_launch_assertion_proof_immutable BEFORE UPDATE OF launch_assertion_proof ON runs WHEN NEW.launch_assertion_proof IS NOT OLD.launch_assertion_proof BEGIN SELECT RAISE(ABORT, 'run launch proof is immutable'); END`,
 }

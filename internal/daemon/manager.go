@@ -1503,17 +1503,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// pr.publish_intent is enforced independently by the PR step.
 	storedOmitIntent := omitIntent || (globalCfg != nil && !globalCfg.Intent.PublishesIntentByDefault())
 
-	run, err := m.db.InsertRunWithLaunchAssertion(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch, storedOmitIntent, plan, expected, pin)
+	run, err := m.db.InsertRunWithLaunchAssertion(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch, storedOmitIntent, plan, expected, launchProof, pin)
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
-	}
-	if launchProof != nil {
-		if err := m.db.SetLaunchAssertionProof(run.ID, expected, launchProof); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
-			return "", err
-		}
-		run.LaunchAssertionProof = launchProof
 	}
 	if inherited := strings.TrimSpace(inheritedPRURL); inherited != "" {
 		if err := m.db.UpdateRunPRURL(run.ID, inherited); err != nil {

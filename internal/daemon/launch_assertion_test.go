@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -235,16 +236,25 @@ func TestLaunchAssertionRecoveryRejectsSourceOrProfileDrift(t *testing.T) {
 		t.Run(change, func(t *testing.T) {
 			manager, root, database, repository, head, marker, global := launchAssertionFixture(t, nil)
 			expected := launchExpectation(head)
-			run, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", head, head, nil, "recovery", "generation", "digest", "", false, nil, expected)
+			proof, err := expected.Verify(head, expected.Profiles)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if change != "missing proof" {
-				proof, err := expected.Verify(head, expected.Profiles)
+			run, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", head, head, nil, "recovery", "generation", "digest", "", false, nil, expected, proof)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if change == "missing proof" {
+				// Only a tampered database can hold an asserted row without its proof.
+				raw, err := sql.Open("sqlite", root.DB())
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := database.SetLaunchAssertionProof(run.ID, expected, proof); err != nil {
+				defer raw.Close()
+				if _, err := raw.Exec(`DROP TRIGGER runs_launch_assertion_proof_immutable`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := raw.Exec(`UPDATE runs SET launch_assertion_proof = NULL WHERE id = ?`, run.ID); err != nil {
 					t.Fatal(err)
 				}
 			}

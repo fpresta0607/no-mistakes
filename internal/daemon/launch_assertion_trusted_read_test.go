@@ -78,15 +78,12 @@ func TestLaunchAssertionTrustedConfigCannotLoseValidatedControls(t *testing.T) {
 				manager.cancels[active.ID] = cancel
 				defer cancel(nil)
 			} else {
-				active, err = database.InsertRunWithLaunchAssertion(repository.ID, "feature", head, head, nil, "recover-read", "generation", "digest", "", false, nil, expected)
-				if err != nil {
-					t.Fatal(err)
-				}
 				proof, err := expected.Verify(trustedSHA, expected.Profiles)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := database.SetLaunchAssertionProof(active.ID, expected, proof); err != nil {
+				active, err = database.InsertRunWithLaunchAssertion(repository.ID, "feature", head, head, nil, "recover-read", "generation", "digest", "", false, nil, expected, proof)
+				if err != nil {
 					t.Fatal(err)
 				}
 				gitCmd(t, gateDirectory, "worktree", "add", "--detach", root.WorktreeDir(repository.ID, active.ID), head)

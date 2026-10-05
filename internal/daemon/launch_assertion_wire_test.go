@@ -83,7 +83,7 @@ func TestLaunchAssertionWireCannotEraseCapturedExpectation(t *testing.T) {
 			for index, assertionFields := range variants {
 				nonce := fmt.Sprintf("wire-%d", index)
 				if method == ipc.MethodClaimLaunchReceipt {
-					if _, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", head, head, nil, nonce, "generation", "digest", "", false, nil, nil); err != nil {
+					if _, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", head, head, nil, nonce, "generation", "digest", "", false, nil, nil, nil); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -140,7 +140,7 @@ func TestLaunchAssertionWireCannotEraseCapturedExpectation(t *testing.T) {
 				t.Error("capability probe accepted an absent assertion")
 			}
 			if method == ipc.MethodClaimLaunchReceipt {
-				if _, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", head, head, nil, "legacy-omitted", "generation", "digest", "", false, nil, nil); err != nil {
+				if _, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", head, head, nil, "legacy-omitted", "generation", "digest", "", false, nil, nil, nil); err != nil {
 					t.Fatal(err)
 				}
 				var legacy ipc.ClaimLaunchReceiptResult

@@ -161,11 +161,13 @@ func (d *DB) InsertRunWithIntent(repoID, branch, headSHA, baseSHA string, intent
 // duplicate defense across daemon processes; callers additionally serialize
 // selection under their branch lock.
 func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, plan *verificationplan.Snapshot, profiles ...*agentcfg.PiProfile) (*Run, error) {
-	return d.InsertRunWithLaunchAssertion(repoID, branch, headSHA, baseSHA, intent, launchNonce, validationGeneration, intentDigest, prBaseBranch, omitIntent, plan, nil, profiles...)
+	return d.InsertRunWithLaunchAssertion(repoID, branch, headSHA, baseSHA, intent, launchNonce, validationGeneration, intentDigest, prBaseBranch, omitIntent, plan, nil, nil, profiles...)
 }
 
-func (d *DB) InsertRunWithLaunchAssertion(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, plan *verificationplan.Snapshot, expected *launchassert.Expectation, profiles ...*agentcfg.PiProfile) (*Run, error) {
-	if err := expected.Validate(); err != nil {
+func (d *DB) InsertRunWithLaunchAssertion(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, plan *verificationplan.Snapshot, expected *launchassert.Expectation, proof *launchassert.Proof, profiles ...*agentcfg.PiProfile) (*Run, error) {
+	// The proof is written with the row: a receipt claim must never observe an
+	// asserted run whose proof has not landed yet.
+	if err := proof.Check(expected); err != nil {
 		return nil, err
 	}
 	if expected != nil && (launchNonce == "" || validationGeneration == "") {
@@ -179,19 +181,20 @@ func (d *DB) InsertRunWithLaunchAssertion(repoID, branch, headSHA, baseSHA strin
 	version := buildinfo.CurrentVersion()
 	buildSHA := buildinfo.Commit
 	r := &Run{
-		ID:                 newID(),
-		RepoID:             repoID,
-		Branch:             branch,
-		HeadSHA:            headSHA,
-		BaseSHA:            baseSHA,
-		SubmittedHeadSHA:   &headSHA,
-		NoMistakesVersion:  &version,
-		NoMistakesBuildSHA: &buildSHA,
-		PiProfile:          pin,
-		LaunchAssertion:    expected,
-		Status:             types.RunPending,
-		CreatedAt:          ts,
-		UpdatedAt:          ts,
+		ID:                   newID(),
+		RepoID:               repoID,
+		Branch:               branch,
+		HeadSHA:              headSHA,
+		BaseSHA:              baseSHA,
+		SubmittedHeadSHA:     &headSHA,
+		NoMistakesVersion:    &version,
+		NoMistakesBuildSHA:   &buildSHA,
+		PiProfile:            pin,
+		LaunchAssertion:      expected,
+		LaunchAssertionProof: proof,
+		Status:               types.RunPending,
+		CreatedAt:            ts,
+		UpdatedAt:            ts,
 	}
 	if plan != nil {
 		r.ID = plan.ID
@@ -214,8 +217,8 @@ func (d *DB) InsertRunWithLaunchAssertion(repoID, branch, headSHA, baseSHA strin
 	}
 	r.OmitIntent = omitIntent
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_assertion, pr_base_branch, omit_intent, pi_profile, verification_plan, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.LaunchAssertion, r.PRBaseBranch, r.OmitIntent, r.PiProfile, r.VerificationPlan, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_assertion, launch_assertion_proof, pr_base_branch, omit_intent, pi_profile, verification_plan, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.LaunchAssertion, r.LaunchAssertionProof, r.PRBaseBranch, r.OmitIntent, r.PiProfile, r.VerificationPlan, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)

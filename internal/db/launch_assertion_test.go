@@ -18,25 +18,27 @@ func TestLaunchAssertionImmutableAndReceiptClaimFailsClosed(t *testing.T) {
 	expected := &launchassert.Expectation{TrustedSHA: strings.Repeat("a", 40), Profiles: map[string][]agentcfg.Selection{
 		"primary": {profile}, "reviewer": {profile}, "fixer": {profile},
 	}}
-	run, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", "head", "base", nil, "nonce", "generation", "digest", "", false, nil, expected)
+	proof, err := expected.Verify(expected.TrustedSHA, expected.Profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", "head", "base", nil, "nonce", "generation", "digest", "", false, nil, expected, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.sql.Exec(`UPDATE runs SET launch_assertion = NULL WHERE id = ?`, run.ID); err == nil {
 		t.Fatal("launch assertion could be cleared")
 	}
-	if _, _, err := database.ClaimLaunchReceiptWithAssertion(repository.ID, "feature", "nonce", "head", "generation", "digest", "", false, expected); err == nil {
-		t.Fatal("missing proof consumed the launch receipt")
-	}
-	proof, err := expected.Verify(expected.TrustedSHA, expected.Profiles)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.SetLaunchAssertionProof(run.ID, expected, proof); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := database.sql.Exec(`UPDATE runs SET launch_assertion_proof = NULL WHERE id = ?`, run.ID); err == nil {
 		t.Fatal("launch proof could be cleared")
+	}
+	if _, err := database.sql.Exec(`INSERT INTO runs
+		(id, repo_id, branch, head_sha, base_sha, submitted_head_sha, launch_nonce, launch_validation_generation, launch_intent_digest, launch_assertion, created_at, updated_at)
+		VALUES ('unproved', ?, 'feature', 'head', 'base', 'head', 'unproved', 'generation', 'digest', ?, 1, 1)`, repository.ID, expected); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := database.ClaimLaunchReceiptWithAssertion(repository.ID, "feature", "unproved", "head", "generation", "digest", "", false, expected); err == nil {
+		t.Fatal("missing proof consumed the launch receipt")
 	}
 	changed := *expected
 	changed.TrustedSHA = strings.Repeat("b", 40)
@@ -69,15 +71,12 @@ func TestLaunchAssertionReceiptClaimRaceKeepsOneOwner(t *testing.T) {
 	expected := &launchassert.Expectation{TrustedSHA: strings.Repeat("a", 40), Profiles: map[string][]agentcfg.Selection{
 		"primary": {profile}, "reviewer": {profile}, "fixer": {profile},
 	}}
-	run, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", "head", "base", nil, "race", "generation", "digest", "", false, nil, expected)
-	if err != nil {
-		t.Fatal(err)
-	}
 	proof, err := expected.Verify(expected.TrustedSHA, expected.Profiles)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.SetLaunchAssertionProof(run.ID, expected, proof); err != nil {
+	run, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", "head", "base", nil, "race", "generation", "digest", "", false, nil, expected, proof)
+	if err != nil {
 		t.Fatal(err)
 	}
 	changed := *expected
@@ -123,5 +122,45 @@ func TestLaunchAssertionReceiptClaimRaceKeepsOneOwner(t *testing.T) {
 	}
 	if created != 1 {
 		t.Fatalf("created receipts = %d, want 1", created)
+	}
+}
+
+func TestLaunchAssertionRowIsNeverVisibleWithoutItsProof(t *testing.T) {
+	database := openTestDB(t)
+	repository, err := database.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := agentcfg.Selection{Harness: "codex", Model: "fixture", Effort: agentcfg.EffortXHigh, ServiceTier: "default"}
+	expected := &launchassert.Expectation{TrustedSHA: strings.Repeat("a", 40), Profiles: map[string][]agentcfg.Selection{
+		"primary": {profile}, "reviewer": {profile}, "fixer": {profile},
+	}}
+	proof, err := expected.Verify(expected.TrustedSHA, expected.Profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name     string
+		expected *launchassert.Expectation
+		proof    *launchassert.Proof
+	}{
+		{name: "assertion without proof", expected: expected},
+		{name: "proof without assertion", proof: proof},
+	} {
+		if _, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", "head", "base", nil, "partial", "generation", "digest", "", false, nil, test.expected, test.proof); err == nil {
+			t.Errorf("%s was inserted", test.name)
+		}
+	}
+	if runs, err := database.GetRunsByRepo(repository.ID); err != nil || len(runs) != 0 {
+		t.Fatalf("refused insert left a row: %+v, error=%v", runs, err)
+	}
+
+	run, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", "head", "base", nil, "atomic", "generation", "digest", "", false, nil, expected, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, isCreated, err := database.ClaimLaunchReceiptWithAssertion(repository.ID, "feature", "atomic", "head", "generation", "digest", "", false, expected)
+	if err != nil || !isCreated || claimed.ID != run.ID || claimed.LaunchAssertionProof.Check(expected) != nil {
+		t.Fatalf("claim right after the insert = %+v, created=%v, error=%v", claimed, isCreated, err)
 	}
 }

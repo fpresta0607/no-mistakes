@@ -32,14 +32,11 @@ func TestLaunchAssertionPersistedBindingReopensAndFailsClosed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		asserted, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", "head", "base", nil, "asserted", "generation", "digest", "", false, nil, expected)
+		asserted, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", "head", "base", nil, "asserted", "generation", "digest", "", false, nil, expected, proof)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := database.SetLaunchAssertionProof(asserted.ID, expected, proof); err != nil {
-			t.Fatal(err)
-		}
-		legacy, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", "head", "base", nil, "legacy", "generation", "digest", "", false, nil, nil)
+		legacy, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", "head", "base", nil, "legacy", "generation", "digest", "", false, nil, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
