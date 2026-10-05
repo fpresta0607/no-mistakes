@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
@@ -14,12 +15,22 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 )
 
+// decodeLaunchParams validates the launch assertion before the typed decode.
+// encoding/json matches field names case-insensitively and lets a later key
+// win, so a case variant such as LAUNCH_ASSERTION:null would silently erase a
+// validated assertion. Only the exact key may carry it.
 func decodeLaunchParams(data json.RawMessage, target interface{}) error {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	if raw, hasAssertion := fields["launch_assertion"]; hasAssertion {
+	for key, raw := range fields {
+		if !strings.EqualFold(key, "launch_assertion") {
+			continue
+		}
+		if key != "launch_assertion" {
+			return fmt.Errorf("non-canonical launch assertion field %q", key)
+		}
 		var expected launchassert.Expectation
 		if err := json.Unmarshal(raw, &expected); err != nil {
 			return err
