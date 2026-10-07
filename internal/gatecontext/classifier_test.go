@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 
@@ -126,8 +127,8 @@ func TestInspectorUsesAuthenticatedProcessAncestryAfterCWDChange(t *testing.T) {
 	inspector := gatecontext.Inspector{
 		DB:    f.d,
 		Paths: f.p,
-		ParentPID: func(pid int) (int, error) {
-			return parents[pid], nil
+		Process: func(pid int) (gatecontext.ProcessInfo, error) {
+			return gatecontext.ProcessInfo{ParentPID: parents[pid]}, nil
 		},
 	}
 	got, err := inspector.Inspect(context.Background(), gatecontext.Request{CWD: f.work, PeerPID: 4300})
@@ -146,11 +147,11 @@ func TestInspectorUsesAuthenticatedProcessAncestryAfterCWDChange(t *testing.T) {
 		t.Fatalf("independent ordinary peer rejected by forged marker: %+v", ordinary)
 	}
 
-	inspector.ParentPID = func(pid int) (int, error) {
+	inspector.Process = func(pid int) (gatecontext.ProcessInfo, error) {
 		if pid == 9300 {
-			return 5000, nil
+			return gatecontext.ProcessInfo{ParentPID: 5000}, nil
 		}
-		return 1, nil
+		return gatecontext.ProcessInfo{ParentPID: 1}, nil
 	}
 	daemonChild, err := inspector.Inspect(context.Background(), gatecontext.Request{CWD: f.work, PeerPID: 9300, DaemonPID: 5000})
 	if err != nil {
@@ -158,6 +159,115 @@ func TestInspectorUsesAuthenticatedProcessAncestryAfterCWDChange(t *testing.T) {
 	}
 	if !daemonChild.Nested || !daemonChild.DaemonDescendant || daemonChild.RunID != "" {
 		t.Fatalf("daemon-descendant classification = %+v, want refusal without guessed run metadata", daemonChild)
+	}
+}
+
+// Windows keeps a dead parent's pid on its children and reuses pids, so an
+// outer client's recorded parent can later name a process inside another
+// run's gate. A recorded parent created after its child is not its parent.
+func TestInspectorStopsAncestryAtAReusedParentPID(t *testing.T) {
+	f := newTopologyFixture(t)
+	runRecord, err := f.d.InsertRun(f.repoID, "feature", "head", "base")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := f.d.UpdateRunStatus(runRecord.ID, types.RunRunning); err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	step, err := f.d.InsertStepResult(runRecord.ID, types.StepCI)
+	if err != nil {
+		t.Fatalf("insert step: %v", err)
+	}
+	if err := f.d.StartStep(step.ID); err != nil {
+		t.Fatalf("start step: %v", err)
+	}
+	const agentPID, daemonPID = 4100, 5000
+	agent := agentPID
+	if err := f.d.SetStepAgentActivity(step.ID, "started", &agent); err != nil {
+		t.Fatalf("set agent pid: %v", err)
+	}
+	at := func(minutes int) time.Time {
+		return time.Date(2026, 10, 1, 22, 0, 0, 0, time.UTC).Add(time.Duration(minutes) * time.Minute)
+	}
+	for _, test := range []struct {
+		name           string
+		processes      map[int]gatecontext.ProcessInfo
+		daemonPID      int
+		isNested       bool
+		isAgentNested  bool
+		isDaemonNested bool
+	}{
+		{
+			name: "reused parent under another run's agent",
+			processes: map[int]gatecontext.ProcessInfo{
+				7000:     {ParentPID: 6000, Started: at(2)},
+				6000:     {ParentPID: agentPID, Started: at(220)},
+				agentPID: {ParentPID: 1, Started: at(200)},
+			},
+		},
+		{
+			name: "two reused hops",
+			processes: map[int]gatecontext.ProcessInfo{
+				7000:     {ParentPID: 6500, Started: at(2)},
+				6500:     {ParentPID: 6000, Started: at(100)},
+				6000:     {ParentPID: agentPID, Started: at(300)},
+				agentPID: {ParentPID: 1, Started: at(200)},
+			},
+		},
+		{
+			name: "reused parent is the daemon",
+			processes: map[int]gatecontext.ProcessInfo{
+				7000:      {ParentPID: daemonPID, Started: at(2)},
+				daemonPID: {ParentPID: 1, Started: at(60)},
+			},
+			daemonPID: daemonPID,
+		},
+		{
+			name: "genuine descendant of the agent",
+			processes: map[int]gatecontext.ProcessInfo{
+				7000:     {ParentPID: 6000, Started: at(240)},
+				6000:     {ParentPID: agentPID, Started: at(220)},
+				agentPID: {ParentPID: 1, Started: at(200)},
+			},
+			isNested: true, isAgentNested: true,
+		},
+		{
+			name: "genuine descendant of the daemon",
+			processes: map[int]gatecontext.ProcessInfo{
+				7000:      {ParentPID: daemonPID, Started: at(240)},
+				daemonPID: {ParentPID: 1, Started: at(60)},
+			},
+			daemonPID: daemonPID,
+			isNested:  true, isDaemonNested: true,
+		},
+		{
+			name: "unknown creation times keep following the chain",
+			processes: map[int]gatecontext.ProcessInfo{
+				7000:     {ParentPID: 6000, Started: at(2)},
+				6000:     {ParentPID: agentPID},
+				agentPID: {ParentPID: 1, Started: at(200)},
+			},
+			isNested: true, isAgentNested: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inspector := gatecontext.Inspector{
+				DB:    f.d,
+				Paths: f.p,
+				Process: func(pid int) (gatecontext.ProcessInfo, error) {
+					return test.processes[pid], nil
+				},
+			}
+
+			got, err := inspector.Inspect(context.Background(), gatecontext.Request{CWD: f.work, PeerPID: 7000, DaemonPID: test.daemonPID})
+
+			if err != nil {
+				t.Fatalf("inspect: %v", err)
+			}
+			if got.Nested != test.isNested || got.AgentDescendant != test.isAgentNested || got.DaemonDescendant != test.isDaemonNested {
+				t.Fatalf("classification = %+v, want nested=%v agent=%v daemon=%v", got, test.isNested, test.isAgentNested, test.isDaemonNested)
+			}
+		})
 	}
 }
 

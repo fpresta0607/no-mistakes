@@ -193,6 +193,9 @@ Before Git changes a managed gate ref, the `pre-receive` hook asks the daemon
 to authorize the pushing process. The daemon refuses descendants of an active
 validation step before mutation, including direct pushes, and safely omits run
 or phase details when authenticated ancestry cannot identify them uniquely.
+On Windows a process keeps its dead parent's pid and pids are reused, so the
+ancestry walk stops at a recorded parent created after its child rather than
+mistaking an unrelated client for a descendant.
 An existing custom `pre-receive` hook is preserved and runs after admission.
 
 When `git push no-mistakes <branch>` lands, the bare repo's `post-receive` hook
