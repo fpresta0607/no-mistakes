@@ -81,3 +81,31 @@ func TestLaunchAssertionProofBindsExactSourceAndEveryRole(t *testing.T) {
 		t.Fatal("missing native proof accepted")
 	}
 }
+
+func TestLaunchAssertionFileAcceptsClaudeEntriesWithoutServiceTier(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	for _, test := range []struct {
+		name    string
+		entry   string
+		isValid bool
+	}{
+		{"claude", `{"harness":"claude","model":"claude-fixture","effort":"high"}`, true},
+		{"claude with tier", `{"harness":"claude","model":"claude-fixture","effort":"high","service_tier":"default"}`, false},
+		{"codex without tier", `{"harness":"codex","model":"fixture","effort":"high"}`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			source := `{"trusted_sha":"` + sha + `","profiles":{"primary":[` + test.entry + `],"reviewer":[` + test.entry + `],"fixer":[` + test.entry + `]}}`
+			var expected Expectation
+			if err := json.Unmarshal([]byte(source), &expected); (err == nil) != test.isValid {
+				t.Fatalf("decode = %v, want valid=%v", err, test.isValid)
+			}
+			if !test.isValid {
+				return
+			}
+			encoded, err := json.Marshal(expected.Profiles["primary"][0])
+			if err != nil || string(encoded) != test.entry {
+				t.Fatalf("canonical Claude entry = %s, want %s (%v)", encoded, test.entry, err)
+			}
+		})
+	}
+}

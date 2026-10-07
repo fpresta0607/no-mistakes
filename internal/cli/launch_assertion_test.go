@@ -141,7 +141,7 @@ func TestLaunchAssertionReceiptRendersSourceAndEffectiveProfiles(t *testing.T) {
 		Harness: "codex", Model: "fixture/fallback", Effort: agentcfg.EffortHigh, ServiceTier: "fast",
 	})
 	expected.Profiles["reviewer_after_round"] = []agentcfg.Selection{{
-		Harness: "codex", Model: "fixture-reviewer", Effort: agentcfg.EffortMedium, ServiceTier: "default",
+		Harness: "claude", Model: "claude-reviewer", Effort: agentcfg.EffortMedium,
 	}}
 	expected.Profiles["fixer_after_round"] = []agentcfg.Selection{{
 		Harness: "codex", Model: "fixture-fixer", Effort: agentcfg.EffortLow, ServiceTier: "fast",
@@ -173,7 +173,7 @@ func TestLaunchAssertionReceiptRendersSourceAndEffectiveProfiles(t *testing.T) {
       reviewer[1]{harness,model,effort,service_tier}:
         codex,fixture,xhigh,default
       reviewer_after_round[1]{harness,model,effort,service_tier}:
-        codex,fixture-reviewer,medium,default
+        claude,claude-reviewer,medium,""
 `, expected.Digest(), expected.TrustedSHA)
 	if !strings.HasSuffix(output.String(), expectedProof) {
 		t.Fatalf("source-bound receipt changed the structured proof: %s", output.String())

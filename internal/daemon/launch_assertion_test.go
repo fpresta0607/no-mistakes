@@ -297,3 +297,79 @@ func TestLaunchAssertionRecoveryRejectsSourceOrProfileDrift(t *testing.T) {
 		})
 	}
 }
+
+func TestLaunchAssertionRunStartProvesClaudeSelections(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		agentConfig string
+		agentArgs   string
+		isMatching  bool
+	}{
+		{name: "matching", agentConfig: "{model: claude-fixture, effort: high}", agentArgs: "[]", isMatching: true},
+		{name: "effort mismatch", agentConfig: "{model: claude-fixture, effort: low}", agentArgs: "[]"},
+		{name: "native model mismatch", agentConfig: "{model: claude-fixture, effort: high}", agentArgs: "['--model', 'other']"},
+		{name: "implicit effort", agentConfig: "{model: claude-fixture}", agentArgs: "[]"},
+		{name: "unprovable native argument", agentConfig: "{model: claude-fixture, effort: high}", agentArgs: "['--fallback-model', 'other']"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager, root, database, repository, head, _, _ := launchAssertionFixture(t, func() []pipeline.Step { return []pipeline.Step{&launchAssertionFixtureStep{}} })
+			directory := t.TempDir()
+			marker := filepath.Join(directory, "claude-entries.txt")
+			binary := filepath.Join(directory, "claude")
+			result := `{"type":"result","subtype":"success","is_error":false,"result":"ok"}`
+			script := "#!/bin/sh\nprintf '%s\n' \"$*\" >> " + shellQuoteForTest(marker) + "\nprintf '%s\n' '" + result + "'\n"
+			if runtime.GOOS == "windows" {
+				binary += ".bat"
+				script = "@echo off\r\necho %*>>\"" + marker + "\"\r\necho " + result + "\r\n"
+			}
+			if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			global := fmt.Sprintf("agent: claude\nagent_path_override:\n  claude: %q\nagent_config:\n  claude: %s\nagent_args_override:\n  claude: %s\n", binary, test.agentConfig, test.agentArgs)
+			if err := os.WriteFile(root.ConfigFile(), []byte(global), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			profile := agentcfg.Selection{Harness: types.AgentClaude, Model: "claude-fixture", Effort: agentcfg.EffortHigh}
+			expected := &launchassert.Expectation{TrustedSHA: head, Profiles: map[string][]agentcfg.Selection{
+				"primary": {profile}, "reviewer": {profile}, "fixer": {profile},
+			}}
+
+			receipt, err := manager.HandleStartFreshRun(context.Background(), &ipc.StartFreshRunParams{
+				RepoID: repository.ID, Branch: "feature", HeadSHA: head, Intent: "assert Claude selection",
+				LaunchNonce: "claude", ValidationGeneration: "generation", LaunchAssertion: expected,
+			})
+
+			if !test.isMatching {
+				if err == nil || !strings.Contains(err.Error(), "selection") && !strings.Contains(err.Error(), "profiles differ") {
+					t.Fatalf("Claude mismatch was not refused by the assertion: %v", err)
+				}
+				if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+					t.Fatal("Claude mismatch entered the agent fixture")
+				}
+				if runs, err := database.GetRunsByRepo(repository.ID); err != nil || len(runs) != 0 {
+					t.Fatalf("refused Claude assertion created a run: %+v %v", runs, err)
+				}
+				return
+			}
+			if err != nil || receipt.LaunchAssertionProof.Check(expected) != nil {
+				t.Fatalf("matching Claude receipt = %+v %v", receipt, err)
+			}
+			if run := waitForRunTerminalState(t, database, receipt.RunID); run.Status != types.RunCompleted {
+				t.Fatalf("matching Claude fixture run = %+v", run)
+			}
+			entries, err := os.ReadFile(marker)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.Split(strings.TrimSpace(string(entries)), "\n")
+			if len(lines) != 3 {
+				t.Fatalf("Claude fixture entered %d times, want 3: %s", len(lines), entries)
+			}
+			for _, line := range lines {
+				if !strings.Contains(line, "--model claude-fixture") || !strings.Contains(line, "--effort high") {
+					t.Fatalf("Claude fixture did not receive the proved selection: %s", line)
+				}
+			}
+		})
+	}
+}

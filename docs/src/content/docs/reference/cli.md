@@ -283,22 +283,24 @@ The file must be a regular file of at most 8 KiB holding one JSON object with ex
 
 - `trusted_sha`: the full, lowercase 40-character commit SHA expected at the tip of the default branch.
 - `profiles`: the ordered agent chain for each role, keyed `primary`, `reviewer`, and `fixer`, plus `reviewer_after_round` and `fixer_after_round` exactly when [`review_agents`](/no-mistakes/reference/global-config/#review_agents) configures them.
-  Each chain has 1-8 entries of `harness`, `model`, `effort`, and `service_tier`.
+  Each chain has 1-8 entries of `harness` (`codex` or `claude`), `model`, and `effort`; a Codex entry also names its `service_tier`, and a Claude entry has none.
 
 ```json
 {
   "trusted_sha": "0123456789abcdef0123456789abcdef01234567",
   "profiles": {
-    "primary": [{ "harness": "codex", "model": "gpt-5", "effort": "high", "service_tier": "default" }],
-    "reviewer": [{ "harness": "codex", "model": "gpt-5", "effort": "high", "service_tier": "default" }],
+    "primary": [{ "harness": "claude", "model": "claude-opus-5-5", "effort": "high" }],
+    "reviewer": [{ "harness": "claude", "model": "claude-opus-5-5", "effort": "xhigh" }],
     "fixer": [{ "harness": "codex", "model": "gpt-5", "effort": "high", "service_tier": "default" }]
   }
 }
 ```
 
 A role without its own `review_agents` entry is proved against the primary chain.
-Only Codex selections are currently verifiable, and every knob must be explicit: the daemon derives each entry from [`agent_config`](/no-mistakes/reference/global-config/#agent_config) and [`agent_args_override`](/no-mistakes/reference/global-config/#agent_args_override) with the same precedence the launched process uses, and refuses a native argument it cannot interpret (such as `--profile`) rather than reporting what was requested.
-Unknown fields, a missing role, an implicit service tier, or any other agent harness refuse the launch.
+Codex and Claude Code selections are verifiable, and every knob must be explicit: the daemon derives each entry from [`agent_config`](/no-mistakes/reference/global-config/#agent_config) and [`agent_args_override`](/no-mistakes/reference/global-config/#agent_args_override) with the same precedence the launched process uses, and refuses a native argument it cannot interpret (such as Codex `--profile` or Claude `--fallback-model` and `--settings`) rather than reporting what was requested.
+For Claude Code the proof is the `--model` and `--effort` flags, which the CLI documents as overriding `ANTHROPIC_MODEL` and the `model`, `effortLevel`, and `modelSettings` settings; a repeated flag is refused, and `--setting-sources`, `--permission-mode`, and `--dangerously-skip-permissions` are accepted because they select no model or effort.
+A model alias such as `opus` is proved as the alias, not the model it resolves to; name the full model ID to pin it.
+Unknown fields, a missing role, an implicit model, effort, or Codex service tier, a Claude service tier, or any other agent harness refuse the launch.
 
 AXI reads the file once and asks the running daemon to acknowledge the assertion before it takes branch custody, so an older daemon that would drop the field refuses the launch instead.
 The daemon fetches the default branch into a private ref without moving tracking refs or `FETCH_HEAD`, reads the trusted `.no-mistakes.yaml` once at that commit, and resolves every role's agent.
