@@ -137,6 +137,13 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			launchAssertion, err := parseLaunchAssertionPushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
+			if launchAssertion != nil && launchNonce == "" {
+				return fmt.Errorf("launch assertion requires launch_nonce and validation_generation")
+			}
 			reconciledPreviousHead, err := parseReconciledPreviousHeadPushOptions(pushOptions)
 			if err != nil {
 				return err
@@ -165,6 +172,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 
 			var result ipc.PushReceivedResult
 			return client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+				LaunchAssertion:        launchAssertion,
 				Gate:                   gatePath,
 				Ref:                    ref,
 				Old:                    oldSHA,

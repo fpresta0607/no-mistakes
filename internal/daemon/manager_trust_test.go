@@ -68,7 +68,7 @@ func TestLoadRecoveredConfig_BoundsFetchAndFailsClosed(t *testing.T) {
 // TestLoadTrustedRepoConfig_FailClosedOnFetchFailure is the regression test for
 // the supply-chain RCE review item #1: when the default-branch fetch fails,
 // startRun passes an empty trustedSHA, and loadTrustedRepoConfig MUST return
-// nil even though a (potentially stale) origin/<default> ref is still present
+// nil and an error even though a (potentially stale) origin/<default> ref is still present
 // in the worktree's shared refs. Reading that stale ref would run a command
 // the live default branch has already removed. EffectiveRepoConfig then forces
 // empty commands, so the stale command does not run.
@@ -129,7 +129,10 @@ func TestLoadTrustedRepoConfig_FailClosedOnFetchFailure(t *testing.T) {
 	// THE REGRESSION: fetch "failed" → startRun passes an empty trustedSHA.
 	// Even with origin/main present and carrying the stale command, the
 	// trusted config must be nil so the stale command cannot run.
-	got := loadTrustedRepoConfig(ctx, wt, "", "test-run")
+	got, err := loadTrustedRepoConfig(ctx, wt, "main", "")
+	if err == nil {
+		t.Fatal("empty trusted SHA must return an error")
+	}
 	if got != nil {
 		t.Fatalf("expected nil trusted config on empty SHA (fetch failure); got commands.lint=%q", got.Commands.Lint)
 	}
@@ -204,7 +207,10 @@ func TestLoadTrustedRepoConfig_PinnedSHAReadsFreshDefaultBranch(t *testing.T) {
 		t.Fatalf("resolved SHA %s != fresh default-branch tip %s", resolved, freshSHA)
 	}
 
-	trusted := loadTrustedRepoConfig(ctx, wt, resolved, "test-run")
+	trusted, err := loadTrustedRepoConfig(ctx, wt, "main", resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if trusted == nil {
 		t.Fatal("expected trusted config at the pinned fresh SHA")
 	}

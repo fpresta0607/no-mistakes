@@ -64,6 +64,18 @@ func TestResolveForcePushDecision_UpToDate(t *testing.T) {
 	}
 }
 
+func TestResolveForcePushDecision_MissingAncestryFailsClosed(t *testing.T) {
+	_, gitRun, remote, featureSHA := newForcePushFixture(t)
+	const missingHead = "ffffffffffffffffffffffffffffffffffffffff"
+	decision, err := resolveForcePushDecision(gitRun, remote, "refs/heads/feature", missingHead, "", "")
+	if err == nil || decision.fastForward {
+		t.Fatalf("missing ancestry authorized a publication: %+v %v", decision, err)
+	}
+	if actual := gitCmd(t, remote, "rev-parse", "refs/heads/feature"); actual != featureSHA {
+		t.Fatal("failed ancestry proof changed the remote branch")
+	}
+}
+
 // An append-only update needs no force at all. The remote itself then enforces
 // the no-rewrite property an open PR's head and a SHA-bound review attestation
 // depend on, instead of our own lease bookkeeping.

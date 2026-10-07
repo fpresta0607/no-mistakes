@@ -142,6 +142,7 @@ no-mistakes axi run --intent "the user's goal" --closes 95 --closes owner/repo#1
 | `--wait`        | `duration` | `8m`    | Maximum time for active-run lookup and run driving before the caller must reattach |
 | `--launch-nonce` | `string` | (none) | Non-secret correlation identifier for a durable pre-drive receipt; requires `--validation-generation` |
 | `--validation-generation` | `string` | (none) | Caller-selected validation generation bound to `--launch-nonce`; requires that flag |
+| `--launch-assertion` | `string` | (none) | Path to a JSON [launch assertion](#launch-assertions) of the expected trusted default-branch commit and effective agent selections; requires `--launch-nonce` |
 
 Explicit intent is the user's goal or request, not a description of the diff.
 no-mistakes uses the supplied text instead of transcript inference; see [Intent input](#intent-input) for transports and whitespace handling.
@@ -267,6 +268,48 @@ A replay that adds `--no-publish-intent` against a run bound to publish the sect
 Explicit `--model`/`--effort` must match a stored pin the same way; omitting both preserves it.
 A conflicting claim does not consume the first `created` disposition.
 Without the two proof flags, ordinary reattachment is unchanged, and historical runs without a nonce are not adopted into a proof binding.
+
+### Launch assertions
+
+Add `--launch-assertion PATH` to a strict launch to have the daemon prove, after its fresh fetch of the trusted default branch and before any agent is created, that the run uses exactly the trusted commit and agent selections the caller expects.
+
+```sh
+no-mistakes axi run --intent "the user's goal" \
+  --launch-nonce request-42 --validation-generation validation-3 \
+  --launch-assertion expected.json
+```
+
+The file must be a regular file of at most 8 KiB holding one JSON object with exactly two fields:
+
+- `trusted_sha`: the full, lowercase 40-character commit SHA expected at the tip of the default branch.
+- `profiles`: the ordered agent chain for each role, keyed `primary`, `reviewer`, and `fixer`, plus `reviewer_after_round` and `fixer_after_round` exactly when [`review_agents`](/no-mistakes/reference/global-config/#review_agents) configures them.
+  Each chain has 1-8 entries of `harness` (`codex` or `claude`), `model`, and `effort`; a Codex entry also names its `service_tier`, and a Claude entry has none.
+
+```json
+{
+  "trusted_sha": "0123456789abcdef0123456789abcdef01234567",
+  "profiles": {
+    "primary": [{ "harness": "claude", "model": "claude-opus-5-5", "effort": "high" }],
+    "reviewer": [{ "harness": "claude", "model": "claude-opus-5-5", "effort": "xhigh" }],
+    "fixer": [{ "harness": "codex", "model": "gpt-5", "effort": "high", "service_tier": "default" }]
+  }
+}
+```
+
+A role without its own `review_agents` entry is proved against the primary chain.
+Codex and Claude Code selections are verifiable, and every knob must be explicit: the daemon derives each entry from [`agent_config`](/no-mistakes/reference/global-config/#agent_config) and [`agent_args_override`](/no-mistakes/reference/global-config/#agent_args_override) with the same precedence the launched process uses, and refuses a native argument it cannot interpret (such as Codex `--profile` or Claude `--fallback-model` and `--settings`) rather than reporting what was requested.
+For Claude Code the proof is the `--model` and `--effort` flags, which the CLI documents as overriding `ANTHROPIC_MODEL` and the `model`, `effortLevel`, and `modelSettings` settings; a repeated flag is refused, and `--setting-sources`, `--permission-mode`, and `--dangerously-skip-permissions` are accepted because they select no model or effort.
+A model alias such as `opus` is proved as the alias, not the model it resolves to; name the full model ID to pin it.
+Unknown fields, a missing role, an implicit model, effort, or Codex service tier, a Claude service tier, or any other agent harness refuse the launch.
+
+AXI reads the file once and asks the running daemon to acknowledge the assertion before it takes branch custody, so an older daemon that would drop the field refuses the launch instead.
+The daemon fetches the default branch into a private ref without moving tracking refs or `FETCH_HEAD`, reads the trusted `.no-mistakes.yaml` once at that commit, and resolves every role's agent.
+A different trusted commit, an unreadable or unparseable trusted config, or any mismatched or unprovable selection refuses the launch before an active run on the branch is cancelled, before a run or receipt exists, and before any agent starts.
+A matching launch records the assertion and an immutable proof with the run, and the receipt adds a `launch_assertion_proof` object with `assertion_digest` (SHA-256 of the canonical assertion), `trusted_sha`, and the proved `profiles`.
+AXI refuses a receipt whose proof is missing or differs from the file it read.
+Replays of the nonce must supply the identical assertion; omitting it, or supplying a different one, is refused like any other conflicting claim.
+Recovery after a daemon restart proves the stored assertion again against a fresh trusted fetch and the current configuration, and fails the run on any drift.
+The proof covers the explicit launch selection only; it does not attest the model a provider actually served or any authentication, subscription, or billing identity.
 
 ## no-mistakes axi respond
 

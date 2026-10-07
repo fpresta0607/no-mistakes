@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS runs (
     pr_base_branch       TEXT,
     omit_intent          INTEGER NOT NULL DEFAULT 0,
     pi_profile           TEXT,
+    launch_assertion     TEXT,
+    launch_assertion_proof TEXT,
     verification_plan    TEXT,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
@@ -377,4 +379,8 @@ var migrationStatements = []string{
 	// a late --closes can still reach the Issues section; non-NULL closes that window
 	// (see UpdateRunClosingIssueRefs / ClaimClosingIssueRefsForPRBody).
 	`ALTER TABLE runs ADD COLUMN closing_issue_refs_locked_at INTEGER`,
+	`ALTER TABLE runs ADD COLUMN launch_assertion TEXT`,
+	`ALTER TABLE runs ADD COLUMN launch_assertion_proof TEXT`,
+	`CREATE TRIGGER IF NOT EXISTS runs_launch_assertion_immutable BEFORE UPDATE OF launch_assertion ON runs WHEN NEW.launch_assertion IS NOT OLD.launch_assertion BEGIN SELECT RAISE(ABORT, 'run launch assertion is immutable'); END`,
+	`CREATE TRIGGER IF NOT EXISTS runs_launch_assertion_proof_immutable BEFORE UPDATE OF launch_assertion_proof ON runs WHEN NEW.launch_assertion_proof IS NOT OLD.launch_assertion_proof BEGIN SELECT RAISE(ABORT, 'run launch proof is immutable'); END`,
 }

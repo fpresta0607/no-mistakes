@@ -10,6 +10,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
 	"github.com/kunchenguid/no-mistakes/internal/closingissues"
+	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 )
@@ -81,6 +82,8 @@ type Run struct {
 	LaunchValidationGeneration *string
 	LaunchIntentDigest         *string
 	LaunchReceiptClaimedAt     *int64
+	LaunchAssertion            *launchassert.Expectation
+	LaunchAssertionProof       *launchassert.Proof
 	// PRBaseBranch is a per-run override for the integration/PR target branch.
 	// It is set by the operator (axi run --base-branch) and takes precedence
 	// over pr.base_branch in repo config for this run only.
@@ -105,7 +108,7 @@ type Run struct {
 	UpdatedAt                int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, pr_base_branch, COALESCE(omit_intent, 0), pi_profile, verification_plan, closing_issue_refs, closing_issue_refs_locked_at, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, launch_assertion, launch_assertion_proof, pr_base_branch, COALESCE(omit_intent, 0), pi_profile, verification_plan, closing_issue_refs, closing_issue_refs_locked_at, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -119,6 +122,7 @@ func scanRun(row interface {
 		&r.CustodyReturnedAt, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
 		&r.LaunchNonce, &r.LaunchValidationGeneration, &r.LaunchIntentDigest, &r.LaunchReceiptClaimedAt,
+		&r.LaunchAssertion, &r.LaunchAssertionProof,
 		&r.PRBaseBranch, &r.OmitIntent, &r.PiProfile, &r.VerificationPlan,
 		&storedClosingIssues, &r.ClosingIssueRefsLockedAt,
 		&r.CreatedAt, &r.UpdatedAt,
@@ -157,6 +161,18 @@ func (d *DB) InsertRunWithIntent(repoID, branch, headSHA, baseSHA string, intent
 // duplicate defense across daemon processes; callers additionally serialize
 // selection under their branch lock.
 func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, plan *verificationplan.Snapshot, profiles ...*agentcfg.PiProfile) (*Run, error) {
+	return d.InsertRunWithLaunchAssertion(repoID, branch, headSHA, baseSHA, intent, launchNonce, validationGeneration, intentDigest, prBaseBranch, omitIntent, plan, nil, nil, profiles...)
+}
+
+func (d *DB) InsertRunWithLaunchAssertion(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, plan *verificationplan.Snapshot, expected *launchassert.Expectation, proof *launchassert.Proof, profiles ...*agentcfg.PiProfile) (*Run, error) {
+	// The proof is written with the row: a receipt claim must never observe an
+	// asserted run whose proof has not landed yet.
+	if err := proof.Check(expected); err != nil {
+		return nil, err
+	}
+	if expected != nil && (launchNonce == "" || validationGeneration == "") {
+		return nil, fmt.Errorf("launch assertion requires a nonce-bound run")
+	}
 	pin := agentcfg.OptionalPiProfile(profiles)
 	if err := pin.Validate(); err != nil {
 		return nil, err
@@ -165,18 +181,20 @@ func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA 
 	version := buildinfo.CurrentVersion()
 	buildSHA := buildinfo.Commit
 	r := &Run{
-		ID:                 newID(),
-		RepoID:             repoID,
-		Branch:             branch,
-		HeadSHA:            headSHA,
-		BaseSHA:            baseSHA,
-		SubmittedHeadSHA:   &headSHA,
-		NoMistakesVersion:  &version,
-		NoMistakesBuildSHA: &buildSHA,
-		PiProfile:          pin,
-		Status:             types.RunPending,
-		CreatedAt:          ts,
-		UpdatedAt:          ts,
+		ID:                   newID(),
+		RepoID:               repoID,
+		Branch:               branch,
+		HeadSHA:              headSHA,
+		BaseSHA:              baseSHA,
+		SubmittedHeadSHA:     &headSHA,
+		NoMistakesVersion:    &version,
+		NoMistakesBuildSHA:   &buildSHA,
+		PiProfile:            pin,
+		LaunchAssertion:      expected,
+		LaunchAssertionProof: proof,
+		Status:               types.RunPending,
+		CreatedAt:            ts,
+		UpdatedAt:            ts,
 	}
 	if plan != nil {
 		r.ID = plan.ID
@@ -199,8 +217,8 @@ func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA 
 	}
 	r.OmitIntent = omitIntent
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, pr_base_branch, omit_intent, pi_profile, verification_plan, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.PRBaseBranch, r.OmitIntent, r.PiProfile, r.VerificationPlan, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_assertion, launch_assertion_proof, pr_base_branch, omit_intent, pi_profile, verification_plan, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.LaunchAssertion, r.LaunchAssertionProof, r.PRBaseBranch, r.OmitIntent, r.PiProfile, r.VerificationPlan, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)
@@ -364,6 +382,25 @@ func (d *DB) GetRunByLaunchNonce(repoID, branch, launchNonce string) (*Run, erro
 // including an explicit PR base branch, is part of the UPDATE predicate, so a
 // conflicting observer cannot consume `created`.
 func (d *DB) ClaimLaunchReceipt(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, profiles ...*agentcfg.PiProfile) (*Run, bool, error) {
+	return d.ClaimLaunchReceiptWithAssertion(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, omitIntent, nil, profiles...)
+}
+
+func (d *DB) ClaimLaunchReceiptWithAssertion(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, expected *launchassert.Expectation, profiles ...*agentcfg.PiProfile) (*Run, bool, error) {
+	if err := expected.Validate(); err != nil {
+		return nil, false, err
+	}
+	existing, err := d.GetRunByLaunchNonce(repoID, branch, launchNonce)
+	if err != nil {
+		return nil, false, err
+	}
+	if existing != nil {
+		if !existing.LaunchAssertion.Matches(expected) {
+			return nil, false, fmt.Errorf("conflicting launch_nonce: captured assertion differs")
+		}
+		if err := existing.LaunchAssertionProof.Check(expected); err != nil {
+			return nil, false, err
+		}
+	}
 	request := agentcfg.OptionalPiProfile(profiles)
 	if err := request.ValidateRequest(); err != nil {
 		return nil, false, err
@@ -373,6 +410,12 @@ func (d *DB) ClaimLaunchReceipt(repoID, branch, launchNonce, submittedHeadSHA, v
 		model, effort = request.Model, string(request.Effort)
 	}
 	prBaseBranch = strings.TrimSpace(prBaseBranch)
+	var requiredProof *launchassert.Proof
+	if expected != nil {
+		// Compare the complete proof in the atomic claim, including when a row
+		// appeared after the preliminary read. This value is never persisted.
+		requiredProof = &launchassert.Proof{AssertionDigest: expected.Digest(), TrustedSHA: expected.TrustedSHA, Profiles: expected.Profiles}
+	}
 	for {
 		r := &Run{}
 		err := scanRun(d.sql.QueryRow(
@@ -383,9 +426,11 @@ func (d *DB) ClaimLaunchReceipt(repoID, branch, launchNonce, submittedHeadSHA, v
 			   AND (? = 0 OR omit_intent = ?)
 			   AND (? = '' OR json_extract(pi_profile, '$.model') = ?)
 			   AND (? = '' OR json_extract(pi_profile, '$.effort') = ?)
+			   AND launch_assertion IS ?
+			   AND launch_assertion_proof IS ?
 			   AND launch_receipt_claimed_at IS NULL
 			 RETURNING `+runColumns,
-			now(), repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, prBaseBranch, omitIntent, omitIntent, model, model, effort, effort,
+			now(), repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, prBaseBranch, omitIntent, omitIntent, model, model, effort, effort, expected, requiredProof,
 		), r)
 		if err == nil {
 			return r, true, nil
@@ -404,6 +449,12 @@ func (d *DB) ClaimLaunchReceipt(repoID, branch, launchNonce, submittedHeadSHA, v
 			prBaseBranch != "" && (r.PRBaseBranch == nil || *r.PRBaseBranch != prBaseBranch) ||
 			omitIntent && !r.OmitIntent {
 			return r, false, nil
+		}
+		if !r.LaunchAssertion.Matches(expected) {
+			return nil, false, fmt.Errorf("conflicting launch_nonce: captured assertion differs")
+		}
+		if err := r.LaunchAssertionProof.Check(expected); err != nil {
+			return nil, false, err
 		}
 		// A creator committed a matching row after UPDATE missed. Retry instead
 		// of labelling the first observer as a replay.

@@ -24,6 +24,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
@@ -224,6 +225,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this run (tighten-only; full intent still reaches every step prompt except PR drafting)")
 	cmd.Flags().StringArrayVar(&closesIssues, "closes", nil, "GitHub issue this PR closes when merged; repeat for multiple issues (42 or owner/repo#42)")
 	cmd.Flags().String("verification-plan", "", "capture a nonempty UTF-8 verification plan as separate run evidence (new runs only)")
+	cmd.Flags().String("launch-assertion", "", "required JSON proof of the expected trusted SHA and effective agent profiles for a nonce-bound launch")
 	bindAxiWaitFlag(cmd, &wait)
 	bindPiProfileFlags(cmd, &model, &effort)
 	return cmd
@@ -234,6 +236,18 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 }
 
 func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, launchNonce, validationGeneration string, wait time.Duration, profiles ...*agentcfg.PiProfile) error {
+	var expected *launchassert.Expectation
+	if cmd.Flags().Changed("launch-assertion") {
+		path, _ := cmd.Flags().GetString("launch-assertion")
+		if strings.TrimSpace(path) == "" || launchNonce == "" || validationGeneration == "" {
+			return emitError(cmd, 2, "--launch-assertion requires a file path, --launch-nonce and --validation-generation")
+		}
+		var err error
+		expected, err = launchassert.Read(path)
+		if err != nil {
+			return emitError(cmd, 2, err.Error())
+		}
+	}
 	profile := agentcfg.OptionalPiProfile(profiles)
 	if err := profile.ValidateRequest(); err != nil {
 		return emitError(cmd, 2, err.Error())
@@ -269,6 +283,9 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
 	}
 	defer env.close()
+	if err := requireDaemonHonorsLaunchAssertion(env.client, expected); err != nil {
+		return emitError(cmd, 2, err.Error())
+	}
 	// Probe before any RPC carries omit_intent: an older daemon would drop
 	// the unknown field silently and publish the intent it was asked to
 	// withhold, so the run is refused instead. An unreadable global config
@@ -312,7 +329,7 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		if strings.TrimSpace(validationGeneration) == "" {
 			return emitError(cmd, 2, "--validation-generation is required with --launch-nonce")
 		}
-		receipt, err := claimLaunchReceipt(env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, profile)
+		receipt, err := claimLaunchReceipt(env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, expected, profile)
 		if err != nil {
 			return emitError(cmd, 1, fmt.Sprintf("claim launch receipt: %v", err))
 		}
@@ -405,7 +422,7 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		}
 		var err error
 		if launchNonce != "" {
-			launchReceipt, err = triggerProofRun(ctx, env, branch, headSHA, skipSteps, intent, baseBranch, omitIntent, launchNonce, validationGeneration, planID, closesIssues, profile)
+			launchReceipt, err = triggerProofRun(ctx, env, branch, headSHA, skipSteps, intent, baseBranch, omitIntent, launchNonce, validationGeneration, planID, closesIssues, expected, profile)
 			if err == nil {
 				runID = launchReceipt.RunID
 			}
@@ -825,10 +842,11 @@ func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []typ
 	return rr.RunID, nil
 }
 
-func claimLaunchReceipt(client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, baseBranch string, omitIntent bool, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
+func claimLaunchReceipt(client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, baseBranch string, omitIntent bool, expected *launchassert.Expectation, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
 	var result ipc.ClaimLaunchReceiptResult
 	if err := client.Call(ipc.MethodClaimLaunchReceipt, &ipc.ClaimLaunchReceiptParams{
-		RepoID: repoID, Branch: branch, LaunchNonce: launchNonce, PiProfile: agentcfg.OptionalPiProfile(profiles),
+		LaunchAssertion: expected,
+		RepoID:          repoID, Branch: branch, LaunchNonce: launchNonce, PiProfile: agentcfg.OptionalPiProfile(profiles),
 		SubmittedHeadSHA: submittedHeadSHA, ValidationGeneration: validationGeneration, IntentDigest: intentDigest, PRBaseBranch: baseBranch, OmitIntent: omitIntent,
 	}, &result); err != nil {
 		return nil, err
@@ -836,15 +854,25 @@ func claimLaunchReceipt(client *ipc.Client, repoID, branch, launchNonce, submitt
 	if result.Receipt != nil && !result.Receipt.PiProfile.Matches(agentcfg.OptionalPiProfile(profiles)) {
 		return nil, fmt.Errorf("launch receipt has a conflicting Pi profile")
 	}
+	if result.Receipt != nil {
+		if err := result.Receipt.LaunchAssertionProof.Check(expected); err != nil {
+			return nil, err
+		}
+	}
 	return result.Receipt, nil
 }
 
 // triggerProofRun captures the immutable submitted commit and waits only for
 // the matching nonce-bound receipt. Ordinary active-run heuristics never prove
 // strict launch identity.
-func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, launchNonce, validationGeneration, planID string, closesIssues []string, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
+func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, launchNonce, validationGeneration, planID string, closesIssues []string, expected *launchassert.Expectation, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
 	profile := agentcfg.OptionalPiProfile(profiles)
+	assertionOptions, err := formatLaunchAssertionPushOptions(expected)
+	if err != nil {
+		return nil, err
+	}
 	pushOptions := append(formatSkipPushOptions(skipSteps), formatPiProfilePushOptions(profile)...)
+	pushOptions = append(pushOptions, assertionOptions...)
 	pushOptions = append(pushOptions, formatVerificationPlanPushOptions(planID)...)
 	pushOptions = append(pushOptions, formatClosingIssueRefsPushOptions(closesIssues)...)
 	pushOptions = append(pushOptions,
@@ -868,29 +896,33 @@ func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, s
 		}
 		return nil, fmt.Errorf("push %q to gate: %w", branch, pushErr)
 	}
-	if receipt, err := waitForLaunchReceipt(ctx, env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, intent, baseBranch, omitIntent, triggerWaitTimeout, profile); err != nil {
+	if receipt, err := waitForLaunchReceipt(ctx, env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, intent, baseBranch, omitIntent, triggerWaitTimeout, expected, profile); err != nil {
 		return nil, err
 	} else if receipt != nil {
 		return receipt, nil
 	}
 	var result ipc.StartFreshRunResult
 	if err := env.client.Call(ipc.MethodStartFreshRun, &ipc.StartFreshRunParams{
-		RepoID: env.repo.ID, Branch: branch, HeadSHA: headSHA, SkipSteps: skipSteps,
+		LaunchAssertion: expected,
+		RepoID:          env.repo.ID, Branch: branch, HeadSHA: headSHA, SkipSteps: skipSteps,
 		Intent: intent, LaunchNonce: launchNonce, ValidationGeneration: validationGeneration, PRBaseBranch: baseBranch, OmitIntent: omitIntent, PiProfile: profile, VerificationPlanID: planID,
 		ClosingIssueRefs: closesIssues,
 	}, &result); err != nil {
 		return nil, fmt.Errorf("start fresh run: %w", err)
 	}
+	if err := result.Receipt.LaunchAssertionProof.Check(expected); err != nil {
+		return nil, err
+	}
 	return &result.Receipt, nil
 }
 
-func waitForLaunchReceipt(ctx context.Context, client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intent, baseBranch string, omitIntent bool, timeout time.Duration, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
+func waitForLaunchReceipt(ctx context.Context, client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intent, baseBranch string, omitIntent bool, timeout time.Duration, expected *launchassert.Expectation, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	poll := time.NewTicker(150 * time.Millisecond)
 	defer poll.Stop()
 	for {
-		receipt, err := claimLaunchReceipt(client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, profiles...)
+		receipt, err := claimLaunchReceipt(client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, expected, profiles...)
 		if err != nil {
 			return nil, err
 		}
@@ -1006,7 +1038,7 @@ func conflictingActiveRunOmitIntent(run *ipc.RunInfo, requested bool) error {
 // emitLaunchReceipt writes the proof before driveRun subscribes, so callers
 // retain the daemon-authored binding even if later driving blocks or fails.
 func emitLaunchReceipt(cmd *cobra.Command, receipt ipc.LaunchReceipt) {
-	emitDoc(cmd, toon.Field{Key: "launch_receipt", Value: toon.NewObject(
+	fields := []toon.Field{
 		toon.Field{Key: "run_id", Value: receipt.RunID},
 		toon.Field{Key: "disposition", Value: receipt.Disposition},
 		toon.Field{Key: "launch_nonce", Value: receipt.LaunchNonce},
@@ -1015,7 +1047,34 @@ func emitLaunchReceipt(cmd *cobra.Command, receipt ipc.LaunchReceipt) {
 		toon.Field{Key: "head_sha", Value: receipt.HeadSHA},
 		toon.Field{Key: "submitted_head_sha", Value: receipt.SubmittedHeadSHA},
 		toon.Field{Key: "intent_digest", Value: receipt.IntentDigest},
-	)})
+	}
+	if receipt.LaunchAssertionProof != nil {
+		type profileOutput struct {
+			Harness     string `toon:"harness"`
+			Model       string `toon:"model"`
+			Effort      string `toon:"effort"`
+			ServiceTier string `toon:"service_tier"`
+		}
+		proof := receipt.LaunchAssertionProof
+		profiles := make([]toon.Field, 0, len(proof.Profiles))
+		for role, chain := range proof.Profiles {
+			selections := make([]profileOutput, len(chain))
+			for index, selection := range chain {
+				selections[index] = profileOutput{
+					Harness: string(selection.Harness), Model: selection.Model,
+					Effort: string(selection.Effort), ServiceTier: selection.ServiceTier,
+				}
+			}
+			profiles = append(profiles, toon.Field{Key: role, Value: selections})
+		}
+		slices.SortFunc(profiles, func(left, right toon.Field) int { return strings.Compare(left.Key, right.Key) })
+		fields = append(fields, toon.Field{Key: "launch_assertion_proof", Value: toon.NewObject(
+			toon.Field{Key: "assertion_digest", Value: proof.AssertionDigest},
+			toon.Field{Key: "trusted_sha", Value: proof.TrustedSHA},
+			toon.Field{Key: "profiles", Value: toon.NewObject(profiles...)},
+		)})
+	}
+	emitDoc(cmd, toon.Field{Key: "launch_receipt", Value: toon.NewObject(fields...)})
 }
 
 // driveRun subscribes to a run and reconciles authoritative state on transition

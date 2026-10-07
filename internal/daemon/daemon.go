@@ -1325,7 +1325,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 
 	srv.Handle(ipc.MethodClaimLaunchReceipt, func(_ context.Context, params json.RawMessage) (interface{}, error) {
 		var p ipc.ClaimLaunchReceiptParams
-		if err := json.Unmarshal(params, &p); err != nil {
+		if err := decodeLaunchParams(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
 		if err := validateLaunchNonce(p.LaunchNonce); err != nil {
@@ -1338,12 +1338,15 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err != nil {
 			return nil, err
 		}
-		run, claimed, err := d.ClaimLaunchReceipt(p.RepoID, p.Branch, p.LaunchNonce, p.SubmittedHeadSHA, p.ValidationGeneration, p.IntentDigest, prBaseBranch, p.OmitIntent, p.PiProfile)
+		run, claimed, err := d.ClaimLaunchReceiptWithAssertion(p.RepoID, p.Branch, p.LaunchNonce, p.SubmittedHeadSHA, p.ValidationGeneration, p.IntentDigest, prBaseBranch, p.OmitIntent, p.LaunchAssertion, p.PiProfile)
 		if err != nil {
 			return nil, fmt.Errorf("claim launch receipt: %w", err)
 		}
 		if run == nil {
 			return &ipc.ClaimLaunchReceiptResult{}, nil
+		}
+		if !run.LaunchAssertion.Matches(p.LaunchAssertion) {
+			return nil, fmt.Errorf("conflicting launch_nonce: captured assertion differs")
 		}
 		if !run.PiProfile.Matches(p.PiProfile) {
 			return nil, fmt.Errorf("conflicting launch_nonce: Pi profile differs from run pin")
@@ -1368,6 +1371,17 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 	// Capability probe for --no-publish-intent: see ipc.ProbeOmitIntentResult.
 	srv.Handle(ipc.MethodProbeOmitIntent, func(context.Context, json.RawMessage) (interface{}, error) {
 		return &ipc.ProbeOmitIntentResult{OK: true}, nil
+	})
+
+	srv.Handle(ipc.MethodProbeLaunchAssertion, func(_ context.Context, params json.RawMessage) (interface{}, error) {
+		var request ipc.ProbeLaunchAssertionParams
+		if err := decodeLaunchParams(params, &request); err != nil {
+			return nil, err
+		}
+		if request.LaunchAssertion == nil {
+			return nil, fmt.Errorf("required launch assertion is missing")
+		}
+		return &ipc.ProbeLaunchAssertionResult{AssertionDigest: request.LaunchAssertion.Digest()}, nil
 	})
 
 	srv.Handle(ipc.MethodCaptureVerificationPlan, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
@@ -1428,7 +1442,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			return nil, err
 		}
 		var p ipc.StartFreshRunParams
-		if err := json.Unmarshal(params, &p); err != nil {
+		if err := decodeLaunchParams(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
 		receipt, err := mgr.HandleStartFreshRun(ctx, &p)
@@ -1460,7 +1474,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			return nil, err
 		}
 		var p ipc.PushReceivedParams
-		if err := json.Unmarshal(params, &p); err != nil {
+		if err := decodeLaunchParams(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
 		slog.Info("push received", "ref", p.Ref, "old", p.Old, "new", p.New, "gate", p.Gate)
