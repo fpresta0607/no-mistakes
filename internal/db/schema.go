@@ -93,6 +93,14 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     created_at           INTEGER NOT NULL
 );
 
+-- The daemon holds one connection, so the per-run step and per-step round
+-- lookups behind get_run and gate_context must not scan all history.
+CREATE INDEX IF NOT EXISTS idx_step_results_run_order
+    ON step_results (run_id, step_order, id);
+
+CREATE INDEX IF NOT EXISTS idx_step_rounds_step_round
+    ON step_rounds (step_result_id, round);
+
 CREATE TABLE IF NOT EXISTS agent_invocations (
     id                    TEXT PRIMARY KEY,
     run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
