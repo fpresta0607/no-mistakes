@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -55,13 +56,21 @@ type Result struct {
 	Phase            types.StepName
 }
 
+// ProcessInfo is one process-table entry in an ancestry walk. A zero
+// ParentPID ends the chain, and a zero Started means the platform did not
+// report when the process was created.
+type ProcessInfo struct {
+	ParentPID int
+	Started   time.Time
+}
+
 // Inspector combines canonical managed Git identity with authenticated IPC
-// peer ancestry. ParentPID exists for deterministic tests; production callers
+// peer ancestry. Process exists for deterministic tests; production callers
 // leave it nil to use the platform process table.
 type Inspector struct {
-	DB        *db.DB
-	Paths     *paths.Paths
-	ParentPID func(int) (int, error)
+	DB      *db.DB
+	Paths   *paths.Paths
+	Process func(int) (ProcessInfo, error)
 }
 
 // Inspect classifies a caller without mutating repositories, runs, refs,
@@ -95,11 +104,11 @@ func (i Inspector) Inspect(ctx context.Context, req Request) (Result, error) {
 		return result, err
 	}
 	if req.PeerPID > 0 && (len(active) > 0 || req.DaemonPID > 0) {
-		parent := i.ParentPID
-		if parent == nil {
-			parent = processParentPID
+		process := i.Process
+		if process == nil {
+			process = processInfo
 		}
-		chain, err := ancestry(req.PeerPID, parent)
+		chain, err := ancestry(req.PeerPID, process)
 		if err != nil {
 			return result, fmt.Errorf("gate execution context: inspect authenticated peer ancestry: %w", err)
 		}
@@ -237,21 +246,30 @@ func gitIdentity(ctx context.Context, cwd string) (commonDir, top string, ok boo
 	return strings.TrimSpace(common), strings.TrimSpace(root), true
 }
 
-func ancestry(pid int, parent func(int) (int, error)) (map[int]bool, error) {
+// ancestry stops at a recorded parent created after its child: Windows keeps
+// a dead parent's pid on its children and reuses pids, so such a pid names an
+// unrelated process. An unknown creation time keeps following the chain.
+func ancestry(pid int, process func(int) (ProcessInfo, error)) (map[int]bool, error) {
 	chain := make(map[int]bool)
+	var childStarted time.Time
 	for depth := 0; pid > 0 && depth < 256; depth++ {
 		if chain[pid] {
 			break
 		}
-		chain[pid] = true
 		if pid == 1 {
+			chain[pid] = true
 			break
 		}
-		next, err := parent(pid)
+		info, err := process(pid)
 		if err != nil {
 			return nil, err
 		}
-		pid = next
+		if !childStarted.IsZero() && info.Started.After(childStarted) {
+			break
+		}
+		chain[pid] = true
+		childStarted = info.Started
+		pid = info.ParentPID
 	}
 	return chain, nil
 }
