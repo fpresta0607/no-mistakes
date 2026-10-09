@@ -750,13 +750,40 @@ func TestCodexAgent_BuildArgs_SuppressesOnResumeUnderOptOut(t *testing.T) {
 	}
 }
 
-// TestCodexAgent_BuildArgs_UserProjectDocOverrideWins ensures an operator who
-// pinned their own project_doc_max_bytes is not double-set even under opt-out.
-func TestCodexAgent_BuildArgs_UserProjectDocOverrideWins(t *testing.T) {
-	ca := &codexAgent{bin: "codex", disableProjectSettings: true, extraArgs: []string{"-c", "project_doc_max_bytes=4096"}}
+// TestCodexAgent_BuildArgs_OptOutZeroFollowsAPinnedProjectDoc ensures an
+// operator's global project_doc_max_bytes, kept for the repositories that load
+// their AGENTS.md, never re-opens one that opted out: the opt-out's own 0 is
+// passed after it, on exec and resume alike, and codex applies the later -c.
+func TestCodexAgent_BuildArgs_OptOutZeroFollowsAPinnedProjectDoc(t *testing.T) {
+	for _, resumeID := range []string{"", "thread-123"} {
+		ca := &codexAgent{bin: "codex", disableProjectSettings: true, extraArgs: []string{"-c", "project_doc_max_bytes=65536"}}
+		args := ca.buildArgs("", resumeID)
+		pin, zero := -1, -1
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "-c" && args[i+1] == "project_doc_max_bytes=65536" {
+				pin = i
+			}
+			if args[i] == "-c" && args[i+1] == "project_doc_max_bytes=0" {
+				zero = i
+			}
+		}
+		if pin < 0 || zero < pin {
+			t.Errorf("resume=%q buildArgs = %v, want the opt-out's project_doc_max_bytes=0 after the operator's pin", resumeID, args)
+		}
+		if !ca.NeutralizesGateInstructions() {
+			t.Errorf("resume=%q: the opt-out's own 0 comes last, so a pinned project doc must stay neutralized", resumeID)
+		}
+	}
+}
+
+// TestCodexAgent_BuildArgs_PinnedProjectDocReachesARepositoryThatLoadsIt keeps
+// the operator's global project_doc_max_bytes for a repository that did not
+// opt out: nothing is appended over it.
+func TestCodexAgent_BuildArgs_PinnedProjectDocReachesARepositoryThatLoadsIt(t *testing.T) {
+	ca := &codexAgent{bin: "codex", extraArgs: []string{"-c", "project_doc_max_bytes=65536"}}
 	args := ca.buildArgs("", "")
-	if argsContainPair(args, "-c", "project_doc_max_bytes=0") {
-		t.Errorf("buildArgs = %v, must not add project_doc_max_bytes=0 over a user pin", args)
+	if !argsContainPair(args, "-c", "project_doc_max_bytes=65536") || argsContainPair(args, "-c", "project_doc_max_bytes=0") {
+		t.Errorf("buildArgs = %v, want the operator's pin alone", args)
 	}
 }
 

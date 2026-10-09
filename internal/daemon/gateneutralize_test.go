@@ -97,15 +97,32 @@ func TestNewPipelineAgent_NoOptOut_AdmitsEveryHarness(t *testing.T) {
 // even for a verified harness when an operator override defeats its knob.
 func TestNewPipelineAgent_OptOut_RefusesDefeatedKnob(t *testing.T) {
 	cfg := &config.Config{
-		Agent:                  types.AgentCodex,
+		Agent:                  types.AgentClaude,
 		DisableProjectSettings: true,
-		AgentArgsOverride:      map[string][]string{"codex": {"-c", "project_doc_max_bytes=8192"}},
+		AgentArgsOverride:      map[string][]string{"claude": {"--setting-sources", "user,project"}},
 	}
 	if _, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), fakeLookPath, runenv.Overlay{}); err == nil {
-		t.Fatal("codex with its knob overridden must be refused under opt-out")
+		t.Fatal("claude with its knob overridden must be refused under opt-out")
 	} else if !strings.Contains(err.Error(), "does not neutralize") {
 		t.Errorf("refusal should explain the reason, got: %v", err)
 	}
+}
+
+// TestNewPipelineAgent_OptOut_AdmitsCodexWithAGlobalProjectDocPin proves an
+// operator's global project_doc_max_bytes, which repositories that load their
+// AGENTS.md need, no longer stops every gate of a repository that opted out:
+// codex passes the opt-out's 0 after it.
+func TestNewPipelineAgent_OptOut_AdmitsCodexWithAGlobalProjectDocPin(t *testing.T) {
+	cfg := &config.Config{
+		Agents:                 []types.AgentName{types.AgentCodex, types.AgentClaude},
+		DisableProjectSettings: true,
+		AgentArgsOverride:      map[string][]string{"codex": {"-c", "project_doc_max_bytes=65536"}},
+	}
+	ag, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), fakeLookPath, runenv.Overlay{})
+	if err != nil {
+		t.Fatalf("codex with a global project_doc_max_bytes must be admitted under opt-out, got: %v", err)
+	}
+	_ = ag.Close()
 }
 
 // TestNewPipelineAgent_OptOut_FallbackRefusesAnyUnverifiedMember proves an
