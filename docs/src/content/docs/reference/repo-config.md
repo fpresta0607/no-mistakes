@@ -176,7 +176,8 @@ Grok 1.0.5 still discovers native project instructions and `.grok` project surfa
 The setting applies to both new and resumed sessions.
 
 The gate fails before launching an agent if any resolved agent or fallback lacks a verified suppression mechanism.
-It also fails if `agent_args_override` defeats suppression, such as a nonzero Codex `project_doc_max_bytes` or Claude setting sources that include `project` or `local`.
+It also fails if `agent_args_override` defeats suppression, such as Claude setting sources that include `project` or `local`.
+A Codex `project_doc_max_bytes` in `agent_args_override` cannot defeat it: under this option Codex receives `project_doc_max_bytes=0` after every operator argument, and Codex applies the later value, so an operator's larger value keeps serving the repositories that load their `AGENTS.md`.
 When this option is `false`, missing, or `null`, all agents retain their existing project-setting behavior.
 
 This field is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`.
