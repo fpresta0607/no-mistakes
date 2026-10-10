@@ -123,3 +123,43 @@ func TestSelectionValidateKeepsEachHarnessShape(t *testing.T) {
 		})
 	}
 }
+
+func TestEffectiveSelectionAcceptsArgumentsThatSelectNothing(t *testing.T) {
+	codex := []string{
+		"-c", `service_tier="default"`, "--ignore-user-config", "--disable", "plugins", "--disable=apps", "--enable", "apps",
+		"-c", `personality="pragmatic"`, "-c", `model_auto_compact_token_limit_scope="total"`,
+		"-c", "features.multi_agent=true", "-c", "project_doc_max_bytes=65536",
+	}
+	actual, err := EffectiveSelection(types.AgentCodex, Profile{Model: "configured", Effort: EffortHigh}, codex)
+	if want := (Selection{Harness: types.AgentCodex, Model: "configured", Effort: EffortHigh, ServiceTier: "default"}); err != nil || actual != want {
+		t.Fatalf("Codex selection = %+v, %v, want %+v", actual, err, want)
+	}
+	actual, err = EffectiveSelection(types.AgentClaude, Profile{Model: "configured", Effort: EffortHigh}, []string{"--strict-mcp-config"})
+	if want := (Selection{Harness: types.AgentClaude, Model: "configured", Effort: EffortHigh}); err != nil || actual != want {
+		t.Fatalf("Claude selection = %+v, %v, want %+v", actual, err, want)
+	}
+}
+
+func TestEffectiveSelectionRefusesFeaturesAndFlagsItCannotRead(t *testing.T) {
+	tier := []string{"-c", `service_tier="default"`}
+	for _, args := range [][]string{
+		{"--disable", "fast_mode"},
+		{"--enable"},
+		{"--ignore-user-config=true"},
+		{"-c", "features.fast_mode=true"},
+		{"-c", `profile="hidden"`},
+	} {
+		t.Run(fmt.Sprint(args), func(t *testing.T) {
+			if _, err := EffectiveSelection(types.AgentCodex, Profile{Model: "configured", Effort: EffortHigh}, append(args, tier...)); err == nil {
+				t.Fatal("unreadable Codex argument was accepted")
+			}
+		})
+	}
+	for _, args := range [][]string{{"--strict-mcp-config=false"}, {"--mcp-config", "servers.json"}} {
+		t.Run(fmt.Sprint(args), func(t *testing.T) {
+			if _, err := EffectiveSelection(types.AgentClaude, Profile{Model: "configured", Effort: EffortHigh}, args); err == nil {
+				t.Fatal("unreadable Claude argument was accepted")
+			}
+		})
+	}
+}
