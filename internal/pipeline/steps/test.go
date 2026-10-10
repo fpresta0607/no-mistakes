@@ -181,6 +181,15 @@ Previous test findings to address:
 		return testAgentTimeoutOutcome(sctx, repairCut, startHead, baselineFindings, baselineSummary, baselineExitCode), nil
 	}
 
+	// The repository's own trusted rule can say this change has nothing to
+	// drive live. The baseline above has already run and still decides the step.
+	if skip, err := liveSurfaceUntouched(sctx, baseSHA); err != nil {
+		return nil, err
+	} else if skip {
+		findings := liveSurfaceSkipFindings(sctx, len(baselineResults) > 0)
+		return testStepOutcome(sctx, findings, tested, baselineFindings, baselineSummary, baselineExitCode, fixSummary, newTestsFromFix), nil
+	}
+
 	evidenceDir := testEvidenceDir(sctx)
 	if evidenceDir == "" {
 		return nil, fmt.Errorf("test evidence dir is not configured for this run")
@@ -302,15 +311,29 @@ Rules:
 		reassessHistory,
 		agent.MemoryFilesRule,
 	)
-	findings, err := runTestAnalyzer(sctx, evidencePrompt)
+	evidencePrompt += liveCheckPromptSections(sctx, evidenceDir)
+	turn := beginLiveCheck(sctx, evidenceDir)
+	findings, err := runTestAnalyzer(turn.ctx, sctx, evidencePrompt)
+	turn.cancel()
+	if errors.Is(err, errTestLiveCheckBudget) {
+		if cut, ok := turn.completeAtBudget(sctx, evidenceDir); ok {
+			findings, err = cut, nil
+		}
+	}
 	if err != nil {
-		if errors.Is(err, errTestAgentTimeout) {
+		if errors.Is(err, errTestAgentTimeout) || errors.Is(err, errTestLiveCheckBudget) {
 			outcome := testAgentTimeoutOutcome(sctx, err, startHead, baselineFindings, baselineSummary, baselineExitCode)
 			outcome.FixSummary = fixSummary
 			return outcome, nil
 		}
 		return nil, err
 	}
+	return testStepOutcome(sctx, findings, tested, baselineFindings, baselineSummary, baselineExitCode, fixSummary, newTestsFromFix), nil
+}
+
+// testStepOutcome assembles the step's outcome from a live check's findings
+// (or the record of one that did not run) and this execution's baseline.
+func testStepOutcome(sctx *pipeline.StepContext, findings Findings, tested []string, baselineFindings []Finding, baselineSummary string, baselineExitCode int, fixSummary string, newTestsFromFix []string) *pipeline.StepOutcome {
 	if len(tested) > 0 {
 		findings.Tested = append(append([]string{}, tested...), findings.Tested...)
 	}
@@ -328,7 +351,7 @@ Rules:
 	// Record any new test files the agent wrote as informational (no-op)
 	// findings. Their presence alone is not an actionable problem, so they
 	// must not force the test step into approval when tests pass (issue #140).
-	newTests := mergeNewTestFiles(newTestsFromFix, detectNewTestFiles(ctx, sctx.WorkDir))
+	newTests := mergeNewTestFiles(newTestsFromFix, detectNewTestFiles(sctx.Ctx, sctx.WorkDir))
 	for _, f := range newTests {
 		findings.Items = append(findings.Items, Finding{
 			Severity:    "info",
@@ -345,7 +368,7 @@ Rules:
 		Findings:      string(findingsJSON),
 		ExitCode:      baselineExitCode,
 		FixSummary:    fixSummary,
-	}, nil
+	}
 }
 
 // testAnalyzerMaxAttempts is the number of evidence-analyzer invocations
@@ -357,7 +380,9 @@ Rules:
 // than correcting structured output.
 const testAnalyzerMaxAttempts = 3
 
-func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error) {
+// ctx bounds the turn: the step context, or a child of it that carries
+// test_live_check_budget.
+func runTestAnalyzer(ctx context.Context, sctx *pipeline.StepContext, prompt string) (Findings, error) {
 	current := prompt
 	var lastErr error
 	for attempt := 1; attempt <= testAnalyzerMaxAttempts; attempt++ {
@@ -370,14 +395,14 @@ func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error
 			))
 		}
 		timeout := testAgentTimeout(sctx)
-		result, err := sctx.RunAgentBudget(sctx.Ctx, timeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, agent.RunOpts{
+		result, err := sctx.RunAgentBudget(ctx, timeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, agent.RunOpts{
 			Prompt:     current,
 			CWD:        sctx.WorkDir,
 			JSONSchema: testFindingsSchema,
 			OnChunk:    sctx.LogChunk,
 		})
 		runErr := testAgentError(timeout, "agent run tests", err)
-		if runErr != nil && (errors.Is(runErr, errTestAgentTimeout) || sctx.Ctx.Err() != nil || !agent.IsStructuredOutputRejected(runErr)) {
+		if runErr != nil && (errors.Is(runErr, errTestAgentTimeout) || ctx.Err() != nil || !agent.IsStructuredOutputRejected(runErr)) {
 			return Findings{}, runErr
 		}
 

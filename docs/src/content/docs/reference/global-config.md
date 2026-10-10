@@ -693,6 +693,36 @@ The 10-minute quiet stop still applies.
 
 It is global-only.
 
+### test_live_check_budget
+
+Optional cap on the Test step's live check, its evidence-gathering turn.
+Unset, the turn's only bound is [`test_agent_timeout`](#test_agent_timeout), and a turn that reaches it parks the run.
+
+With a budget set:
+
+- The evidence agent is told the budget at the start of its turn.
+- It is told to append one line per scenario to a ledger file, when it plans the scenario and again when it settles it. The ledger is `live-check/progress.ndjson` in the run's evidence directory.
+- A turn that reaches the budget is stopped, and the Test step completes with what the ledger holds instead of parking. A recorded live pass counts. A recorded failure is a `no-go`, which parks as an auto-fixable error exactly as a finished live check's failure does. A scenario that was planned and not reached is listed on the pull request as `untested`, with the budget as its reason.
+- The ledger is held to the live-validation contract: a pass or fail counts only when it is recorded as live with evidence, and anything else is listed as `untested`.
+- The record carries no verdict unless a failure was recorded, so the pull request's attestation omits `live_validation` for a live check that did not finish.
+- Files the stopped turn left in the worktree are moved to `live-check/set-aside` in the run's evidence directory, changes to tracked files as one patch, and the worktree is put back at its head. They are neither pushed nor deleted, and that folder is never published as evidence.
+
+The stop still parks, exactly as an expired `test_agent_timeout` does, when completing could publish or clear something nobody validated:
+
+- the stopped turn made a commit, or left a rebase or merge unfinished
+- the worktree already held changes before the turn, or could not be put back
+- the turn ran in a fix round whose gate held a failed or inconclusive live check, or any blocking finding
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | unset                  |
+
+It must be positive and must not exceed `test_agent_timeout`: a config that sets it higher is refused when the global config loads.
+The baseline [`commands.test`](/no-mistakes/reference/repo-config/#commandstest) and a Test-repair turn are not bounded by it.
+What still catches a defect in a scenario the budget cut off: the baseline command, the review, CI, and the pull request's own list of what was left untested.
+It is global-only.
+
 ### daemon_connect_timeout
 
 Maximum time a CLI client waits for an existing daemon socket to accept a connection before failing instead of hanging. Guards against a daemon process that is alive but stuck or unresponsive.
