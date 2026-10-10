@@ -12,7 +12,16 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+)
+
+// wrapperRanMarkerCommand leaves a file in the worktree, so a test can tell
+// from the worktree whether the command ever ran. The step's log cannot say:
+// it names the command before starting it.
+const (
+	wrapperRanMarker        = "wrapper-ran.marker"
+	wrapperRanMarkerCommand = "echo ran> " + wrapperRanMarker
 )
 
 // wrapperFixture is a Test step context whose machine config puts the baseline
@@ -32,6 +41,12 @@ func newWrapperFixture(t *testing.T, cmds config.Commands, vars map[string]strin
 		return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, cmds)
+	if cmds.Prepare != "" {
+		gateDir := t.TempDir()
+		gitCmd(t, gateDir, "init", "--bare")
+		sctx.GateDir = gateDir
+		sctx.Shared = &pipeline.RunShared{}
+	}
 
 	binDir := fakeCLIBinDir(t)
 	linkTestBinary(t, binDir, "turnline")
@@ -226,7 +241,7 @@ func TestTestStep_WrapperRefusalParksWithNoAgent(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			f := newWrapperFixture(t, config.Commands{Test: "echo never-runs"}, map[string]string{
+			f := newWrapperFixture(t, config.Commands{Test: wrapperRanMarkerCommand}, map[string]string{
 				"FAKE_CLI_WRAPPER_REFUSAL":      tc.line,
 				"FAKE_CLI_WRAPPER_REFUSAL_CODE": tc.code,
 			})
@@ -255,8 +270,8 @@ func TestTestStep_WrapperRefusalParksWithNoAgent(t *testing.T) {
 			if !strings.Contains(item.Description, tc.line) {
 				t.Fatalf("finding = %q, want the wrapper's own last line %q", item.Description, tc.line)
 			}
-			if strings.Contains(strings.Join(*f.logs, "\n"), "never-runs") {
-				t.Fatal("the command ran although the wrapper refused it")
+			if _, err := os.Stat(filepath.Join(f.sctx.WorkDir, wrapperRanMarker)); !os.IsNotExist(err) {
+				t.Fatalf("the command ran although the wrapper refused it (stat error %v)", err)
 			}
 		})
 	}
@@ -284,7 +299,7 @@ func TestTestStep_ExitCode125WithoutTheWrappersLineIsTheCommandsOwn(t *testing.T
 // With no refusal_prefix configured the step cannot tell a refusal from a
 // result, so it reads every exit code as the command's: today's reading.
 func TestTestStep_WrapperWithNoRefusalPrefixReadsEveryExitCodeAsTheCommands(t *testing.T) {
-	f := newWrapperFixture(t, config.Commands{Test: "echo never-runs"}, map[string]string{
+	f := newWrapperFixture(t, config.Commands{Test: wrapperRanMarkerCommand}, map[string]string{
 		"FAKE_CLI_WRAPPER_REFUSAL":      "turnline: this run takes no turn: memory stayed under the floor for an hour",
 		"FAKE_CLI_WRAPPER_REFUSAL_CODE": "125",
 	})
@@ -302,7 +317,7 @@ func TestTestStep_WrapperWithNoRefusalPrefixReadsEveryExitCodeAsTheCommands(t *t
 // A wrapper that cannot be started gave the command no turn either. It parks
 // the same way, so a missing or replaced wrapper never fails a whole run.
 func TestTestStep_WrapperThatCannotStartParksLikeARefusal(t *testing.T) {
-	f := newWrapperFixture(t, config.Commands{Test: "echo never-runs"}, nil)
+	f := newWrapperFixture(t, config.Commands{Test: wrapperRanMarkerCommand}, nil)
 	f.sctx.Config.TestCommandWrapper.Command[0] = filepath.Join(t.TempDir(), "no-such-wrapper.exe")
 
 	outcome, err := (&TestStep{}).Execute(f.sctx)
@@ -318,6 +333,33 @@ func TestTestStep_WrapperThatCannotStartParksLikeARefusal(t *testing.T) {
 	}
 	if len(f.agent.calls) != 0 {
 		t.Fatalf("agent calls = %d, want none", len(f.agent.calls))
+	}
+}
+
+// On Windows the wrapper is started by the cooperative-command helper, which
+// reports a start it could not make as its own last line with exit code 1.
+// With a wrapper configured that line is about the wrapper, never a test
+// result, and it is read only then.
+func TestCommandWrapperStartFailure_ReadsTheWindowsHelpersLine(t *testing.T) {
+	f := newWrapperFixture(t, config.Commands{Test: "echo x"}, nil)
+	output := "an earlier line\n" + shellenv.CooperativeStartFailurePrefix + "fork/exec C:\\bin\\cfo.exe: Access is denied.\n\n"
+
+	got := commandWrapperStartFailure(f.sctx, "test", output, 1, nil)
+	if !strings.Contains(got, "could not be started") || !strings.Contains(got, "Access is denied.") {
+		t.Fatalf("commandWrapperStartFailure() = %q, want the helper's reason", got)
+	}
+	if got := commandWrapperStartFailure(f.sctx, "test", output, 3, nil); got != "" {
+		t.Fatalf("exit code 3 read as a failed start: %q", got)
+	}
+	if got := commandWrapperStartFailure(f.sctx, "test", "tests failed\n", 1, nil); got != "" {
+		t.Fatalf("a failing test command read as a failed start: %q", got)
+	}
+	if got := commandWrapperStartFailure(f.sctx, "lint", output, 1, nil); got != "" {
+		t.Fatalf("lint has no wrapper, yet its output read as a failed wrapper start: %q", got)
+	}
+	f.sctx.Config.TestCommandWrapper = config.CommandWrapper{}
+	if got := commandWrapperStartFailure(f.sctx, "test", output, 1, nil); got != "" {
+		t.Fatalf("with no wrapper configured the line read as a failed wrapper start: %q", got)
 	}
 }
 

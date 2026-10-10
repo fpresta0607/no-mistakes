@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -317,6 +318,10 @@ func runShellCommandWithPriority(ctx context.Context, dir string, env []string, 
 	return runShellCommandBehind(ctx, dir, env, cmdStr, nice, nil)
 }
 
+// errCommandWrapperStart marks a machine-local wrapper that could not be
+// started, which is never a result of the command behind it.
+var errCommandWrapperStart = errors.New("command wrapper could not be started")
+
 // runShellCommandBehind runs cmdStr through the platform shell, behind the
 // words of a machine-local wrapper when one is given: the wrapper is started
 // with no shell of its own, followed by exactly the shell call that would
@@ -341,6 +346,11 @@ func runShellCommandBehind(ctx context.Context, dir string, env []string, cmdStr
 	if len(wrapper) > 0 {
 		if cmd.Err != nil {
 			return "", -1, cmd.Err
+		}
+		// A wrapper that is not there is known before anything starts, on every
+		// platform, so the caller can tell it from a result of the command.
+		if _, err := exec.LookPath(wrapper[0]); err != nil {
+			return "", -1, fmt.Errorf("%w: %v", errCommandWrapperStart, err)
 		}
 		// The already-resolved program and its arguments, unchanged, behind the
 		// wrapper's words.

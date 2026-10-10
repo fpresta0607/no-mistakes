@@ -8,6 +8,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 func runRepositoryCommand(sctx *pipeline.StepContext, name, command string) (string, int, error) {
@@ -76,6 +77,31 @@ func wrapperRepoName(sctx *pipeline.StepContext) string {
 		return name
 	}
 	return filepath.Base(sctx.Repo.WorkingPath)
+}
+
+// commandWrapperStartFailure reports why name's wrapper never started, or "".
+// A wrapper that is missing is caught before the start (errCommandWrapperStart),
+// and so is any start error the platform returns. On Windows the wrapper is
+// started by the cooperative-command helper, which reports a failed start as
+// its own last output line with exit code 1; with a wrapper configured that
+// line is about the wrapper, since the wrapper is what the helper starts.
+func commandWrapperStartFailure(sctx *pipeline.StepContext, name, output string, exitCode int, err error) string {
+	if sctx.Ctx.Err() != nil || len(commandWrapperWords(sctx, name)) == 0 {
+		return ""
+	}
+	if err != nil {
+		return fmt.Sprintf("the wrapper could not be started: %v", err)
+	}
+	if last := lastOutputLine(output); exitCode == 1 && strings.HasPrefix(last, shellenv.CooperativeStartFailurePrefix) {
+		return "the wrapper could not be started: " + strings.TrimPrefix(last, shellenv.CooperativeStartFailurePrefix)
+	}
+	return ""
+}
+
+// lastOutputLine is the last line of output that is not blank.
+func lastOutputLine(output string) string {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
 }
 
 // commandWrapperRefusal returns the wrapper's own last line when a wrapped
@@ -172,12 +198,12 @@ func runConfiguredChecks(sctx *pipeline.StepContext, name, command string) (stri
 		}
 		out, code, err := executeRepositoryCommand(sctx, name, checks[i].Command)
 		output.WriteString(out)
-		if err != nil && sctx.Ctx.Err() == nil && len(commandWrapperWords(sctx, name)) > 0 {
+		if reason := commandWrapperStartFailure(sctx, name, out, code, err); reason != "" {
 			// A wrapper that cannot be started gave this check no turn. That is
 			// the machine's state, not the run's, so it parks like a refusal
-			// instead of failing the run.
+			// instead of failing the run or reading as a failed test.
 			checks[i].ExitCode = 126
-			checks[i].NoTurn = fmt.Sprintf("the wrapper could not be started: %v", err)
+			checks[i].NoTurn = reason
 			return output.String(), checks[:i+1], nil
 		}
 		if err != nil {

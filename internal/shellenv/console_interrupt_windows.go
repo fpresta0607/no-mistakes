@@ -60,7 +60,7 @@ func runWindowsCooperativeCommand(eventName, targetPath string, targetArgs []str
 		},
 	}
 	if err := target.Start(); err != nil {
-		return 1, fmt.Errorf("start Windows cooperative command: %w", err)
+		return 1, fmt.Errorf(CooperativeStartFailurePrefix+"%w", err)
 	}
 
 	targetHandle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(target.Process.Pid))
