@@ -194,8 +194,13 @@ type GlobalConfig struct {
 	AgentWorkingTimeout       time.Duration `yaml:"-"`
 	ReviewAgentWorkingTimeout time.Duration `yaml:"-"`
 	TestAgentWorkingTimeout   time.Duration `yaml:"-"`
-	DaemonConnectTimeout      time.Duration `yaml:"-"`
-	BranchSyncRemoteTimeout   time.Duration `yaml:"-"`
+	// TestLiveCheckBudget caps the Test step's evidence turn (the live check)
+	// below test_agent_timeout. Zero, the default, is off: the turn keeps
+	// test_agent_timeout as its only bound and a cut parks as it always has.
+	// Global-only like every agent budget: it describes this machine.
+	TestLiveCheckBudget     time.Duration `yaml:"-"`
+	DaemonConnectTimeout    time.Duration `yaml:"-"`
+	BranchSyncRemoteTimeout time.Duration `yaml:"-"`
 	// GateReconcileInterval / GateReconcileTimeout bound how often and how
 	// long a parked approval gate is rechecked. They are machine-local
 	// operator knobs (slow hosts, contended gh auth) and global-only so a
@@ -258,6 +263,7 @@ type globalConfigRaw struct {
 	AgentWorkingTimeout       string                     `yaml:"agent_working_timeout"`
 	ReviewAgentWorkingTimeout string                     `yaml:"review_agent_working_timeout"`
 	TestAgentWorkingTimeout   string                     `yaml:"test_agent_working_timeout"`
+	TestLiveCheckBudget       string                     `yaml:"test_live_check_budget"`
 	LogLevel                  string                     `yaml:"log_level"`
 	SessionReuse              *bool                      `yaml:"session_reuse"`
 	AutoFix                   AutoFixRaw                 `yaml:"auto_fix"`
@@ -734,6 +740,7 @@ type Config struct {
 	AgentWorkingTimeout       time.Duration
 	ReviewAgentWorkingTimeout time.Duration
 	TestAgentWorkingTimeout   time.Duration
+	TestLiveCheckBudget       time.Duration
 	GateReconcileInterval     time.Duration
 	GateReconcileTimeout      time.Duration
 	LogLevel                  string
@@ -903,6 +910,23 @@ type TestRaw struct {
 	// (see EffectiveRepoConfig): a contributor's pushed branch must not be able
 	// to waive the configured-test gate that validates it.
 	AllowApproveOverFailure string `yaml:"allow_approve_over_failure"`
+	// SurfacePaths lists the paths that are this repository's live surface:
+	// what an end user runs or sees. When the list is set and a change touches
+	// none of it, the Test step does not call the evidence agent; it records
+	// one line naming this rule, and commands.test still runs. Unset (the
+	// default) keeps the evidence turn on every change. Entries follow the
+	// ignore_patterns match rules. It decides whether the gate that validates
+	// the pushed branch runs at all, so it is honored ONLY from the trusted
+	// default-branch copy of .no-mistakes.yaml (see EffectiveRepoConfig),
+	// regardless of allow_repo_commands.
+	SurfacePaths []string `yaml:"surface_paths"`
+	// Environment names the repository's prepared live-check environment: the
+	// command that brings the real product up on disposable data, with any
+	// notes. When set, the evidence agent is told to use it and to build no
+	// environment of its own. It is injected into the test gate's prompt, so
+	// like Instructions it is honored ONLY from the trusted default-branch
+	// copy.
+	Environment string `yaml:"environment"`
 }
 
 // EvidenceRaw is the YAML representation of test-evidence settings.
@@ -939,14 +963,16 @@ type EvidenceRaw struct {
 }
 
 // Test is the resolved test-step config. Prepare, BaseAttribution,
-// Instructions and AllowApproveOverFailure come from the trusted
-// default-branch repo config only (see TestRaw).
+// Instructions, AllowApproveOverFailure, SurfacePaths and Environment come
+// from the trusted default-branch repo config only (see TestRaw).
 type Test struct {
 	Prepare                 bool
 	BaseAttribution         bool
 	Evidence                Evidence
 	Instructions            string
 	AllowApproveOverFailure string
+	SurfacePaths            []string
+	Environment             string
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -1233,6 +1259,14 @@ test_agent_timeout: "30m"
 # Optional still-working cap for Test. Unset means no extension past
 # test_agent_timeout. Must be at least test_agent_timeout.
 # test_agent_working_timeout: "1h"
+
+# Optional cap on the Test step's live check (its evidence-gathering turn).
+# Unset means test_agent_timeout is its only bound and a cut parks the run.
+# With a budget the agent is told it and records each scenario as it goes, and
+# a turn that reaches the budget completes with what it proved: recorded passes
+# count, a recorded failure is a finding, and unreached scenarios are listed on
+# the pull request as untested. Must not exceed test_agent_timeout.
+# test_live_check_budget: "15m"
 
 # Maximum time a CLI client waits for an existing daemon socket to accept a
 # connection before failing instead of hanging.
@@ -2389,6 +2423,18 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateWorkingCap("test_agent_working_timeout", "test_agent_timeout", cfg.TestAgentWorkingTimeout, cfg.TestAgentTimeout); err != nil {
 		return nil, err
 	}
+	if raw.TestLiveCheckBudget != "" {
+		d, err := parsePositiveDuration("test_live_check_budget", raw.TestLiveCheckBudget)
+		if err != nil {
+			return nil, err
+		}
+		// A cap, never an extension: the live check is one Test agent turn, so a
+		// budget above that turn's own limit could only lengthen it.
+		if d > cfg.TestAgentTimeout {
+			return nil, fmt.Errorf("test_live_check_budget (%s) must not exceed test_agent_timeout (%s)", d, cfg.TestAgentTimeout)
+		}
+		cfg.TestLiveCheckBudget = d
+	}
 	if raw.DaemonConnectTimeout != "" {
 		d, err := parsePositiveDuration("daemon_connect_timeout", raw.DaemonConnectTimeout)
 		if err != nil {
@@ -2818,6 +2864,12 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// trusted-only for the same reason no_ci is: a pushed branch must not
 		// waive the gate that certifies it.
 		effective.Test.AllowApproveOverFailure = trusted.Test.AllowApproveOverFailure
+		// test.surface_paths decides whether the live check runs for a change
+		// and test.environment steers the agent that runs it. Both are
+		// trusted-only for the reason test.instructions is: a pushed branch
+		// must not be able to switch off or rewrite the check that validates it.
+		effective.Test.SurfacePaths = append([]string(nil), trusted.Test.SurfacePaths...)
+		effective.Test.Environment = trusted.Test.Environment
 		// pr.base_branch controls where the contributor's PR lands, so it is
 		// trusted-only unless the repository explicitly opts into pushed
 		// settings alongside commands and agent selection. TitleFormat is a
@@ -2845,6 +2897,8 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Test.Prepare = false
 		effective.Test.BaseAttribution = false
 		effective.Test.AllowApproveOverFailure = ""
+		effective.Test.SurfacePaths = nil
+		effective.Test.Environment = ""
 		if !allowRepoCommands {
 			effective.PR.BaseBranch = ""
 		}
@@ -3130,6 +3184,23 @@ func validateTestRaw(test TestRaw) error {
 	if test.Evidence.MaxRuns != nil && *test.Evidence.MaxRuns < 0 {
 		return fmt.Errorf("test.evidence.max_runs must be 0 (keep every run) or greater, got %d", *test.Evidence.MaxRuns)
 	}
+	// An entry that can never match a git path would match nothing, and a list
+	// that matches nothing is exactly what skips the live check. Refuse it
+	// here instead of letting it read as "this change has no surface".
+	for i, pattern := range test.SurfacePaths {
+		pattern = strings.TrimSpace(pattern)
+		switch {
+		case pattern == "":
+			return fmt.Errorf("test.surface_paths[%d]: entry is empty", i)
+		case strings.Contains(pattern, "\\"):
+			return fmt.Errorf("test.surface_paths[%d] %q: use forward slashes, as git paths do", i, pattern)
+		case strings.HasPrefix(pattern, "/") || strings.HasPrefix(pattern, "./"):
+			return fmt.Errorf("test.surface_paths[%d] %q: paths are relative to the repository root, with no leading / or ./", i, pattern)
+		}
+		if err := validatePathInstructionGlob(pattern); err != nil {
+			return fmt.Errorf("test.surface_paths[%d] %q: %w", i, pattern, err)
+		}
+	}
 	return nil
 }
 
@@ -3323,6 +3394,12 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	test.BaseAttribution = repo.Test.BaseAttribution
 	test.Instructions = strings.TrimSpace(repo.Test.Instructions)
 	test.AllowApproveOverFailure = strings.TrimSpace(repo.Test.AllowApproveOverFailure)
+	// Like the runbook, the surface list and the prepared environment describe
+	// ONE repository's product, so global config never supplies them.
+	for _, pattern := range repo.Test.SurfacePaths {
+		test.SurfacePaths = append(test.SurfacePaths, strings.TrimSpace(pattern))
+	}
+	test.Environment = strings.TrimSpace(repo.Test.Environment)
 
 	commit := Commit{FixMessage: DefaultFixMessageTemplate}
 	if global.Commit.FixMessage != nil {
@@ -3400,6 +3477,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		AgentWorkingTimeout:       global.AgentWorkingTimeout,
 		ReviewAgentWorkingTimeout: global.ReviewAgentWorkingTimeout,
 		TestAgentWorkingTimeout:   global.TestAgentWorkingTimeout,
+		TestLiveCheckBudget:       global.TestLiveCheckBudget,
 		GateReconcileInterval:     global.GateReconcileInterval,
 		GateReconcileTimeout:      global.GateReconcileTimeout,
 		LogLevel:                  global.LogLevel,
