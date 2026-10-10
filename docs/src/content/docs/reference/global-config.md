@@ -723,6 +723,59 @@ The baseline [`commands.test`](/no-mistakes/reference/repo-config/#commandstest)
 What still catches a defect in a scenario the budget cut off: the baseline command, the review, CI, and the pull request's own list of what was left untested.
 It is global-only.
 
+### test_command_wrapper
+
+Optional wrapper program in front of every run's baseline test command, so one program can make the test runs on this machine take turns without any repository naming it.
+Unset, the command starts exactly as it always has.
+
+```yaml
+test_command_wrapper:
+  command: ["cfo", "gate", "turn", "--as", "{repo} {branch}, run {run_short}", "--"]
+  refusal_prefix: "cfo gate turn: "
+```
+
+|         |                                              |
+| ------- | -------------------------------------------- |
+| Type    | mapping: `command` (list of `string`), `refusal_prefix` (`string`) |
+| Default | unset                                        |
+
+`command` is a list of words, never one string.
+The words are started with no shell in front of them, followed by exactly the program and arguments the command would have been started with: `sh -c <command>`, or `cmd.exe /c <command>` on Windows, with the shell as its resolved path.
+The command string therefore stays one argument, so `a && b` stands behind the wrapper whole.
+The working directory and the environment are those the command has without a wrapper.
+A word may name a run fact, filled in once: `{repo}` (the last element of the upstream URL), `{branch}`, `{run}` (the run id), and `{run_short}` (its first 8 characters).
+Use the full path of the wrapper program unless it is on the daemon's own `PATH`.
+
+The wrapper is trusted to start what follows its words and to pass that program's output and exit code through.
+Its own lines, such as what it prints while it waits, are captured with the command's and appear in the step log.
+The step logs one line of its own saying the wrapper was applied, so a result produced behind it is never shown as a plain run.
+
+What stands behind it:
+
+- [`commands.test`](/no-mistakes/reference/repo-config/#commandstest) of every run
+- each machine-local [`repository_overrides.commands.test.additional`](#machine-local-commands) check, as its own start
+- the re-run of `commands.test` on the base commit under [`test.base_attribution`](/no-mistakes/reference/repo-config/#testbase_attribution)
+
+`commands.prepare`, `commands.lint`, `commands.format`, and repository `gates` start as they always have.
+
+`refusal_prefix` is optional and tells the wrapper's own refusal from a test result.
+The convention is the one `env`, `nice`, and `timeout` share: a wrapper exits 125 when it gave up before starting the command and 126 when the command could not be started.
+A test command can exit with those codes too, so the step reads them as a refusal only when the last non-empty line of output starts with `refusal_prefix`.
+With no `refusal_prefix`, every exit code is the command's own.
+
+A refusal is not a test result:
+
+- The Test step parks with one `ask-user` warning, `test-command-no-turn`, that quotes the wrapper's last line. It is never auto-fixed, and no live check runs.
+- A fix response runs the test command again with no repair turn, since there is nothing to repair.
+- An approval goes on without the baseline and is recorded as an approval over a configured test command that did not pass, exactly as approving a failing `commands.test` is.
+- A wrapper that cannot be started at all parks the same way, so a missing wrapper never fails a whole run and never lets a command start outside it.
+- On the base commit re-run, a refusal reports attribution as unavailable.
+
+No time limit bounds `commands.test`, so a wait inside the wrapper costs the run nothing but time.
+The base commit re-run is bounded by [`test_agent_timeout`](#test_agent_timeout), and that bound includes the wait.
+
+It is global-only: it decides how a command starts on this machine, so no repository file, trusted or pushed, can set it.
+
 ### daemon_connect_timeout
 
 Maximum time a CLI client waits for an existing daemon socket to accept a connection before failing instead of hanging. Guards against a daemon process that is alive but stuck or unresponsive.
