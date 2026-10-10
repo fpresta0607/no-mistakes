@@ -70,6 +70,19 @@ func (m *RunManager) newRunPipelineAgent(ctx context.Context, run *db.Run, cfg *
 	return newResolvedPipelineAgent(cfg, roleConfigs, evidenceRoot, environment)
 }
 
+// applyLaunchSelection gives a run the agents its launch selection names,
+// before prepareLaunchAssertion proves them. An assertion that applies
+// nothing leaves cfg as the configuration resolved it.
+func applyLaunchSelection(cfg *config.Config, expected *launchassert.Expectation) error {
+	if expected == nil || !expected.Apply {
+		return nil
+	}
+	if err := expected.Validate(); err != nil {
+		return err
+	}
+	return cfg.ApplyLaunchSelection(expected.Profiles["primary"])
+}
+
 func prepareLaunchAssertion(ctx context.Context, expected *launchassert.Expectation, cfg *config.Config, lookPath func(string) (string, error)) (map[string]*config.Config, *launchassert.Proof, error) {
 	if expected.TrustedSHA != cfg.TrustedConfigSHA {
 		return nil, nil, fmt.Errorf("launch assertion trusted source differs after fresh fetch")

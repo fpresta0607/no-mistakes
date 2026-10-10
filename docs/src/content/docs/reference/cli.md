@@ -298,6 +298,8 @@ The file must be a regular file of at most 8 KiB holding one JSON object with ex
 
 A role without its own `review_agents` entry is proved against the primary chain.
 Codex and Claude Code selections are verifiable, and every knob must be explicit: the daemon derives each entry from [`agent_config`](/no-mistakes/reference/global-config/#agent_config) and [`agent_args_override`](/no-mistakes/reference/global-config/#agent_args_override) with the same precedence the launched process uses, and refuses a native argument it cannot interpret (such as Codex `--profile` or Claude `--fallback-model` and `--settings`) rather than reporting what was requested.
+Arguments that select no model, effort or service tier are accepted: for Codex `--ignore-user-config`, `--enable` and `--disable` of `plugins` or `apps`, and the `-c` keys `project_doc_max_bytes`, `personality`, `model_auto_compact_token_limit_scope` and `features.multi_agent`, and for Claude Code `--strict-mcp-config`.
+Any other feature toggle or `-c` key is refused, since one may choose a model or a service tier.
 For Claude Code the proof is the `--model` and `--effort` flags, which the CLI documents as overriding `ANTHROPIC_MODEL` and the `model`, `effortLevel`, and `modelSettings` settings; a repeated flag is refused, and `--setting-sources`, `--permission-mode`, and `--dangerously-skip-permissions` are accepted because they select no model or effort.
 A model alias such as `opus` is proved as the alias, not the model it resolves to; name the full model ID to pin it.
 Unknown fields, a missing role, an implicit model, effort, or Codex service tier, a Claude service tier, or any other agent harness refuse the launch.
@@ -310,6 +312,34 @@ AXI refuses a receipt whose proof is missing or differs from the file it read.
 Replays of the nonce must supply the identical assertion; omitting it, or supplying a different one, is refused like any other conflicting claim.
 Recovery after a daemon restart proves the stored assertion again against a fresh trusted fetch and the current configuration, and fails the run on any drift.
 The proof covers the explicit launch selection only; it does not attest the model a provider actually served or any authentication, subscription, or billing identity.
+
+#### Launch selections
+
+Add `"apply": true` to the file to make the assertion a launch selection, which sets the run's agents and then proves them.
+
+```json
+{
+  "trusted_sha": "0123456789abcdef0123456789abcdef01234567",
+  "apply": true,
+  "profiles": {
+    "primary": [{ "harness": "claude", "model": "claude-opus-5-5", "effort": "xhigh" }],
+    "reviewer": [{ "harness": "claude", "model": "claude-opus-5-5", "effort": "xhigh" }],
+    "fixer": [{ "harness": "claude", "model": "claude-opus-5-5", "effort": "xhigh" }]
+  }
+}
+```
+
+Before the proof, the daemon replaces this run's agent chain with the asserted chain in order, sets each named harness's model and effort to the asserted ones, and runs every review role on that chain, whatever `agent`, `review_agents` and `agent_config` model or effort the global config or the trusted repository names.
+It changes that run alone and writes no config file, so one daemon can run launches started at the same time each on the harness its own caller names.
+A selection names one chain: `reviewer` and `fixer` must equal `primary`, the later-round roles are refused, and a harness may appear once.
+
+[`agent_args_override`](/no-mistakes/reference/global-config/#agent_args_override) stays the operator's.
+The proof that follows derives every entry from the arguments the agent will really be started with, so an override that pins another model or effort still refuses the launch.
+A Codex entry's `service_tier` is proved and never set: it comes from `agent_args_override.codex`.
+A named harness the daemon cannot run is not skipped: the proved chain then differs from the asserted one and the launch is refused, so no harness the caller did not name ever starts, and none it named is silently dropped.
+The selection is stored with the run as the assertion is, replays of the nonce must supply it unchanged, and recovery after a daemon restart applies the stored selection again before it proves it.
+A selection cannot be combined with `--model` or `--effort`, the per-run Pi profile.
+A daemon that proves assertions but cannot apply them refuses the unknown `apply` field, so a selection is never proved without being applied.
 
 ## no-mistakes axi respond
 

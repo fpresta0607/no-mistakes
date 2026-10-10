@@ -103,12 +103,30 @@ func codexSelection(args []string) (Selection, error) {
 				case "service_tier":
 					selection.ServiceTier = resolved
 				}
-			case "project_doc_max_bytes":
-				// This suppression knob does not select a model or profile.
+			case "project_doc_max_bytes", "personality", "model_auto_compact_token_limit_scope", "features.multi_agent":
+				// The project doc budget, the response style, the scope of
+				// the compaction limit and sub-agents select no model,
+				// effort, service tier, provider or profile.
 			default:
 				return Selection{}, fmt.Errorf("native config override is not verifiable by launch assertions")
 			}
-		case "--ignore-rules", "--full-auto", "--dangerously-bypass-approvals-and-sandbox":
+		case "--enable", "--disable":
+			if !hasInlineValue {
+				index++
+				if index >= len(args) {
+					return Selection{}, fmt.Errorf("incomplete native feature argument")
+				}
+				value = args[index]
+			}
+			// Plugins and apps bring MCP servers and tools, never a model.
+			// Any other feature is refused, since one may choose a model or
+			// a service tier.
+			if value != "plugins" && value != "apps" {
+				return Selection{}, fmt.Errorf("native feature toggle is not verifiable by launch assertions")
+			}
+		case "--ignore-rules", "--full-auto", "--dangerously-bypass-approvals-and-sandbox", "--ignore-user-config":
+			// --ignore-user-config skips the user config.toml, the one file
+			// an implicit model, provider or profile could come from.
 			if hasInlineValue {
 				return Selection{}, fmt.Errorf("invalid native execution argument")
 			}
@@ -158,7 +176,9 @@ func claudeSelection(args []string) (Selection, error) {
 			// --setting-sources and --permission-mode choose which settings
 			// files load and the tool policy; the flags above override any
 			// model or effort those settings carry.
-		case "--dangerously-skip-permissions":
+		case "--dangerously-skip-permissions", "--strict-mcp-config":
+			// --strict-mcp-config loads only the MCP servers --mcp-config
+			// names, and selects no model or effort.
 			if hasInlineValue {
 				return Selection{}, fmt.Errorf("invalid native execution argument")
 			}
