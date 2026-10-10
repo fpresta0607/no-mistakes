@@ -13,6 +13,14 @@ type Proof struct {
 	AssertionDigest string                          `json:"assertion_digest"`
 	TrustedSHA      string                          `json:"trusted_sha"`
 	Profiles        map[string][]agentcfg.Selection `json:"profiles"`
+	Apply           bool                            `json:"apply,omitempty"`
+}
+
+// assertion is the expectation this proof says it proved, field for field.
+// Value and Scan check the proof against it, so a proof that lost a field of
+// its assertion is neither stored nor loaded.
+func (p *Proof) assertion() *Expectation {
+	return &Expectation{TrustedSHA: p.TrustedSHA, Profiles: p.Profiles, Apply: p.Apply}
 }
 
 func (p *Proof) Check(expected *Expectation) error {
@@ -32,7 +40,7 @@ func (p *Proof) Check(expected *Expectation) error {
 }
 
 func (p Proof) Value() (driver.Value, error) {
-	if err := p.Check(&Expectation{TrustedSHA: p.TrustedSHA, Profiles: p.Profiles}); err != nil {
+	if err := p.Check(p.assertion()); err != nil {
 		return nil, err
 	}
 	data, err := json.Marshal(p)
@@ -52,5 +60,5 @@ func (p *Proof) Scan(source interface{}) error {
 	if err := json.Unmarshal(data, p); err != nil {
 		return fmt.Errorf("unreadable persisted launch proof")
 	}
-	return p.Check(&Expectation{TrustedSHA: p.TrustedSHA, Profiles: p.Profiles})
+	return p.Check(p.assertion())
 }
