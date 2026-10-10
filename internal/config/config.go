@@ -198,9 +198,15 @@ type GlobalConfig struct {
 	// below test_agent_timeout. Zero, the default, is off: the turn keeps
 	// test_agent_timeout as its only bound and a cut parks as it always has.
 	// Global-only like every agent budget: it describes this machine.
-	TestLiveCheckBudget     time.Duration `yaml:"-"`
-	DaemonConnectTimeout    time.Duration `yaml:"-"`
-	BranchSyncRemoteTimeout time.Duration `yaml:"-"`
+	TestLiveCheckBudget time.Duration `yaml:"-"`
+	// TestCommandWrapper puts every run's baseline test command behind one
+	// wrapper program, so the machine can make test runs take turns without
+	// any repository naming the wrapper. Unset, the default, starts the
+	// command exactly as before. Global-only: it decides how a command starts
+	// on this machine, so no repository file, trusted or pushed, may set it.
+	TestCommandWrapper      CommandWrapper `yaml:"-"`
+	DaemonConnectTimeout    time.Duration  `yaml:"-"`
+	BranchSyncRemoteTimeout time.Duration  `yaml:"-"`
 	// GateReconcileInterval / GateReconcileTimeout bound how often and how
 	// long a parked approval gate is rechecked. They are machine-local
 	// operator knobs (slow hosts, contended gh auth) and global-only so a
@@ -264,6 +270,7 @@ type globalConfigRaw struct {
 	ReviewAgentWorkingTimeout string                     `yaml:"review_agent_working_timeout"`
 	TestAgentWorkingTimeout   string                     `yaml:"test_agent_working_timeout"`
 	TestLiveCheckBudget       string                     `yaml:"test_live_check_budget"`
+	TestCommandWrapper        *CommandWrapper            `yaml:"test_command_wrapper"`
 	LogLevel                  string                     `yaml:"log_level"`
 	SessionReuse              *bool                      `yaml:"session_reuse"`
 	AutoFix                   AutoFixRaw                 `yaml:"auto_fix"`
@@ -741,6 +748,7 @@ type Config struct {
 	ReviewAgentWorkingTimeout time.Duration
 	TestAgentWorkingTimeout   time.Duration
 	TestLiveCheckBudget       time.Duration
+	TestCommandWrapper        CommandWrapper
 	GateReconcileInterval     time.Duration
 	GateReconcileTimeout      time.Duration
 	LogLevel                  string
@@ -1267,6 +1275,18 @@ test_agent_timeout: "30m"
 # count, a recorded failure is a finding, and unreached scenarios are listed on
 # the pull request as untested. Must not exceed test_agent_timeout.
 # test_live_check_budget: "15m"
+
+# Optional wrapper in front of every run's baseline test command
+# (commands.test, machine-local additional test checks, and a base attribution
+# re-run), so one program can make test runs on this machine take turns. The
+# words are started with no shell, followed by exactly the shell call the
+# command would have been started with. A word may name {repo}, {branch},
+# {run} or {run_short}. With refusal_prefix set, an exit code of 125 or 126
+# whose last output line starts with it means the wrapper never produced a
+# test result: the step parks for a decision instead of reading a failed test.
+# test_command_wrapper:
+#   command: ["cfo", "gate", "turn", "--as", "{repo} {branch}, run {run_short}", "--"]
+#   refusal_prefix: "cfo gate turn: "
 
 # Maximum time a CLI client waits for an existing daemon socket to accept a
 # connection before failing instead of hanging.
@@ -2435,6 +2455,12 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		}
 		cfg.TestLiveCheckBudget = d
 	}
+	if raw.TestCommandWrapper != nil {
+		if err := validateCommandWrapper("test_command_wrapper", *raw.TestCommandWrapper); err != nil {
+			return nil, err
+		}
+		cfg.TestCommandWrapper = copyCommandWrapper(*raw.TestCommandWrapper)
+	}
 	if raw.DaemonConnectTimeout != "" {
 		d, err := parsePositiveDuration("daemon_connect_timeout", raw.DaemonConnectTimeout)
 		if err != nil {
@@ -3478,6 +3504,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		ReviewAgentWorkingTimeout: global.ReviewAgentWorkingTimeout,
 		TestAgentWorkingTimeout:   global.TestAgentWorkingTimeout,
 		TestLiveCheckBudget:       global.TestLiveCheckBudget,
+		TestCommandWrapper:        copyCommandWrapper(global.TestCommandWrapper),
 		GateReconcileInterval:     global.GateReconcileInterval,
 		GateReconcileTimeout:      global.GateReconcileTimeout,
 		LogLevel:                  global.LogLevel,

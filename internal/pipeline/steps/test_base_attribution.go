@@ -188,7 +188,9 @@ func runTestCommandOnBase(sctx *pipeline.StepContext, testCmd, baseSHA string) (
 			return "", 0, fmt.Errorf("clean base preparation changes: %w", err)
 		}
 	}
-	output, exitCode, err := runShellCommandWithPriority(ctx, checkout, env, testCmd, sctx.Config.CommandOverrides["test"].Nice)
+	// A second whole run of the suite stands behind the machine's wrapper like
+	// the first. Its wait counts against this run's deadline.
+	output, exitCode, err := runShellCommandBehind(ctx, checkout, env, testCmd, sctx.Config.CommandOverrides["test"].Nice, commandWrapperWords(sctx, "test"))
 	if err := exceeded(); err != nil {
 		return "", 0, err
 	}
@@ -196,6 +198,9 @@ func runTestCommandOnBase(sctx *pipeline.StepContext, testCmd, baseSHA string) (
 		return "", 0, fmt.Errorf("run test command on base: %w", err)
 	}
 	logCommandOutput(sctx, output, "Test (base)", types.StepTest)
+	if refusal := commandWrapperRefusal(sctx, "test", output, exitCode); refusal != "" {
+		return "", 0, fmt.Errorf("test command was given no turn on the base checkout: %s", refusal)
+	}
 	// The shell's own "cannot execute" and "not found" codes mean the suite
 	// never ran on the base (typically an ignored dependency the fresh clone
 	// lacks), which is not a base test failure.
