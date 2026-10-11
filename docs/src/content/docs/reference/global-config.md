@@ -835,6 +835,52 @@ What still catches each kind of defect with it on:
 
 It is global-only: how many agents and test runs work at once is this machine's decision, so no repository file can set it.
 
+### ci_end_at_green
+
+Ends a run when CI is first green on the head it pushed, instead of watching the pull request until it is merged or closed.
+Unset, the run keeps watching, as it always has.
+
+```yaml
+ci_end_at_green: true
+
+repository_overrides:
+  https://github.com/acme/widget:
+    ci:
+      end_at_green: false
+```
+
+|         |          |
+| ------- | -------- |
+| Type    | `bool`   |
+| Default | `false`  |
+
+A [`repository_overrides`](#repository_overrides) entry sets it for one repository: `ci: {end_at_green: true}` switches it on there only, and `false` keeps one repository watched under a global `true`.
+
+The CI step ends the run at the first poll where all of these hold:
+
+- every registered check has passed, or the repository declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) and none is registered
+- the pull request is open, and its mergeability, where the forge reports it, is known and clear
+- the pull request head the forge read the checks for, where the forge reports it, is the head the run pushed
+- the push target's branch still points at the head the run pushed
+
+The step then records CI readiness, logs one line naming the head, and completes, so the run completes.
+A green it cannot tie to the pushed head is logged once, and monitoring goes on as it does without the setting.
+
+What a run does after green today, and no longer does with the setting on:
+
+- It keeps polling the checks, so a check that turns red later, such as a re-run or a newly required check, is repaired within [`auto_fix.ci`](/no-mistakes/reference/repo-config/#auto_fix) or parked for a decision.
+- When the base branch moves, it re-arms its idle timeout, and when the forge then reports a merge conflict, a repair agent rebases onto the base. That repair cannot prove continuity with what was reviewed, so the run goes back through Review before the rebased head is pushed.
+- It re-runs a check the provider cancelled, under [`ci.rerun_transient`](/no-mistakes/reference/repo-config/#cirerun_transient).
+- It parks a supported review bot's comments for a decision.
+- It records that the pull request was merged or closed, checks the merge proof against the pushed head, and calls the merge hook that relabels evaluation runs.
+- It parks for a decision when [`ci_timeout`](#ci_timeout) passes with the pull request still open.
+- It reports `checks-passed` in `axi` and the TUI while it waits. A run that ended at green reports `passed`.
+
+What still catches each kind of defect with it on: a check that fails after green, and a conflict from a base that moved, show on the pull request, where the forge's required checks and branch protection decide whether it can merge.
+A new push to the branch starts a new gate run.
+
+It is global-only: whether the gate keeps watching a pull request is this machine's decision, so no repository file can set it.
+
 ### daemon_connect_timeout
 
 Maximum time a CLI client waits for an existing daemon socket to accept a connection before failing instead of hanging. Guards against a daemon process that is alive but stuck or unresponsive.
@@ -1161,6 +1207,7 @@ repository_overrides:
 ```
 
 Formatting fields are `commit.branch_pattern`, `commit.branch_replacement`, `commit.fix_message`, `commit.trailers`, and `pr.title_format`; each retains the same fail-closed validation as its global or repository-config equivalent.
+`ci.end_at_green` sets [`ci_end_at_green`](#ci_end_at_green) for the matching repository only.
 A `commit.branch_replacement` must be paired with `commit.branch_pattern` in the same override.
 Precedence is explicit: `.no-mistakes.yaml` wins for every field it sets, then a matching machine-local override, then the plain global value, then the built-in default.
 As with the global replacement, a repository `commit.branch_pattern` replaces the matching machine-local pattern and clears its replacement.

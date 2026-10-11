@@ -407,6 +407,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	var timeoutFailingChecks []scm.CheckTarget
 	timeoutMergeConflict := false
 	lastMonitorLog := ""
+	lastEndAtGreenNote := ""
 	consecutiveCheckErrs := 0
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
 		sctx.Log("CI timeout reached")
@@ -728,6 +729,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// evidence; there is no grace-period promotion path.
 					if sctx.Config != nil && sctx.Config.NoCI {
 						sctx.DeferredFindings = ""
+						if ended, err := endAtGreen(sctx, pr.HeadSHA, true, &lastEndAtGreenNote); err != nil {
+							return nil, err
+						} else if ended {
+							return &pipeline.StepOutcome{}, nil
+						}
 						lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
 					} else {
 						clearCIMonitorReady(sctx)
@@ -736,6 +742,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					}
 				case allChecksPassed(checks):
 					sctx.DeferredFindings = ""
+					if ended, err := endAtGreen(sctx, pr.HeadSHA, false, &lastEndAtGreenNote); err != nil {
+						return nil, err
+					} else if ended {
+						return &pipeline.StepOutcome{}, nil
+					}
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
 				default:
 					clearCIMonitorReady(sctx)
@@ -772,6 +783,48 @@ func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) st
 		sctx.Log(message)
 	}
 	return message
+}
+
+// endAtGreen ends the run at its first green CI under ci_end_at_green, when
+// that green belongs to the head this run pushed. observedHead is the head the
+// provider read the checks for: the forge's live pull request head where the
+// provider reports one (GitHub), else the run's head. The push target's branch
+// must point at the run's head too, so a green on a commit somebody else
+// pushed never ends a run. Readiness is recorded first, so the run ends marked
+// ready exactly as a monitor that kept watching would have marked it. A green
+// it cannot bind to the pushed head leaves monitoring as it is today, and the
+// reason is logged once per distinct reason in note.
+func endAtGreen(sctx *pipeline.StepContext, observedHead string, declaredNoCI bool, note *string) (bool, error) {
+	if sctx.Config == nil || !sctx.Config.CIEndAtGreen {
+		return false, nil
+	}
+	head := sctx.Run.HeadSHA
+	keepMonitoring := func(reason string) (bool, error) {
+		if reason != *note {
+			*note = reason
+			sctx.Log("ci_end_at_green: CI is green, but " + reason + ", so monitoring continues as it does without the setting")
+		}
+		return false, nil
+	}
+	if observedHead != head {
+		return keepMonitoring(fmt.Sprintf("on %s, the pull request's head, not on %s, the head this run pushed", shortSHA(observedHead), shortSHA(head)))
+	}
+	published, err := publishedBranchHead(sctx)
+	if err != nil {
+		return keepMonitoring(fmt.Sprintf("the pushed branch's head could not be read (%v)", err))
+	}
+	if published != head {
+		return keepMonitoring(fmt.Sprintf("the pushed branch now points at %s, not at %s, the head this run pushed", shortSHA(published), shortSHA(head)))
+	}
+	if err := setCIMonitorReadiness(sctx, true, declaredNoCI); err != nil {
+		return false, err
+	}
+	what := "all CI checks passed"
+	if declaredNoCI {
+		what = "the repository declares no CI (no_ci: true)"
+	}
+	sctx.Log(fmt.Sprintf("%s on %s, the head this run pushed. The run ends here under ci_end_at_green, without watching the pull request until it is merged or closed.", what, shortSHA(head)))
+	return true, nil
 }
 
 func clearCIMonitorReady(sctx *pipeline.StepContext) {
