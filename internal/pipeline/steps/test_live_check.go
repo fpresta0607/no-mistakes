@@ -52,7 +52,13 @@ var errTestLiveCheckBudget = errors.New("test live check budget")
 // excluded for the reason evidence_publish.go records; the live check folder
 // holds a ledger and set-aside work, neither of which is evidence.
 func evidencePublishExcludedDirs() []string {
-	return []string{reviewqa.DirName, liveCheckDirName}
+	return []string{
+		reviewqa.DirName,
+		liveCheckDirName,
+		// A Test step whose work started beside the review (side_by_side)
+		// keeps its evidence one level down, and its ledger with it.
+		sideLaneDirName + "/" + string(types.StepTest) + "/" + liveCheckDirName,
+	}
 }
 
 // liveSurfaceUntouched reports whether trusted test.surface_paths is set and

@@ -89,6 +89,12 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
+	// Under global side_by_side this pass may have started beside the review.
+	// Its commit is taken only when the run's head is still the commit it was
+	// made on.
+	if outcome, ok := takeSideLane(sctx, s.Name()); ok {
+		return outcome, nil
+	}
 	ctx := sctx.Ctx
 	baseBranch := effectivePRBaseBranch(sctx)
 	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
