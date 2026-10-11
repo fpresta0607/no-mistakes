@@ -453,8 +453,8 @@ func TestSideBySide_TestFilesTheEarlyLiveCheckWroteAreBroughtOver(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if len(f.agent.evidenceCalls()) != 1 {
-		t.Fatalf("live check calls = %d, want the early one taken", len(f.agent.evidenceCalls()))
+	if calls := f.agent.evidenceCalls(); len(calls) != 1 || samePath(calls[0], f.dir) {
+		t.Fatalf("live check ran in %q, want once, in a copy, and taken", calls)
 	}
 	content, err := os.ReadFile(filepath.Join(f.dir, "feature_test.go"))
 	if err != nil || string(content) != "package main\n" {
