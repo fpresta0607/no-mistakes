@@ -211,7 +211,14 @@ type GlobalConfig struct {
 	// after the tested one. False, the default, runs the steps one after
 	// another exactly as before. Global-only: how many agents and test runs
 	// work at once is this machine's decision, never a repository's.
-	SideBySide              bool          `yaml:"-"`
+	SideBySide bool `yaml:"-"`
+	// CIEndAtGreen ends a run when CI is first green on the head it pushed,
+	// instead of monitoring the pull request until it is merged or closed.
+	// False, the default, monitors exactly as before. A machine-local
+	// repository_overrides entry can set it for one repository. Global-only:
+	// whether the gate keeps watching a pull request is this machine's
+	// decision, never a repository's.
+	CIEndAtGreen            bool          `yaml:"-"`
 	DaemonConnectTimeout    time.Duration `yaml:"-"`
 	BranchSyncRemoteTimeout time.Duration `yaml:"-"`
 	// GateReconcileInterval / GateReconcileTimeout bound how often and how
@@ -279,6 +286,7 @@ type globalConfigRaw struct {
 	TestLiveCheckBudget       string                     `yaml:"test_live_check_budget"`
 	TestCommandWrapper        *CommandWrapper            `yaml:"test_command_wrapper"`
 	SideBySide                *bool                      `yaml:"side_by_side"`
+	CIEndAtGreen              *bool                      `yaml:"ci_end_at_green"`
 	LogLevel                  string                     `yaml:"log_level"`
 	SessionReuse              *bool                      `yaml:"session_reuse"`
 	AutoFix                   AutoFixRaw                 `yaml:"auto_fix"`
@@ -319,7 +327,14 @@ type ForgeProfiles map[string]ForgeProfile
 type RepositoryOverride struct {
 	Commit   GlobalCommitRaw            `yaml:"commit"`
 	PR       RepositoryPRRaw            `yaml:"pr"`
+	CI       RepositoryCIRaw            `yaml:"ci"`
 	Commands map[string]CommandOverride `yaml:"commands"`
+}
+
+// RepositoryCIRaw contains machine-local per-repository CI monitor settings.
+type RepositoryCIRaw struct {
+	// EndAtGreen sets global ci_end_at_green for this repository only.
+	EndAtGreen *bool `yaml:"end_at_green"`
 }
 
 // RepositoryPRRaw contains machine-local per-repository PR title settings.
@@ -758,6 +773,7 @@ type Config struct {
 	TestLiveCheckBudget       time.Duration
 	TestCommandWrapper        CommandWrapper
 	SideBySide                bool
+	CIEndAtGreen              bool
 	GateReconcileInterval     time.Duration
 	GateReconcileTimeout      time.Duration
 	LogLevel                  string
@@ -1335,6 +1351,14 @@ test_agent_timeout: "30m"
 # commits touch more than documentation the baseline runs again on the head to
 # push. Off by default: the steps run one after another.
 # side_by_side: true
+
+# End a run when CI is first green on the head it pushed, instead of watching
+# the pull request until it is merged or closed. The run then no longer
+# repairs a later CI failure, rebases on a base that moved, re-runs a
+# cancelled check, or records the merge. Off by default. A machine-local
+# repository_overrides entry can set it for one repository with
+# ci: {end_at_green: true}.
+# ci_end_at_green: true
 
 # Maximum time a CLI client waits for an existing daemon socket to accept a
 # connection before failing instead of hanging.
@@ -2512,6 +2536,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if raw.SideBySide != nil {
 		cfg.SideBySide = *raw.SideBySide
 	}
+	if raw.CIEndAtGreen != nil {
+		cfg.CIEndAtGreen = *raw.CIEndAtGreen
+	}
 	if raw.DaemonConnectTimeout != "" {
 		d, err := parsePositiveDuration("daemon_connect_timeout", raw.DaemonConnectTimeout)
 		if err != nil {
@@ -3563,6 +3590,10 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	if override != nil && override.PR.TitleFormat != nil {
 		pr.TitleFormat = *override.PR.TitleFormat
 	}
+	ciEndAtGreen := global.CIEndAtGreen
+	if override != nil && override.CI.EndAtGreen != nil {
+		ciEndAtGreen = *override.CI.EndAtGreen
+	}
 	if repo.PR.TitleFormat != nil {
 		pr.TitleFormat = *repo.PR.TitleFormat
 	}
@@ -3588,6 +3619,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		TestLiveCheckBudget:       global.TestLiveCheckBudget,
 		TestCommandWrapper:        copyCommandWrapper(global.TestCommandWrapper),
 		SideBySide:                global.SideBySide,
+		CIEndAtGreen:              ciEndAtGreen,
 		GateReconcileInterval:     global.GateReconcileInterval,
 		GateReconcileTimeout:      global.GateReconcileTimeout,
 		LogLevel:                  global.LogLevel,
