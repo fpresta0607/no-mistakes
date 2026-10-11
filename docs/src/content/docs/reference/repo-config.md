@@ -8,12 +8,12 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor` and `devin`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.surface_paths`, `test.environment`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
+The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.surface_paths`, `test.environment`, `test.documentation_paths`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
-Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`, `pr.title_format`, and `providers`) are still read from the pushed branch, except `test.prepare`, `test.base_attribution`, `test.instructions`, `test.surface_paths`, `test.environment`, `test.allow_approve_over_failure`, and `test.evidence.branch`.
+Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`, `pr.title_format`, and `providers`) are still read from the pushed branch, except `test.prepare`, `test.base_attribution`, `test.instructions`, `test.surface_paths`, `test.environment`, `test.documentation_paths`, `test.allow_approve_over_failure`, and `test.evidence.branch`.
 
 If you genuinely want per-branch `commands` and `agent` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
@@ -957,6 +957,37 @@ With the field unset, the prompt is exactly what it was before the field existed
 
 This is a prompt contract, like [`test.instructions`](#testinstructions): the agent has shell access, and the wording is what is pinned.
 It is injected into the test gate's own prompt, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`.
+
+### test.documentation_paths
+
+Paths that are documentation and nothing else, for global [`side_by_side`](/no-mistakes/reference/global-config/#side_by_side).
+
+| | |
+| --- | --- |
+| Type | list of `string` globs |
+| Default | Unset: `*.md`, `*.mdx`, `*.markdown`, `*.rst`, and `*.adoc` |
+
+```yaml
+test:
+  documentation_paths:
+    - "docs/**"
+    - "*.md"
+```
+
+It is read only when the machine sets `side_by_side`, and only by the Push step.
+There the baseline test command ran on an earlier commit than the one to push, and the commits after it are compared with this list.
+When every path those commits change is on this list, they are named on the Push step and the head is pushed without the baseline running again.
+When any other path changed, the baseline runs again on the head to push.
+
+Unset uses the prose formats above.
+Plain text, data and config files are left out of that default on purpose, since a `requirements.txt` or a test fixture is not documentation.
+An empty list says nothing in this repository is documentation, so every later commit runs the baseline again.
+A repository whose tests read its documents, or that embeds them in its product, should set an empty list or name only the documents nothing reads.
+Entries follow the [`ignore_patterns`](#ignore_patterns) match rules, and an entry that could never match a git path fails the config, as it does for [`test.surface_paths`](#testsurface_paths).
+
+What still catches a defect in a commit this list lets through untested: the review, and CI on the pushed head.
+
+The field decides what may be pushed without the baseline running on it, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`.
 
 ### test.allow_approve_over_failure
 

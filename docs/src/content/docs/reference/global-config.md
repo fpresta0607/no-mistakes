@@ -776,6 +776,65 @@ The base commit re-run is bounded by [`test_agent_timeout`](#test_agent_timeout)
 
 It is global-only: it decides how a command starts on this machine, so no repository file, trusted or pushed, can set it.
 
+### side_by_side
+
+Starts the Test step's work and the documentation pass beside the review, instead of after it.
+Unset, the steps run one after another, as they always have.
+
+```yaml
+side_by_side: true
+```
+
+|         |          |
+| ------- | -------- |
+| Type    | `bool`   |
+| Default | `false`  |
+
+When the review starts, its later steps' work starts with it, each in a throwaway clone of the run's worktree at the commit the review reads:
+
+- the Test step's work: the baseline test command, then the live check
+- the documentation pass, when the repository names [`commands.lint`](/no-mistakes/reference/repo-config/#commandslint). Without it the pass also fixes lint and may change code, so it keeps its place after the Test step.
+
+The run still runs one step at a time and holds one approval gate at a time.
+Work started early changes nothing of the run: it has its own clone, its own copy of the run record, and no approval.
+Each step takes that work at its own turn, in its usual order, only when it is still what the step would do now:
+
+- The run's head is still the commit the work ran on. A review fix moves the head, and work on the old head is stopped and removed at once.
+- The work finished without an error.
+- For the Test step, the work made no commit and the run's worktree holds nothing uncommitted. The test files its live check left uncommitted are brought into the run's worktree, where the step leaves them without the setting.
+- For the documentation pass, its commit changes no path the run's worktree holds uncommitted changes to. The commit is brought over as a fast-forward of the unchanged head.
+
+Anything else discards the work, the step log says why, and the step runs as it does without the setting.
+A fix round never takes work started early.
+Nothing starts beside the review when a harness other than `claude` or `codex` is configured, since those are the harnesses known to serve two calls at once, or when the repository has submodules or Git LFS files, which a plain clone would not hold.
+The review's log says which.
+
+What is pushed is the hard part.
+The baseline ran on the commit the review started on, and the documentation pass, the Lint step and the formatter can each add a commit after it.
+So before anything is pushed, the Push step compares the head to push with the commit the baseline last ran on:
+
+- The tested commit itself is pushed as it is.
+- Otherwise every commit after the tested one is named in an informational note on the Push step.
+- When those commits change only paths the repository counts as documentation, by [`test.documentation_paths`](/no-mistakes/reference/repo-config/#testdocumentation_paths), the head is pushed without the baseline running again.
+- When they change anything else, the baseline runs again on the head to push. A pass pushes. A failure pushes nothing and sends the run back to the Test step, which owns failing tests and their fix rounds. A second such failure in one run fails the run with nothing pushed.
+- A tested commit the daemon no longer knows, as after a restart, counts as untested, so the baseline runs again.
+- With no baseline configured, or a failing baseline a person approved the Test step over, the commits are named and nothing runs again.
+
+This holds whether or not early work was taken.
+With the setting on, a commit made after the Test step is pushed without the baseline running on it only when it is documentation.
+
+What it costs: the machine does more at once, a test suite and up to three agent turns beside each other.
+Each clone runs [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) for itself.
+The baseline runs twice when the commits after the tested one change more than documentation, and the test files a live check writes are such a change.
+
+What still catches each kind of defect with it on:
+
+- a defect a review fix brings in: the Test step, which runs again on the new head, as it does today
+- a defect a later commit brings in, from the documentation pass, the Lint step or the formatter: the baseline on the head to push, or for documentation only, the review and CI
+- a difference between a clone and the run's worktree: work starts only where a clone holds what the worktree holds, and the baseline before the push runs in the run's own worktree
+
+It is global-only: how many agents and test runs work at once is this machine's decision, so no repository file can set it.
+
 ### daemon_connect_timeout
 
 Maximum time a CLI client waits for an existing daemon socket to accept a connection before failing instead of hanging. Guards against a daemon process that is alive but stuck or unresponsive.

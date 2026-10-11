@@ -53,6 +53,12 @@ func resolveBaseSHA(ctx context.Context, workDir, baseSHA, defaultBranch string)
 // layer down. Callers return the error, which fails the step instead of
 // validating or drafting content against unverified base state.
 func resolveBranchBaseSHA(ctx context.Context, sctx *pipeline.StepContext, fallbackBaseSHA, defaultBranch string) (string, error) {
+	// A side lane runs in a clone with no upstream remote, on the commit and
+	// base the review step resolved a moment earlier. It uses that base as
+	// given: a second fetch beside the review's could collide on a ref lock.
+	if sctx.SideLane && sctx.SideLaneBaseSHA != "" {
+		return sctx.SideLaneBaseSHA, nil
+	}
 	// Eval replay has no upstream to fetch: it pins origin/<base> to the
 	// captured commit in its isolated worktree, which is the base to use.
 	if strings.TrimSpace(defaultBranch) != "" && !sctx.EvalReplay {

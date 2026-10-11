@@ -130,6 +130,22 @@ type StepContext struct {
 	// ClosingIssueRefs are the explicit --closes values claimed from the DB at
 	// PR-step start. Steps read this snapshot instead of mutable run state.
 	ClosingIssueRefs []string
+	// SideLane marks a context whose step runs early, beside the review, on a
+	// throwaway copy of the run's worktree (global side_by_side). Its Run is a
+	// copy and its Shared is its own, and a step running under it must leave
+	// the run itself alone: no recorded head, no branch ref, no approval.
+	// The step that owns the work takes or discards the result at its own turn.
+	SideLane bool
+	// SideLaneBaseSHA is the branch base the review step resolved before it
+	// started the side lane. A side lane uses it as given and never fetches:
+	// its copy has no upstream remote, and a second fetch beside the review's
+	// could collide with it on a ref lock.
+	SideLaneBaseSHA string
+	// SideLaneContext returns a context in which another step of this run can
+	// do its work early, or false when that step is skipped or absent. The
+	// executor offers it to the review step alone, and only under global
+	// side_by_side. Nil everywhere else.
+	SideLaneContext func(step types.StepName) (*StepContext, bool)
 }
 
 // RunAgentSession executes one turn of a durable review-loop role session,

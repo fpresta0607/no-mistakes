@@ -28,6 +28,11 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
+	// Under global side_by_side this step's work may have started beside the
+	// review. It is taken only when it is still what the step would do now.
+	if outcome, ok := takeSideLane(sctx, s.Name()); ok {
+		return outcome, nil
+	}
 	planSection, err := verificationPlanPromptSection(sctx)
 	if err != nil {
 		return nil, err
@@ -186,6 +191,9 @@ Previous test findings to address:
 			}
 		}
 	}
+	// The commit the baseline ran on, and whether it passed there, is what the
+	// Push step under side_by_side compares the head it is about to push with.
+	sctx.Shared.RecordBaseline(sctx.Run.HeadSHA, !baselineNoTurn && len(failedChecks(baselineResults)) == 0)
 	if repairCut != nil {
 		return testAgentTimeoutOutcome(sctx, repairCut, startHead, baselineFindings, baselineSummary, baselineExitCode), nil
 	}

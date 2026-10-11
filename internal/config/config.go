@@ -204,9 +204,16 @@ type GlobalConfig struct {
 	// any repository naming the wrapper. Unset, the default, starts the
 	// command exactly as before. Global-only: it decides how a command starts
 	// on this machine, so no repository file, trusted or pushed, may set it.
-	TestCommandWrapper      CommandWrapper `yaml:"-"`
-	DaemonConnectTimeout    time.Duration  `yaml:"-"`
-	BranchSyncRemoteTimeout time.Duration  `yaml:"-"`
+	TestCommandWrapper CommandWrapper `yaml:"-"`
+	// SideBySide starts the Test step's work and the documentation pass beside
+	// the review instead of after it, each on a throwaway copy of the run's
+	// worktree, and makes the Push step answer for every commit that came
+	// after the tested one. False, the default, runs the steps one after
+	// another exactly as before. Global-only: how many agents and test runs
+	// work at once is this machine's decision, never a repository's.
+	SideBySide              bool          `yaml:"-"`
+	DaemonConnectTimeout    time.Duration `yaml:"-"`
+	BranchSyncRemoteTimeout time.Duration `yaml:"-"`
 	// GateReconcileInterval / GateReconcileTimeout bound how often and how
 	// long a parked approval gate is rechecked. They are machine-local
 	// operator knobs (slow hosts, contended gh auth) and global-only so a
@@ -271,6 +278,7 @@ type globalConfigRaw struct {
 	TestAgentWorkingTimeout   string                     `yaml:"test_agent_working_timeout"`
 	TestLiveCheckBudget       string                     `yaml:"test_live_check_budget"`
 	TestCommandWrapper        *CommandWrapper            `yaml:"test_command_wrapper"`
+	SideBySide                *bool                      `yaml:"side_by_side"`
 	LogLevel                  string                     `yaml:"log_level"`
 	SessionReuse              *bool                      `yaml:"session_reuse"`
 	AutoFix                   AutoFixRaw                 `yaml:"auto_fix"`
@@ -749,6 +757,7 @@ type Config struct {
 	TestAgentWorkingTimeout   time.Duration
 	TestLiveCheckBudget       time.Duration
 	TestCommandWrapper        CommandWrapper
+	SideBySide                bool
 	GateReconcileInterval     time.Duration
 	GateReconcileTimeout      time.Duration
 	LogLevel                  string
@@ -935,6 +944,18 @@ type TestRaw struct {
 	// like Instructions it is honored ONLY from the trusted default-branch
 	// copy.
 	Environment string `yaml:"environment"`
+	// DocumentationPaths lists the paths of this repository that are
+	// documentation and nothing else: a commit that touches only these may
+	// follow the commit the baseline test command passed on without the
+	// baseline running again. It is read only under global side_by_side.
+	// Unset uses DefaultDocumentationPaths; an explicit empty list means no
+	// path is documentation, so every later commit runs the baseline again.
+	// A repository whose tests read its documents, or that embeds them in its
+	// product, should set it. It decides what may be pushed untested, so it
+	// is honored ONLY from the trusted default-branch copy of
+	// .no-mistakes.yaml (see EffectiveRepoConfig), regardless of
+	// allow_repo_commands.
+	DocumentationPaths []string `yaml:"documentation_paths"`
 }
 
 // EvidenceRaw is the YAML representation of test-evidence settings.
@@ -981,6 +1002,24 @@ type Test struct {
 	AllowApproveOverFailure string
 	SurfacePaths            []string
 	Environment             string
+	// DocumentationPaths is nil when the repository set none, and non-nil,
+	// possibly empty, when it did. Read it through DocumentationPatterns.
+	DocumentationPaths []string
+}
+
+// DefaultDocumentationPaths are the paths counted as documentation when the
+// repository lists none: prose formats only. Plain text, data and config
+// formats are left out on purpose, since a requirements.txt or a fixture is
+// not documentation.
+var DefaultDocumentationPaths = []string{"*.md", "*.mdx", "*.markdown", "*.rst", "*.adoc"}
+
+// DocumentationPatterns returns the globs that name documentation for this
+// repository: its own trusted list when it set one, else the built-in list.
+func (t Test) DocumentationPatterns() []string {
+	if t.DocumentationPaths != nil {
+		return append([]string{}, t.DocumentationPaths...)
+	}
+	return append([]string(nil), DefaultDocumentationPaths...)
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -1287,6 +1326,15 @@ test_agent_timeout: "30m"
 # test_command_wrapper:
 #   command: ["cfo", "gate", "turn", "--as", "{repo} {branch}, run {run_short}", "--"]
 #   refusal_prefix: "cfo gate turn: "
+
+# Start the Test step's work (the baseline test command, then the live check)
+# and the documentation pass beside the review instead of after it, each on a
+# throwaway copy of the run's worktree. A step takes that work at its own turn
+# only when the run's head is still the commit it was done on. Before the
+# push, every commit that came after the tested one is listed, and when those
+# commits touch more than documentation the baseline runs again on the head to
+# push. Off by default: the steps run one after another.
+# side_by_side: true
 
 # Maximum time a CLI client waits for an existing daemon socket to accept a
 # connection before failing instead of hanging.
@@ -2461,6 +2509,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		}
 		cfg.TestCommandWrapper = copyCommandWrapper(*raw.TestCommandWrapper)
 	}
+	if raw.SideBySide != nil {
+		cfg.SideBySide = *raw.SideBySide
+	}
 	if raw.DaemonConnectTimeout != "" {
 		d, err := parsePositiveDuration("daemon_connect_timeout", raw.DaemonConnectTimeout)
 		if err != nil {
@@ -2896,6 +2947,11 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// must not be able to switch off or rewrite the check that validates it.
 		effective.Test.SurfacePaths = append([]string(nil), trusted.Test.SurfacePaths...)
 		effective.Test.Environment = trusted.Test.Environment
+		// test.documentation_paths decides which commits may follow the tested
+		// one without the baseline running again, so a pushed branch must not
+		// be able to call its own code documentation. Nil and empty are kept
+		// apart: an empty list says nothing here is documentation.
+		effective.Test.DocumentationPaths = copyStringList(trusted.Test.DocumentationPaths)
 		// pr.base_branch controls where the contributor's PR lands, so it is
 		// trusted-only unless the repository explicitly opts into pushed
 		// settings alongside commands and agent selection. TitleFormat is a
@@ -2925,6 +2981,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Test.AllowApproveOverFailure = ""
 		effective.Test.SurfacePaths = nil
 		effective.Test.Environment = ""
+		effective.Test.DocumentationPaths = nil
 		if !allowRepoCommands {
 			effective.PR.BaseBranch = ""
 		}
@@ -3213,21 +3270,40 @@ func validateTestRaw(test TestRaw) error {
 	// An entry that can never match a git path would match nothing, and a list
 	// that matches nothing is exactly what skips the live check. Refuse it
 	// here instead of letting it read as "this change has no surface".
-	for i, pattern := range test.SurfacePaths {
+	if err := validateRepositoryPathGlobs("test.surface_paths", test.SurfacePaths); err != nil {
+		return err
+	}
+	// A documentation entry that can never match would only make the baseline
+	// run again more often, which is safe, but it is still a mistake to name.
+	return validateRepositoryPathGlobs("test.documentation_paths", test.DocumentationPaths)
+}
+
+// validateRepositoryPathGlobs refuses entries that could never match a git
+// path: empty, a backslash path, a leading / or ./, or a malformed glob.
+func validateRepositoryPathGlobs(key string, patterns []string) error {
+	for i, pattern := range patterns {
 		pattern = strings.TrimSpace(pattern)
 		switch {
 		case pattern == "":
-			return fmt.Errorf("test.surface_paths[%d]: entry is empty", i)
+			return fmt.Errorf("%s[%d]: entry is empty", key, i)
 		case strings.Contains(pattern, "\\"):
-			return fmt.Errorf("test.surface_paths[%d] %q: use forward slashes, as git paths do", i, pattern)
+			return fmt.Errorf("%s[%d] %q: use forward slashes, as git paths do", key, i, pattern)
 		case strings.HasPrefix(pattern, "/") || strings.HasPrefix(pattern, "./"):
-			return fmt.Errorf("test.surface_paths[%d] %q: paths are relative to the repository root, with no leading / or ./", i, pattern)
+			return fmt.Errorf("%s[%d] %q: paths are relative to the repository root, with no leading / or ./", key, i, pattern)
 		}
 		if err := validatePathInstructionGlob(pattern); err != nil {
-			return fmt.Errorf("test.surface_paths[%d] %q: %w", i, pattern, err)
+			return fmt.Errorf("%s[%d] %q: %w", key, i, pattern, err)
 		}
 	}
 	return nil
+}
+
+// copyStringList copies a list and keeps nil apart from empty.
+func copyStringList(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append([]string{}, values...)
 }
 
 // applyProvidersOverrides applies non-nil raw values onto resolved defaults.
@@ -3426,6 +3502,12 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		test.SurfacePaths = append(test.SurfacePaths, strings.TrimSpace(pattern))
 	}
 	test.Environment = strings.TrimSpace(repo.Test.Environment)
+	if repo.Test.DocumentationPaths != nil {
+		test.DocumentationPaths = []string{}
+		for _, pattern := range repo.Test.DocumentationPaths {
+			test.DocumentationPaths = append(test.DocumentationPaths, strings.TrimSpace(pattern))
+		}
+	}
 
 	commit := Commit{FixMessage: DefaultFixMessageTemplate}
 	if global.Commit.FixMessage != nil {
@@ -3505,6 +3587,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		TestAgentWorkingTimeout:   global.TestAgentWorkingTimeout,
 		TestLiveCheckBudget:       global.TestLiveCheckBudget,
 		TestCommandWrapper:        copyCommandWrapper(global.TestCommandWrapper),
+		SideBySide:                global.SideBySide,
 		GateReconcileInterval:     global.GateReconcileInterval,
 		GateReconcileTimeout:      global.GateReconcileTimeout,
 		LogLevel:                  global.LogLevel,

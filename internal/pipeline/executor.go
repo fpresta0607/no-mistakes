@@ -61,6 +61,10 @@ type Executor struct {
 	sessions *RunSessions
 	shared   *RunShared
 	workDir  string
+	// stepRecords are this Execute's step rows by name. They let the review
+	// step be offered a context for another step's early work (side_by_side).
+	// Nil on a recovered run, which therefore starts nothing early.
+	stepRecords map[types.StepName]*db.StepResult
 
 	mu                     sync.Mutex
 	approvalCh             chan approvalResponse // buffered channel for approval responses
@@ -244,6 +248,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.failRun(run, repo, err)
 	}
 	e.initializeRunScopes(run.ID)
+	defer e.shared.Close()
 
 	// Create step result records in DB
 	stepRecords := make(map[types.StepName]*db.StepResult)
@@ -254,6 +259,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		}
 		stepRecords[step.Name()] = sr
 	}
+	e.stepRecords = stepRecords
 
 	// Execute steps sequentially. A late repair may send the same run back
 	// through validation before any new head is published.
@@ -443,6 +449,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, err)
 	}
 	e.initializeRunScopes(run.ID)
+	defer e.shared.Close()
 
 	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
 	duration := recoveredStepDuration(gate.stepResult)
@@ -870,6 +877,53 @@ func recoveredLogPath(step *db.StepResult) string {
 	return ""
 }
 
+// sideLaneContext builds the context in which step name does its work early,
+// beside the review (global side_by_side). It mirrors what executeStep gives a
+// step, with three differences that keep the early work from touching the run:
+// Run is a copy, Shared is the lane's own, and nothing is logged to a step
+// stream or parked for approval. The caller sets WorkDir, the evidence
+// directory and the log sinks. It returns false for a step this run skips or
+// does not have.
+func (e *Executor) sideLaneContext(ctx context.Context, run *db.Run, repo *db.Repo, name types.StepName) (*StepContext, bool) {
+	sr := e.stepRecords[name]
+	if sr == nil || e.skips[name] || name == types.StepReview {
+		return nil, false
+	}
+	runCopy := *run
+	stepAgent := e.agent
+	if stepAgent != nil {
+		stepAgent = &timeoutAgent{inner: stepAgent, timeout: AgentTimeout(e.config), working: AgentWorkingTimeout(e.config)}
+		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: name}
+		stepAgent = &perfRecordingAgent{inner: stepAgent, db: e.db, runID: run.ID, stepName: name, round: func() int { return 1 }}
+		stepAgent = &roundStampingAgent{inner: stepAgent, round: func() int { return 1 }}
+	}
+	sctx := &StepContext{
+		Ctx:          ctx,
+		Run:          &runCopy,
+		Repo:         repo,
+		GateDir:      e.paths.RepoDir(repo.ID),
+		Agent:        stepAgent,
+		Config:       e.config,
+		ForgeContext: e.forge,
+		DB:           e.db,
+		StepResultID: sr.ID,
+		Shared:       &RunShared{},
+		EvidenceDir:  e.runEvidenceDir(run.ID),
+		SideLane:     true,
+		Log:          func(string) {},
+		LogChunk:     func(string) {},
+		LogFile:      func(string) {},
+	}
+	if run.Intent != nil {
+		sctx.UserIntent = *run.Intent
+	}
+	if run.IntentSource != nil {
+		sctx.IntentSource = *run.IntentSource
+	}
+	BindBranchDecisions(sctx)
+	return sctx, true
+}
+
 func (e *Executor) autoFixLimit(stepName types.StepName) int {
 	if e.config == nil {
 		return 0
@@ -1098,6 +1152,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		CIReadinessChanged: ciReadinessChanged,
 		MarkRunning:        markRunning,
 		OnPRMerged:         e.onPRMerged,
+	}
+	if stepName == types.StepReview && e.config != nil && e.config.SideBySide && e.stepRecords != nil {
+		sctx.SideLaneContext = func(name types.StepName) (*StepContext, bool) {
+			return e.sideLaneContext(ctx, run, repo, name)
+		}
 	}
 	if stepName == types.StepReview {
 		BindUncertifiedPipelineRange(sctx)
