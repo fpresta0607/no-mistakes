@@ -27,8 +27,12 @@ func (s Selection) Validate() error {
 		if !isSelectionToken(s.Model) || s.ServiceTier != "" {
 			return fmt.Errorf("launch assertion requires an explicit Claude model and no service tier")
 		}
+	case types.AgentPi:
+		if err := (&PiProfile{Model: s.Model}).ValidateRequest(); err != nil || s.ServiceTier != "" {
+			return fmt.Errorf("launch assertion requires an explicit Pi provider/model identifier and no service tier")
+		}
 	default:
-		return fmt.Errorf("launch assertions verify only Codex and Claude selection mechanisms")
+		return fmt.Errorf("launch assertions verify only Codex, Claude and Pi selection mechanisms")
 	}
 	effort, err := ParseEffort(string(s.Effort))
 	if err != nil || effort != s.Effort || effort == "" {
@@ -41,7 +45,7 @@ func (s Selection) Validate() error {
 // User-home profiles and implicit defaults cannot prove an opt-in assertion;
 // refuse selectors we cannot interpret rather than reporting requested knobs.
 func EffectiveSelection(name types.AgentName, profile Profile, rawArgs []string) (Selection, error) {
-	if name != types.AgentCodex && name != types.AgentClaude {
+	if name != types.AgentCodex && name != types.AgentClaude && name != types.AgentPi {
 		return Selection{}, fmt.Errorf("agent selection has no verified launch-assertion mechanism")
 	}
 	if err := Validate(name, profile); err != nil {
@@ -50,10 +54,13 @@ func EffectiveSelection(name types.AgentName, profile Profile, rawArgs []string)
 	args := append(append([]string(nil), rawArgs...), NativeArgs(name, profile, rawArgs)...)
 	var selection Selection
 	var err error
-	if name == types.AgentCodex {
+	switch name {
+	case types.AgentCodex:
 		selection, err = codexSelection(args)
-	} else {
+	case types.AgentClaude:
 		selection, err = claudeSelection(args)
+	default:
+		selection, err = piSelection(args)
 	}
 	if err != nil {
 		return Selection{}, err
@@ -184,6 +191,59 @@ func claudeSelection(args []string) (Selection, error) {
 			}
 		default:
 			return Selection{}, fmt.Errorf("native argument is not verifiable by launch assertions")
+		}
+	}
+	return selection, nil
+}
+
+// piSelection reads Pi's --model and --thinking flags, which the CLI documents
+// as selecting the served model and the reasoning depth. Pi's --model takes a
+// provider/model id, so a selection without a provider is refused rather than
+// resolved by Pi's own inference, and a --provider flag must name the same
+// provider the model does. A repeated selector is refused rather than resolved
+// by guessing Pi's own last-wins rule.
+func piSelection(args []string) (Selection, error) {
+	selection := Selection{Harness: types.AgentPi}
+	provider := ""
+	for index := 0; index < len(args); index++ {
+		flag, value, hasInlineValue := strings.Cut(args[index], "=")
+		switch flag {
+		case "--model", "--thinking", "--provider":
+			if !hasInlineValue {
+				index++
+				if index >= len(args) {
+					return Selection{}, fmt.Errorf("incomplete native selection argument")
+				}
+				value = args[index]
+			}
+			switch flag {
+			case "--model":
+				if selection.Model != "" {
+					return Selection{}, fmt.Errorf("ambiguous native model selection")
+				}
+				if err := (&PiProfile{Model: value}).ValidateRequest(); err != nil {
+					return Selection{}, err
+				}
+				selection.Model = value
+			case "--thinking":
+				if selection.Effort != "" {
+					return Selection{}, fmt.Errorf("ambiguous native effort selection")
+				}
+				selection.Effort = Effort(value)
+			case "--provider":
+				if provider != "" {
+					return Selection{}, fmt.Errorf("ambiguous native provider selection")
+				}
+				provider = value
+			}
+		default:
+			return Selection{}, fmt.Errorf("native argument is not verifiable by launch assertions")
+		}
+	}
+	if provider != "" {
+		modelProvider, _, ok := SplitProviderModel(selection.Model)
+		if !ok || modelProvider != provider {
+			return Selection{}, fmt.Errorf("native provider selection does not match the model provider")
 		}
 	}
 	return selection, nil
