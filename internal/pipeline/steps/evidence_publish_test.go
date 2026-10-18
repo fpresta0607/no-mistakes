@@ -258,3 +258,23 @@ func TestPublishRunEvidence_NeverPublishesTheReviewConversation(t *testing.T) {
 		}
 	}
 }
+
+func TestPublishRunEvidence_NeverPublishesTheTestScratchDirectory(t *testing.T) {
+	sctx, remote := newEvidencePublishContext(t, "feature/add-login")
+	writeRunEvidence(t, sctx, map[string]string{
+		"cli-run.txt": "it works\n",
+		testScratchDirName + "/chrome-win64/chrome.dll": "disposable browser build the step could not delete",
+	})
+
+	if links := publishRunEvidence(sctx); links == nil {
+		t.Fatal("the real test evidence beside the scratch directory must still publish")
+	}
+
+	tree := gitCmd(t, remote, "ls-tree", "-r", "--name-only", gitCmd(t, remote, "rev-parse", "refs/heads/no-mistakes/evidence"))
+	if !strings.Contains(tree, "cli-run.txt") {
+		t.Fatalf("the real test evidence did not publish:\n%s", tree)
+	}
+	if strings.Contains(tree, testScratchDirName) || strings.Contains(tree, "chrome.dll") {
+		t.Fatalf("the test scratch directory reached the evidence branch:\n%s", tree)
+	}
+}

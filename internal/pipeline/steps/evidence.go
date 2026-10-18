@@ -27,6 +27,15 @@ func testEvidenceDir(sctx *pipeline.StepContext) string {
 	return sctx.EvidenceDir
 }
 
+// testScratchDirName is the Test agent's disposable workspace inside the run's
+// evidence directory, outside the worktree that every correction stages. The
+// Test step creates it before its agent turns and deletes it when it returns,
+// so the agent's own cleanup is never what keeps a downloaded browser out of a
+// commit: a Test agent once put a Chrome build in the worktree, its cleanup
+// was refused, and the next correction committed it (#1076). It holds no
+// evidence and is never published.
+const testScratchDirName = "test-scratch"
+
 // evidenceBranchSlug turns a branch name into readable, filesystem-safe path
 // segments used as the run's directory on the evidence branch. Branch
 // separators are preserved as nested directories; unsafe characters are
