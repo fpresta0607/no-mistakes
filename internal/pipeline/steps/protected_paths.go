@@ -2,14 +2,25 @@ package steps
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
 
+// githubMaxFileBytes is GitHub's file size limit: it refuses a push carrying
+// any file larger than 100 MiB.
+const githubMaxFileBytes = 100 << 20
+
 // stagePipelineChanges guards every pipeline-owned catch-all staging path,
 // including Push's leftover commit. Refusal preserves the index and worktree.
+//
+// An untracked file larger than githubMaxFileBytes is left out, unstaged and
+// unhashed, and named in the step log. Such a file is an agent's disposable
+// artifact rather than a correction: a Test agent whose cleanup was refused
+// left a whole Chrome build in the worktree, `git add -A` committed its 302 MB
+// chrome.dll, and the push could never succeed (#1076).
 func stagePipelineChanges(sctx *pipeline.StepContext) error {
 	if len(sctx.Config.ProtectedPaths) > 0 {
 		// Disable renames so both source and destination are checked, and list
@@ -34,10 +45,45 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 			}
 		}
 	}
-	if _, err := stepGitRun(sctx, "add", "-A"); err != nil {
+	oversized, err := oversizedUntrackedFiles(sctx)
+	if err != nil {
+		return err
+	}
+	addArgs := []string{"add", "-A"}
+	if len(oversized) > 0 {
+		addArgs = append(addArgs, "--", ".")
+		for _, file := range oversized {
+			addArgs = append(addArgs, ":(exclude,literal)"+file)
+		}
+		sctx.Log(fmt.Sprintf("left untracked files larger than GitHub's 100 MiB limit out of the commit: %s", strings.Join(oversized, ", ")))
+	}
+	if _, err := stepGitRun(sctx, addArgs...); err != nil {
 		return err
 	}
 	return unstageSubmodulePointerMoves(sctx)
+}
+
+// oversizedUntrackedFiles lists the untracked files `git add -A` would stage
+// that are larger than githubMaxFileBytes.
+func oversizedUntrackedFiles(sctx *pipeline.StepContext) ([]string, error) {
+	untracked, err := stepGitRunRaw(sctx, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, fmt.Errorf("list untracked files: %w", err)
+	}
+	var oversized []string
+	for _, file := range strings.Split(strings.TrimSuffix(untracked, "\x00"), "\x00") {
+		if file == "" {
+			continue
+		}
+		info, err := os.Lstat(filepath.Join(sctx.WorkDir, filepath.FromSlash(file)))
+		if err != nil {
+			return nil, fmt.Errorf("check untracked file size: %w", err)
+		}
+		if info.Mode().IsRegular() && info.Size() > githubMaxFileBytes {
+			oversized = append(oversized, file)
+		}
+	}
+	return oversized, nil
 }
 
 // unstageSubmodulePointerMoves keeps catch-all staging from recording a
