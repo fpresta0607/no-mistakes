@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -494,6 +495,113 @@ func TestTestStep_FixMode_ProtectedPathDoesNotReachCommit(t *testing.T) {
 		t.Errorf("protected edit was discarded: content = %q, err = %v", got, err)
 	}
 	t.Logf("Test auto-fix refusal: %v\nHEAD=%s\nindex paths=%q\nworktree status:\n%s", err, gitCmd(t, dir, "rev-parse", "HEAD"), gitCmd(t, dir, "diff", "--cached", "--name-only"), gitStatusPorcelain(t, dir))
+}
+
+// A Test fix round that leaves a browser build in the worktree, as the test
+// agent did when its own cleanup was refused (#1076), commits its repair but
+// not the file GitHub would refuse, which stays in the worktree and is named in
+// the step log.
+func TestTestStep_FixMode_LeavesAnOversizedUntrackedFileOutOfTheCommit(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	const leftover = ".test-local/chrome-win64/chrome.dll"
+	leftoverPath := filepath.Join(dir, filepath.FromSlash(leftover))
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("test repair\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeFileOfSize(t, leftoverPath, githubMaxFileBytes+1)
+		return &agent.Result{Output: json.RawMessage(`{"summary":"repair test failure","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	repo, err := config.LoadRepoFromBytes([]byte("commands:\n  test: exit 0\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Config = config.Merge(config.DefaultGlobalConfig(), config.EffectiveRepoConfig(repo, repo, false))
+	var logs []string
+	sctx.Log = func(s string) { logs = append(logs, s) }
+	sctx.Fixing = true
+	sctx.PreviousFindings = `{"items":[{"id":"test-1","severity":"error","file":"fix.txt","description":"test failed"}]}`
+
+	if _, err := (&TestStep{}).Execute(sctx); err != nil {
+		t.Fatalf("test fix round failed: %v", err)
+	}
+
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got == headSHA {
+		t.Fatal("the repair was not committed")
+	}
+	gitCmd(t, dir, "cat-file", "-e", "HEAD:fix.txt")
+	if got := gitCmd(t, dir, "ls-tree", "-r", "--name-only", "HEAD", "--", ".test-local"); got != "" {
+		t.Errorf("the fix commit carries the oversized leftover: %q", got)
+	}
+	if got := gitCmd(t, dir, "ls-files", "--", ".test-local"); got != "" {
+		t.Errorf("the oversized leftover was staged: %q", got)
+	}
+	if info, err := os.Stat(leftoverPath); err != nil || info.Size() != githubMaxFileBytes+1 {
+		t.Errorf("the oversized leftover must stay in the worktree as the agent left it: %v, %v", info, err)
+	}
+	if log := strings.Join(logs, "\n"); !strings.Contains(log, leftover) {
+		t.Errorf("no step log names the file left out of the commit:\n%s", log)
+	}
+}
+
+// Catch-all staging leaves out an untracked file GitHub would refuse, one
+// larger than 100 MiB (#1076), and still stages the rest of the correction.
+func TestStagePipelineChanges_LeavesOutUntrackedFilesOverGitHubsLimit(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		file     string
+		size     int64
+		isStaged bool
+	}{
+		{"at_the_limit", "fixture.bin", githubMaxFileBytes, true},
+		{"over_the_limit", "chrome.dll", githubMaxFileBytes + 1, false},
+		{"over_the_limit_in_a_new_directory", ".test-local/chrome win64/chröme.dll", githubMaxFileBytes + 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+			writeFileOfSize(t, filepath.Join(dir, filepath.FromSlash(tc.file)), tc.size)
+			if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("agent fix\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := stagePipelineChanges(sctx); err != nil {
+				t.Fatalf("stage: %v", err)
+			}
+
+			staged := strings.Split(gitCmd(t, dir, "-c", "core.quotePath=false", "diff", "--cached", "--name-only"), "\n")
+			if !slices.Contains(staged, "fix.txt") {
+				t.Errorf("the correction itself was not staged: %q", staged)
+			}
+			if got := slices.Contains(staged, tc.file); got != tc.isStaged {
+				t.Errorf("%s (%d bytes) staged = %v, want %v; staged paths %q", tc.file, tc.size, got, tc.isStaged, staged)
+			}
+		})
+	}
+}
+
+// writeFileOfSize creates path holding size bytes without writing them, so a
+// fixture larger than GitHub's file limit is cheap to make.
+func writeFileOfSize(t *testing.T, path string, size int64) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(size); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestProtectedPaths_AllAutomaticCommitPathsRefuseWithoutMutation(t *testing.T) {

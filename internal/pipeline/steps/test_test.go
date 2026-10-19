@@ -1433,3 +1433,64 @@ func TestTestStep_InitialAgent_NoTargetedEvidenceRequiresHonestFinding(t *testin
 		}
 	}
 }
+
+// Each Test agent turn is given a scratch directory outside the worktree for
+// its disposable tools, and the step deletes it itself, so a browser build the
+// agent leaves there is never committed and does not outlive the step (#1076).
+func TestTestStep_AgentScratchDirectoryIsOutsideTheWorktreeAndDiesWithTheStep(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		isFixing  bool
+		wantCalls int
+	}{
+		{"evidence_turn", false, 1},
+		{"fix_round", true, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			var scratchDir string
+			ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				if !strings.Contains(opts.Prompt, "Your disposable workspace is this scratch directory outside the worktree: "+scratchDir+".") {
+					t.Errorf("the prompt does not name the scratch directory %s:\n%s", scratchDir, opts.Prompt)
+				}
+				for file, content := range map[string]string{
+					filepath.Join(scratchDir, "chrome-win64", "chrome.dll"): "disposable browser build",
+					filepath.Join(scratchDir, "check.mjs"):                  "throwaway check script",
+					filepath.Join(dir, "fix.txt"):                           "test repair\n",
+				} {
+					if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return &agent.Result{Output: json.RawMessage(`{"summary":"repair test failure","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			scratchDir = filepath.Join(sctx.EvidenceDir, testScratchDirName)
+			if tc.isFixing {
+				sctx.Fixing = true
+				sctx.PreviousFindings = `{"items":[{"id":"test-1","severity":"error","file":"fix.txt","description":"test failed"}]}`
+			}
+
+			if _, err := (&TestStep{}).Execute(sctx); err != nil {
+				t.Fatalf("test step failed: %v", err)
+			}
+
+			if len(ag.calls) != tc.wantCalls {
+				t.Fatalf("agent calls = %d, want %d", len(ag.calls), tc.wantCalls)
+			}
+			if _, err := os.Stat(scratchDir); !os.IsNotExist(err) {
+				t.Errorf("the scratch directory outlived the step: %v", err)
+			}
+			if tc.isFixing {
+				if got := gitCmd(t, dir, "show", "--name-only", "--pretty=format:", "HEAD"); got != "fix.txt" {
+					t.Errorf("the fix commit carries %q, want only the repair fix.txt", got)
+				}
+			}
+		})
+	}
+}
