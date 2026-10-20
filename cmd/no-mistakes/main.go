@@ -32,6 +32,12 @@ func run() int {
 		}
 		return exitCode
 	}
+	if handled, exitCode, err := shellenv.RunWindowsDesktopCommandHelper(os.Args[1:]); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		return exitCode
+	}
 
 	_ = cleanupOldExecutable()
 

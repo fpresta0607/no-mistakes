@@ -43,6 +43,12 @@ type RunOpts struct {
 	JSONSchema  json.RawMessage      // structured output schema (optional)
 	OnChunk     func(text string)    // streaming text callback (optional)
 	OnLifecycle func(LifecycleEvent) // native agent lifecycle callback (optional)
+	// Desktop, when set, names the hidden desktop (winproc.HiddenDesktop)
+	// the agent process starts on, so it and every program it starts run
+	// there and none of their windows shows on the user's screen. An adapter
+	// that cannot start its agent there refuses the invocation rather than
+	// start it on the user's desktop.
+	Desktop string
 	// Session, when non-nil, asks a session-capable adapter (see
 	// SessionResumer) to start or resume a durable native session. Adapters
 	// without session support ignore it and run cold; the caller detects the

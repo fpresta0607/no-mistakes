@@ -65,11 +65,15 @@ func (p *nativeAgentPipe) markDone() {
 	p.doneOnce.Do(p.done)
 }
 
-// startNativeAgentCommand starts cmd with dedicated stdout/stderr pipes.
+// startNativeAgentCommand starts cmd with dedicated stdout/stderr pipes, on
+// desktop when it names one (RunOpts.Desktop).
 // activity, when non-nil, is invoked on every non-empty read from either pipe;
 // see LifecyclePhaseActivity for why subprocess byte liveness - not assistant
 // prose - is the signal that distinguishes a working agent from a wedged one.
-func startNativeAgentCommand(cmd *exec.Cmd, activity func()) (*nativeAgentCommand, error) {
+func startNativeAgentCommand(cmd *exec.Cmd, desktop string, activity func()) (*nativeAgentCommand, error) {
+	if err := shellenv.PlaceOnDesktop(cmd, desktop); err != nil {
+		return nil, err
+	}
 	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
