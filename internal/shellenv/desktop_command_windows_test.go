@@ -32,50 +32,71 @@ var (
 
 func TestPlaceOnDesktopRunsAProgramAndEveryProgramItStartsOnTheHiddenDesktop(t *testing.T) {
 	installWindowsDesktopCommandTestHelper(t)
-	desktop, err := winproc.NewHiddenDesktop()
+	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = desktop.Close() })
-	reports := t.TempDir()
-	cmd := desktopProbeCommand(reports)
-	ConfigureShellCommand(cmd)
-	var output bytes.Buffer
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-
-	if err := PlaceOnDesktop(cmd, desktop.Name()); err != nil {
+	shims := t.TempDir()
+	// An npm global install is a batch file the agent's path names without
+	// its extension, as os/exec accepts.
+	if err := os.WriteFile(filepath.Join(shims, "probe.cmd"), []byte("@\""+exe+"\" %*\r\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := RunShellCommand(cmd); err != nil {
-		t.Fatalf("the probe failed: %v\n%s", err, output.String())
-	}
-	if err := desktop.Close(); err != nil {
-		t.Fatal(err)
-	}
+	for _, tc := range []struct {
+		name    string
+		program string
+	}{
+		{"an_executable", exe},
+		{"an_executable_named_without_its_extension", strings.TrimSuffix(exe, filepath.Ext(exe))},
+		{"a_batch_file_named_without_its_extension", filepath.Join(shims, "probe")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			desktop, err := winproc.NewHiddenDesktop()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = desktop.Close() })
+			reports := t.TempDir()
+			cmd := desktopProbeCommand(tc.program, reports)
+			ConfigureShellCommand(cmd)
+			var output bytes.Buffer
+			cmd.Stdout = &output
+			cmd.Stderr = &output
 
-	for _, who := range []string{"program", "child"} {
-		if got := readDesktopProbeReport(t, reports, who); got != desktop.Name() {
-			t.Errorf("the %s ran on desktop %q, want the hidden desktop %q", who, got, desktop.Name())
-		}
-	}
-	opened, more := desktop.Windows()
-	image := filepath.Base(os.Args[0])
-	found := false
-	for _, window := range opened {
-		if window.Title == desktopProbeTitle && strings.EqualFold(window.Image, image) && window.PID > 0 {
-			found = true
-		}
-	}
-	if !found || more != 0 {
-		t.Errorf("the hidden desktop recorded %v and %d more, want the child's window %q of %s", opened, more, desktopProbeTitle, image)
+			if err := PlaceOnDesktop(cmd, desktop.Name()); err != nil {
+				t.Fatal(err)
+			}
+			if err := RunShellCommand(cmd); err != nil {
+				t.Fatalf("the probe failed: %v\n%s", err, output.String())
+			}
+			if err := desktop.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			for _, who := range []string{"program", "child"} {
+				if got := readDesktopProbeReport(t, reports, who); got != desktop.Name() {
+					t.Errorf("the %s ran on desktop %q, want the hidden desktop %q", who, got, desktop.Name())
+				}
+			}
+			opened, more := desktop.Windows()
+			image := filepath.Base(exe)
+			found := false
+			for _, window := range opened {
+				if window.Title == desktopProbeTitle && strings.EqualFold(window.Image, image) && window.PID > 0 {
+					found = true
+				}
+			}
+			if !found || more != 0 {
+				t.Errorf("the hidden desktop recorded %v and %d more, want the child's window %q of %s", opened, more, desktopProbeTitle, image)
+			}
+		})
 	}
 }
 
 func TestPlaceOnDesktopRefusesToStartWhenTheDesktopIsNotOpen(t *testing.T) {
 	installWindowsDesktopCommandTestHelper(t)
 	reports := t.TempDir()
-	cmd := desktopProbeCommand(reports)
+	cmd := desktopProbeCommand(os.Args[0], reports)
 	ConfigureShellCommand(cmd)
 	var output bytes.Buffer
 	cmd.Stdout = &output
@@ -168,8 +189,10 @@ func installWindowsDesktopCommandTestHelper(t *testing.T) {
 	t.Cleanup(func() { windowsDesktopHelperCommandFunc = old })
 }
 
-func desktopProbeCommand(reports string) *exec.Cmd {
-	cmd := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^TestWindowsDesktopProbe$")
+// desktopProbeCommand starts the probe as program, which runs this test
+// binary. Its pattern has no caret, which a batch file would drop.
+func desktopProbeCommand(program, reports string) *exec.Cmd {
+	cmd := exec.CommandContext(context.Background(), program, "-test.run=TestWindowsDesktopProbe$")
 	cmd.Env = append(os.Environ(), "NM_DESKTOP_PROBE=program", "NM_DESKTOP_PROBE_REPORTS="+reports)
 	return cmd
 }

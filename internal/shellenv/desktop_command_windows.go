@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -89,6 +90,11 @@ func RunWindowsDesktopCommandHelper(args []string) (bool, int, error) {
 // with the same application name and command line, so a batch file runs as it
 // would there, and with this process's standard handles, environment and
 // directory, then waits for it.
+//
+// os/exec adds a missing extension (claude for claude.cmd) only as it starts
+// the program, never in cmd.Path, and CreateProcess adds none, so the helper
+// looks the extension up as os/exec does: a bare name in this process's
+// directory, which is the command's, and never on PATH.
 func runOnWindowsDesktop(desktop, targetPath string, targetArgs []string) (int, error) {
 	desktopName, err := windows.UTF16PtrFromString(desktop)
 	if err != nil {
@@ -99,7 +105,15 @@ func runOnWindowsDesktop(desktop, targetPath string, targetArgs []string) (int, 
 		return 1, fmt.Errorf("refusing to start %s: desktop %s is not open in this window station, and the program must not start on the user's desktop instead: %w", targetPath, desktop, openErr)
 	}
 	defer procCloseDesktop.Call(opened)
-	appName, err := windows.UTF16PtrFromString(targetPath)
+	lookup := targetPath
+	if filepath.Base(lookup) == lookup {
+		lookup = "." + string(filepath.Separator) + lookup
+	}
+	resolved, err := exec.LookPath(lookup)
+	if err != nil {
+		return 1, fmt.Errorf("start %s on desktop %s: %w", targetPath, desktop, err)
+	}
+	appName, err := windows.UTF16PtrFromString(resolved)
 	if err != nil {
 		return 1, err
 	}

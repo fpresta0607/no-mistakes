@@ -35,6 +35,9 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err != nil {
 		return nil, fmt.Errorf("the test step starts its agents on a hidden desktop, so that no program they start shows on the user's screen, and could not create one: %w", err)
 	}
+	// A side lane recovers a panic in its step, so the desktop is closed on
+	// that path too. Close is idempotent.
+	defer desktop.Close()
 	outcome, err := s.execute(sctx, desktop.Name())
 	if closeErr := desktop.Close(); closeErr != nil {
 		sctx.Log("warning: " + closeErr.Error())
