@@ -414,7 +414,10 @@ func (d *DB) ClaimLaunchReceiptWithAssertion(repoID, branch, launchNonce, submit
 	if expected != nil {
 		// Compare the complete proof in the atomic claim, including when a row
 		// appeared after the preliminary read. This value is never persisted.
-		requiredProof = &launchassert.Proof{AssertionDigest: expected.Digest(), TrustedSHA: expected.TrustedSHA, Profiles: expected.Profiles}
+		requiredProof, err = expected.Verify(expected.TrustedSHA, expected.Profiles)
+		if err != nil {
+			return nil, false, err
+		}
 	}
 	for {
 		r := &Run{}

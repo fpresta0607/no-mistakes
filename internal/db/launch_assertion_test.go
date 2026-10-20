@@ -164,3 +164,39 @@ func TestLaunchAssertionRowIsNeverVisibleWithoutItsProof(t *testing.T) {
 		t.Fatalf("claim right after the insert = %+v, created=%v, error=%v", claimed, isCreated, err)
 	}
 }
+
+// A launch selection is stored and claimed as the assertion it extends, and
+// the claim keeps it apart from the same profiles asserted without apply.
+func TestLaunchSelectionReceiptIsClaimedOnlyAsTheSelectionItWasStoredAs(t *testing.T) {
+	database := openTestDB(t)
+	repository, err := database.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := agentcfg.Selection{Harness: "claude", Model: "fixture", Effort: agentcfg.EffortHigh}
+	selected := &launchassert.Expectation{TrustedSHA: strings.Repeat("a", 40), Apply: true, Profiles: map[string][]agentcfg.Selection{
+		"primary": {profile}, "reviewer": {profile}, "fixer": {profile},
+	}}
+	proof, err := selected.Verify(selected.TrustedSHA, selected.Profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", "head", "base", nil, "selection", "generation", "digest", "", false, nil, selected, proof)
+	if err != nil {
+		t.Fatalf("a launch selection could not be stored with its run: %v", err)
+	}
+	asserted := *selected
+	asserted.Apply = false
+	if _, _, err := database.ClaimLaunchReceiptWithAssertion(repository.ID, "feature", "selection", "head", "generation", "digest", "", false, &asserted); err == nil {
+		t.Fatal("the same profiles without apply claimed a selection's receipt")
+	}
+
+	claimed, isCreated, err := database.ClaimLaunchReceiptWithAssertion(repository.ID, "feature", "selection", "head", "generation", "digest", "", false, selected)
+
+	if err != nil || !isCreated || claimed.ID != run.ID {
+		t.Fatalf("selection claim = %+v, created=%v, error=%v", claimed, isCreated, err)
+	}
+	if !claimed.LaunchAssertion.Apply || !claimed.LaunchAssertionProof.Apply || claimed.LaunchAssertionProof.Check(selected) != nil {
+		t.Fatalf("the stored selection lost its apply: assertion=%+v proof=%+v", claimed.LaunchAssertion, claimed.LaunchAssertionProof)
+	}
+}

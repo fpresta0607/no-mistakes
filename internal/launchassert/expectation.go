@@ -19,9 +19,16 @@ const MaxBytes = 8192
 
 // Expectation is a caller-captured, immutable input to a nonce-bound launch.
 // It contains no commands, paths, credentials or inferred provider identity.
+//
+// Apply makes it a launch selection: before the daemon proves the profiles it
+// sets this run's agent chain, and each named harness's model and effort, to
+// them, for every role and for this run alone. One daemon can then run each
+// launch on the harness its own caller names, with no config file edited. A
+// selection names one chain, so its reviewer and fixer equal its primary.
 type Expectation struct {
 	TrustedSHA string                          `json:"trusted_sha"`
 	Profiles   map[string][]agentcfg.Selection `json:"profiles"`
+	Apply      bool                            `json:"apply,omitempty"`
 }
 
 func (e *Expectation) Validate() error {
@@ -49,6 +56,19 @@ func (e *Expectation) Validate() error {
 		for _, profile := range profiles {
 			if err := profile.Validate(); err != nil {
 				return err
+			}
+		}
+	}
+	if e.Apply {
+		primary := e.Profiles["primary"]
+		if len(e.Profiles) != 3 || !reflect.DeepEqual(e.Profiles["reviewer"], primary) || !reflect.DeepEqual(e.Profiles["fixer"], primary) {
+			return fmt.Errorf("launch selection names one agent chain for the primary, reviewer and fixer roles")
+		}
+		for index, profile := range primary {
+			for _, earlier := range primary[:index] {
+				if earlier.Harness == profile.Harness {
+					return fmt.Errorf("launch selection names an agent harness once")
+				}
 			}
 		}
 	}
@@ -114,7 +134,7 @@ func (e *Expectation) Verify(trustedSHA string, profiles map[string][]agentcfg.S
 	if !reflect.DeepEqual(e.Profiles, profiles) {
 		return nil, fmt.Errorf("launch assertion effective agent profiles differ")
 	}
-	return &Proof{AssertionDigest: e.Digest(), TrustedSHA: trustedSHA, Profiles: profiles}, nil
+	return &Proof{AssertionDigest: e.Digest(), TrustedSHA: trustedSHA, Profiles: profiles, Apply: e.Apply}, nil
 }
 
 func (e Expectation) Value() (driver.Value, error) {

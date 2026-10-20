@@ -50,6 +50,8 @@ func handleFakeCLI(mode string) {
 		fakeGlabHandler(args)
 	case "record-success":
 		fakeRecordSuccessHandler()
+	case "wrapper":
+		fakeWrapperHandler(args)
 	case "git-passthrough":
 		fakeGitPassthroughHandler(args)
 	case "git-trusted-config-second-read-error":
@@ -132,6 +134,52 @@ func fakeRecordSuccessHandler() {
 			fmt.Fprintln(f, filepath.Base(os.Args[0]))
 			f.Close()
 		}
+	}
+	os.Exit(0)
+}
+
+// fakeWrapperHandler stands in for a machine-local command wrapper such as
+// `cfo gate turn`: it records its own arguments, one JSON list per line, then
+// starts whatever follows "--" and passes that program's output and exit code
+// through. FAKE_CLI_WRAPPER_SAYS is a line it prints first, as a wrapper does
+// while it waits. FAKE_CLI_WRAPPER_REFUSAL makes it print that line and exit
+// with FAKE_CLI_WRAPPER_REFUSAL_CODE without starting anything.
+func fakeWrapperHandler(args []string) {
+	if logFile := os.Getenv("FAKE_CLI_WRAPPER_LOG"); logFile != "" {
+		if f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			line, _ := json.Marshal(args)
+			f.Write(append(line, '\n'))
+			f.Close()
+		}
+	}
+	if says := os.Getenv("FAKE_CLI_WRAPPER_SAYS"); says != "" {
+		fmt.Fprintln(os.Stderr, says)
+	}
+	if refusal := os.Getenv("FAKE_CLI_WRAPPER_REFUSAL"); refusal != "" {
+		fmt.Fprintln(os.Stderr, refusal)
+		code, _ := strconv.Atoi(os.Getenv("FAKE_CLI_WRAPPER_REFUSAL_CODE"))
+		os.Exit(code)
+	}
+	separator := -1
+	for i, arg := range args {
+		if arg == "--" {
+			separator = i
+			break
+		}
+	}
+	if separator < 0 || separator == len(args)-1 {
+		fmt.Fprintln(os.Stderr, "wrapper: no command after --")
+		os.Exit(125)
+	}
+	command := exec.Command(args[separator+1], args[separator+2:]...)
+	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := command.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			os.Exit(exit.ExitCode())
+		}
+		fmt.Fprintln(os.Stderr, "wrapper: the command did not start:", err)
+		os.Exit(126)
 	}
 	os.Exit(0)
 }

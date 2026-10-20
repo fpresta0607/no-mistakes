@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -314,6 +315,18 @@ func runShellCommandWithProcessEnv(ctx context.Context, dir string, env []string
 }
 
 func runShellCommandWithPriority(ctx context.Context, dir string, env []string, cmdStr string, nice int) (string, int, error) {
+	return runShellCommandBehind(ctx, dir, env, cmdStr, nice, nil)
+}
+
+// errCommandWrapperStart marks a machine-local wrapper that could not be
+// started, which is never a result of the command behind it.
+var errCommandWrapperStart = errors.New("command wrapper could not be started")
+
+// runShellCommandBehind runs cmdStr through the platform shell, behind the
+// words of a machine-local wrapper when one is given: the wrapper is started
+// with no shell of its own, followed by exactly the shell call that would
+// have been started without it, so cmdStr stays one argument.
+func runShellCommandBehind(ctx context.Context, dir string, env []string, cmdStr string, nice int, wrapper []string) (string, int, error) {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
 		cmd = exec.CommandContext(ctx, "cmd.exe", "/c", cmdStr)
@@ -329,6 +342,20 @@ func runShellCommandWithPriority(ctx context.Context, dir string, env []string, 
 		}
 		// Run the already-resolved shell under nice with the same arguments.
 		cmd = exec.CommandContext(ctx, "nice", append([]string{"-n", strconv.Itoa(nice), cmd.Path}, cmd.Args[1:]...)...)
+	}
+	if len(wrapper) > 0 {
+		if cmd.Err != nil {
+			return "", -1, cmd.Err
+		}
+		// A wrapper that is not there is known before anything starts, on every
+		// platform, so the caller can tell it from a result of the command.
+		if _, err := exec.LookPath(wrapper[0]); err != nil {
+			return "", -1, fmt.Errorf("%w: %v", errCommandWrapperStart, err)
+		}
+		// The already-resolved program and its arguments, unchanged, behind the
+		// wrapper's words.
+		args := append(append([]string{}, wrapper[1:]...), cmd.Path)
+		cmd = exec.CommandContext(ctx, wrapper[0], append(args, cmd.Args[1:]...)...)
 	}
 	shellenv.ConfigureCooperativeShellCommand(cmd)
 	cmd.Dir = dir

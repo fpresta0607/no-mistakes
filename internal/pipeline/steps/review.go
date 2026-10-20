@@ -34,6 +34,10 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	if err != nil {
 		return nil, err
 	}
+	// Under global side_by_side the later steps' work starts here, beside
+	// this review and on the commit it reads. Without the setting this does
+	// nothing.
+	startSideLanes(sctx, baseSHA)
 	branch := sctx.Run.Branch
 	ignorePatterns := "none"
 	if len(sctx.Config.IgnorePatterns) > 0 {

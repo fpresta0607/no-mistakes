@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,17 +38,15 @@ func (a *codexAgent) ReportsAgentAttempts() bool { return true }
 // NeutralizesGateInstructions reports whether codex is currently launched with
 // the target repo's project-level settings/instructions suppressed. It is
 // meaningful only under the opt-out (disableProjectSettings): the gate only
-// consults it when the repo opted out. It is honest about the EFFECTIVE knob
-// value, not merely its presence - codex neutralizes iff the effective codex
-// `project_doc_max_bytes` is 0 (buildArgs appends `=0`, or the operator pinned
-// `=0` themselves). An operator override that re-enables the project doc
-// (`project_doc_max_bytes` > 0) defeats neutralization, so this returns false
-// and the gate fails closed rather than running with the captain-identity hazard
-// re-enabled. Verified empirically: with the project doc loaded codex adopts the
-// AGENTS.md identity; with project_doc_max_bytes=0 (plus --ignore-rules) it does
-// not.
+// consults it when the repo opted out. Under the opt-out buildArgs always
+// passes `-c project_doc_max_bytes=0` after every operator argument, and codex
+// applies the later of two -c values for one key, so the effective value is 0
+// even when the operator pinned a larger project_doc_max_bytes globally for the
+// repositories that load their AGENTS.md. Verified empirically: with the project
+// doc loaded codex adopts the AGENTS.md identity; with project_doc_max_bytes=0
+// (plus --ignore-rules) it does not.
 func (a *codexAgent) NeutralizesGateInstructions() bool {
-	return a.disableProjectSettings && codexEffectiveProjectDocSuppressed(a.extraArgs)
+	return a.disableProjectSettings
 }
 
 func (a *codexAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
@@ -213,9 +210,10 @@ func (a *codexAgent) buildArgs(schemaPath, resumeID string) []string {
 	// accepted by `codex exec` AND `codex exec resume`, appended last so they
 	// never disturb codex's `[resume] <id> -` positionals:
 	//   - `-c project_doc_max_bytes=0` makes codex read zero bytes of AGENTS.md
-	//     (the identity-bearing surface). Skipped only when the operator pinned
-	//     their own project_doc_max_bytes (their choice wins; NeutralizesGate-
-	//     Instructions then fails closed if that value re-enables the doc).
+	//     (the identity-bearing surface). It always follows the operator's own
+	//     arguments, because codex applies the later -c: an operator's global
+	//     project_doc_max_bytes keeps serving the repositories that load their
+	//     AGENTS.md and can never re-open the doc of one that opted out.
 	//   - `--ignore-rules` drops project (and user) execpolicy `.rules` for full
 	//     project-settings coverage. It is functionally redundant under the gate's
 	//     --dangerously-bypass-approvals-and-sandbox (which bypasses execpolicy
@@ -224,62 +222,12 @@ func (a *codexAgent) buildArgs(schemaPath, resumeID string) []string {
 	// When the repo did not opt out, none of this is added and codex loads
 	// AGENTS.md exactly as before (backward-compat for ordinary repos).
 	if a.disableProjectSettings {
-		if !codexUserSetProjectDocMaxBytes(a.extraArgs) {
-			args = append(args, "-c", "project_doc_max_bytes=0")
-		}
+		args = append(args, "-c", "project_doc_max_bytes=0")
 		if !codexArgsContain(a.extraArgs, "--ignore-rules") {
 			args = append(args, "--ignore-rules")
 		}
 	}
 	return args
-}
-
-// codexEffectiveProjectDocSuppressed reports whether the EFFECTIVE codex
-// project_doc_max_bytes is 0 (AGENTS.md fully suppressed): true when the
-// operator did not pin the value (buildArgs appends `=0`) or pinned it to 0
-// themselves, and false when the operator pinned a non-zero (or unparseable)
-// value that would re-enable the project doc.
-func codexEffectiveProjectDocSuppressed(extraArgs []string) bool {
-	value, pinned := codexUserProjectDocMaxBytes(extraArgs)
-	if !pinned {
-		return true // buildArgs appends project_doc_max_bytes=0
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(value))
-	return err == nil && n == 0
-}
-
-// codexUserSetProjectDocMaxBytes reports whether extraArgs pin
-// project_doc_max_bytes at all (so buildArgs does not double-set it).
-func codexUserSetProjectDocMaxBytes(extraArgs []string) bool {
-	_, pinned := codexUserProjectDocMaxBytes(extraArgs)
-	return pinned
-}
-
-// codexUserProjectDocMaxBytes returns the operator-pinned project_doc_max_bytes
-// value (the last occurrence wins) and whether it was pinned at all. It handles
-// both the inline `-c project_doc_max_bytes=<v>` token and the split
-// `-c <key=value>` form.
-func codexUserProjectDocMaxBytes(extraArgs []string) (string, bool) {
-	const key = "project_doc_max_bytes"
-	value := ""
-	pinned := false
-	extract := func(tok string) {
-		if i := strings.Index(tok, key+"="); i >= 0 {
-			value = tok[i+len(key)+1:]
-			pinned = true
-		}
-	}
-	for i, arg := range extraArgs {
-		if strings.Contains(arg, key+"=") {
-			extract(arg)
-			continue
-		}
-		if (arg == "-c" || arg == "--config") && i+1 < len(extraArgs) &&
-			strings.Contains(extraArgs[i+1], key+"=") {
-			extract(extraArgs[i+1])
-		}
-	}
-	return value, pinned
 }
 
 // codexArgsContain reports whether extraArgs already include the exact flag.

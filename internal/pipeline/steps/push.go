@@ -74,6 +74,20 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err != nil {
 		return nil, fmt.Errorf("resolve head before push: %w", err)
 	}
+	// Under global side_by_side the baseline ran on the commit the review
+	// started on. Answer for every commit since, before anything is pushed.
+	afterTested, backToTest, err := baselineBeforePush(sctx, headBeingPushed)
+	if err != nil {
+		return nil, err
+	}
+	if backToTest {
+		// The Test step owns a failing baseline and its fix rounds. Record the
+		// head it will test, since a commit made above is not recorded yet.
+		if err := recordAgentFixHead(sctx, s.Name(), headBeingPushed); err != nil {
+			return nil, err
+		}
+		return &pipeline.StepOutcome{RestartFrom: types.StepTest}, nil
+	}
 	// This run's own review/test/document have already completed by now (see
 	// AllSteps' fixed order), so these are honest statuses to attest for the
 	// head about to be pushed - see attestHeadBeforePush.
@@ -86,7 +100,19 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 
 	sctx.Log("pushed successfully")
-	return &pipeline.StepOutcome{}, nil
+	outcome := &pipeline.StepOutcome{}
+	if afterTested != "" {
+		// An informational note, so the step's record says which commits were
+		// pushed beyond the tested one and what was done about them.
+		if encoded, err := types.MarshalFindingsJSON(Findings{Items: []Finding{{
+			Severity:    types.FindingSeverityInfo,
+			Action:      types.ActionNoOp,
+			Description: afterTested,
+		}}}); err == nil {
+			outcome.Findings = encoded
+		}
+	}
+	return outcome, nil
 }
 
 // publishRunHead is the single guarded publication path for a run's head. Both

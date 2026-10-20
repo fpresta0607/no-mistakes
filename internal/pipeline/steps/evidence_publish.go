@@ -8,7 +8,6 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
-	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 )
 
 // evidenceLinks describes a published evidence commit well enough to turn a
@@ -74,10 +73,8 @@ func publishRunEvidence(sctx *pipeline.StepContext) *evidenceLinks {
 		// answers would land on the orphan branch verbatim and permanently,
 		// with none of the bounding or home-path redaction the deliberate
 		// PR-body rendering applies. The name comes from the package that owns
-		// the location, so the two cannot drift. The Test step's scratch
-		// directory holds the agent's disposable tools, never evidence, so a copy
-		// the step could not delete is never published either.
-		ExcludeDirs:       []string{reviewqa.DirName, testScratchDirName},
+		// the location, so the two cannot drift.
+		ExcludeDirs:       evidencePublishExcludedDirs(),
 		Message:           fmt.Sprintf("no-mistakes: evidence for %s (run %s)", branch, sctx.Run.ID),
 		ForbiddenBranches: []string{branch, sctx.Repo.DefaultBranch},
 	})

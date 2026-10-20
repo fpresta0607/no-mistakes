@@ -50,8 +50,64 @@ func TestEffectiveSelectionRefusesUnprovableNativeSettings(t *testing.T) {
 			}
 		})
 	}
-	if _, err := EffectiveSelection(types.AgentPi, Profile{Model: "configured", Effort: EffortHigh}, nil); err == nil {
+	if _, err := EffectiveSelection(types.AgentGrok, Profile{Model: "configured", Effort: EffortHigh}, nil); err == nil {
 		t.Fatal("unsupported assertion harness was accepted")
+	}
+}
+
+// A Pi gate proves the provider-qualified model and the reasoning effort the
+// selection names, read from the native flags no-mistakes itself emits and
+// from a provider flag the operator may set.
+func TestEffectiveSelectionReadsPiFlags(t *testing.T) {
+	valid := Profile{Model: "openrouter/deepseek/deepseek-v4.1-flash", Effort: EffortHigh}
+	for _, test := range []struct {
+		name   string
+		args   []string
+		model  string
+		effort Effort
+	}{
+		{"typed", nil, "openrouter/deepseek/deepseek-v4.1-flash", EffortHigh},
+		{"native model", []string{"--model=anthropic/claude-fixture"}, "anthropic/claude-fixture", EffortHigh},
+		{"native effort", []string{"--thinking", "max"}, "openrouter/deepseek/deepseek-v4.1-flash", EffortMax},
+		{"matching provider", []string{"--provider", "openrouter"}, "openrouter/deepseek/deepseek-v4.1-flash", EffortHigh},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			actual, err := EffectiveSelection(types.AgentPi, valid, test.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := Selection{Harness: types.AgentPi, Model: test.model, Effort: test.effort}
+			if actual != want {
+				t.Fatalf("selection = %+v, want %+v", actual, want)
+			}
+		})
+	}
+}
+
+func TestEffectiveSelectionRefusesUnprovablePiSettings(t *testing.T) {
+	valid := Profile{Model: "openrouter/deepseek/deepseek-v4.1-flash", Effort: EffortHigh}
+	for _, test := range []struct {
+		name    string
+		profile Profile
+		args    []string
+	}{
+		{"implicit model", Profile{Effort: EffortHigh}, nil},
+		{"implicit effort", Profile{Model: "openrouter/deepseek/deepseek-v4.1-flash"}, nil},
+		{"model without a provider", valid, []string{"--model", "configured"}},
+		{"model with a thinking suffix", valid, []string{"--model", "openrouter/deepseek/deepseek-v4.1-flash:high"}},
+		{"repeated model", valid, []string{"--model", "one/two", "--model", "three/four"}},
+		{"repeated effort", valid, []string{"--thinking", "low", "--thinking=high"}},
+		{"repeated provider", valid, []string{"--provider", "openrouter", "--provider", "anthropic"}},
+		{"provider mismatch", valid, []string{"--provider", "anthropic"}},
+		{"api key", valid, []string{"--api-key", "secret"}},
+		{"output mode", valid, []string{"--mode", "rpc"}},
+		{"incomplete flag", valid, []string{"--model"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := EffectiveSelection(types.AgentPi, test.profile, test.args); err == nil {
+				t.Fatal("unprovable Pi selection was accepted")
+			}
+		})
 	}
 }
 
@@ -114,11 +170,54 @@ func TestSelectionValidateKeepsEachHarnessShape(t *testing.T) {
 		{"claude", Selection{Harness: types.AgentClaude, Model: "m", Effort: EffortHigh}, true},
 		{"claude with tier", Selection{Harness: types.AgentClaude, Model: "m", Effort: EffortHigh, ServiceTier: "default"}, false},
 		{"claude without effort", Selection{Harness: types.AgentClaude, Model: "m"}, false},
-		{"other harness", Selection{Harness: types.AgentPi, Model: "m", Effort: EffortHigh}, false},
+		{"pi", Selection{Harness: types.AgentPi, Model: "provider/model", Effort: EffortHigh}, true},
+		{"pi without a provider", Selection{Harness: types.AgentPi, Model: "m", Effort: EffortHigh}, false},
+		{"pi with a tier", Selection{Harness: types.AgentPi, Model: "provider/model", Effort: EffortHigh, ServiceTier: "default"}, false},
+		{"other harness", Selection{Harness: types.AgentGrok, Model: "m", Effort: EffortHigh}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if err := test.selection.Validate(); (err == nil) != test.isValid {
 				t.Fatalf("Validate() = %v, want valid=%v", err, test.isValid)
+			}
+		})
+	}
+}
+
+func TestEffectiveSelectionAcceptsArgumentsThatSelectNothing(t *testing.T) {
+	codex := []string{
+		"-c", `service_tier="default"`, "--ignore-user-config", "--disable", "plugins", "--disable=apps", "--enable", "apps",
+		"-c", `personality="pragmatic"`, "-c", `model_auto_compact_token_limit_scope="total"`,
+		"-c", "features.multi_agent=true", "-c", "project_doc_max_bytes=65536",
+	}
+	actual, err := EffectiveSelection(types.AgentCodex, Profile{Model: "configured", Effort: EffortHigh}, codex)
+	if want := (Selection{Harness: types.AgentCodex, Model: "configured", Effort: EffortHigh, ServiceTier: "default"}); err != nil || actual != want {
+		t.Fatalf("Codex selection = %+v, %v, want %+v", actual, err, want)
+	}
+	actual, err = EffectiveSelection(types.AgentClaude, Profile{Model: "configured", Effort: EffortHigh}, []string{"--strict-mcp-config"})
+	if want := (Selection{Harness: types.AgentClaude, Model: "configured", Effort: EffortHigh}); err != nil || actual != want {
+		t.Fatalf("Claude selection = %+v, %v, want %+v", actual, err, want)
+	}
+}
+
+func TestEffectiveSelectionRefusesFeaturesAndFlagsItCannotRead(t *testing.T) {
+	tier := []string{"-c", `service_tier="default"`}
+	for _, args := range [][]string{
+		{"--disable", "fast_mode"},
+		{"--enable"},
+		{"--ignore-user-config=true"},
+		{"-c", "features.fast_mode=true"},
+		{"-c", `profile="hidden"`},
+	} {
+		t.Run(fmt.Sprint(args), func(t *testing.T) {
+			if _, err := EffectiveSelection(types.AgentCodex, Profile{Model: "configured", Effort: EffortHigh}, append(args, tier...)); err == nil {
+				t.Fatal("unreadable Codex argument was accepted")
+			}
+		})
+	}
+	for _, args := range [][]string{{"--strict-mcp-config=false"}, {"--mcp-config", "servers.json"}} {
+		t.Run(fmt.Sprint(args), func(t *testing.T) {
+			if _, err := EffectiveSelection(types.AgentClaude, Profile{Model: "configured", Effort: EffortHigh}, args); err == nil {
+				t.Fatal("unreadable Claude argument was accepted")
 			}
 		})
 	}

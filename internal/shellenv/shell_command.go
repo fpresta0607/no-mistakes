@@ -10,6 +10,12 @@ import (
 	"time"
 )
 
+// CooperativeStartFailurePrefix starts the line the Windows cooperative-command
+// helper prints, with exit code 1, when the program it was asked to start
+// could not be started. A caller that put a wrapper program in front of a
+// command reads it to tell "the wrapper never started" from a result.
+const CooperativeStartFailurePrefix = "start Windows cooperative command: "
+
 type shellOutputPipe struct {
 	reader *os.File
 	writer *os.File

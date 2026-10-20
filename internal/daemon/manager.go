@@ -262,6 +262,9 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	if err := cfg.ApplyPiProfile(run.PiProfile); err != nil {
 		return nil, err
 	}
+	if err := applyLaunchSelection(cfg, run.LaunchAssertion); err != nil {
+		return nil, err
+	}
 	if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
 		return nil, err
 	}
@@ -1400,6 +1403,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	globalCfg, globalCfgErr := config.LoadGlobal(m.paths.ConfigFile())
 	var pin *agentcfg.PiProfile
 	if request := agentcfg.OptionalPiProfile(profiles); request != nil {
+		if expected != nil && expected.Apply {
+			trackStartFailure("invalid_pi_profile")
+			return "", fmt.Errorf("a launch selection names the run's agents itself and cannot be combined with a Pi run profile")
+		}
 		if globalCfgErr != nil {
 			trackStartFailure("load_global_config")
 			return "", fmt.Errorf("load global config: %w", globalCfgErr)
@@ -1467,6 +1474,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		cfg, stage, err = m.loadRunConfig(ctx, repo, globalCfg, repoCfg, gateDir, trustedSHA, "", branch, pin)
 		if err != nil {
 			trackStartFailure(stage)
+			return "", err
+		}
+		if err := applyLaunchSelection(cfg, expected); err != nil {
+			trackStartFailure("launch_assertion")
 			return "", err
 		}
 		roleConfigs, launchProof, err = prepareLaunchAssertion(ctx, expected, cfg, exec.LookPath)

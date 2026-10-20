@@ -33,7 +33,7 @@ func inheritedCommandEnvironment() map[string]string {
 
 func recordCommandConfiguration(logDir, event string, cfg *config.Config) error {
 	path := filepath.Join(logDir, commandConfigurationFile)
-	if cfg == nil || len(cfg.CommandOverrides) == 0 {
+	if cfg == nil || (len(cfg.CommandOverrides) == 0 && !cfg.TestCommandWrapper.Enabled()) {
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			return nil
 		} else if err != nil {

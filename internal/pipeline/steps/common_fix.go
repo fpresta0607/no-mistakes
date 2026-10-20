@@ -456,6 +456,13 @@ func recordAgentFixHead(sctx *pipeline.StepContext, stepName types.StepName, hea
 	if headSHA == sctx.Run.HeadSHA {
 		return nil
 	}
+	// A side lane works on a copy of the run record in a clone of its own.
+	// Its commit becomes the run's only if the owning step takes it, which
+	// then records it here in the run's own context.
+	if sctx.SideLane {
+		sctx.Run.HeadSHA = headSHA
+		return nil
+	}
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
 		return err
 	}
@@ -473,6 +480,7 @@ func recordAgentFixHead(sctx *pipeline.StepContext, stepName types.StepName, hea
 	if stepName == types.StepReview {
 		pipeline.PersistUncertifiedPipelineRange(sctx, startingHead, headSHA)
 	}
+	stopStaleSideLanes(sctx, headSHA)
 	return nil
 }
 

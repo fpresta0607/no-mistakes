@@ -129,6 +129,17 @@ const FindingIDTestAgentTimeout = "test-agent-timeout"
 // publish the work.
 const FindingIDTestAgentUnvalidatedWork = "test-agent-unvalidated-work"
 
+// FindingIDTestLiveCheckBudget is the informational note a Test step records
+// when its live check was stopped at test_live_check_budget and the step
+// completed with what the live check had written down. It never parks.
+const FindingIDTestLiveCheckBudget = "test-live-check-budget"
+
+// FindingIDTestCommandNoTurn is the Test-step park when the machine-local
+// test_command_wrapper reported that it never produced a result of the test
+// command: the machine gave the run no turn, or the command did not start.
+// It is not a test failure, so no repair agent is ever sent to it.
+const FindingIDTestCommandNoTurn = "test-command-no-turn"
+
 // Test scenario result constants: the vocabulary the test step's evidence
 // prompt instructs the agent to use for each derived scenario.
 //

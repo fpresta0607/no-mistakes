@@ -693,6 +693,194 @@ The 10-minute quiet stop still applies.
 
 It is global-only.
 
+### test_live_check_budget
+
+Optional cap on the Test step's live check, its evidence-gathering turn.
+Unset, the turn's only bound is [`test_agent_timeout`](#test_agent_timeout), and a turn that reaches it parks the run.
+
+With a budget set:
+
+- The evidence agent is told the budget at the start of its turn.
+- It is told to append one line per scenario to a ledger file, when it plans the scenario and again when it settles it. The ledger is `live-check/progress.ndjson` in the run's evidence directory.
+- A turn that reaches the budget is stopped, and the Test step completes with what the ledger holds instead of parking. A recorded live pass counts. A recorded failure is a `no-go`, which parks as an auto-fixable error exactly as a finished live check's failure does. A scenario that was planned and not reached is listed on the pull request as `untested`, with the budget as its reason.
+- The ledger is held to the live-validation contract: a pass or fail counts only when it is recorded as live with evidence, and anything else is listed as `untested`.
+- The record carries no verdict unless a failure was recorded, so the pull request's attestation omits `live_validation` for a live check that did not finish.
+- Files the stopped turn left in the worktree are moved to `live-check/set-aside` in the run's evidence directory, changes to tracked files as one patch, and the worktree is put back at its head. They are neither pushed nor deleted, and that folder is never published as evidence.
+
+The stop still parks, exactly as an expired `test_agent_timeout` does, when completing could publish or clear something nobody validated:
+
+- the stopped turn made a commit, or left a rebase or merge unfinished
+- the worktree already held changes before the turn, or could not be put back
+- the turn ran in a fix round whose gate held a failed or inconclusive live check, or any blocking finding
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | unset                  |
+
+It must be positive and must not exceed `test_agent_timeout`: a config that sets it higher is refused when the global config loads.
+The baseline [`commands.test`](/no-mistakes/reference/repo-config/#commandstest) and a Test-repair turn are not bounded by it.
+What still catches a defect in a scenario the budget cut off: the baseline command, the review, CI, and the pull request's own list of what was left untested.
+It is global-only.
+
+### test_command_wrapper
+
+Optional wrapper program in front of every run's baseline test command, so one program can make the test runs on this machine take turns without any repository naming it.
+Unset, the command starts exactly as it always has.
+
+```yaml
+test_command_wrapper:
+  command: ["cfo", "gate", "turn", "--as", "{repo} {branch}, run {run_short}", "--"]
+  refusal_prefix: "cfo gate turn: "
+```
+
+|         |                                              |
+| ------- | -------------------------------------------- |
+| Type    | mapping: `command` (list of `string`), `refusal_prefix` (`string`) |
+| Default | unset                                        |
+
+`command` is a list of words, never one string.
+The words are started with no shell in front of them, followed by exactly the program and arguments the command would have been started with: `sh -c <command>`, or `cmd.exe /c <command>` on Windows, with the shell as its resolved path.
+The command string therefore stays one argument, so `a && b` stands behind the wrapper whole.
+The working directory and the environment are those the command has without a wrapper.
+A word may name a run fact, filled in once: `{repo}` (the last element of the upstream URL), `{branch}`, `{run}` (the run id), and `{run_short}` (its first 8 characters).
+Use the full path of the wrapper program unless it is on the daemon's own `PATH`.
+
+The wrapper is trusted to start what follows its words and to pass that program's output and exit code through.
+Its own lines, such as what it prints while it waits, are captured with the command's and appear in the step log.
+The step logs one line of its own saying the wrapper was applied, so a result produced behind it is never shown as a plain run.
+
+What stands behind it:
+
+- [`commands.test`](/no-mistakes/reference/repo-config/#commandstest) of every run
+- each machine-local [`repository_overrides.commands.test.additional`](#machine-local-commands) check, as its own start
+- the re-run of `commands.test` on the base commit under [`test.base_attribution`](/no-mistakes/reference/repo-config/#testbase_attribution)
+
+`commands.prepare`, `commands.lint`, `commands.format`, and repository `gates` start as they always have.
+
+`refusal_prefix` is optional and tells the wrapper's own refusal from a test result.
+The convention is the one `env`, `nice`, and `timeout` share: a wrapper exits 125 when it gave up before starting the command and 126 when the command could not be started.
+A test command can exit with those codes too, so the step reads them as a refusal only when the last non-empty line of output starts with `refusal_prefix`.
+With no `refusal_prefix`, every exit code is the command's own.
+
+A refusal is not a test result:
+
+- The Test step parks with one `ask-user` warning, `test-command-no-turn`, that quotes the wrapper's last line. It is never auto-fixed, and no live check runs.
+- A fix response runs the test command again with no repair turn, since there is nothing to repair.
+- An approval goes on without the baseline and is recorded as an approval over a configured test command that did not pass, exactly as approving a failing `commands.test` is.
+- A wrapper that cannot be started at all parks the same way, so a missing wrapper never fails a whole run and never lets a command start outside it.
+- On the base commit re-run, a refusal reports attribution as unavailable.
+
+No time limit bounds `commands.test`, so a wait inside the wrapper costs the run nothing but time.
+The base commit re-run is bounded by [`test_agent_timeout`](#test_agent_timeout), and that bound includes the wait.
+
+It is global-only: it decides how a command starts on this machine, so no repository file, trusted or pushed, can set it.
+
+### side_by_side
+
+Starts the Test step's work and the documentation pass beside the review, instead of after it.
+Unset, the steps run one after another, as they always have.
+
+```yaml
+side_by_side: true
+```
+
+|         |          |
+| ------- | -------- |
+| Type    | `bool`   |
+| Default | `false`  |
+
+When the review starts, its later steps' work starts with it, each in a throwaway clone of the run's worktree at the commit the review reads:
+
+- the Test step's work: the baseline test command, then the live check
+- the documentation pass, when the repository names [`commands.lint`](/no-mistakes/reference/repo-config/#commandslint). Without it the pass also fixes lint and may change code, so it keeps its place after the Test step.
+
+The run still runs one step at a time and holds one approval gate at a time.
+Work started early changes nothing of the run: it has its own clone, its own copy of the run record, and no approval.
+Each step takes that work at its own turn, in its usual order, only when it is still what the step would do now:
+
+- The run's head is still the commit the work ran on. A review fix moves the head, and work on the old head is stopped and removed at once.
+- The work finished without an error.
+- For the Test step, the work made no commit and the run's worktree holds nothing uncommitted. The test files its live check left uncommitted are brought into the run's worktree, where the step leaves them without the setting.
+- For the documentation pass, its commit changes no path the run's worktree holds uncommitted changes to. The commit is brought over as a fast-forward of the unchanged head.
+
+Anything else discards the work, the step log says why, and the step runs as it does without the setting.
+A fix round never takes work started early.
+Nothing starts beside the review when a harness other than `claude` or `codex` is configured, since those are the harnesses known to serve two calls at once, or when the repository has submodules or Git LFS files, which a plain clone would not hold.
+The review's log says which.
+
+What is pushed is the hard part.
+The baseline ran on the commit the review started on, and the documentation pass, the Lint step and the formatter can each add a commit after it.
+So before anything is pushed, the Push step compares the head to push with the commit the baseline last ran on:
+
+- The tested commit itself is pushed as it is.
+- Otherwise every commit after the tested one is named in an informational note on the Push step.
+- When those commits change only paths the repository counts as documentation, by [`test.documentation_paths`](/no-mistakes/reference/repo-config/#testdocumentation_paths), the head is pushed without the baseline running again.
+- When they change anything else, the baseline runs again on the head to push. A pass pushes. A failure pushes nothing and sends the run back to the Test step, which owns failing tests and their fix rounds. A second such failure in one run fails the run with nothing pushed.
+- A tested commit the daemon no longer knows, as after a restart, counts as untested, so the baseline runs again.
+- With no baseline configured, or a failing baseline a person approved the Test step over, the commits are named and nothing runs again.
+
+This holds whether or not early work was taken.
+With the setting on, a commit made after the Test step is pushed without the baseline running on it only when it is documentation.
+
+What it costs: the machine does more at once, a test suite and up to three agent turns beside each other.
+Each clone runs [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) for itself.
+The baseline runs twice when the commits after the tested one change more than documentation, and the test files a live check writes are such a change.
+
+What still catches each kind of defect with it on:
+
+- a defect a review fix brings in: the Test step, which runs again on the new head, as it does today
+- a defect a later commit brings in, from the documentation pass, the Lint step or the formatter: the baseline on the head to push, or for documentation only, the review and CI
+- a difference between a clone and the run's worktree: work starts only where a clone holds what the worktree holds, and the baseline before the push runs in the run's own worktree
+
+It is global-only: how many agents and test runs work at once is this machine's decision, so no repository file can set it.
+
+### ci_end_at_green
+
+Ends a run when CI is first green on the head it pushed, instead of watching the pull request until it is merged or closed.
+Unset, the run keeps watching, as it always has.
+
+```yaml
+ci_end_at_green: true
+
+repository_overrides:
+  https://github.com/acme/widget:
+    ci:
+      end_at_green: false
+```
+
+|         |          |
+| ------- | -------- |
+| Type    | `bool`   |
+| Default | `false`  |
+
+A [`repository_overrides`](#repository_overrides) entry sets it for one repository: `ci: {end_at_green: true}` switches it on there only, and `false` keeps one repository watched under a global `true`.
+
+The CI step ends the run at the first poll where all of these hold:
+
+- every registered check has passed, or the repository declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) and none is registered
+- the pull request is open, and its mergeability, where the forge reports it, is known and clear
+- the pull request head the forge read the checks for, where the forge reports it, is the head the run pushed
+- the push target's branch still points at the head the run pushed
+
+The step then records CI readiness, logs one line naming the head, and completes, so the run completes.
+A green it cannot tie to the pushed head is logged once, and monitoring goes on as it does without the setting.
+
+What a run does after green today, and no longer does with the setting on:
+
+- It keeps polling the checks, so a check that turns red later, such as a re-run or a newly required check, is repaired within [`auto_fix.ci`](/no-mistakes/reference/repo-config/#auto_fix) or parked for a decision.
+- When the base branch moves, it re-arms its idle timeout, and when the forge then reports a merge conflict, a repair agent rebases onto the base. That repair cannot prove continuity with what was reviewed, so the run goes back through Review before the rebased head is pushed.
+- It re-runs a check the provider cancelled, under [`ci.rerun_transient`](/no-mistakes/reference/repo-config/#cirerun_transient).
+- It parks a supported review bot's comments for a decision.
+- It records that the pull request was merged or closed, checks the merge proof against the pushed head, and calls the merge hook that relabels evaluation runs.
+- It parks for a decision when [`ci_timeout`](#ci_timeout) passes with the pull request still open.
+- It reports `checks-passed` in `axi` and the TUI while it waits. A run that ended at green reports `passed`.
+
+What still catches each kind of defect with it on: a check that fails after green, and a conflict from a base that moved, show on the pull request, where the forge's required checks and branch protection decide whether it can merge.
+A new push to the branch starts a new gate run.
+
+It is global-only: whether the gate keeps watching a pull request is this machine's decision, so no repository file can set it.
+
 ### daemon_connect_timeout
 
 Maximum time a CLI client waits for an existing daemon socket to accept a connection before failing instead of hanging. Guards against a daemon process that is alive but stuck or unresponsive.
@@ -1019,6 +1207,7 @@ repository_overrides:
 ```
 
 Formatting fields are `commit.branch_pattern`, `commit.branch_replacement`, `commit.fix_message`, `commit.trailers`, and `pr.title_format`; each retains the same fail-closed validation as its global or repository-config equivalent.
+`ci.end_at_green` sets [`ci_end_at_green`](#ci_end_at_green) for the matching repository only.
 A `commit.branch_replacement` must be paired with `commit.branch_pattern` in the same override.
 Precedence is explicit: `.no-mistakes.yaml` wins for every field it sets, then a matching machine-local override, then the plain global value, then the built-in default.
 As with the global replacement, a repository `commit.branch_pattern` replaces the matching machine-local pattern and clears its replacement.

@@ -194,8 +194,33 @@ type GlobalConfig struct {
 	AgentWorkingTimeout       time.Duration `yaml:"-"`
 	ReviewAgentWorkingTimeout time.Duration `yaml:"-"`
 	TestAgentWorkingTimeout   time.Duration `yaml:"-"`
-	DaemonConnectTimeout      time.Duration `yaml:"-"`
-	BranchSyncRemoteTimeout   time.Duration `yaml:"-"`
+	// TestLiveCheckBudget caps the Test step's evidence turn (the live check)
+	// below test_agent_timeout. Zero, the default, is off: the turn keeps
+	// test_agent_timeout as its only bound and a cut parks as it always has.
+	// Global-only like every agent budget: it describes this machine.
+	TestLiveCheckBudget time.Duration `yaml:"-"`
+	// TestCommandWrapper puts every run's baseline test command behind one
+	// wrapper program, so the machine can make test runs take turns without
+	// any repository naming the wrapper. Unset, the default, starts the
+	// command exactly as before. Global-only: it decides how a command starts
+	// on this machine, so no repository file, trusted or pushed, may set it.
+	TestCommandWrapper CommandWrapper `yaml:"-"`
+	// SideBySide starts the Test step's work and the documentation pass beside
+	// the review instead of after it, each on a throwaway copy of the run's
+	// worktree, and makes the Push step answer for every commit that came
+	// after the tested one. False, the default, runs the steps one after
+	// another exactly as before. Global-only: how many agents and test runs
+	// work at once is this machine's decision, never a repository's.
+	SideBySide bool `yaml:"-"`
+	// CIEndAtGreen ends a run when CI is first green on the head it pushed,
+	// instead of monitoring the pull request until it is merged or closed.
+	// False, the default, monitors exactly as before. A machine-local
+	// repository_overrides entry can set it for one repository. Global-only:
+	// whether the gate keeps watching a pull request is this machine's
+	// decision, never a repository's.
+	CIEndAtGreen            bool          `yaml:"-"`
+	DaemonConnectTimeout    time.Duration `yaml:"-"`
+	BranchSyncRemoteTimeout time.Duration `yaml:"-"`
 	// GateReconcileInterval / GateReconcileTimeout bound how often and how
 	// long a parked approval gate is rechecked. They are machine-local
 	// operator knobs (slow hosts, contended gh auth) and global-only so a
@@ -258,6 +283,10 @@ type globalConfigRaw struct {
 	AgentWorkingTimeout       string                     `yaml:"agent_working_timeout"`
 	ReviewAgentWorkingTimeout string                     `yaml:"review_agent_working_timeout"`
 	TestAgentWorkingTimeout   string                     `yaml:"test_agent_working_timeout"`
+	TestLiveCheckBudget       string                     `yaml:"test_live_check_budget"`
+	TestCommandWrapper        *CommandWrapper            `yaml:"test_command_wrapper"`
+	SideBySide                *bool                      `yaml:"side_by_side"`
+	CIEndAtGreen              *bool                      `yaml:"ci_end_at_green"`
 	LogLevel                  string                     `yaml:"log_level"`
 	SessionReuse              *bool                      `yaml:"session_reuse"`
 	AutoFix                   AutoFixRaw                 `yaml:"auto_fix"`
@@ -298,7 +327,14 @@ type ForgeProfiles map[string]ForgeProfile
 type RepositoryOverride struct {
 	Commit   GlobalCommitRaw            `yaml:"commit"`
 	PR       RepositoryPRRaw            `yaml:"pr"`
+	CI       RepositoryCIRaw            `yaml:"ci"`
 	Commands map[string]CommandOverride `yaml:"commands"`
+}
+
+// RepositoryCIRaw contains machine-local per-repository CI monitor settings.
+type RepositoryCIRaw struct {
+	// EndAtGreen sets global ci_end_at_green for this repository only.
+	EndAtGreen *bool `yaml:"end_at_green"`
 }
 
 // RepositoryPRRaw contains machine-local per-repository PR title settings.
@@ -734,6 +770,10 @@ type Config struct {
 	AgentWorkingTimeout       time.Duration
 	ReviewAgentWorkingTimeout time.Duration
 	TestAgentWorkingTimeout   time.Duration
+	TestLiveCheckBudget       time.Duration
+	TestCommandWrapper        CommandWrapper
+	SideBySide                bool
+	CIEndAtGreen              bool
 	GateReconcileInterval     time.Duration
 	GateReconcileTimeout      time.Duration
 	LogLevel                  string
@@ -903,6 +943,35 @@ type TestRaw struct {
 	// (see EffectiveRepoConfig): a contributor's pushed branch must not be able
 	// to waive the configured-test gate that validates it.
 	AllowApproveOverFailure string `yaml:"allow_approve_over_failure"`
+	// SurfacePaths lists the paths that are this repository's live surface:
+	// what an end user runs or sees. When the list is set and a change touches
+	// none of it, the Test step does not call the evidence agent; it records
+	// one line naming this rule, and commands.test still runs. Unset (the
+	// default) keeps the evidence turn on every change. Entries follow the
+	// ignore_patterns match rules. It decides whether the gate that validates
+	// the pushed branch runs at all, so it is honored ONLY from the trusted
+	// default-branch copy of .no-mistakes.yaml (see EffectiveRepoConfig),
+	// regardless of allow_repo_commands.
+	SurfacePaths []string `yaml:"surface_paths"`
+	// Environment names the repository's prepared live-check environment: the
+	// command that brings the real product up on disposable data, with any
+	// notes. When set, the evidence agent is told to use it and to build no
+	// environment of its own. It is injected into the test gate's prompt, so
+	// like Instructions it is honored ONLY from the trusted default-branch
+	// copy.
+	Environment string `yaml:"environment"`
+	// DocumentationPaths lists the paths of this repository that are
+	// documentation and nothing else: a commit that touches only these may
+	// follow the commit the baseline test command passed on without the
+	// baseline running again. It is read only under global side_by_side.
+	// Unset uses DefaultDocumentationPaths; an explicit empty list means no
+	// path is documentation, so every later commit runs the baseline again.
+	// A repository whose tests read its documents, or that embeds them in its
+	// product, should set it. It decides what may be pushed untested, so it
+	// is honored ONLY from the trusted default-branch copy of
+	// .no-mistakes.yaml (see EffectiveRepoConfig), regardless of
+	// allow_repo_commands.
+	DocumentationPaths []string `yaml:"documentation_paths"`
 }
 
 // EvidenceRaw is the YAML representation of test-evidence settings.
@@ -939,14 +1008,34 @@ type EvidenceRaw struct {
 }
 
 // Test is the resolved test-step config. Prepare, BaseAttribution,
-// Instructions and AllowApproveOverFailure come from the trusted
-// default-branch repo config only (see TestRaw).
+// Instructions, AllowApproveOverFailure, SurfacePaths and Environment come
+// from the trusted default-branch repo config only (see TestRaw).
 type Test struct {
 	Prepare                 bool
 	BaseAttribution         bool
 	Evidence                Evidence
 	Instructions            string
 	AllowApproveOverFailure string
+	SurfacePaths            []string
+	Environment             string
+	// DocumentationPaths is nil when the repository set none, and non-nil,
+	// possibly empty, when it did. Read it through DocumentationPatterns.
+	DocumentationPaths []string
+}
+
+// DefaultDocumentationPaths are the paths counted as documentation when the
+// repository lists none: prose formats only. Plain text, data and config
+// formats are left out on purpose, since a requirements.txt or a fixture is
+// not documentation.
+var DefaultDocumentationPaths = []string{"*.md", "*.mdx", "*.markdown", "*.rst", "*.adoc"}
+
+// DocumentationPatterns returns the globs that name documentation for this
+// repository: its own trusted list when it set one, else the built-in list.
+func (t Test) DocumentationPatterns() []string {
+	if t.DocumentationPaths != nil {
+		return append([]string{}, t.DocumentationPaths...)
+	}
+	return append([]string(nil), DefaultDocumentationPaths...)
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -1233,6 +1322,43 @@ test_agent_timeout: "30m"
 # Optional still-working cap for Test. Unset means no extension past
 # test_agent_timeout. Must be at least test_agent_timeout.
 # test_agent_working_timeout: "1h"
+
+# Optional cap on the Test step's live check (its evidence-gathering turn).
+# Unset means test_agent_timeout is its only bound and a cut parks the run.
+# With a budget the agent is told it and records each scenario as it goes, and
+# a turn that reaches the budget completes with what it proved: recorded passes
+# count, a recorded failure is a finding, and unreached scenarios are listed on
+# the pull request as untested. Must not exceed test_agent_timeout.
+# test_live_check_budget: "15m"
+
+# Optional wrapper in front of every run's baseline test command
+# (commands.test, machine-local additional test checks, and a base attribution
+# re-run), so one program can make test runs on this machine take turns. The
+# words are started with no shell, followed by exactly the shell call the
+# command would have been started with. A word may name {repo}, {branch},
+# {run} or {run_short}. With refusal_prefix set, an exit code of 125 or 126
+# whose last output line starts with it means the wrapper never produced a
+# test result: the step parks for a decision instead of reading a failed test.
+# test_command_wrapper:
+#   command: ["cfo", "gate", "turn", "--as", "{repo} {branch}, run {run_short}", "--"]
+#   refusal_prefix: "cfo gate turn: "
+
+# Start the Test step's work (the baseline test command, then the live check)
+# and the documentation pass beside the review instead of after it, each on a
+# throwaway copy of the run's worktree. A step takes that work at its own turn
+# only when the run's head is still the commit it was done on. Before the
+# push, every commit that came after the tested one is listed, and when those
+# commits touch more than documentation the baseline runs again on the head to
+# push. Off by default: the steps run one after another.
+# side_by_side: true
+
+# End a run when CI is first green on the head it pushed, instead of watching
+# the pull request until it is merged or closed. The run then no longer
+# repairs a later CI failure, rebases on a base that moved, re-runs a
+# cancelled check, or records the merge. Off by default. A machine-local
+# repository_overrides entry can set it for one repository with
+# ci: {end_at_green: true}.
+# ci_end_at_green: true
 
 # Maximum time a CLI client waits for an existing daemon socket to accept a
 # connection before failing instead of hanging.
@@ -2389,6 +2515,30 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateWorkingCap("test_agent_working_timeout", "test_agent_timeout", cfg.TestAgentWorkingTimeout, cfg.TestAgentTimeout); err != nil {
 		return nil, err
 	}
+	if raw.TestLiveCheckBudget != "" {
+		d, err := parsePositiveDuration("test_live_check_budget", raw.TestLiveCheckBudget)
+		if err != nil {
+			return nil, err
+		}
+		// A cap, never an extension: the live check is one Test agent turn, so a
+		// budget above that turn's own limit could only lengthen it.
+		if d > cfg.TestAgentTimeout {
+			return nil, fmt.Errorf("test_live_check_budget (%s) must not exceed test_agent_timeout (%s)", d, cfg.TestAgentTimeout)
+		}
+		cfg.TestLiveCheckBudget = d
+	}
+	if raw.TestCommandWrapper != nil {
+		if err := validateCommandWrapper("test_command_wrapper", *raw.TestCommandWrapper); err != nil {
+			return nil, err
+		}
+		cfg.TestCommandWrapper = copyCommandWrapper(*raw.TestCommandWrapper)
+	}
+	if raw.SideBySide != nil {
+		cfg.SideBySide = *raw.SideBySide
+	}
+	if raw.CIEndAtGreen != nil {
+		cfg.CIEndAtGreen = *raw.CIEndAtGreen
+	}
 	if raw.DaemonConnectTimeout != "" {
 		d, err := parsePositiveDuration("daemon_connect_timeout", raw.DaemonConnectTimeout)
 		if err != nil {
@@ -2818,6 +2968,17 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// trusted-only for the same reason no_ci is: a pushed branch must not
 		// waive the gate that certifies it.
 		effective.Test.AllowApproveOverFailure = trusted.Test.AllowApproveOverFailure
+		// test.surface_paths decides whether the live check runs for a change
+		// and test.environment steers the agent that runs it. Both are
+		// trusted-only for the reason test.instructions is: a pushed branch
+		// must not be able to switch off or rewrite the check that validates it.
+		effective.Test.SurfacePaths = append([]string(nil), trusted.Test.SurfacePaths...)
+		effective.Test.Environment = trusted.Test.Environment
+		// test.documentation_paths decides which commits may follow the tested
+		// one without the baseline running again, so a pushed branch must not
+		// be able to call its own code documentation. Nil and empty are kept
+		// apart: an empty list says nothing here is documentation.
+		effective.Test.DocumentationPaths = copyStringList(trusted.Test.DocumentationPaths)
 		// pr.base_branch controls where the contributor's PR lands, so it is
 		// trusted-only unless the repository explicitly opts into pushed
 		// settings alongside commands and agent selection. TitleFormat is a
@@ -2845,6 +3006,9 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Test.Prepare = false
 		effective.Test.BaseAttribution = false
 		effective.Test.AllowApproveOverFailure = ""
+		effective.Test.SurfacePaths = nil
+		effective.Test.Environment = ""
+		effective.Test.DocumentationPaths = nil
 		if !allowRepoCommands {
 			effective.PR.BaseBranch = ""
 		}
@@ -3130,7 +3294,43 @@ func validateTestRaw(test TestRaw) error {
 	if test.Evidence.MaxRuns != nil && *test.Evidence.MaxRuns < 0 {
 		return fmt.Errorf("test.evidence.max_runs must be 0 (keep every run) or greater, got %d", *test.Evidence.MaxRuns)
 	}
+	// An entry that can never match a git path would match nothing, and a list
+	// that matches nothing is exactly what skips the live check. Refuse it
+	// here instead of letting it read as "this change has no surface".
+	if err := validateRepositoryPathGlobs("test.surface_paths", test.SurfacePaths); err != nil {
+		return err
+	}
+	// A documentation entry that can never match would only make the baseline
+	// run again more often, which is safe, but it is still a mistake to name.
+	return validateRepositoryPathGlobs("test.documentation_paths", test.DocumentationPaths)
+}
+
+// validateRepositoryPathGlobs refuses entries that could never match a git
+// path: empty, a backslash path, a leading / or ./, or a malformed glob.
+func validateRepositoryPathGlobs(key string, patterns []string) error {
+	for i, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		switch {
+		case pattern == "":
+			return fmt.Errorf("%s[%d]: entry is empty", key, i)
+		case strings.Contains(pattern, "\\"):
+			return fmt.Errorf("%s[%d] %q: use forward slashes, as git paths do", key, i, pattern)
+		case strings.HasPrefix(pattern, "/") || strings.HasPrefix(pattern, "./"):
+			return fmt.Errorf("%s[%d] %q: paths are relative to the repository root, with no leading / or ./", key, i, pattern)
+		}
+		if err := validatePathInstructionGlob(pattern); err != nil {
+			return fmt.Errorf("%s[%d] %q: %w", key, i, pattern, err)
+		}
+	}
 	return nil
+}
+
+// copyStringList copies a list and keeps nil apart from empty.
+func copyStringList(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append([]string{}, values...)
 }
 
 // applyProvidersOverrides applies non-nil raw values onto resolved defaults.
@@ -3323,6 +3523,18 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	test.BaseAttribution = repo.Test.BaseAttribution
 	test.Instructions = strings.TrimSpace(repo.Test.Instructions)
 	test.AllowApproveOverFailure = strings.TrimSpace(repo.Test.AllowApproveOverFailure)
+	// Like the runbook, the surface list and the prepared environment describe
+	// ONE repository's product, so global config never supplies them.
+	for _, pattern := range repo.Test.SurfacePaths {
+		test.SurfacePaths = append(test.SurfacePaths, strings.TrimSpace(pattern))
+	}
+	test.Environment = strings.TrimSpace(repo.Test.Environment)
+	if repo.Test.DocumentationPaths != nil {
+		test.DocumentationPaths = []string{}
+		for _, pattern := range repo.Test.DocumentationPaths {
+			test.DocumentationPaths = append(test.DocumentationPaths, strings.TrimSpace(pattern))
+		}
+	}
 
 	commit := Commit{FixMessage: DefaultFixMessageTemplate}
 	if global.Commit.FixMessage != nil {
@@ -3378,6 +3590,10 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	if override != nil && override.PR.TitleFormat != nil {
 		pr.TitleFormat = *override.PR.TitleFormat
 	}
+	ciEndAtGreen := global.CIEndAtGreen
+	if override != nil && override.CI.EndAtGreen != nil {
+		ciEndAtGreen = *override.CI.EndAtGreen
+	}
 	if repo.PR.TitleFormat != nil {
 		pr.TitleFormat = *repo.PR.TitleFormat
 	}
@@ -3400,6 +3616,10 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		AgentWorkingTimeout:       global.AgentWorkingTimeout,
 		ReviewAgentWorkingTimeout: global.ReviewAgentWorkingTimeout,
 		TestAgentWorkingTimeout:   global.TestAgentWorkingTimeout,
+		TestLiveCheckBudget:       global.TestLiveCheckBudget,
+		TestCommandWrapper:        copyCommandWrapper(global.TestCommandWrapper),
+		SideBySide:                global.SideBySide,
+		CIEndAtGreen:              ciEndAtGreen,
 		GateReconcileInterval:     global.GateReconcileInterval,
 		GateReconcileTimeout:      global.GateReconcileTimeout,
 		LogLevel:                  global.LogLevel,

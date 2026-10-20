@@ -143,12 +143,13 @@ func TestNeutralizesGateInstructions_HonestOnEffectiveOverride(t *testing.T) {
 	if !NeutralizesGateInstructions(optOutAgent(t, types.AgentCodex, []string{"-c", "project_doc_max_bytes=0"})) {
 		t.Error("codex with an explicit project_doc_max_bytes=0 must stay neutralized")
 	}
-	// codex: project_doc_max_bytes>0 re-enables the doc -> fails closed.
-	if NeutralizesGateInstructions(optOutAgent(t, types.AgentCodex, []string{"-c", "project_doc_max_bytes=4096"})) {
-		t.Error("codex with project_doc_max_bytes=4096 must fail closed")
+	// codex: a global project_doc_max_bytes>0 cannot re-open the doc, because
+	// the opt-out's own 0 is passed after it and codex applies the later -c.
+	if !NeutralizesGateInstructions(optOutAgent(t, types.AgentCodex, []string{"-c", "project_doc_max_bytes=4096"})) {
+		t.Error("codex with a global project_doc_max_bytes=4096 must stay neutralized")
 	}
-	if err := EnsureGateNeutralized(optOutAgent(t, types.AgentCodex, []string{"-c", "project_doc_max_bytes=4096"})); err == nil {
-		t.Error("codex with the knob defeated must be refused by the gate")
+	if err := EnsureGateNeutralized(optOutAgent(t, types.AgentCodex, []string{"-c", "project_doc_max_bytes=4096"})); err != nil {
+		t.Errorf("codex with a global project_doc_max_bytes must be admitted: %v", err)
 	}
 	// claude: --setting-sources user preserves suppression -> admitted.
 	if !NeutralizesGateInstructions(optOutAgent(t, types.AgentClaude, []string{"--setting-sources", "user"})) {

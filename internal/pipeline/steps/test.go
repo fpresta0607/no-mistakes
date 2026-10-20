@@ -29,6 +29,11 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
+	// Under global side_by_side this step's work may have started beside the
+	// review. It is taken only when it is still what the step would do now.
+	if outcome, ok := takeSideLane(sctx, s.Name()); ok {
+		return outcome, nil
+	}
 	planSection, err := verificationPlanPromptSection(sctx)
 	if err != nil {
 		return nil, err
@@ -82,7 +87,10 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	var newTestsFromFix []string
 	var fixSummary string
 	var repairCut error
-	if sctx.Fixing && onlyTestBudgetCutFindings(sctx.PreviousFindings) {
+	if sctx.Fixing && onlyTestCommandNoTurnFindings(sctx.PreviousFindings) {
+		sctx.Log("fix selection holds only a test command that was given no turn; running it again without a repair turn...")
+		fixSummary = NoChangesAppliedSummary
+	} else if sctx.Fixing && onlyTestBudgetCutFindings(sctx.PreviousFindings) {
 		sctx.Log("fix selection holds only the Test agent budget cut; re-running validation without a repair turn...")
 		fixSummary = NoChangesAppliedSummary
 	} else if sctx.Fixing {
@@ -153,6 +161,7 @@ Previous test findings to address:
 	var baselineFindings []Finding
 	var baselineSummary string
 	var baselineExitCode int
+	var baselineNoTurn bool
 	var attributionSection string
 	if testCmd != "" || len(sctx.Config.CommandOverrides["test"].Additional) > 0 {
 		if err := ensurePrepared(sctx, s.Name()); err != nil {
@@ -173,7 +182,12 @@ Previous test findings to address:
 		}
 
 		projectedOutput := logConfiguredCommandOutput(sctx, output, types.StepTest)
-		if failed := failedChecks(results); len(failed) > 0 {
+		if refused := noTurnChecks(results); len(refused) > 0 {
+			baselineNoTurn = true
+			baselineFindings = append(baselineFindings, testCommandNoTurnFinding(refused[0]))
+			baselineSummary = projectedOutput
+			baselineExitCode = refused[0].ExitCode
+		} else if failed := failedChecks(results); len(failed) > 0 {
 			for _, result := range failed {
 				baselineFindings = append(baselineFindings, Finding{
 					Severity:    "error",
@@ -193,8 +207,32 @@ Previous test findings to address:
 			}
 		}
 	}
+	// The commit the baseline ran on, and whether it passed there, is what the
+	// Push step under side_by_side compares the head it is about to push with.
+	sctx.Shared.RecordBaseline(sctx.Run.HeadSHA, !baselineNoTurn && len(failedChecks(baselineResults)) == 0)
 	if repairCut != nil {
 		return testAgentTimeoutOutcome(sctx, repairCut, startHead, baselineFindings, baselineSummary, baselineExitCode), nil
+	}
+
+	// The machine gave the test command no turn, so there is no test result:
+	// nothing for a fix agent to repair, and no room for a live check either.
+	if baselineNoTurn {
+		findingsJSON, _ := json.Marshal(Findings{Items: baselineFindings, Summary: baselineSummary})
+		return &pipeline.StepOutcome{
+			NeedsApproval: true,
+			Findings:      string(findingsJSON),
+			ExitCode:      baselineExitCode,
+			FixSummary:    fixSummary,
+		}, nil
+	}
+
+	// The repository's own trusted rule can say this change has nothing to
+	// drive live. The baseline above has already run and still decides the step.
+	if skip, err := liveSurfaceUntouched(sctx, baseSHA); err != nil {
+		return nil, err
+	} else if skip {
+		findings := liveSurfaceSkipFindings(sctx, len(baselineResults) > 0)
+		return testStepOutcome(sctx, findings, tested, baselineFindings, baselineSummary, baselineExitCode, fixSummary, newTestsFromFix), nil
 	}
 
 	failedBaseline := failedChecks(baselineResults)
@@ -313,15 +351,29 @@ Rules:
 		reassessHistory,
 		agent.MemoryFilesRule,
 	)
-	findings, err := runTestAnalyzer(sctx, evidencePrompt)
+	evidencePrompt += liveCheckPromptSections(sctx, evidenceDir)
+	turn := beginLiveCheck(sctx, evidenceDir)
+	findings, err := runTestAnalyzer(turn.ctx, sctx, evidencePrompt)
+	turn.cancel()
+	if errors.Is(err, errTestLiveCheckBudget) {
+		if cut, ok := turn.completeAtBudget(sctx, evidenceDir); ok {
+			findings, err = cut, nil
+		}
+	}
 	if err != nil {
-		if errors.Is(err, errTestAgentTimeout) {
+		if errors.Is(err, errTestAgentTimeout) || errors.Is(err, errTestLiveCheckBudget) {
 			outcome := testAgentTimeoutOutcome(sctx, err, startHead, baselineFindings, baselineSummary, baselineExitCode)
 			outcome.FixSummary = fixSummary
 			return outcome, nil
 		}
 		return nil, err
 	}
+	return testStepOutcome(sctx, findings, tested, baselineFindings, baselineSummary, baselineExitCode, fixSummary, newTestsFromFix), nil
+}
+
+// testStepOutcome assembles the step's outcome from a live check's findings
+// (or the record of one that did not run) and this execution's baseline.
+func testStepOutcome(sctx *pipeline.StepContext, findings Findings, tested []string, baselineFindings []Finding, baselineSummary string, baselineExitCode int, fixSummary string, newTestsFromFix []string) *pipeline.StepOutcome {
 	if len(tested) > 0 {
 		findings.Tested = append(append([]string{}, tested...), findings.Tested...)
 	}
@@ -339,7 +391,7 @@ Rules:
 	// Record any new test files the agent wrote as informational (no-op)
 	// findings. Their presence alone is not an actionable problem, so they
 	// must not force the test step into approval when tests pass (issue #140).
-	newTests := mergeNewTestFiles(newTestsFromFix, detectNewTestFiles(ctx, sctx.WorkDir))
+	newTests := mergeNewTestFiles(newTestsFromFix, detectNewTestFiles(sctx.Ctx, sctx.WorkDir))
 	for _, f := range newTests {
 		findings.Items = append(findings.Items, Finding{
 			Severity:    "info",
@@ -356,7 +408,7 @@ Rules:
 		Findings:      string(findingsJSON),
 		ExitCode:      baselineExitCode,
 		FixSummary:    fixSummary,
-	}, nil
+	}
 }
 
 // testAnalyzerMaxAttempts is the number of evidence-analyzer invocations
@@ -368,7 +420,9 @@ Rules:
 // than correcting structured output.
 const testAnalyzerMaxAttempts = 3
 
-func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error) {
+// ctx bounds the turn: the step context, or a child of it that carries
+// test_live_check_budget.
+func runTestAnalyzer(ctx context.Context, sctx *pipeline.StepContext, prompt string) (Findings, error) {
 	current := prompt
 	var lastErr error
 	for attempt := 1; attempt <= testAnalyzerMaxAttempts; attempt++ {
@@ -381,14 +435,14 @@ func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error
 			))
 		}
 		timeout := testAgentTimeout(sctx)
-		result, err := sctx.RunAgentBudget(sctx.Ctx, timeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, agent.RunOpts{
+		result, err := sctx.RunAgentBudget(ctx, timeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, agent.RunOpts{
 			Prompt:     current,
 			CWD:        sctx.WorkDir,
 			JSONSchema: testFindingsSchema,
 			OnChunk:    sctx.LogChunk,
 		})
 		runErr := testAgentError(timeout, "agent run tests", err)
-		if runErr != nil && (errors.Is(runErr, errTestAgentTimeout) || sctx.Ctx.Err() != nil || !agent.IsStructuredOutputRejected(runErr)) {
+		if runErr != nil && (errors.Is(runErr, errTestAgentTimeout) || ctx.Err() != nil || !agent.IsStructuredOutputRejected(runErr)) {
 			return Findings{}, runErr
 		}
 
@@ -718,7 +772,49 @@ func answeredTestGate(sctx *pipeline.StepContext) Findings {
 // testBudgetCutIDs are the step-owned findings of a Test budget-cut park. They
 // are operator decisions, never defects for an agent to repair, so an agent's
 // own finding can never claim them.
-var testBudgetCutIDs = []string{types.FindingIDTestAgentTimeout, types.FindingIDTestAgentUnvalidatedWork}
+//
+// FindingIDTestCommandNoTurn rides the same rules for the same reason: a test
+// command the machine never ran is nothing a repair agent can repair, and the
+// step derives it again on every execution.
+var testBudgetCutIDs = []string{types.FindingIDTestAgentTimeout, types.FindingIDTestAgentUnvalidatedWork, types.FindingIDTestCommandNoTurn}
+
+// onlyTestCommandNoTurnFindings reports whether a fix selection holds nothing
+// but a test command that was given no turn.
+func onlyTestCommandNoTurnFindings(raw string) bool {
+	findings, err := types.ParseFindingsJSON(raw)
+	return err == nil && len(findings.Items) > 0 && len(types.ExcludeFindings(findings, []string{types.FindingIDTestCommandNoTurn}).Items) == 0
+}
+
+// noTurnChecks returns the checks the machine-local wrapper produced no
+// result for.
+func noTurnChecks(results []checkResult) []checkResult {
+	var refused []checkResult
+	for _, result := range results {
+		if result.NoTurn != "" {
+			refused = append(refused, result)
+		}
+	}
+	return refused
+}
+
+// testCommandNoTurnFinding parks the Test step on a test command that never
+// ran. It is a warning that asks for a decision, never an auto-fixable error:
+// there is no test result, so there is nothing to repair. It keeps the
+// test-command category so an approval is recorded as an approval over a
+// configured test command that did not pass.
+func testCommandNoTurnFinding(result checkResult) Finding {
+	return Finding{
+		ID:       types.FindingIDTestCommandNoTurn,
+		Severity: types.FindingSeverityWarning,
+		Action:   types.ActionAskUser,
+		Category: types.FindingCategoryTestCommand,
+		Description: fmt.Sprintf(
+			"The test command `%s` was given no turn on this machine, so it never ran and there is no test result. The wrapper reported: %s. "+
+				"Respond with fix to run it again; no repair agent is asked. "+
+				"Approving goes on without the baseline and is recorded as an approval over a test command that did not pass. Or abort.",
+			result.Command, result.NoTurn),
+	}
+}
 
 // onlyTestBudgetCutFindings reports whether a fix selection holds nothing but
 // a Test budget cut, which leaves the repair turn nothing to repair.
