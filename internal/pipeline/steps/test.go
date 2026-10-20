@@ -25,7 +25,25 @@ var _ pipeline.ApprovalOverrideVerifier = (*TestStep)(nil)
 
 func (s *TestStep) Name() types.StepName { return types.StepTest }
 
+// Execute runs the step with every agent it starts on a hidden desktop of its
+// own (see testDesktopGuidance), and names in its report every window a
+// program those agents started opened there. When no hidden desktop can be
+// created the step starts no agent at all, rather than one whose programs
+// would show on the user's screen.
 func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	desktop, err := newTestDesktop()
+	if err != nil {
+		return nil, fmt.Errorf("the test step starts its agents on a hidden desktop, so that no program they start shows on the user's screen, and could not create one: %w", err)
+	}
+	outcome, err := s.execute(sctx, desktop.Name())
+	if closeErr := desktop.Close(); closeErr != nil {
+		sctx.Log("warning: " + closeErr.Error())
+	}
+	opened, more := desktop.Windows()
+	return reportTestWindows(sctx, outcome, err, opened, more)
+}
+
+func (s *TestStep) execute(sctx *pipeline.StepContext, desktop string) (*pipeline.StepOutcome, error) {
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
@@ -120,7 +138,7 @@ Rules:
 			sctx.Run.Branch,
 			baseSHA,
 			sctx.Run.HeadSHA,
-			testScratchGuidance(scratchDir),
+			testScratchGuidance(scratchDir)+testDesktopGuidance(desktop),
 			historySection,
 		)
 		if repair := testRepairFindings(sctx.PreviousFindings); repair != "" {
@@ -135,6 +153,7 @@ Previous test findings to address:
 			Prompt:          fixPrompt,
 			FallbackSummary: "fix test failures",
 			RunAgent: func(runOpts agent.RunOpts) (*agent.Result, error) {
+				runOpts.Desktop = desktop
 				result, runErr := sctx.RunAgentBudget(sctx.Ctx, fixTimeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, runOpts)
 				if runErr != nil {
 					return nil, testAgentError(fixTimeout, "agent fix tests", runErr)
@@ -345,7 +364,7 @@ Rules:
 		sctx.Run.HeadSHA,
 		configuredTestCommand,
 		trustedRunbook,
-		testScratchGuidance(scratchDir),
+		testScratchGuidance(scratchDir)+testDesktopGuidance(desktop),
 		evidenceGuidance,
 		fallbackGuidance,
 		reassessHistory,
@@ -353,7 +372,7 @@ Rules:
 	)
 	evidencePrompt += liveCheckPromptSections(sctx, evidenceDir)
 	turn := beginLiveCheck(sctx, evidenceDir)
-	findings, err := runTestAnalyzer(turn.ctx, sctx, evidencePrompt)
+	findings, err := runTestAnalyzer(turn.ctx, sctx, evidencePrompt, desktop)
 	turn.cancel()
 	if errors.Is(err, errTestLiveCheckBudget) {
 		if cut, ok := turn.completeAtBudget(sctx, evidenceDir); ok {
@@ -421,8 +440,8 @@ func testStepOutcome(sctx *pipeline.StepContext, findings Findings, tested []str
 const testAnalyzerMaxAttempts = 3
 
 // ctx bounds the turn: the step context, or a child of it that carries
-// test_live_check_budget.
-func runTestAnalyzer(ctx context.Context, sctx *pipeline.StepContext, prompt string) (Findings, error) {
+// test_live_check_budget. Every turn starts on desktop (RunOpts.Desktop).
+func runTestAnalyzer(ctx context.Context, sctx *pipeline.StepContext, prompt, desktop string) (Findings, error) {
 	current := prompt
 	var lastErr error
 	for attempt := 1; attempt <= testAnalyzerMaxAttempts; attempt++ {
@@ -438,6 +457,7 @@ func runTestAnalyzer(ctx context.Context, sctx *pipeline.StepContext, prompt str
 		result, err := sctx.RunAgentBudget(ctx, timeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, agent.RunOpts{
 			Prompt:     current,
 			CWD:        sctx.WorkDir,
+			Desktop:    desktop,
 			JSONSchema: testFindingsSchema,
 			OnChunk:    sctx.LogChunk,
 		})

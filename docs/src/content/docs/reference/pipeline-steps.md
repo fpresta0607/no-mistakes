@@ -181,6 +181,11 @@ Local Test is never a repository-wide regression-suite substitute; broad regress
 - Every evidence and repair turn is given a disposable workspace: a `test-scratch` directory inside the run's evidence directory, outside the worktree.
   Its prompt directs everything the agent creates only to drive or check the change there, such as downloaded or built tools and browsers, their profiles and caches, throwaway scripts, data, and logs.
   The Test step deletes the directory itself when it returns, so nothing left there reaches a commit or outlives the step, and it is never published with the evidence.
+- On Windows every evidence and repair turn runs on a hidden desktop of the step's own, which nothing ever switches to.
+  The agent starts there, and so does every program it starts, because a process passes its desktop on to the processes it starts, so a window one of them opens never shows on the user's screen.
+  Its prompt forbids the starts that could still leave that desktop: a document or URL handed to a program already running on the user's desktop, Task Scheduler, WMI, a service or a COM server.
+  When the step cannot create the desktop it starts no agent, and an agent served by a long-lived server (OpenCode, Rovo Dev), which cannot start on one invocation's desktop, refuses the turn rather than start on the user's desktop.
+  Every visible window a program opened there is named in the step log and as an informational `no-op` finding, which does not change the step's result.
 - Before finishing, test agents are instructed to remove transient working-tree artifacts they created, such as downloaded models, caches, build outputs, large binaries, or generated data directories, while preserving intentional source or test-file changes and evidence files under the dedicated evidence directory.
 - Missing evidence for user intent can be reported as a warning with `action: ask-user`. When a host capability or OS permission is unavailable to the agent process, the agent is instructed to name the specific capability or permission and explain how to grant it before the test is rerun.
 - If the agent creates new test files (detected via `git status --porcelain`), they are recorded as informational `no-op` findings and do not require approval when tests pass.

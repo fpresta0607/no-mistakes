@@ -27,6 +27,9 @@ func (a *rovodevAgent) Name() string { return "rovodev" }
 func (a *rovodevAgent) ReportsAgentAttempts() bool { return true }
 
 func (a *rovodevAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
+	if opts.Desktop != "" {
+		return nil, serverDesktopRefusal("rovodev")
+	}
 	return runWithRetry(ctx, "rovodev", opts, claudeMaxRetries, classifyTransient, a.recoverTransientRetry, func() (*Result, error) {
 		return a.runOnce(ctx, opts)
 	})
