@@ -247,6 +247,7 @@ Pushes the validated branch to the configured push target.
 - Immediately before remote mutation, reloads the durable review-approved commit and refuses to push when that binding is missing, malformed, or unreachable
 - Requires the commit proposed for push to equal or descend from the review-approved commit, allowing commits made by later pipeline steps without authorizing unrelated history
 - Re-reads the push target via `git ls-remote` before pushing
+- On GitHub, refuses before uploading anything or refreshing an attestation when a commit it would publish carries a file larger than 100 MiB, and names each such file and its size. GitHub refuses that push only after receiving the whole upload. The commits checked are those the push target's current head and the worktree's remote-tracking refs do not already reach
 - Before pushing a non-base branch, refreshes an existing PR attestation using the [pre-push attestation protocol](#pipeline-step-attestation), which owns provider coverage, snapshot selection, and failure behavior.
 - For existing branches, refuses to force-push when the live remote carries commits the pipeline has not incorporated by patch-id
 - Fails closed when the remote safety check cannot verify whether the push would discard existing remote work

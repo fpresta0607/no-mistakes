@@ -351,6 +351,106 @@ func TestPushStep_ReconcilesStaleDatabaseHeadSHA(t *testing.T) {
 	}
 }
 
+// On GitHub, Push refuses before uploading anything, and before it attests the
+// head in the PR body, when a commit it would publish carries a file larger
+// than GitHub's 100 MiB limit, and names the file and its size (#1124). An
+// agent's own commit puts such a file past the staging guard, and uploading it
+// could only end in GitHub's refusal or a timeout.
+func TestPushStep_RefusesAFileOverGitHubsLimitBeforeUploading(t *testing.T) {
+	const file = ".test-local/chrome-win64/chrome.dll"
+	for _, tc := range []struct {
+		name           string
+		size           int64
+		isGitHub       bool
+		isRemovedLater bool
+		isRefused      bool
+	}{
+		{name: "at_the_limit", size: githubMaxFileBytes, isGitHub: true},
+		{name: "over_the_limit", size: githubMaxFileBytes + 1, isGitHub: true, isRefused: true},
+		{name: "over_the_limit_in_an_earlier_commit", size: githubMaxFileBytes + 1, isGitHub: true, isRemovedLater: true, isRefused: true},
+		{name: "over_the_limit_on_another_forge", size: githubMaxFileBytes + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := t.TempDir()
+			gitCmd(t, upstream, "init", "--bare")
+			dir, baseSHA, priorHead := setupGitRepo(t)
+			gitCmd(t, dir, "remote", "add", "origin", upstream)
+			gitCmd(t, dir, "push", "origin", "main")
+			gitCmd(t, dir, "push", "origin", "feature")
+			// Uncompressed objects keep the 100 MiB fixture quick to hash and push.
+			gitCmd(t, dir, "config", "core.compression", "0")
+			writeFileOfSize(t, filepath.Join(dir, filepath.FromSlash(file)), tc.size)
+			gitCmd(t, dir, "add", "-A")
+			gitCmd(t, dir, "commit", "-m", "agent commits its browser build")
+			blob := gitCmd(t, dir, "rev-parse", "HEAD:"+file)
+			if tc.isRemovedLater {
+				gitCmd(t, dir, "rm", "-q", file)
+				gitCmd(t, dir, "commit", "-m", "agent removes its browser build")
+			}
+			head := gitCmd(t, dir, "rev-parse", "HEAD")
+
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, priorHead, config.Commands{})
+			setupGateMirror(t, sctx)
+			recordReviewApproval(t, sctx, head)
+			priorAttestedBody := compliantPipelineBody(t, priorHead)
+			bodyFile := filepath.Join(t.TempDir(), "pr-body.md")
+			if err := os.WriteFile(bodyFile, []byte(priorAttestedBody), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.isGitHub {
+				// The push still goes to origin, the local upstream.
+				prURL := "https://github.com/test/repo/pull/42"
+				sctx.Repo.UpstreamURL = "https://github.com/test/repo"
+				sctx.Run.PRURL = &prURL
+				sctx.Env = append(fakeCIGH(t, "OPEN", `[]`),
+					`FAKE_CLI_PR_LIST_JSON=[{"number":42,"url":"https://github.com/test/repo/pull/42","baseRefName":"main"}]`,
+					"FAKE_CLI_PR_BODY_FILE="+bodyFile,
+					"FAKE_CLI_PR_TITLE=fix: existing pr",
+				)
+			} else {
+				sctx.Repo.UpstreamURL = upstream
+			}
+
+			_, err := (&PushStep{}).Execute(sctx)
+
+			isUploaded := exec.Command("git", "-C", upstream, "cat-file", "-e", blob).Run() == nil
+			if !tc.isRefused {
+				if err != nil {
+					t.Fatalf("push failed: %v", err)
+				}
+				if !isUploaded {
+					t.Fatal("the pushed branch's file did not reach the remote")
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("expected Push to refuse a file over GitHub's limit")
+			}
+			for _, want := range []string{file, fmt.Sprintf("%d bytes", tc.size)} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal %q does not name %q", err, want)
+				}
+			}
+			if isUploaded {
+				t.Error("the oversized file reached the remote")
+			}
+			if remoteHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); remoteHead != priorHead {
+				t.Errorf("remote head = %s, want it left at %s", remoteHead, priorHead)
+			}
+			if body, err := os.ReadFile(bodyFile); err != nil || string(body) != priorAttestedBody {
+				t.Errorf("a refused push rewrote the PR attestation (read error %v)", err)
+			}
+			dbRun, err := sctx.DB.GetRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if dbRun.LastPushedSHA != nil {
+				t.Errorf("a refused push recorded a publication at %s", *dbRun.LastPushedSHA)
+			}
+		})
+	}
+}
+
 func TestPushStep_DoesNotPublishTestEvidenceIntoThePushedBranch(t *testing.T) {
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
