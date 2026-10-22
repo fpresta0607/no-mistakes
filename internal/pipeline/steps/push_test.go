@@ -672,6 +672,41 @@ func TestPushStep_CommitsLeftoverChangesWhenLegacyHuskyRuntimeIsMissing(t *testi
 	}
 }
 
+// Push's leftover commit takes agents' and the formatter's edits, never an
+// untracked file an earlier step left in the worktree (#1316).
+func TestPushStep_LeavesUntrackedFilesEarlierStepsLeftOutOfItsCommit(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+	probe := filepath.Join(dir, ".nm-live", "probe.log")
+	writeTestFile(t, probe, "live probe output\n")
+	writeTestFile(t, filepath.Join(dir, "feature.txt"), "formatted feature code\n")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	setupGateMirror(t, sctx)
+	recordReviewApproval(t, sctx, headSHA)
+
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatalf("push failed: %v", err)
+	}
+
+	pushed := gitCmd(t, upstream, "rev-parse", "refs/heads/feature")
+	if got := gitCmd(t, upstream, "show", pushed+":feature.txt"); got != "formatted feature code" {
+		t.Errorf("pushed feature.txt = %q, want the leftover edit", got)
+	}
+	if files := gitCmd(t, upstream, "ls-tree", "-r", "--name-only", pushed); strings.Contains(files, ".nm-live") {
+		t.Errorf("the pushed branch carries the probe output an earlier step left:\n%s", files)
+	}
+	if _, err := os.Stat(probe); err != nil {
+		t.Errorf("the probe output must stay in the run worktree as the step left it: %v", err)
+	}
+}
+
 // TestPushStep_AllowsForcePushAfterMidRunRebaseOverPriorPushedGeneration (Issue #837)
 // reproduces the exact pipeline sequence:
 // 1. Generation 1 pushed gen1Head to the remote.

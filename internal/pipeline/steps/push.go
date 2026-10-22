@@ -34,6 +34,13 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
 
+	// What the steps before Push left untracked is never committed here: their
+	// own commits took what their turns wrote (see stagePipelineChanges).
+	before, err := untrackedFiles(sctx)
+	if err != nil {
+		return nil, err
+	}
+
 	// Run format command if configured (before committing, so changes are formatted).
 	if fmtCmd := sctx.Config.Commands.Format; fmtCmd != "" {
 		if err := ensurePrepared(sctx, s.Name()); err != nil {
@@ -58,7 +65,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	if strings.TrimSpace(status) != "" {
 		sctx.Log("committing agent changes...")
-		if err := stagePipelineChanges(sctx); err != nil {
+		if err := stagePipelineChanges(sctx, before); err != nil {
 			return nil, fmt.Errorf("stage agent changes: %w", err)
 		}
 		if err := commitPipelineCorrection(ctx, sctx.WorkDir, "no-mistakes: apply agent fixes", sctx.Log); err != nil {

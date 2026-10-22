@@ -60,6 +60,37 @@ func TestDocumentStep_AgentManaged_FixesAndCommitsWithoutApproval(t *testing.T) 
 	}
 }
 
+// The documentation commit holds what its own turn wrote, never an untracked
+// file an earlier step left in the worktree (#1316): before, its catch-all
+// staging carried a Test turn's leftovers into "no-mistakes(document)" commits.
+func TestDocumentStep_CommitLeavesOutUntrackedFilesEarlierStepsLeft(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	leftBehind := filepath.Join(dir, ".validation", "live-check.log")
+	writeTestFile(t, leftBehind, "probe output\n")
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			writeTestFile(t, filepath.Join(dir, "README.md"), "# Updated\n")
+			writeTestFile(t, filepath.Join(dir, "docs", "feature.md"), "# Feature\n")
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"document the feature"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := (&DocumentStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := gitCmd(t, dir, "show", "--name-only", "--pretty=format:", "HEAD"); got != "README.md\ndocs/feature.md" {
+		t.Errorf("the documentation commit carries %q, want only README.md and docs/feature.md", got)
+	}
+	if _, err := os.Stat(leftBehind); err != nil {
+		t.Errorf("the earlier step's file must stay in the run worktree: %v", err)
+	}
+}
+
 func TestDocumentStep_AgentManaged_NormalizesMultilineCommitSummary(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

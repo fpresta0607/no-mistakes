@@ -38,7 +38,7 @@ func TestCommitAgentFixes_AppendsTrailersForTheAgentThatRan(t *testing.T) {
 	writeAgentChange(t, dir)
 
 	producer := &agent.Result{Provider: "codex", Model: "gpt-5.5"}
-	if _, err := commitAgentFixesWithResult(sctx, types.StepReview, "repair widget", "fallback", producer); err != nil {
+	if _, err := commitAgentFixesWithResult(sctx, types.StepReview, "repair widget", "fallback", producer, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := lastCommitMessage(t, dir), "no-mistakes(review): repair widget"; got != want {
@@ -59,7 +59,7 @@ func TestCommitAgentFixes_TrailersFallBackToStepAgentName(t *testing.T) {
 
 	// A single configured agent is the bare adapter, which leaves Provider empty.
 	producer := &agent.Result{Model: "claude-opus-5-5"}
-	if _, err := commitAgentFixesWithResult(sctx, types.StepLint, "fix lint", "fallback", producer); err != nil {
+	if _, err := commitAgentFixesWithResult(sctx, types.StepLint, "fix lint", "fallback", producer, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := gitTrailers(t, dir), "Assisted-by: no-mistakes:claude:claude-opus-5-5"; got != want {
@@ -90,7 +90,7 @@ func TestCommitAgentFixes_InvalidTrailerDoesNotStageChanges(t *testing.T) {
 	sctx.Config.Commit = config.Commit{Trailers: []string{"not a trailer"}}
 	writeAgentChange(t, dir)
 
-	if _, err := commitAgentFixesWithResult(sctx, types.StepReview, "repair widget", "fallback", &agent.Result{}); err == nil {
+	if _, err := commitAgentFixesWithResult(sctx, types.StepReview, "repair widget", "fallback", &agent.Result{}, nil); err == nil {
 		t.Fatal("commitAgentFixesWithResult() accepted an invalid commit.trailers entry")
 	}
 	if got := gitCmd(t, dir, "diff", "--cached", "--name-only"); got != "" {
@@ -111,7 +111,7 @@ func TestCIStep_CommitRepairAppendsTrailers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	repair, err := (&CIStep{}).commitRepair(sctx, "repair failing checks", &agent.Result{Provider: "grok", Model: "grok-5"})
+	repair, err := (&CIStep{}).commitRepair(sctx, "repair failing checks", &agent.Result{Provider: "grok", Model: "grok-5"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

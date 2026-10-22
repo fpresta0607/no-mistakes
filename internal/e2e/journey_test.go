@@ -1168,12 +1168,10 @@ func assertAgentEditCommitRun(t *testing.T, h *Harness) {
 	if strings.TrimSpace(string(message)) != "no-mistakes: apply agent fixes" {
 		t.Fatalf("agent-edits upstream commit message = %q", strings.TrimSpace(string(message)))
 	}
-	contents, err := h.runGit(ctx, h.UpstreamDir, "show", "refs/heads/agent-edits:agent-edit.txt")
-	if err != nil {
-		t.Fatalf("read committed agent edit from upstream: %v\n%s", err, contents)
-	}
-	if string(contents) != "agent edited\n" {
-		t.Fatalf("agent-edit.txt contents = %q", string(contents))
+	// The review turn, which corrects nothing, wrote agent-edit.txt first, so no
+	// later commit takes it (#1316); Push commits what its own formatter wrote.
+	if contents, err := h.runGit(ctx, h.UpstreamDir, "show", "refs/heads/agent-edits:agent-edit.txt"); err == nil {
+		t.Fatalf("agent-edit.txt, which an earlier step left untracked, reached the pushed branch: %q", string(contents))
 	}
 	formatted, err := h.runGit(ctx, h.UpstreamDir, "show", "refs/heads/agent-edits:formatted-by-push.txt")
 	if err != nil {
@@ -1810,19 +1808,13 @@ func assertTestAgentNewTestFileRun(t *testing.T, h *Harness) {
 	t.Helper()
 	h.CommitChange("test-agent-new-test-file", "test-agent-new-test-file.txt", "test agent new test file\n", "add test agent new test file")
 	h.PushToGate("test-agent-new-test-file")
-	// Issue #140: a passing test run whose only finding is an informational
-	// "new test file written by agent" note must not gate on approval; the run
-	// proceeds automatically to completion.
-	run := h.WaitForRun("test-agent-new-test-file", 60*time.Second)
-	if run.Status != types.RunCompleted {
-		t.Fatalf("test-agent-new-test-file run status = %s, want completed; error=%v", run.Status, deref(run.Error))
-	}
+	// Issue #140 records a test file the evidence turn wrote as an
+	// informational note. Left untracked, no commit takes it (#1316), so the
+	// step parks naming it, and approving goes on without it.
+	run := waitForStepStatus(t, h, "test-agent-new-test-file", types.StepTest, types.StepStatusAwaitingApproval, 60*time.Second)
 	testStep, ok := findStep(run.Steps, types.StepTest)
 	if !ok {
 		t.Fatal("expected test step in test-agent-new-test-file run")
-	}
-	if testStep.Status != types.StepStatusCompleted {
-		t.Fatalf("test step status = %s, want completed", testStep.Status)
 	}
 	if testStep.FindingsJSON == nil {
 		t.Fatal("expected test step to record findings JSON for new test file")
@@ -1831,21 +1823,30 @@ func assertTestAgentNewTestFileRun(t *testing.T, h *Harness) {
 	if err != nil {
 		t.Fatalf("parse new test file findings: %v", err)
 	}
-	if len(findings.Items) != 1 {
-		t.Fatalf("expected one new test file finding, got %+v", findings.Items)
+	var note, left *types.Finding
+	for i := range findings.Items {
+		switch item := &findings.Items[i]; {
+		case strings.Contains(item.Description, "new test file written by agent: agent_test.py"):
+			note = item
+		case strings.HasPrefix(item.Description, "The Test step left untracked files in the run worktree"):
+			left = item
+		}
 	}
-	item := findings.Items[0]
-	if item.Severity != "info" {
-		t.Fatalf("new test file finding severity = %q, want info", item.Severity)
+	if note == nil || note.Severity != "info" || note.Action != types.ActionNoOp || note.File != "agent_test.py" {
+		t.Fatalf("new test file finding = %+v, want an info no-op note for agent_test.py in %+v", note, findings.Items)
 	}
-	if item.Action != types.ActionNoOp {
-		t.Fatalf("new test file finding action = %q, want no-op", item.Action)
+	if left == nil || left.Severity != types.FindingSeverityWarning || left.Action != types.ActionAskUser || !strings.Contains(left.Description, "agent_test.py") {
+		t.Fatalf("left-files finding = %+v, want an ask-user warning naming agent_test.py in %+v", left, findings.Items)
 	}
-	if item.File != "agent_test.py" {
-		t.Fatalf("new test file finding file = %q, want agent_test.py", item.File)
+	h.Respond(run.ID, types.StepTest, types.ActionApprove)
+	completed := h.WaitForRun("test-agent-new-test-file", 60*time.Second)
+	if completed.Status != types.RunCompleted {
+		t.Fatalf("test-agent-new-test-file run status after approval = %s, want completed; error=%v", completed.Status, deref(completed.Error))
 	}
-	if !strings.Contains(item.Description, "new test file written by agent: agent_test.py") {
-		t.Fatalf("new test file finding description = %q", item.Description)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if contents, err := h.runGit(ctx, h.UpstreamDir, "show", "refs/heads/test-agent-new-test-file:agent_test.py"); err == nil {
+		t.Fatalf("agent_test.py, which the evidence turn left untracked, reached the pushed branch: %q", string(contents))
 	}
 }
 

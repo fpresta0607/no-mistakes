@@ -29,7 +29,8 @@ func (s *TestStep) Name() types.StepName { return types.StepTest }
 // own (see testDesktopGuidance), and names in its report every window a
 // program those agents started opened there. When no hidden desktop can be
 // created the step starts no agent at all, rather than one whose programs
-// would show on the user's screen.
+// would show on the user's screen. It parks naming every untracked file it
+// left in the worktree (see reportLeftUntracked).
 func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	desktop, err := newTestDesktop()
 	if err != nil {
@@ -38,12 +39,65 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	// A side lane recovers a panic in its step, so the desktop is closed on
 	// that path too. Close is idempotent.
 	defer desktop.Close()
+	before, err := untrackedFiles(sctx)
+	if err != nil {
+		return nil, err
+	}
 	outcome, err := s.execute(sctx, desktop.Name())
 	if closeErr := desktop.Close(); closeErr != nil {
 		sctx.Log("warning: " + closeErr.Error())
 	}
 	opened, more := desktop.Windows()
-	return reportTestWindows(sctx, outcome, err, opened, more)
+	outcome, err = reportTestWindows(sctx, outcome, err, opened, more)
+	return reportLeftUntracked(sctx, before, outcome, err)
+}
+
+// reportLeftUntracked parks the step when its execution left untracked files
+// in the worktree that before, the files it held when the step started, does
+// not name. No commit takes such a file, since a commit leaves out what its own
+// turn did not write (see stagePipelineChanges), so the step says what it left
+// rather than finishing as though the worktree were clean.
+func reportLeftUntracked(sctx *pipeline.StepContext, before []string, outcome *pipeline.StepOutcome, err error) (*pipeline.StepOutcome, error) {
+	if err != nil || outcome == nil {
+		return outcome, err
+	}
+	after, err := untrackedFiles(sctx)
+	if err != nil {
+		return nil, err
+	}
+	held := make(map[string]bool, len(before))
+	for _, file := range before {
+		held[file] = true
+	}
+	var left []string
+	for _, file := range after {
+		if !held[file] {
+			left = append(left, file)
+		}
+	}
+	if len(left) == 0 {
+		return outcome, nil
+	}
+	item := Finding{
+		Severity: types.FindingSeverityWarning,
+		Action:   types.ActionAskUser,
+		Description: fmt.Sprintf(
+			"The Test step left untracked files in the run worktree (%d): %s. no-mistakes never commits a file its own commands or agents leave behind, only what a fix writes, so they stay out of the branch; list them with `git -C %s status --untracked-files=all`. Approve to go on without them; a file that belongs in the change reaches the branch only through a commit of your own.",
+			len(left), namedPaths(left), sctx.WorkDir),
+	}
+	sctx.Log(item.Description)
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		return nil, fmt.Errorf("name the files the test step left in its findings: %w", err)
+	}
+	findings.Items = append(findings.Items, item)
+	findingsJSON, err := json.Marshal(findings)
+	if err != nil {
+		return nil, fmt.Errorf("name the files the test step left in its findings: %w", err)
+	}
+	outcome.Findings = string(findingsJSON)
+	outcome.NeedsApproval = true
+	return outcome, nil
 }
 
 func (s *TestStep) execute(sctx *pipeline.StepContext, desktop string) (*pipeline.StepOutcome, error) {
@@ -79,6 +133,13 @@ func (s *TestStep) execute(sctx *pipeline.StepContext, desktop string) (*pipelin
 			sctx.Log(fmt.Sprintf("warning: failed to remove test scratch dir %s: %v", scratchDir, err))
 		}
 	}()
+	// Every command and agent this step starts keeps its temporary files there
+	// too. A test command once inherited a temporary directory that no longer
+	// existed, its agent pointed TEMP into the worktree instead, and the runs
+	// left 597 files in it (fpresta0607/code-goblins#1316).
+	env := sctx.Env
+	sctx.Env = append(append([]string(nil), env...), "TMP="+scratchDir, "TEMP="+scratchDir, "TMPDIR="+scratchDir)
+	defer func() { sctx.Env = env }()
 
 	// Agent-only preparation is an explicit eager opt-in, not a claim from
 	// the agent that dependencies exist. Use the same worktree receipt and
@@ -157,6 +218,7 @@ Previous test findings to address:
 			FallbackSummary: "fix test failures",
 			RunAgent: func(runOpts agent.RunOpts) (*agent.Result, error) {
 				runOpts.Desktop = desktop
+				runOpts.Env = sctx.Env
 				result, runErr := sctx.RunAgentBudget(sctx.Ctx, fixTimeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, runOpts)
 				if runErr != nil {
 					return nil, testAgentError(fixTimeout, "agent fix tests", runErr)
@@ -355,7 +417,7 @@ Rules:
 - Do NOT run linters, formatters, or static analysis tools.
 - Focus on testing and test-related fixes only.
 - A generic driver or user instruction asking for broad or full-suite confirmation does NOT override the targeted-validation product boundary.
-- Before finishing, remove any transient artifacts your testing created in the working tree (downloaded models, caches, build outputs, large binaries, or generated data directories) so they are not committed and pushed. Do not remove intentional source or test-file changes, leave evidence files in the dedicated evidence directory untouched, and do not remove dependencies materialized by commands.prepare because later configured commands share them.
+- Before finishing, remove any transient artifacts your testing created in the working tree (downloaded models, caches, build outputs, large binaries, or generated data directories): no-mistakes never commits a file this turn adds to the worktree, and one left there stops the step for a human decision. Do not remove intentional source or test-file changes, leave evidence files in the dedicated evidence directory untouched, and do not remove dependencies materialized by commands.prepare because later configured commands share them.
 - Keep "testing_summary" high-signal and natural language. Avoid raw logs and noisy counts.
 - Always return a non-empty "tested" array describing what you exercised, even when every scenario passes.
 - Only report actionable findings: scenario or test failures, unfixable setup issues, flaky tests you identified, or missing evidence that prevents you from demonstrating the user intent at all.
@@ -460,6 +522,7 @@ func runTestAnalyzer(ctx context.Context, sctx *pipeline.StepContext, prompt, de
 		result, err := sctx.RunAgentBudget(ctx, timeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, agent.RunOpts{
 			Prompt:     current,
 			CWD:        sctx.WorkDir,
+			Env:        sctx.Env,
 			Desktop:    desktop,
 			JSONSchema: testFindingsSchema,
 			OnChunk:    sctx.LogChunk,
@@ -921,12 +984,7 @@ func unvalidatedTestWork(sctx *pipeline.StepContext, validatedHead string) strin
 	if err != nil {
 		parts = append(parts, fmt.Sprintf("a worktree status that could not be read (%v)", err))
 	} else if changed := porcelainPaths(status); len(changed) > 0 {
-		const maxNamed = 10
-		named := strings.Join(changed[:min(len(changed), maxNamed)], ", ")
-		if len(changed) > maxNamed {
-			named += fmt.Sprintf(" and %d more", len(changed)-maxNamed)
-		}
-		parts = append(parts, fmt.Sprintf("uncommitted changes to %s (inspect with `git -C %s status` and `git -C %s diff`)", named, dir, dir))
+		parts = append(parts, fmt.Sprintf("uncommitted changes to %s (inspect with `git -C %s status` and `git -C %s diff`)", namedPaths(changed), dir, dir))
 	}
 	return strings.Join(parts, "; ")
 }

@@ -743,9 +743,14 @@ func TestPushStep_PreparesFormatterWithPendingUntrackedChanges(t *testing.T) {
 	if _, err := (&PushStep{}).Execute(sctx); err != nil {
 		t.Fatalf("push with pending formatter input: %v", err)
 	}
+	// Preparation keeps the pending file; Push does not commit it, since an
+	// earlier step left it untracked (#1316).
+	if got, err := os.ReadFile(filepath.Join(dir, "pending_test.go")); err != nil || string(got) != "package pending\n" {
+		t.Fatalf("pending test file after preparation = %q (%v), want preserved content", got, err)
+	}
 	pushedHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature")
-	if got := gitCmd(t, upstream, "show", pushedHead+":pending_test.go"); got != "package pending" {
-		t.Fatalf("pushed pending test file = %q, want preserved content", got)
+	if files := gitCmd(t, upstream, "ls-tree", "--name-only", pushedHead); strings.Contains(files, "pending_test.go") {
+		t.Fatalf("Push committed the pending untracked file an earlier step left:\n%s", files)
 	}
 	if got := gitCmd(t, upstream, "show", pushedHead+":feature.txt"); !strings.Contains(got, "formatted") {
 		t.Fatalf("formatter output missing from pushed feature.txt: %q", got)

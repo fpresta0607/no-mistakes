@@ -16,12 +16,26 @@ const githubMaxFileBytes = 100 << 20
 // stagePipelineChanges guards every pipeline-owned catch-all staging path,
 // including Push's leftover commit. Refusal preserves the index and worktree.
 //
-// An untracked file larger than githubMaxFileBytes is left out, unstaged and
-// unhashed, and named in the step log. Such a file is an agent's disposable
+// before lists the untracked files the worktree held when the work being
+// committed began, as untrackedFiles read them. Those files are left out,
+// unstaged, and named in the step log: a correction commits the files its own
+// turn wrote, never what an earlier step left behind. A Test evidence turn
+// once left a Home Assistant runtime, a downloaded tool and copied third-party
+// source in the worktree, a test command left its scratch beside them, and
+// the next fix round's `git add -A` committed 636 of those files to the branch
+// (fpresta0607/code-goblins#1316). A nil before leaves no file out for that
+// reason.
+//
+// An untracked file larger than githubMaxFileBytes is left out too, unstaged
+// and unhashed, and named in the step log. Such a file is an agent's disposable
 // artifact rather than a correction: a Test agent whose cleanup was refused
 // left a whole Chrome build in the worktree, `git add -A` committed its 302 MB
 // chrome.dll, and the push could never succeed (#1076).
-func stagePipelineChanges(sctx *pipeline.StepContext) error {
+func stagePipelineChanges(sctx *pipeline.StepContext, before []string) error {
+	leftBehind := make(map[string]bool, len(before))
+	for _, file := range before {
+		leftBehind[file] = true
+	}
 	if len(sctx.Config.ProtectedPaths) > 0 {
 		// Disable renames so both source and destination are checked, and list
 		// individual untracked files so a protected path inside a new directory
@@ -38,6 +52,9 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 				return fmt.Errorf("check protected_paths: invalid git status entry %q", entry)
 			}
 			file := entry[3:]
+			if entry[:2] == "??" && leftBehind[file] {
+				continue
+			}
 			for _, pattern := range sctx.Config.ProtectedPaths {
 				if matchIgnorePattern(file, pattern) {
 					return &pipeline.ProtectedPathError{Path: file, Rule: pattern}
@@ -45,45 +62,72 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 			}
 		}
 	}
-	oversized, err := oversizedUntrackedFiles(sctx)
+	untracked, err := untrackedFiles(sctx)
 	if err != nil {
 		return err
 	}
-	addArgs := []string{"add", "-A"}
-	if len(oversized) > 0 {
-		addArgs = append(addArgs, "--", ".")
-		for _, file := range oversized {
-			addArgs = append(addArgs, ":(exclude,literal)"+file)
-		}
-		sctx.Log(fmt.Sprintf("left untracked files larger than GitHub's 100 MiB limit out of the commit: %s", strings.Join(oversized, ", ")))
-	}
-	if _, err := stepGitRun(sctx, addArgs...); err != nil {
-		return err
-	}
-	return unstageSubmodulePointerMoves(sctx)
-}
-
-// oversizedUntrackedFiles lists the untracked files `git add -A` would stage
-// that are larger than githubMaxFileBytes.
-func oversizedUntrackedFiles(sctx *pipeline.StepContext) ([]string, error) {
-	untracked, err := stepGitRunRaw(sctx, "ls-files", "--others", "--exclude-standard", "-z")
-	if err != nil {
-		return nil, fmt.Errorf("list untracked files: %w", err)
-	}
-	var oversized []string
-	for _, file := range strings.Split(strings.TrimSuffix(untracked, "\x00"), "\x00") {
-		if file == "" {
+	var notMade, oversized []string
+	for _, file := range untracked {
+		if leftBehind[file] {
+			notMade = append(notMade, file)
 			continue
 		}
 		info, err := os.Lstat(filepath.Join(sctx.WorkDir, filepath.FromSlash(file)))
 		if err != nil {
-			return nil, fmt.Errorf("check untracked file size: %w", err)
+			return fmt.Errorf("check untracked file size: %w", err)
 		}
 		if info.Mode().IsRegular() && info.Size() > githubMaxFileBytes {
 			oversized = append(oversized, file)
 		}
 	}
-	return oversized, nil
+	if len(notMade) > 0 {
+		sctx.Log(fmt.Sprintf("left the untracked files the worktree held before this change out of the commit (%d): %s", len(notMade), namedPaths(notMade)))
+	}
+	if len(oversized) > 0 {
+		sctx.Log(fmt.Sprintf("left untracked files larger than GitHub's 100 MiB limit out of the commit: %s", strings.Join(oversized, ", ")))
+	}
+	if len(notMade) == 0 && len(oversized) == 0 {
+		if _, err := stepGitRun(sctx, "add", "-A"); err != nil {
+			return err
+		}
+		return unstageSubmodulePointerMoves(sctx)
+	}
+	// The exclusions go on standard input: a step can leave hundreds of files
+	// behind, and as arguments their paths would overrun Windows' command line.
+	pathspecs := []string{"."}
+	for _, file := range append(notMade, oversized...) {
+		pathspecs = append(pathspecs, ":(exclude,literal)"+file)
+	}
+	if _, err := stepGitRunInput(sctx, strings.Join(pathspecs, "\x00"), "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
+		return err
+	}
+	return unstageSubmodulePointerMoves(sctx)
+}
+
+// untrackedFiles lists the files `git add -A` would stage that git does not
+// track yet.
+func untrackedFiles(sctx *pipeline.StepContext) ([]string, error) {
+	out, err := stepGitRunRaw(sctx, "ls-files", "--others", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, fmt.Errorf("list untracked files: %w", err)
+	}
+	var files []string
+	for _, file := range strings.Split(strings.TrimSuffix(out, "\x00"), "\x00") {
+		if file != "" {
+			files = append(files, file)
+		}
+	}
+	return files, nil
+}
+
+// namedPaths names the first ten paths and counts the rest.
+func namedPaths(paths []string) string {
+	const maxNamed = 10
+	named := strings.Join(paths[:min(len(paths), maxNamed)], ", ")
+	if len(paths) > maxNamed {
+		named += fmt.Sprintf(" and %d more", len(paths)-maxNamed)
+	}
+	return named
 }
 
 // unstageSubmodulePointerMoves keeps catch-all staging from recording a
