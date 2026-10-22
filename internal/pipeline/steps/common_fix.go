@@ -388,13 +388,15 @@ func stagedChangesPresent(gitRun gitRunner) (bool, error) {
 }
 
 func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string) error {
-	_, err := commitAgentFixesWithResult(sctx, stepName, summary, fallbackSummary, nil)
+	_, err := commitAgentFixesWithResult(sctx, stepName, summary, fallbackSummary, nil, nil)
 	return err
 }
 
 // commitAgentFixesWithResult commits the worktree changes left by producer, the
 // agent invocation that made them. A nil producer commits without trailers.
-func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string, producer *agent.Result) (bool, error) {
+// before lists the untracked files the worktree held before producer started,
+// which stay out of the commit (see stagePipelineChanges).
+func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string, producer *agent.Result, before []string) (bool, error) {
 	ctx := sctx.Ctx
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
 		return false, err
@@ -425,7 +427,7 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	if err != nil {
 		return false, fmt.Errorf("render %s fix commit trailers: %w", stepName, err)
 	}
-	if err := stagePipelineChanges(sctx); err != nil {
+	if err := stagePipelineChanges(sctx, before); err != nil {
 		return false, fmt.Errorf("stage %s changes: %w", stepName, err)
 	}
 	headBeforeCommit, err := git.HeadSHA(ctx, sctx.WorkDir)
@@ -532,8 +534,11 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		Purpose:    purpose,
 		Workload:   opts.Workload,
 	}
+	before, err := untrackedFiles(sctx)
+	if err != nil {
+		return "", err
+	}
 	var result *agent.Result
-	var err error
 	if opts.RunAgent != nil {
 		result, err = opts.RunAgent(runOpts)
 	} else {
@@ -557,7 +562,7 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		}
 		sctx.Log(fmt.Sprintf("warning: could not parse fix summary: %v", err))
 	}
-	committed, err := commitAgentFixesWithResult(sctx, stepName, summary, opts.FallbackSummary, result)
+	committed, err := commitAgentFixesWithResult(sctx, stepName, summary, opts.FallbackSummary, result, before)
 	if err != nil {
 		return "", err
 	}

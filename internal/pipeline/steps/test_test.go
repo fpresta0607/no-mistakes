@@ -1125,8 +1125,10 @@ func TestTestStep_ConfiguredCommandRunsEvidenceWithoutExtractedIntent(t *testing
 func TestTestStep_UserIntentRunsConfiguredCommandThenEvidenceAgent(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	baselineLog := filepath.Join(dir, "baseline.log")
-	testCmd := "go env GOOS > baseline.log"
+	// The probe goes outside the worktree: a file the command left there would
+	// park the step (#1316).
+	baselineLog := filepath.Join(t.TempDir(), "baseline.log")
+	testCmd := "go env GOOS > " + baselineLog
 
 	callCount := 0
 	ag := &mockAgent{
@@ -1492,5 +1494,131 @@ func TestTestStep_AgentScratchDirectoryIsOutsideTheWorktreeAndDiesWithTheStep(t 
 				}
 			}
 		})
+	}
+}
+
+const passingTestTurnOutput = `{"summary":"repair test failure","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`
+
+// The incident of fpresta0607/code-goblins#1316: a Test evidence turn left a
+// validation runtime, a downloaded tool, copied third-party source and its
+// runs' temporary files in the worktree, its cleanup was refused, and the next
+// Test fix round committed all of it. The step now parks naming what it left,
+// and the fix round's commit holds only the repair its own turn wrote.
+func TestTestStep_FixRoundCommitsOnlyWhatItsOwnTurnWrote(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	leftBehind := []string{
+		".spotify-validation/live.py",
+		".spotify-validation/reference/spotify/spotifyaio/spotify.py",
+		".spotify-validation/tools/uv.tar.gz",
+		".test-validation/tmp/family-room-0xPFtV/room.json",
+		"uv.lock",
+	}
+	isFixRound := false
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		switch {
+		case strings.HasPrefix(opts.Prompt, "Fix the failing tests"):
+			writeTestFile(t, filepath.Join(dir, "fix.txt"), "test repair\n")
+		case !isFixRound:
+			for _, file := range leftBehind {
+				writeTestFile(t, filepath.Join(dir, filepath.FromSlash(file)), "validation scratch\n")
+			}
+		}
+		return &agent.Result{Output: json.RawMessage(passingTestTurnOutput)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	parked, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("test step failed: %v", err)
+	}
+	if !parked.NeedsApproval {
+		t.Fatalf("the step finished as though the worktree were clean, want a park naming what it left: %s", parked.Findings)
+	}
+	findings, err := types.ParseFindingsJSON(parked.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left *types.Finding
+	for i := range findings.Items {
+		if strings.HasPrefix(findings.Items[i].Description, "The Test step left untracked files in the run worktree (5): ") {
+			left = &findings.Items[i]
+		}
+	}
+	if left == nil {
+		t.Fatalf("no finding names the 5 files the step left: %s", parked.Findings)
+	}
+	if left.Severity != types.FindingSeverityWarning || left.Action != types.ActionAskUser {
+		t.Errorf("finding is %s/%s, want a warning that asks the user", left.Severity, left.Action)
+	}
+	for _, file := range leftBehind {
+		if !strings.Contains(left.Description, file) {
+			t.Errorf("the finding does not name %s: %s", file, left.Description)
+		}
+	}
+
+	isFixRound = true
+	sctx.Fixing = true
+	sctx.PreviousFindings = `{"items":[{"id":"test-1","severity":"error","file":"fix.txt","description":"test failed"}]}`
+	fixed, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("test fix round failed: %v", err)
+	}
+
+	if got := gitCmd(t, dir, "show", "--name-only", "--pretty=format:", "HEAD"); got != "fix.txt" {
+		t.Errorf("the fix commit carries %q, want only the repair fix.txt", got)
+	}
+	if tracked := gitCmd(t, dir, "ls-files", "--", ".spotify-validation", ".test-validation", "uv.lock"); tracked != "" {
+		t.Errorf("files the step left reached the branch:\n%s", tracked)
+	}
+	for _, file := range leftBehind {
+		if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(file))); err != nil {
+			t.Errorf("%s must stay in the run worktree as the step left it: %v", file, err)
+		}
+	}
+	if fixed.NeedsApproval {
+		t.Errorf("the fix round parked again on files an earlier execution left: %s", fixed.Findings)
+	}
+}
+
+// Every command and agent the Test step starts keeps its temporary files in
+// the step's scratch directory, outside the worktree (#1316), and the step
+// hands the context back with the environment it was given.
+func TestTestStep_CommandsAndAgentsKeepTemporaryFilesOutsideTheWorktree(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	probe := filepath.Join(t.TempDir(), "temp.txt")
+	testCmd := `printf '%s|%s|%s' "$TMP" "$TEMP" "$TMPDIR" > "$PROBE_OUT"`
+	if runtime.GOOS == "windows" {
+		testCmd = `echo %TMP%^|%TEMP%^|%TMPDIR%>%PROBE_OUT%`
+	}
+	var agentEnv []string
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		agentEnv = opts.Env
+		return &agent.Result{Output: json.RawMessage(passingTestTurnOutput)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: testCmd})
+	given := []string{"PROBE_OUT=" + probe}
+	sctx.Env = slices.Clone(given)
+	scratchDir := filepath.Join(sctx.EvidenceDir, testScratchDirName)
+
+	if _, err := (&TestStep{}).Execute(sctx); err != nil {
+		t.Fatalf("test step failed: %v", err)
+	}
+
+	recorded, err := os.ReadFile(probe)
+	if err != nil {
+		t.Fatalf("the test command did not record its temporary directory: %v", err)
+	}
+	if got, want := strings.TrimSpace(string(recorded)), scratchDir+"|"+scratchDir+"|"+scratchDir; got != want {
+		t.Errorf("the test command's TMP|TEMP|TMPDIR = %q, want the scratch directory %q", got, want)
+	}
+	for _, name := range []string{"TMP", "TEMP", "TMPDIR"} {
+		if got, _ := envValue(agentEnv, name); got != scratchDir {
+			t.Errorf("the test agent's %s = %q, want the scratch directory %q", name, got, scratchDir)
+		}
+	}
+	if !slices.Equal(sctx.Env, given) {
+		t.Errorf("the step left its environment on the context: %q, want %q", sctx.Env, given)
 	}
 }

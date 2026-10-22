@@ -251,6 +251,10 @@ CI logs:
 	prompt += executionContextPromptSection(sctx.WorkDir)
 	prompt = fixerPrompt(testguidance.LateRepairPrompt(string(s.Name()), prompt))
 
+	before, err := untrackedFiles(sctx)
+	if err != nil {
+		return ciRepairResult{}, err
+	}
 	sctx.Log("running agent to fix CI issues...")
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,
@@ -266,7 +270,7 @@ CI logs:
 	if conclusionErr != nil {
 		sctx.Log(fmt.Sprintf("warning: could not parse CI repair conclusion: %v", conclusionErr))
 	}
-	repair, err := s.commitRepair(sctx, conclusion.Summary, result)
+	repair, err := s.commitRepair(sctx, conclusion.Summary, result, before)
 	var refusal *pipeline.ProtectedPathError
 	if errors.As(err, &refusal) {
 		head, recordErr := stepGitHeadSHA(sctx)
@@ -551,7 +555,7 @@ type ciRepairResult struct {
 
 // commitAndPush remains as the narrow test seam for the default summary.
 func (s *CIStep) commitAndPush(sctx *pipeline.StepContext) (ciRepairResult, error) {
-	return s.commitRepair(sctx, "", nil)
+	return s.commitRepair(sctx, "", nil, nil)
 }
 
 func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext) (ciRepairResult, error) {
@@ -561,8 +565,10 @@ func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext) (ciRepairR
 	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
 	sctx.Log("retrying retained CI repair after protected-path refusal")
 	// The retained changes outlived the invocation that made them, so no
-	// producer is known here and the commit carries no trailers.
-	repair, err := s.commitRepair(sctx, "", nil)
+	// producer is known here and the commit carries no trailers. Which
+	// untracked files that invocation wrote is no longer known either, and the
+	// retained repair's own new files are among them, so none is left out.
+	repair, err := s.commitRepair(sctx, "", nil, nil)
 	if err != nil || repair.HeadAdvanced {
 		return repair, err
 	}
@@ -573,7 +579,10 @@ func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext) (ciRepairR
 	return s.recordRepair(sctx, head)
 }
 
-func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, producer *agent.Result) (ciRepairResult, error) {
+// commitRepair commits the CI repair producer left in the worktree. before
+// lists the untracked files the worktree held before producer started, which
+// stay out of the commit (see stagePipelineChanges).
+func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, producer *agent.Result, before []string) (ciRepairResult, error) {
 	status, err := stepGitRun(sctx, "status", "--porcelain")
 	if err != nil {
 		return ciRepairResult{}, fmt.Errorf("check CI changes: %w", err)
@@ -598,7 +607,7 @@ func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, produc
 	if err != nil {
 		return ciRepairResult{}, fmt.Errorf("render CI repair commit trailers: %w", err)
 	}
-	if err := stagePipelineChanges(sctx); err != nil {
+	if err := stagePipelineChanges(sctx, before); err != nil {
 		return ciRepairResult{}, fmt.Errorf("stage CI changes: %w", err)
 	}
 	staged, err := stagedChangesPresent(func(args ...string) (string, error) {
