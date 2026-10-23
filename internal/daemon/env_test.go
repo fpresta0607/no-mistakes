@@ -2,13 +2,146 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
+func daemonEnvironmentTestPaths(t *testing.T) *paths.Paths {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("NM_HOME", root)
+	for _, key := range []string{"TEMP", "TMP", "TMPDIR", "GOTMPDIR"} {
+		t.Setenv(key, os.Getenv(key))
+	}
+	return paths.WithRoot(root)
+}
+
+func TestPrepareDaemonEnvironment_OwnsTemporaryDirectory(t *testing.T) {
+	for _, name := range []string{"caller", "login_shell", "relative_home", "resolved_home"} {
+		t.Run(name, func(t *testing.T) {
+			p := daemonEnvironmentTestPaths(t)
+			root := p.Root()
+			if name == "relative_home" {
+				t.Chdir(root)
+				p = paths.WithRoot("relative-home")
+				t.Setenv("NM_HOME", p.Root())
+				root = filepath.Join(root, "relative-home")
+			}
+			if name == "resolved_home" {
+				t.Setenv("NM_HOME", "")
+			}
+			for _, key := range []string{"TEMP", "TMP", "TMPDIR", "GOTMPDIR"} {
+				t.Setenv(key, filepath.Join(root, "caller-scratch"))
+			}
+			oldApply := applyShellEnvToProcess
+			t.Cleanup(func() { applyShellEnvToProcess = oldApply })
+			applyShellEnvToProcess = func(...string) error {
+				if name == "resolved_home" {
+					if err := os.Setenv("NM_HOME", filepath.Join(root, "shell-home")); err != nil {
+						return err
+					}
+				}
+				if name == "login_shell" || name == "resolved_home" {
+					for _, key := range []string{"TEMP", "TMP", "TMPDIR", "GOTMPDIR"} {
+						if err := os.Setenv(key, filepath.Join(root, "shell-scratch")); err != nil {
+							return err
+						}
+					}
+				}
+				return nil
+			}
+
+			if err := prepareDaemonEnvironment(p); err != nil {
+				t.Fatal(err)
+			}
+
+			want := filepath.Join(root, "tmp")
+			for _, key := range []string{"TEMP", "TMP", "TMPDIR", "GOTMPDIR"} {
+				if got := os.Getenv(key); got != want {
+					t.Errorf("%s = %q, want %q", key, got, want)
+				}
+			}
+			file, err := os.CreateTemp("", "daemon-temp-*")
+			if err != nil {
+				t.Fatalf("create temporary file: %v", err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if filepath.Dir(file.Name()) != want {
+				t.Errorf("temporary file = %q, want parent %q", file.Name(), want)
+			}
+			if err := os.Remove(file.Name()); err != nil {
+				t.Fatal(err)
+			}
+			if entries, err := os.ReadDir(want); err != nil || len(entries) != 0 {
+				t.Fatalf("temporary directory contains leftover probes: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestPrepareDaemonEnvironment_RejectsUnusableTemporaryDirectory(t *testing.T) {
+	for _, name := range []string{"file", "unwritable"} {
+		t.Run(name, func(t *testing.T) {
+			p := daemonEnvironmentTestPaths(t)
+			destination := filepath.Join(p.Root(), "tmp")
+			if name == "file" {
+				if err := os.WriteFile(destination, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Mkdir(destination, 0o500); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(destination, 0o700) })
+				if runtime.GOOS == "windows" {
+					changeACL := func(args ...string) {
+						t.Helper()
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						command := exec.CommandContext(ctx, "icacls.exe", append([]string{destination}, args...)...)
+						winproc.Harden(command)
+						if out, err := command.CombinedOutput(); err != nil {
+							t.Fatalf("set test directory permissions: %v\n%s", err, out)
+						}
+					}
+					t.Cleanup(func() { changeACL("/remove:d", "*S-1-1-0") })
+					changeACL("/deny", "*S-1-1-0:(W)")
+				}
+				if file, err := os.CreateTemp(destination, "permission-check-*"); err == nil {
+					file.Close()
+					if runtime.GOOS == "windows" {
+						t.Fatal("test directory is still writable after denying writes")
+					}
+					t.Skip("current user can write to a read-only directory")
+				}
+			}
+			oldApply := applyShellEnvToProcess
+			t.Cleanup(func() { applyShellEnvToProcess = oldApply })
+			applyShellEnvToProcess = func(...string) error { return nil }
+
+			err := prepareDaemonEnvironment(p)
+
+			if err == nil || !strings.Contains(err.Error(), destination) {
+				t.Fatalf("startup error = %v, want unusable temporary directory %q", err, destination)
+			}
+		})
+	}
+}
+
 func TestPrepareDaemonEnvironment_RemovesClaudeSessionVarsAndAppliesShellEnv(t *testing.T) {
+	p := daemonEnvironmentTestPaths(t)
 	for key, value := range map[string]string{
 		"CLAUDECODE":                       "1",
 		"CLAUDE_CODE_ENTRYPOINT":           "shell",
@@ -29,7 +162,7 @@ func TestPrepareDaemonEnvironment_RemovesClaudeSessionVarsAndAppliesShellEnv(t *
 		return os.Setenv("PATH", "/resolved/bin")
 	}
 
-	if err := prepareDaemonEnvironment(); err != nil {
+	if err := prepareDaemonEnvironment(p); err != nil {
 		t.Fatal(err)
 	}
 	if !applied {
@@ -52,7 +185,7 @@ func TestPrepareDaemonEnvironment_RemovesClaudeSessionVarsAndAppliesShellEnv(t *
 }
 
 func TestPrepareDaemonEnvironment_PreservesExistingNMHome(t *testing.T) {
-	t.Setenv("NM_HOME", "/service/root")
+	p := daemonEnvironmentTestPaths(t)
 	t.Setenv("PATH", os.Getenv("PATH"))
 
 	oldApply := applyShellEnvToProcess
@@ -71,11 +204,11 @@ func TestPrepareDaemonEnvironment_PreservesExistingNMHome(t *testing.T) {
 		return os.Setenv("PATH", "/resolved/bin")
 	}
 
-	if err := prepareDaemonEnvironment(); err != nil {
+	if err := prepareDaemonEnvironment(p); err != nil {
 		t.Fatal(err)
 	}
-	if got := os.Getenv("NM_HOME"); got != "/service/root" {
-		t.Fatalf("NM_HOME = %q, want %q", got, "/service/root")
+	if got := os.Getenv("NM_HOME"); got != p.Root() {
+		t.Fatalf("NM_HOME = %q, want %q", got, p.Root())
 	}
 	if got := os.Getenv("PATH"); got != "/resolved/bin" {
 		t.Fatalf("PATH = %q, want %q", got, "/resolved/bin")
@@ -87,6 +220,7 @@ func TestPrepareDaemonEnvironment_PreservesExistingNMHome(t *testing.T) {
 // took a forensic dive to diagnose - future bugs should be readable from
 // the daemon log alone.
 func TestPrepareDaemonEnvironment_LogsPathSummary(t *testing.T) {
+	p := daemonEnvironmentTestPaths(t)
 	t.Setenv("PATH", os.Getenv("PATH"))
 
 	oldApply := applyShellEnvToProcess
@@ -100,7 +234,7 @@ func TestPrepareDaemonEnvironment_LogsPathSummary(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	defer slog.SetDefault(oldLogger)
 
-	if err := prepareDaemonEnvironment(); err != nil {
+	if err := prepareDaemonEnvironment(p); err != nil {
 		t.Fatal(err)
 	}
 
