@@ -10,6 +10,8 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/spf13/cobra"
 )
@@ -653,6 +655,17 @@ func branchSyncField(state branchsync.State) toON.Field {
 }
 
 func cachedBranchSyncField(ctxCmd *cobra.Command, runID string) *toON.Field {
+	if runID != "" {
+		if appPaths, err := paths.New(); err == nil {
+			if database, err := db.OpenReadOnly(appPaths.DB()); err == nil {
+				run, readErr := database.GetRun(runID)
+				closeErr := database.Close()
+				if readErr == nil && closeErr == nil && run == nil {
+					return nil
+				}
+			}
+		}
+	}
 	service, closeFn, err := openSyncService()
 	if err != nil {
 		return nil
