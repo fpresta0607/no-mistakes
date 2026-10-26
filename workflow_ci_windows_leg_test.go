@@ -120,7 +120,9 @@ func goListPackages(t *testing.T, patterns ...string) []string {
 func goTestPackagePatterns(command workflowCommand) []string {
 	var patterns []string
 	for _, arg := range command.args[1:] {
-		if strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "@") {
+		// A "-run $run" step resolves its pattern from tools/testshard at run
+		// time, so a shell variable is never a package pattern.
+		if strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "@") || strings.HasPrefix(arg, "$") {
 			continue
 		}
 		patterns = append(patterns, arg)
@@ -144,7 +146,7 @@ func workflowCommandsMatching(steps []wfStep, include func(wfStep) bool) []workf
 				continue
 			}
 			fields := strings.Fields(line)
-			if len(fields) == 0 || strings.HasPrefix(fields[0], "$p") || strings.ContainsAny(fields[0], "{}()") {
+			if len(fields) == 0 || strings.HasPrefix(fields[0], "$") || strings.ContainsAny(fields[0], "{}()") {
 				continue
 			}
 			commands = append(commands, workflowCommand{step: stepIndex, line: lineIndex, name: fields[0], args: fields[1:]})
@@ -210,8 +212,10 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 		t.Fatalf("test job timeout-minutes = %d, want 40 so a wedged runner cannot burn a full six-hour budget", job.TimeoutMinutes)
 	}
 
-	wantWindowsShards := []string{"core", "git", "steps"}
-	var matrixShards []string
+	// pipeline/steps is one package whose test time exceeds one Windows budget, so
+	// its shard is three jobs, each running one part of its top-level tests.
+	wantWindowsShardCounts := map[string]int{"core": 1, "git": 1, "steps": 3}
+	matrixShards := map[string]int{}
 	for _, row := range job.Strategy.Matrix.Include {
 		if row["os"] != "windows-latest" {
 			continue
@@ -220,12 +224,17 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 		if shard == "" {
 			t.Fatalf("windows matrix row %v is missing shard", row)
 		}
-		matrixShards = append(matrixShards, shard)
+		matrixShards[shard]++
 	}
-	slices.Sort(matrixShards)
-	if !slices.Equal(matrixShards, wantWindowsShards) {
-		t.Fatalf("windows matrix shards %v, want %v so pipeline/steps runs in parallel with the other git-heavy packages", matrixShards, wantWindowsShards)
+	if len(matrixShards) != len(wantWindowsShardCounts) {
+		t.Fatalf("windows matrix shards %v, want %v", matrixShards, wantWindowsShardCounts)
 	}
+	for shard, want := range wantWindowsShardCounts {
+		if matrixShards[shard] != want {
+			t.Fatalf("windows matrix shard %q has %d jobs, want %d so pipeline/steps runs as parts beside the other git-heavy packages", shard, matrixShards[shard], want)
+		}
+	}
+	wantWindowsShards := []string{"core", "git", "steps"}
 
 	tests := windowsGoTestCommands(t)
 	if len(tests) < 3 {
