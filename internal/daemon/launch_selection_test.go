@@ -51,6 +51,16 @@ func selectionHarness(t *testing.T, harness types.AgentName, isFailing bool) (bi
 		binary += ".bat"
 		script = "@echo off\r\necho %*>>\"" + marker + "\"\r\n"
 	}
+	// A real harness reads the prompt from stdin before it replies. Without
+	// this drain the fixture can exit while the adapter is still writing the
+	// prompt, and the write races the exit into a spurious step failure.
+	if harness == types.AgentPi && !isFailing {
+		if runtime.GOOS == "windows" {
+			script += "more >nul\r\n"
+		} else {
+			script += "cat >/dev/null\n"
+		}
+	}
 	switch {
 	case isFailing && runtime.GOOS == "windows":
 		script += "exit /b 1\r\n"
