@@ -273,7 +273,7 @@ exit 0
 					continue
 				}
 				dir := fields[1]
-				if strings.HasPrefix(dir, h.NMHome) || strings.HasPrefix(dir, h.WorkDir) {
+				if baseCheckoutInRunState(dir, h.NMHome, h.WorkDir) {
 					t.Errorf("base command ran inside the run's state: %s", dir)
 				}
 				if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -289,5 +289,39 @@ exit 0
 				_ = os.WriteFile(filepath.Join(evidence, tc.name+".md"), []byte(transcript), 0o644)
 			}
 		})
+	}
+}
+
+// baseCheckoutInRunState reports whether dir lies in the user's checkout
+// workDir or in the state the no-mistakes home nmHome keeps: the run
+// worktrees, the gate mirrors, the database and the logs. The daemon's own
+// temporary directory under the home is not run state; the daemon points
+// TEMP there for its whole lifetime (fpresta0607/code-goblins#1380), so a
+// disposable base checkout lands there.
+func baseCheckoutInRunState(dir, nmHome, workDir string) bool {
+	within := func(root string) bool {
+		rel, err := filepath.Rel(root, dir)
+		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	}
+	return within(workDir) || within(nmHome) && !within(filepath.Join(nmHome, "tmp"))
+}
+
+func TestBaseCheckoutInRunState(t *testing.T) {
+	nmHome := filepath.Join(string(filepath.Separator)+"e2e", "nmhome")
+	workDir := filepath.Join(string(filepath.Separator)+"e2e", "work")
+	for _, tc := range []struct {
+		dir  string
+		want bool
+	}{
+		{filepath.Join(workDir, "no-mistakes-test-base-1", "base"), true},
+		{filepath.Join(nmHome, "worktrees", "repo", "run", "no-mistakes-test-base-1", "base"), true},
+		{filepath.Join(nmHome, "repos", "no-mistakes-test-base-1", "base"), true},
+		{filepath.Join(nmHome, "tmpx", "no-mistakes-test-base-1", "base"), true},
+		{filepath.Join(nmHome, "tmp", "no-mistakes-test-base-1", "base"), false},
+		{filepath.Join(string(filepath.Separator)+"tmp", "no-mistakes-test-base-1", "base"), false},
+	} {
+		if got := baseCheckoutInRunState(tc.dir, nmHome, workDir); got != tc.want {
+			t.Errorf("baseCheckoutInRunState(%q) = %v, want %v", tc.dir, got, tc.want)
+		}
 	}
 }
