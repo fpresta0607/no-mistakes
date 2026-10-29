@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -496,6 +498,218 @@ func TestTestStep_FixMode_ProtectedPathDoesNotReachCommit(t *testing.T) {
 	t.Logf("Test auto-fix refusal: %v\nHEAD=%s\nindex paths=%q\nworktree status:\n%s", err, gitCmd(t, dir, "rev-parse", "HEAD"), gitCmd(t, dir, "diff", "--cached", "--name-only"), gitStatusPorcelain(t, dir))
 }
 
+// A Test fix round that leaves a browser build in the worktree, as the test
+// agent did when its own cleanup was refused (#1076), commits its repair but
+// not the file GitHub would refuse, which stays in the worktree and is named in
+// the step log.
+func TestTestStep_FixMode_LeavesAnOversizedUntrackedFileOutOfTheCommit(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	const leftover = ".test-local/chrome-win64/chrome.dll"
+	leftoverPath := filepath.Join(dir, filepath.FromSlash(leftover))
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("test repair\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeFileOfSize(t, leftoverPath, githubMaxFileBytes+1)
+		return &agent.Result{Output: json.RawMessage(`{"summary":"repair test failure","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	repo, err := config.LoadRepoFromBytes([]byte("commands:\n  test: exit 0\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Config = config.Merge(config.DefaultGlobalConfig(), config.EffectiveRepoConfig(repo, repo, false))
+	var logs []string
+	sctx.Log = func(s string) { logs = append(logs, s) }
+	sctx.Fixing = true
+	sctx.PreviousFindings = `{"items":[{"id":"test-1","severity":"error","file":"fix.txt","description":"test failed"}]}`
+
+	if _, err := (&TestStep{}).Execute(sctx); err != nil {
+		t.Fatalf("test fix round failed: %v", err)
+	}
+
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got == headSHA {
+		t.Fatal("the repair was not committed")
+	}
+	gitCmd(t, dir, "cat-file", "-e", "HEAD:fix.txt")
+	if got := gitCmd(t, dir, "ls-tree", "-r", "--name-only", "HEAD", "--", ".test-local"); got != "" {
+		t.Errorf("the fix commit carries the oversized leftover: %q", got)
+	}
+	if got := gitCmd(t, dir, "ls-files", "--", ".test-local"); got != "" {
+		t.Errorf("the oversized leftover was staged: %q", got)
+	}
+	if info, err := os.Stat(leftoverPath); err != nil || info.Size() != githubMaxFileBytes+1 {
+		t.Errorf("the oversized leftover must stay in the worktree as the agent left it: %v, %v", info, err)
+	}
+	if log := strings.Join(logs, "\n"); !strings.Contains(log, leftover) {
+		t.Errorf("no step log names the file left out of the commit:\n%s", log)
+	}
+}
+
+// Catch-all staging leaves out an untracked file GitHub would refuse, one
+// larger than 100 MiB (#1076), and still stages the rest of the correction.
+func TestStagePipelineChanges_LeavesOutUntrackedFilesOverGitHubsLimit(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		file     string
+		size     int64
+		isStaged bool
+	}{
+		{"at_the_limit", "fixture.bin", githubMaxFileBytes, true},
+		{"over_the_limit", "chrome.dll", githubMaxFileBytes + 1, false},
+		{"over_the_limit_in_a_new_directory", ".test-local/chrome win64/chröme.dll", githubMaxFileBytes + 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+			writeFileOfSize(t, filepath.Join(dir, filepath.FromSlash(tc.file)), tc.size)
+			if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("agent fix\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := stagePipelineChanges(sctx, nil); err != nil {
+				t.Fatalf("stage: %v", err)
+			}
+
+			staged := strings.Split(gitCmd(t, dir, "-c", "core.quotePath=false", "diff", "--cached", "--name-only"), "\n")
+			if !slices.Contains(staged, "fix.txt") {
+				t.Errorf("the correction itself was not staged: %q", staged)
+			}
+			if got := slices.Contains(staged, tc.file); got != tc.isStaged {
+				t.Errorf("%s (%d bytes) staged = %v, want %v; staged paths %q", tc.file, tc.size, got, tc.isStaged, staged)
+			}
+		})
+	}
+}
+
+// writeFileOfSize creates path holding size bytes without writing them, so a
+// fixture larger than GitHub's file limit is cheap to make.
+func writeFileOfSize(t *testing.T, path string, size int64) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(size); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Catch-all staging leaves out every untracked file the worktree held before
+// the correction began, however many there are and whatever their names, and
+// still stages what the correction itself wrote (#1316).
+func TestStagePipelineChanges_LeavesOutUntrackedFilesTheWorktreeHeldBefore(t *testing.T) {
+	t.Parallel()
+	// As arguments, these exclusions would overrun Windows' 32 KiB command line.
+	var hundreds []string
+	for i := range 600 {
+		hundreds = append(hundreds, fmt.Sprintf(".test-validation/tmp/family-room-%03d-0xPFtV/room.json", i))
+	}
+	for _, tc := range []struct {
+		name  string
+		files []string
+	}{
+		{"names_git_could_read_as_pathspecs", []string{".spotify-validation/live.py", ".spotify-validation/tools/uv.tar.gz", "uv.lock", "notes with spaces ü.txt", "[od]d.txt"}},
+		{"more_than_a_command_line_holds", hundreds},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+			// The step left uv.lock behind, so this rule must not refuse it.
+			sctx.Config.ProtectedPaths = []string{"*.lock"}
+			var logs []string
+			sctx.Log = func(s string) { logs = append(logs, s) }
+			for _, file := range tc.files {
+				writeTestFile(t, filepath.Join(dir, filepath.FromSlash(file)), "left behind\n")
+			}
+			before, err := untrackedFiles(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, filepath.Join(dir, "fix.txt"), "agent fix\n")
+			writeTestFile(t, filepath.Join(dir, "feature.txt"), "repaired feature code\n")
+
+			if err := stagePipelineChanges(sctx, before); err != nil {
+				t.Fatalf("stage: %v", err)
+			}
+
+			staged := strings.Split(gitCmd(t, dir, "-c", "core.quotePath=false", "diff", "--cached", "--name-only"), "\n")
+			if !slices.Equal(staged, []string{"feature.txt", "fix.txt"}) {
+				t.Errorf("staged %d paths %.300q, want only the correction feature.txt and fix.txt", len(staged), staged)
+			}
+			for _, file := range tc.files {
+				if _, err := os.Stat(filepath.Join(dir, filepath.FromSlash(file))); err != nil {
+					t.Errorf("%s must stay in the worktree as the step left it: %v", file, err)
+				}
+			}
+			if log := strings.Join(logs, "\n"); !strings.Contains(log, fmt.Sprintf("left the untracked files the worktree held before this change out of the commit (%d): %s", len(tc.files), tc.files[0])) {
+				t.Errorf("no step log names the files left out of the commit:\n%.500s", log)
+			}
+		})
+	}
+}
+
+// protected_paths judges only what staging would commit: a protected file the
+// worktree held before the correction is left out rather than refused, and
+// one the correction wrote is still refused.
+func TestStagePipelineChanges_ChecksProtectedPathsOnlyOnWhatItStages(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		isLeftBehind bool
+	}{
+		{"left_behind_by_an_earlier_step", true},
+		{"written_by_the_correction", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Config.ProtectedPaths = []string{"*.lock"}
+			lock := filepath.Join(dir, "uv.lock")
+			if tc.isLeftBehind {
+				writeTestFile(t, lock, "version = 1\n")
+			}
+			before, err := untrackedFiles(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.isLeftBehind {
+				writeTestFile(t, lock, "version = 1\n")
+			}
+			writeTestFile(t, filepath.Join(dir, "fix.txt"), "agent fix\n")
+
+			err = stagePipelineChanges(sctx, before)
+
+			var refusal *pipeline.ProtectedPathError
+			if got := errors.As(err, &refusal); got == tc.isLeftBehind {
+				t.Fatalf("stage refused = %v (%v), want %v", got, err, !tc.isLeftBehind)
+			}
+		})
+	}
+}
+
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProtectedPaths_AllAutomaticCommitPathsRefuseWithoutMutation(t *testing.T) {
 	t.Parallel()
 	for _, caller := range []struct {
@@ -510,7 +724,7 @@ func TestProtectedPaths_AllAutomaticCommitPathsRefuseWithoutMutation(t *testing.
 			return err
 		}},
 		{"ci", func(sctx *pipeline.StepContext) error {
-			_, err := (&CIStep{}).commitRepair(sctx, "repair checks", nil)
+			_, err := (&CIStep{}).commitRepair(sctx, "repair checks", nil, nil)
 			return err
 		}},
 	} {
@@ -583,7 +797,7 @@ func TestProtectedPaths_Staging(t *testing.T) {
 				gitCmd(t, dir, "mv", "feature.txt", tc.file)
 			}
 			before := gitCmd(t, dir, "diff", "--cached")
-			err := stagePipelineChanges(sctx)
+			err := stagePipelineChanges(sctx, nil)
 			if tc.blocked {
 				if err == nil || !strings.Contains(err.Error(), "protected") {
 					t.Fatalf("expected protected-path error, got %v", err)
@@ -652,7 +866,7 @@ func TestStagePipelineChanges_KeepsRecordedSubmodulePointer(t *testing.T) {
 			}
 
 			sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
-			committed, err := commitAgentFixesWithResult(sctx, types.StepLint, "fix lint", "", nil)
+			committed, err := commitAgentFixesWithResult(sctx, types.StepLint, "fix lint", "", nil, nil)
 			if err != nil {
 				t.Fatalf("commit agent fixes: %v", err)
 			}
@@ -703,7 +917,7 @@ func TestStagePipelineChanges_DoesNotReAddRemovedPopulatedSubmodule(t *testing.T
 	}
 
 	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
-	committed, err := commitAgentFixesWithResult(sctx, types.StepLint, "fix lint", "", nil)
+	committed, err := commitAgentFixesWithResult(sctx, types.StepLint, "fix lint", "", nil, nil)
 	if err != nil {
 		t.Fatalf("commit agent fixes: %v", err)
 	}
@@ -716,7 +930,7 @@ func TestStagePipelineChanges_DoesNotReAddRemovedPopulatedSubmodule(t *testing.T
 	}
 
 	gitCmd(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", "-b", "main", remote, "added")
-	if err := stagePipelineChanges(sctx); err != nil {
+	if err := stagePipelineChanges(sctx, nil); err != nil {
 		t.Fatalf("stage registered submodule: %v", err)
 	}
 	if got := gitCmd(t, dir, "ls-files", "--stage", "--", "added"); !strings.HasPrefix(got, "160000 ") {
@@ -728,7 +942,7 @@ func TestProtectedPaths_UnreadableStatusFailsClosed(t *testing.T) {
 	t.Parallel()
 	sctx := newTestContext(t, &mockAgent{}, t.TempDir(), "", "", config.Commands{})
 	sctx.Config.ProtectedPaths = []string{"*.lock"}
-	if err := stagePipelineChanges(sctx); err == nil || !strings.Contains(err.Error(), "check protected_paths") {
+	if err := stagePipelineChanges(sctx, nil); err == nil || !strings.Contains(err.Error(), "check protected_paths") {
 		t.Fatalf("unreadable git status did not fail closed: %v", err)
 	}
 }

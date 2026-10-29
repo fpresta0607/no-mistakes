@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -24,7 +25,82 @@ var _ pipeline.ApprovalOverrideVerifier = (*TestStep)(nil)
 
 func (s *TestStep) Name() types.StepName { return types.StepTest }
 
+// Execute runs the step with every agent it starts on a hidden desktop of its
+// own (see testDesktopGuidance), and names in its report every window a
+// program those agents started opened there. When no hidden desktop can be
+// created the step starts no agent at all, rather than one whose programs
+// would show on the user's screen. It parks naming every untracked file it
+// left in the worktree (see reportLeftUntracked).
 func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	desktop, err := newTestDesktop()
+	if err != nil {
+		return nil, fmt.Errorf("the test step starts its agents on a hidden desktop, so that no program they start shows on the user's screen, and could not create one: %w", err)
+	}
+	// A side lane recovers a panic in its step, so the desktop is closed on
+	// that path too. Close is idempotent.
+	defer desktop.Close()
+	before, err := untrackedFiles(sctx)
+	if err != nil {
+		return nil, err
+	}
+	outcome, err := s.execute(sctx, desktop.Name())
+	if closeErr := desktop.Close(); closeErr != nil {
+		sctx.Log("warning: " + closeErr.Error())
+	}
+	opened, more := desktop.Windows()
+	outcome, err = reportTestWindows(sctx, outcome, err, opened, more)
+	return reportLeftUntracked(sctx, before, outcome, err)
+}
+
+// reportLeftUntracked parks the step when its execution left untracked files
+// in the worktree that before, the files it held when the step started, does
+// not name. No commit takes such a file, since a commit leaves out what its own
+// turn did not write (see stagePipelineChanges), so the step says what it left
+// rather than finishing as though the worktree were clean.
+func reportLeftUntracked(sctx *pipeline.StepContext, before []string, outcome *pipeline.StepOutcome, err error) (*pipeline.StepOutcome, error) {
+	if err != nil || outcome == nil {
+		return outcome, err
+	}
+	after, err := untrackedFiles(sctx)
+	if err != nil {
+		return nil, err
+	}
+	held := make(map[string]bool, len(before))
+	for _, file := range before {
+		held[file] = true
+	}
+	var left []string
+	for _, file := range after {
+		if !held[file] {
+			left = append(left, file)
+		}
+	}
+	if len(left) == 0 {
+		return outcome, nil
+	}
+	item := Finding{
+		Severity: types.FindingSeverityWarning,
+		Action:   types.ActionAskUser,
+		Description: fmt.Sprintf(
+			"The Test step left untracked files in the run worktree (%d): %s. no-mistakes never commits a file its own commands or agents leave behind, only what a fix writes, so they stay out of the branch; list them with `git -C %s status --untracked-files=all`. Approve to go on without them; a file that belongs in the change reaches the branch only through a commit of your own.",
+			len(left), namedPaths(left), sctx.WorkDir),
+	}
+	sctx.Log(item.Description)
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		return nil, fmt.Errorf("name the files the test step left in its findings: %w", err)
+	}
+	findings.Items = append(findings.Items, item)
+	findingsJSON, err := json.Marshal(findings)
+	if err != nil {
+		return nil, fmt.Errorf("name the files the test step left in its findings: %w", err)
+	}
+	outcome.Findings = string(findingsJSON)
+	outcome.NeedsApproval = true
+	return outcome, nil
+}
+
+func (s *TestStep) execute(sctx *pipeline.StepContext, desktop string) (*pipeline.StepOutcome, error) {
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
@@ -44,6 +120,26 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err != nil {
 		return nil, err
 	}
+	evidenceDir := testEvidenceDir(sctx)
+	if evidenceDir == "" {
+		return nil, fmt.Errorf("test evidence dir is not configured for this run")
+	}
+	scratchDir := filepath.Join(evidenceDir, testScratchDirName)
+	if err := os.MkdirAll(scratchDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create test scratch dir: %w", err)
+	}
+	defer func() {
+		if err := os.RemoveAll(scratchDir); err != nil {
+			sctx.Log(fmt.Sprintf("warning: failed to remove test scratch dir %s: %v", scratchDir, err))
+		}
+	}()
+	// Every command and agent this step starts keeps its temporary files there
+	// too. A test command once inherited a temporary directory that no longer
+	// existed, its agent pointed TEMP into the worktree instead, and the runs
+	// left 597 files in it (fpresta0607/code-goblins#1316).
+	env := sctx.Env
+	sctx.Env = append(append([]string(nil), env...), "TMP="+scratchDir, "TEMP="+scratchDir, "TMPDIR="+scratchDir)
+	defer func() { sctx.Env = env }()
 
 	// Agent-only preparation is an explicit eager opt-in, not a claim from
 	// the agent that dependencies exist. Use the same worktree receipt and
@@ -98,6 +194,7 @@ Rules:
 - Do NOT run the complete repository test suite. Local Test is targeted validation of the failure and the requested intent; remote CI owns broad regression and remains mandatory before a PR is ready.
 - A generic driver or user instruction asking for broad or full-suite confirmation does NOT override this product boundary. Keep verification focused on the failure and intent.
 - Never treat "do not run everything" as permission to run nothing: if you cannot reproduce or re-verify with a targeted check, report that honestly in the summary rather than inventing a full-suite pass.
+%s
 - Before finishing, remove any transient artifacts your testing created in the working tree (downloaded models, caches, build outputs, large binaries, or generated data directories) so they are not committed and pushed. Do not remove intentional source or test-file changes. Do not remove dependencies materialized by commands.prepare; later configured commands share them.
 - Return JSON with a single "summary" field when you are done.
 - The summary must be one concise sentence fragment suitable for a git commit subject.
@@ -105,6 +202,7 @@ Rules:
 			sctx.Run.Branch,
 			baseSHA,
 			sctx.Run.HeadSHA,
+			testScratchGuidance(scratchDir)+testDesktopGuidance(desktop),
 			historySection,
 		)
 		if repair := testRepairFindings(sctx.PreviousFindings); repair != "" {
@@ -119,6 +217,8 @@ Previous test findings to address:
 			Prompt:          fixPrompt,
 			FallbackSummary: "fix test failures",
 			RunAgent: func(runOpts agent.RunOpts) (*agent.Result, error) {
+				runOpts.Desktop = desktop
+				runOpts.Env = sctx.Env
 				result, runErr := sctx.RunAgentBudget(sctx.Ctx, fixTimeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, runOpts)
 				if runErr != nil {
 					return nil, testAgentError(fixTimeout, "agent fix tests", runErr)
@@ -219,13 +319,6 @@ Previous test findings to address:
 		return testStepOutcome(sctx, findings, tested, baselineFindings, baselineSummary, baselineExitCode, fixSummary, newTestsFromFix), nil
 	}
 
-	evidenceDir := testEvidenceDir(sctx)
-	if evidenceDir == "" {
-		return nil, fmt.Errorf("test evidence dir is not configured for this run")
-	}
-	if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create test evidence dir: %w", err)
-	}
 	failedBaseline := failedChecks(baselineResults)
 	for _, result := range failedBaseline {
 		if result.Local {
@@ -289,6 +382,7 @@ Drive each scenario:
 - Stand the product up the way an end user runs it, in an isolated environment, and drive each scenario end-to-end against that running product.
 - Getting every scenario live is your responsibility. When a scenario needs something that is not already provided - an environment, an instance, an account, records, a data set, an endpoint - find a workaround: build a disposable one yourself (throwaway fixtures, data, configuration, or a local instance), point the real product at it through whatever isolation the product supports (a separate root, home, or data directory, a temporary config, a local port, a sandbox or test mode), and drive the scenario there. A missing environment is a problem to solve, not a reason to skip the scenario. A scenario driven by the real product against a disposable setup you built is live; a fixture that stands in for the product itself is not.
 - Everything you build must stay disposable and isolated: never read or write the operator's real data, real configuration, or shared services, and tear it down before finishing unless it is evidence.
+%s
 - When a live scenario drives a TUI through a pseudo-terminal, give the pty a non-zero window size (TIOCSWINSZ) before the TUI reads its grid, and drain the master. A 0x0 grid makes the TUI exit immediately with a symptom such as "terminal reported a zero-sized grid" and never register, so a live UI check silently becomes a fake. Bare script(1) and pty.fork() from a non-tty parent typically yield that 0x0 grid.
 - Mark a scenario "live": true ONLY when you drove it against the real product in this run. A unit test, a stub, a mock, a recorded fixture, or reading the code is NOT live.
 - Return a scenario with result "untested" only when live validation is truly impossible here: every workaround you could find within the workspace boundary still cannot drive it. Its reason must state what you tried in order to drive it live and why each attempt cannot work, naming the specific tool, credential, permission, or authority that is out of reach and how to provide it. "No environment was provided" is not such a reason while you could have built a disposable one.
@@ -323,7 +417,7 @@ Rules:
 - Do NOT run linters, formatters, or static analysis tools.
 - Focus on testing and test-related fixes only.
 - A generic driver or user instruction asking for broad or full-suite confirmation does NOT override the targeted-validation product boundary.
-- Before finishing, remove any transient artifacts your testing created in the working tree (downloaded models, caches, build outputs, large binaries, or generated data directories) so they are not committed and pushed. Do not remove intentional source or test-file changes, leave evidence files in the dedicated evidence directory untouched, and do not remove dependencies materialized by commands.prepare because later configured commands share them.
+- Before finishing, remove any transient artifacts your testing created in the working tree (downloaded models, caches, build outputs, large binaries, or generated data directories): no-mistakes never commits a file this turn adds to the worktree, and one left there stops the step for a human decision. Do not remove intentional source or test-file changes, leave evidence files in the dedicated evidence directory untouched, and do not remove dependencies materialized by commands.prepare because later configured commands share them.
 - Keep "testing_summary" high-signal and natural language. Avoid raw logs and noisy counts.
 - Always return a non-empty "tested" array describing what you exercised, even when every scenario passes.
 - Only report actionable findings: scenario or test failures, unfixable setup issues, flaky tests you identified, or missing evidence that prevents you from demonstrating the user intent at all.
@@ -335,6 +429,7 @@ Rules:
 		sctx.Run.HeadSHA,
 		configuredTestCommand,
 		trustedRunbook,
+		testScratchGuidance(scratchDir)+testDesktopGuidance(desktop),
 		evidenceGuidance,
 		fallbackGuidance,
 		reassessHistory,
@@ -342,7 +437,7 @@ Rules:
 	)
 	evidencePrompt += liveCheckPromptSections(sctx, evidenceDir)
 	turn := beginLiveCheck(sctx, evidenceDir)
-	findings, err := runTestAnalyzer(turn.ctx, sctx, evidencePrompt)
+	findings, err := runTestAnalyzer(turn.ctx, sctx, evidencePrompt, desktop)
 	turn.cancel()
 	if errors.Is(err, errTestLiveCheckBudget) {
 		if cut, ok := turn.completeAtBudget(sctx, evidenceDir); ok {
@@ -410,8 +505,8 @@ func testStepOutcome(sctx *pipeline.StepContext, findings Findings, tested []str
 const testAnalyzerMaxAttempts = 3
 
 // ctx bounds the turn: the step context, or a child of it that carries
-// test_live_check_budget.
-func runTestAnalyzer(ctx context.Context, sctx *pipeline.StepContext, prompt string) (Findings, error) {
+// test_live_check_budget. Every turn starts on desktop (RunOpts.Desktop).
+func runTestAnalyzer(ctx context.Context, sctx *pipeline.StepContext, prompt, desktop string) (Findings, error) {
 	current := prompt
 	var lastErr error
 	for attempt := 1; attempt <= testAnalyzerMaxAttempts; attempt++ {
@@ -427,6 +522,8 @@ func runTestAnalyzer(ctx context.Context, sctx *pipeline.StepContext, prompt str
 		result, err := sctx.RunAgentBudget(ctx, timeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, agent.RunOpts{
 			Prompt:     current,
 			CWD:        sctx.WorkDir,
+			Env:        sctx.Env,
+			Desktop:    desktop,
 			JSONSchema: testFindingsSchema,
 			OnChunk:    sctx.LogChunk,
 		})
@@ -500,6 +597,13 @@ Validation errors:
 	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+// testScratchGuidance gives the evidence and repair turns their disposable
+// workspace, scratchDir, which this step deletes itself (see
+// testScratchDirName).
+func testScratchGuidance(scratchDir string) string {
+	return fmt.Sprintf("- Your disposable workspace is this scratch directory outside the worktree: %s. Put everything you create only to drive or check the change there, never in the worktree: downloaded or built tools and browsers, their profiles and caches, throwaway scripts, data, and logs. no-mistakes deletes it when this step ends, so keep evidence files and intended source or test changes out of it.", scratchDir)
 }
 
 func trustedTestInstructionsSection(sctx *pipeline.StepContext) string {
@@ -880,12 +984,7 @@ func unvalidatedTestWork(sctx *pipeline.StepContext, validatedHead string) strin
 	if err != nil {
 		parts = append(parts, fmt.Sprintf("a worktree status that could not be read (%v)", err))
 	} else if changed := porcelainPaths(status); len(changed) > 0 {
-		const maxNamed = 10
-		named := strings.Join(changed[:min(len(changed), maxNamed)], ", ")
-		if len(changed) > maxNamed {
-			named += fmt.Sprintf(" and %d more", len(changed)-maxNamed)
-		}
-		parts = append(parts, fmt.Sprintf("uncommitted changes to %s (inspect with `git -C %s status` and `git -C %s diff`)", named, dir, dir))
+		parts = append(parts, fmt.Sprintf("uncommitted changes to %s (inspect with `git -C %s status` and `git -C %s diff`)", namedPaths(changed), dir, dir))
 	}
 	return strings.Join(parts, "; ")
 }

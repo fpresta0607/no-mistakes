@@ -14,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -32,6 +33,13 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, err
 	}
 	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
+
+	// What the steps before Push left untracked is never committed here: their
+	// own commits took what their turns wrote (see stagePipelineChanges).
+	before, err := untrackedFiles(sctx)
+	if err != nil {
+		return nil, err
+	}
 
 	// Run format command if configured (before committing, so changes are formatted).
 	if fmtCmd := sctx.Config.Commands.Format; fmtCmd != "" {
@@ -57,7 +65,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	if strings.TrimSpace(status) != "" {
 		sctx.Log("committing agent changes...")
-		if err := stagePipelineChanges(sctx); err != nil {
+		if err := stagePipelineChanges(sctx, before); err != nil {
 			return nil, fmt.Errorf("stage agent changes: %w", err)
 		}
 		if err := commitPipelineCorrection(ctx, sctx.WorkDir, "no-mistakes: apply agent fixes", sctx.Log); err != nil {
@@ -187,6 +195,11 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	if err != nil {
 		return fmt.Errorf("push to %s: %w", pushTarget, err)
 	}
+	if !decision.upToDate {
+		if err := refuseFilesOverGitHubLimit(sctx, headBeingPushed, decision.remoteSHA); err != nil {
+			return fmt.Errorf("push to %s: %w", pushTarget, err)
+		}
+	}
 
 	// This protocol has single-publisher scope: the daemon's
 	// startRunWithIntentSourceLocked enforces one active run per repo branch, so
@@ -257,6 +270,63 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	}
 	sctx.Run.HeadSHA = headBeingPushed
 	return nil
+}
+
+// refuseFilesOverGitHubLimit refuses a push to GitHub that would publish a file
+// larger than githubMaxFileBytes, before anything is uploaded or attested.
+// GitHub refuses such a push only after receiving the whole pack: a 302 MB
+// chrome.dll a fix round committed spent about 80 minutes of upload and then
+// failed as an HTTP 408 (#1124). Staging now leaves such untracked files out
+// of pipeline corrections, but one still reaches Push through an agent's own
+// commit, a correction that grows a tracked file, or the developer's commits.
+//
+// The commits checked are those reachable from head and not from the remote
+// head being replaced or any remote-tracking ref. Remote-tracking refs hold
+// only what was fetched from the forge, so nothing GitHub refused.
+func refuseFilesOverGitHubLimit(sctx *pipeline.StepContext, head, remoteSHA string) error {
+	if resolvedProvider(sctx) != scm.ProviderGitHub {
+		return nil
+	}
+	exclude := []string{"--not", "--remotes"}
+	if remoteSHA != "" {
+		if _, err := stepGitRun(sctx, "rev-parse", "--verify", "--quiet", remoteSHA+"^{commit}"); err == nil {
+			exclude = append(exclude, remoteSHA)
+		}
+	}
+	// blob:limit=n leaves out blobs of n bytes or more, and
+	// --filter-print-omitted lists each one it left out as "~<oid>".
+	omitted, err := stepGitRun(sctx, append([]string{"rev-list", "--objects", fmt.Sprintf("--filter=blob:limit=%d", githubMaxFileBytes+1), "--filter-print-omitted", head}, exclude...)...)
+	if err != nil {
+		return fmt.Errorf("check file sizes before push: %w", err)
+	}
+	oversized := map[string]bool{}
+	for _, line := range strings.Split(omitted, "\n") {
+		if oid, ok := strings.CutPrefix(line, "~"); ok {
+			oversized[oid] = true
+		}
+	}
+	if len(oversized) == 0 {
+		return nil
+	}
+	// The filtered walk prints no path for an omitted blob; the full walk does.
+	objects, err := stepGitRun(sctx, append([]string{"rev-list", "--objects", head}, exclude...)...)
+	if err != nil {
+		return fmt.Errorf("name files over GitHub's limit: %w", err)
+	}
+	var files []string
+	for _, line := range strings.Split(objects, "\n") {
+		oid, path, ok := strings.Cut(line, " ")
+		if !ok || !oversized[oid] {
+			continue
+		}
+		delete(oversized, oid)
+		size, err := stepGitRun(sctx, "cat-file", "-s", oid)
+		if err != nil {
+			return fmt.Errorf("name files over GitHub's limit: %w", err)
+		}
+		files = append(files, fmt.Sprintf("%s (%s bytes)", path, size))
+	}
+	return fmt.Errorf("refusing to publish files larger than GitHub's 100 MiB limit, which GitHub refuses only after the whole upload: %s", strings.Join(files, ", "))
 }
 
 // planGateMirrorReconciliation inspects the gate mirror without mutating it.

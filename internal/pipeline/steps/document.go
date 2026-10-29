@@ -141,6 +141,10 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		purpose = "housekeeping"
 	}
 
+	before, err := untrackedFiles(sctx)
+	if err != nil {
+		return nil, err
+	}
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
@@ -159,7 +163,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if combinedLint {
 		fallbackSummary = "update documentation and fix lint"
 	}
-	committed, err := commitAgentFixesWithResult(sctx, s.Name(), commitSummary, fallbackSummary, result)
+	committed, err := commitAgentFixesWithResult(sctx, s.Name(), commitSummary, fallbackSummary, result, before)
 	if err != nil {
 		return nil, err
 	}

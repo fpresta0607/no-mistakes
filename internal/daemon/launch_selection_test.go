@@ -22,6 +22,7 @@ import (
 var (
 	selectedClaude = agentcfg.Selection{Harness: types.AgentClaude, Model: "claude-fixture", Effort: agentcfg.EffortHigh}
 	selectedCodex  = agentcfg.Selection{Harness: types.AgentCodex, Model: "fixture", Effort: agentcfg.EffortXHigh, ServiceTier: "default"}
+	selectedPi     = agentcfg.Selection{Harness: types.AgentPi, Model: "openrouter/deepseek/deepseek-v4.1-flash", Effort: agentcfg.EffortHigh}
 )
 
 // launchSelection is an assertion that applies its one chain to every role.
@@ -39,13 +40,26 @@ func selectionHarness(t *testing.T, harness types.AgentName, isFailing bool) (bi
 	marker = filepath.Join(directory, string(harness)+"-entries.txt")
 	binary = filepath.Join(directory, string(harness))
 	replies := []string{`{"type":"result","subtype":"success","is_error":false,"result":"ok"}`}
-	if harness == types.AgentCodex {
+	switch harness {
+	case types.AgentCodex:
 		replies = []string{`{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}`, `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`}
+	case types.AgentPi:
+		replies = []string{`{"type":"message_end","message":{"role":"assistant","content":"ok"}}`}
 	}
 	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuoteForTest(marker) + "\n"
 	if runtime.GOOS == "windows" {
 		binary += ".bat"
 		script = "@echo off\r\necho %*>>\"" + marker + "\"\r\n"
+	}
+	// A real harness reads the prompt from stdin before it replies. Without
+	// this drain the fixture can exit while the adapter is still writing the
+	// prompt, and the write races the exit into a spurious step failure.
+	if harness == types.AgentPi && !isFailing {
+		if runtime.GOOS == "windows" {
+			script += "more >nul\r\n"
+		} else {
+			script += "cat >/dev/null\n"
+		}
 	}
 	switch {
 	case isFailing && runtime.GOOS == "windows":
@@ -179,6 +193,53 @@ func TestLaunchSelectionsOnTwoHarnessesShareOneDaemon(t *testing.T) {
 	}
 	if claude, codex := len(markerLines(t, claudeMarker)), len(markerLines(t, codexMarker)); claude != 3 || codex != 3 {
 		t.Fatalf("each run has 3 duties on its own harness, got Claude %d and Codex %d", claude, codex)
+	}
+}
+
+// A Pi task's gate runs Pi, with the provider-qualified model and the effort
+// the launch selection names, whatever the machine's own chain says. The
+// machine chain here is Codex, so a Codex start would prove the selection was
+// ignored.
+func TestLaunchSelectionRunsAPiGateOnPi(t *testing.T) {
+	manager, root, database, repository, head, _, _ := launchAssertionFixture(t, func() []pipeline.Step { return []pipeline.Step{&launchAssertionFixtureStep{}} })
+	codex, codexMarker := selectionHarness(t, types.AgentCodex, false)
+	pi, piMarker := selectionHarness(t, types.AgentPi, false)
+	global := fmt.Sprintf(`agent: codex
+agent_path_override:
+  codex: %q
+  pi: %q
+agent_config:
+  codex: {model: fixture, effort: xhigh}
+  pi: {model: openrouter/deepseek/deepseek-v4.1-flash, effort: high}
+`, codex, pi)
+	if err := os.WriteFile(root.ConfigFile(), []byte(global), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expected := launchSelection(head, selectedPi)
+
+	receipt, err := manager.HandleStartFreshRun(context.Background(), &ipc.StartFreshRunParams{
+		RepoID: repository.ID, Branch: "feature", HeadSHA: head, Intent: "run on the caller's harness",
+		LaunchNonce: "pi-task", ValidationGeneration: "generation", LaunchAssertion: expected,
+	})
+
+	if err != nil || receipt.LaunchAssertionProof.Check(expected) != nil {
+		t.Fatalf("selection receipt = %+v %v", receipt, err)
+	}
+	if run := waitForRunTerminalState(t, database, receipt.RunID); run.Status != types.RunCompleted {
+		t.Fatalf("selected run = %+v", run)
+	}
+	lines := markerLines(t, piMarker)
+	if len(lines) != 3 {
+		t.Fatalf("Pi ran %d of the 3 duties: %v", len(lines), lines)
+	}
+	for _, line := range lines {
+		t.Logf("Pi invocation: %s", line)
+		if !strings.Contains(line, "--model openrouter/deepseek/deepseek-v4.1-flash") || !strings.Contains(line, "--thinking high") {
+			t.Fatalf("Pi did not get the selected model and effort: %s", line)
+		}
+	}
+	if started := markerLines(t, codexMarker); started != nil {
+		t.Fatalf("the machine chain's Codex started for a run that selected Pi: %v", started)
 	}
 }
 

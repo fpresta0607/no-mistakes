@@ -71,7 +71,7 @@ func dial(endpoint string, timeout time.Duration) (net.Conn, error) {
 		return nil, fmt.Errorf("invalid ipc endpoint file")
 	}
 	if pid, err := strconv.Atoi(pidStr); err == nil && !processAlive(pid) {
-		return nil, fmt.Errorf("daemon process %d is no longer running", pid)
+		return nil, &DeadEndpointError{PID: pid}
 	}
 	conn, err := dialNetworkWithTimeout("tcp", addr, timeout)
 	if err != nil {

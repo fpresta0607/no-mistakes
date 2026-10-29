@@ -22,6 +22,16 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+// capturedReceiptFact renders one single-value captured fact exactly as emitLaunchReceipt's TOON
+// encoding writes it. Asserting a hand-written "key: value" string would instead assume the
+// encoder's quoting decision: the encoder must quote a leading-zero decimal, so a captured head
+// sha beginning with "0" plus a digit renders quoted (hosted PR26 CI, issue #27) even though the
+// captured fact is present and correctly bound. The rendered fact still requires the exact key
+// and the exact value.
+func capturedReceiptFact(key, value string) string {
+	return strings.TrimSpace(axiDoc(toon.Field{Key: key, Value: value}))
+}
+
 func TestLaunchAssertionCommandKeepsCapturedProofThroughReceipt(t *testing.T) {
 	for _, path := range []string{"claim_receipt", "fresh_fallback"} {
 		t.Run(path, func(t *testing.T) {
@@ -161,10 +171,15 @@ func TestLaunchAssertionCommandKeepsCapturedProofThroughReceipt(t *testing.T) {
 						t.Fatalf("matching captured receipt command failed: %v\n%s", commandError, output.String())
 					}
 					for _, fact := range []string{
-						"launch_receipt:\n", "launch_nonce: captured-nonce", "validation_generation: captured-generation",
-						"branch: " + branch, "head_sha: " + head, "submitted_head_sha: " + head,
-						strings.TrimSpace(axiDoc(toon.Field{Key: "intent_digest", Value: digestLaunchIntent(intent)})),
-						"assertion_digest: " + expected.Digest(), "trusted_sha: " + expected.TrustedSHA,
+						"launch_receipt:\n",
+						capturedReceiptFact("launch_nonce", "captured-nonce"),
+						capturedReceiptFact("validation_generation", "captured-generation"),
+						capturedReceiptFact("branch", branch),
+						capturedReceiptFact("head_sha", head),
+						capturedReceiptFact("submitted_head_sha", head),
+						capturedReceiptFact("intent_digest", digestLaunchIntent(intent)),
+						capturedReceiptFact("assertion_digest", expected.Digest()),
+						capturedReceiptFact("trusted_sha", expected.TrustedSHA),
 						"primary[2]{harness,model,effort,service_tier}:\n        codex,fixture,xhigh,default\n        codex,fixture/fallback,high,fast",
 						"reviewer[1]{harness,model,effort,service_tier}:\n        codex,fixture,xhigh,default",
 						"fixer[1]{harness,model,effort,service_tier}:\n        codex,fixture,xhigh,default",
@@ -229,6 +244,46 @@ func TestLaunchAssertionCommandKeepsCapturedProofThroughReceipt(t *testing.T) {
 					if count != 1 {
 						t.Errorf("push option binding %q count=%d, want one", required, count)
 					}
+				}
+			}
+		})
+	}
+}
+
+// TestLaunchReceiptCapturedFactsSurviveTOONQuoting exercises the real receipt writer with head
+// shas that the TOON document rules render differently: the encoder must quote a value whose
+// prefix is a leading-zero decimal (toon-format/toon-go format.HasLeadingZeroDecimal), which a
+// head sha beginning "0" plus a digit hits. Hosted PR26 CI failed on exactly that shape: the
+// captured facts were emitted, and only a hand-written unquoted fact string missed them.
+func TestLaunchReceiptCapturedFactsSurviveTOONQuoting(t *testing.T) {
+	const intent = "  preserve captured intent\n\n"
+	for _, head := range []string{
+		"abbc4bbd70f036e6ee69ba92c309d8ac58bbb39c",
+		"00bc4bbd70f036e6ee69ba92c309d8ac58bbb39c",
+	} {
+		t.Run(head, func(t *testing.T) {
+			command := newAxiRunCmd()
+			var output bytes.Buffer
+			command.SetOut(&output)
+			command.SetErr(&output)
+			emitLaunchReceipt(command, ipc.LaunchReceipt{
+				RunID:                "captured-run",
+				Disposition:          "created",
+				LaunchNonce:          "captured-nonce",
+				ValidationGeneration: "captured-generation",
+				Branch:               "feature/omit",
+				HeadSHA:              head,
+				SubmittedHeadSHA:     head,
+				IntentDigest:         digestLaunchIntent(intent),
+			})
+			rendered := output.String()
+			for _, fact := range []string{
+				capturedReceiptFact("branch", "feature/omit"),
+				capturedReceiptFact("head_sha", head),
+				capturedReceiptFact("submitted_head_sha", head),
+			} {
+				if !strings.Contains(rendered, fact) {
+					t.Errorf("receipt omitted structured captured fact %q:\n%s", fact, rendered)
 				}
 			}
 		})

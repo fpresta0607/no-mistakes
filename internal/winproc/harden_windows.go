@@ -5,7 +5,8 @@
 // console-less daemon, so every console child (agents, git, shell, provider
 // CLIs, helper commands) would otherwise get a fresh visible console window
 // for its lifetime. Harden keeps stdout/stderr pipes intact while suppressing
-// the window.
+// the window. A HiddenDesktop goes further for a process tree that may open
+// windows of its own: started on it, none of them shows on the user's screen.
 package winproc
 
 import (

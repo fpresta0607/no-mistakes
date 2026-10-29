@@ -50,14 +50,19 @@ var errTestLiveCheckBudget = errors.New("test live check budget")
 // evidencePublishExcludedDirs names the folders of a run's evidence directory
 // that are never published to the evidence branch. The review conversation is
 // excluded for the reason evidence_publish.go records; the live check folder
-// holds a ledger and set-aside work, neither of which is evidence.
+// holds a ledger and set-aside work, neither of which is evidence. The Test
+// step's scratch directory holds the agent's disposable tools, never evidence,
+// so a copy the step could not delete is never published either.
 func evidencePublishExcludedDirs() []string {
 	return []string{
 		reviewqa.DirName,
 		liveCheckDirName,
+		testScratchDirName,
 		// A Test step whose work started beside the review (side_by_side)
-		// keeps its evidence one level down, and its ledger with it.
+		// keeps its evidence one level down, and its ledger and scratch
+		// directory with it.
 		sideLaneDirName + "/" + string(types.StepTest) + "/" + liveCheckDirName,
+		sideLaneDirName + "/" + string(types.StepTest) + "/" + testScratchDirName,
 	}
 }
 

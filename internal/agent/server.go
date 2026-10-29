@@ -128,6 +128,13 @@ func startServerWithPort(ctx context.Context, agentName, bin string, args []stri
 	return srv, nil
 }
 
+// serverDesktopRefusal refuses RunOpts.Desktop for an agent served by a managed
+// server, which outlives every invocation and so cannot start on any one
+// invocation's hidden desktop.
+func serverDesktopRefusal(agentName string) error {
+	return fmt.Errorf("%s runs as a server that outlives each invocation, so it cannot start on this invocation's hidden desktop, and it is not started on the user's desktop instead", agentName)
+}
+
 // baseURL returns the server's base URL.
 func (s *managedServer) baseURL() string {
 	return fmt.Sprintf("http://127.0.0.1:%d", s.port)
