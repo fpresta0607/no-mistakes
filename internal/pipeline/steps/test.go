@@ -549,8 +549,8 @@ func runTestAnalyzer(ctx context.Context, sctx *pipeline.StepContext, prompt, de
 		if attempt == testAnalyzerMaxAttempts {
 			break
 		}
-		var rejected []byte
-		if result != nil {
+		rejected := []byte(agent.RejectedOutput(runErr))
+		if runErr == nil && result != nil {
 			rejected = result.Output
 		}
 		current = testAnalyzerCorrectionPrompt(valErr, rejected)

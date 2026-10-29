@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -412,6 +413,25 @@ func TestFinalizeTextResult_SchemaRejectKeepsReportedUsage(t *testing.T) {
 	}
 	if result.Output != nil {
 		t.Fatalf("rejected output must not be treated as structured JSON, got %s", result.Output)
+	}
+}
+
+func TestFinalizeTextResult_SchemaRejectCarriesTheWholeOutput(t *testing.T) {
+	text := `{"findings":[],"note":"` + strings.Repeat("x", 300) + `","end":true}`
+
+	_, err := finalizeTextResult("pi", text, json.RawMessage(`{"type":"object","required":["verdict"]}`), TokenUsage{})
+
+	if !IsStructuredOutputRejected(err) {
+		t.Fatalf("want structured-output rejection, got %v", err)
+	}
+	if strings.Contains(err.Error(), `"end":true`) {
+		t.Fatalf("the error should quote only a snippet, got %v", err)
+	}
+	if got := RejectedOutput(fmt.Errorf("agent run tests: %w", err)); got != text {
+		t.Fatalf("RejectedOutput = %q, want the whole refused response %q", got, text)
+	}
+	if got := RejectedOutput(errors.New("pi exited: exit status 1")); got != "" {
+		t.Fatalf("RejectedOutput of a process failure = %q, want empty", got)
 	}
 }
 

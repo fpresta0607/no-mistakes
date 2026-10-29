@@ -675,6 +675,100 @@ func TestTestStep_FinalizerRejectionTriggersCorrectionRound(t *testing.T) {
 	}
 }
 
+// TestTestStep_FinalizerRejectionCorrectsTheWholePayload replays
+// fpresta0607/code-goblins#1561. Pi refused an evidence payload whose only
+// defect was a scenario without a reason, and its error quotes just the first
+// 200 characters. The correction turn was handed that snippet alone, rebuilt
+// a payload around the one finding the snippet began, and parked the run on
+// an ask-user finding about a file the change never touched. It must be
+// handed the whole payload Pi refused, findings past the snippet included.
+func TestTestStep_FinalizerRejectionCorrectsTheWholePayload(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	refused, err := json.Marshal(map[string]any{
+		"findings": []map[string]any{
+			{"id": "hidden-desktop-window-enumeration", "severity": "warning", "file": "internal/proc/window_windows.go", "line": 58, "description": "The configured test command failed only on a window enumeration test this change does not touch, a host capability of the hidden desktop.", "action": "no-op"},
+			{"id": "custody-test-timing-race", "severity": "info", "file": "internal/supervisor/custody_test.go", "line": 93, "description": "The new custody test read the job before its child started; it now waits for the child.", "action": "no-op"},
+		},
+		"summary":         "Drove the engine selector end to end.",
+		"tested":          []string{"`go test ./internal/supervisor`"},
+		"testing_summary": "Drove the board API in a disposable home.",
+		"artifacts":       []any{},
+		"scenarios": []map[string]any{
+			{"name": "a saved engine survives a restart", "result": "pass", "live": true, "evidence": "snapshot.json", "reason": ""},
+			{"name": "an unknown model is refused", "result": "untested", "live": false, "evidence": ""},
+		},
+		"verdict": "go",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(refused[200:]), "custody-test-timing-race") {
+		t.Fatal("the second finding must start past the 200-character snippet Pi's error quotes")
+	}
+	var lines []byte
+	for _, event := range []any{
+		map[string]any{"type": "message_end", "message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": string(refused)}}}},
+		map[string]any{"type": "agent_end", "messages": []any{}},
+	} {
+		line, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines = append(append(lines, line...), '\n')
+	}
+	piDir := t.TempDir()
+	events := filepath.Join(piDir, "events.jsonl")
+	if err := os.WriteFile(events, lines, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(piDir, "pi")
+	script := "#!/bin/sh\ncat > /dev/null\ncat '" + events + "'\n"
+	if runtime.GOOS == "windows" {
+		bin += ".cmd"
+		script = "@echo off\r\nmore > nul\r\ntype \"" + events + "\"\r\n"
+	}
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pi, err := agent.New(types.AgentPi, bin, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if strings.Contains(opts.Prompt, "were REJECTED") {
+				return &agent.Result{Output: json.RawMessage(mixedLivePassAndUntestedFindingsJSON)}, nil
+			}
+			// A placed agent starts through the desktop helper this test
+			// binary does not serve, and the desktop plays no part here.
+			opts.Desktop = ""
+			return pi.Run(ctx, opts)
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	if _, err := (&TestStep{}).Execute(sctx); err != nil {
+		t.Fatalf("Pi's refusal must enter the bounded correction round: %v", err)
+	}
+
+	if len(ag.calls) != 2 {
+		t.Fatalf("agent calls = %d, want the refused evidence turn plus one correction", len(ag.calls))
+	}
+	correction := ag.calls[1].Prompt
+	for _, want := range []string{
+		`missing required field "reason"`,
+		"<rejected-json>",
+		"custody-test-timing-race",
+		"an unknown model is refused",
+	} {
+		if !strings.Contains(correction, want) {
+			t.Fatalf("correction prompt missing %q, so the turn cannot correct the payload Pi refused:\n%s", want, correction)
+		}
+	}
+}
+
 func TestTestStep_MalformedJSONTriggersCorrectionRound(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
