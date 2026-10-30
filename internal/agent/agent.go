@@ -92,7 +92,22 @@ func IsStructuredOutputRejected(err error) bool {
 	return errors.As(err, &rejection) && rejection.StructuredOutputRejected()
 }
 
-type structuredOutputRejection struct{ err error }
+// RejectedOutput returns the whole response an adapter refused as structured
+// output, or "" when err carries none. The error's message quotes only a
+// snippet of it, and a turn asked to correct the response needs all of it
+// (fpresta0607/code-goblins#1561).
+func RejectedOutput(err error) string {
+	var rejection *structuredOutputRejection
+	if errors.As(err, &rejection) {
+		return rejection.output
+	}
+	return ""
+}
+
+type structuredOutputRejection struct {
+	err    error
+	output string
+}
 
 func (e *structuredOutputRejection) Error() string                { return e.err.Error() }
 func (e *structuredOutputRejection) Unwrap() error                { return e.err }
@@ -376,7 +391,7 @@ func finalizeTextResult(agentName, text string, schema json.RawMessage, usage To
 
 	output, err := parseStructuredTextOutput(text, schema, strings.HasPrefix(agentName, "acp:"))
 	if err != nil {
-		return resultFromUsage(usage), rejectStructuredOutput(fmt.Errorf("%s output parse: %w (output snippet: %q)", agentName, err, outputSnippet(text)))
+		return resultFromUsage(usage), &structuredOutputRejection{err: fmt.Errorf("%s output parse: %w (output snippet: %q)", agentName, err, outputSnippet(text)), output: text}
 	}
 
 	res := textResult(text, usage)
