@@ -1378,6 +1378,19 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("daemon_shutdown")
 		return "", fmt.Errorf("daemon is shutting down")
 	}
+	active, err := m.db.GetActiveRun(repo.ID, branch)
+	if err != nil {
+		return "", err
+	}
+	if active != nil {
+		handback, err := m.db.LatestCIHandback(active.ID)
+		if err != nil {
+			return "", err
+		}
+		if handback != nil {
+			return "", fmt.Errorf("run %s retains its CI handback and budget history; use axi handback --resume for the caller follow-up", active.ID)
+		}
+	}
 	// Best-effort only: a clone's remotes may change after init. Refresh the
 	// registered URLs before constructing any run-owned Git operation, but keep
 	// the exact prior repo value and continue when discovery, validation, or the

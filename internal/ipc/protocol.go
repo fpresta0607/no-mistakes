@@ -28,6 +28,7 @@ const (
 	MethodRerun                     = "rerun"
 	MethodSubscribe                 = "subscribe"
 	MethodRespond                   = "respond"
+	MethodCIHandback                = "ci_handback"
 	MethodAnswerReview              = "answer_review_question"
 	MethodCancelRun                 = "cancel_run"
 	MethodGateContext               = "gate_context"
@@ -71,6 +72,22 @@ type RPCError struct {
 func (e *RPCError) Error() string { return e.Message }
 
 // --- Method parameters ---
+
+type CIHandbackParams struct {
+	RepoID    string `json:"repo_id"`
+	RunID     string `json:"run_id"`
+	Branch    string `json:"branch"`
+	CallerDir string `json:"caller_dir"`
+	HeadSHA   string `json:"head_sha"`
+	Resume    bool   `json:"resume"`
+}
+
+type CIHandbackResult struct {
+	RunID        string `json:"run_id"`
+	PRURL        string `json:"pr_url"`
+	ReleasedHead string `json:"released_head"`
+	AcceptedHead string `json:"accepted_head,omitempty"`
+}
 
 // PushReceivedParams are sent by the post-receive hook when a push arrives.
 //

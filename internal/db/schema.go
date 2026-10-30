@@ -1,6 +1,24 @@
 package db
 
 const schemaSQL = `
+CREATE TABLE IF NOT EXISTS ci_handbacks (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    round_id TEXT NOT NULL REFERENCES step_rounds(id),
+    caller_dir TEXT NOT NULL,
+    released_head TEXT NOT NULL,
+    pr_url TEXT NOT NULL,
+    base_branch TEXT NOT NULL,
+    base_head TEXT NOT NULL,
+    push_generation INTEGER NOT NULL,
+    target_fingerprint TEXT NOT NULL,
+    push_ref TEXT NOT NULL,
+    released_at INTEGER NOT NULL,
+    accepted_head TEXT,
+    accepted_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ci_handbacks_open ON ci_handbacks(run_id) WHERE accepted_head IS NULL;
+
 CREATE TABLE IF NOT EXISTS repos (
     id             TEXT PRIMARY KEY,
     working_path   TEXT NOT NULL UNIQUE,

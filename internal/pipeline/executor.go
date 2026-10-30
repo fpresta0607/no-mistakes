@@ -71,6 +71,9 @@ type Executor struct {
 	waiting                bool                  // true when blocked on approval
 	waitingStep            types.StepName        // which step is currently awaiting approval
 	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
+	ciHandbackCh           chan ciHandbackRequest
+	ciHandbackPending      bool
+	ciHandbackReleased     bool
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -117,6 +120,7 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 		steps:                 steps,
 		onEvent:               onEvent,
 		approvalCh:            make(chan approvalResponse, 1),
+		ciHandbackCh:          make(chan ciHandbackRequest),
 		gateReconcileInterval: defaultGateReconcileInterval,
 		gateReconcileTimeout:  defaultGateReconcileTimeout,
 	}
@@ -196,6 +200,10 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		return fmt.Errorf("unrecognized approval action %q (valid: approve, fix, skip, abort, answer)", action)
 	}
 	e.mu.Lock()
+	if e.ciHandbackPending || e.ciHandbackReleased {
+		e.mu.Unlock()
+		return fmt.Errorf("CI handback owns this gate; submit the additive follow-up with axi handback --resume")
+	}
 	if !e.waiting {
 		e.mu.Unlock()
 		return fmt.Errorf("no step awaiting approval")
@@ -441,6 +449,15 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if err != nil {
 		return err
 	}
+	if gate.step.Name() == types.StepCI {
+		isOpen, err := e.ciHandbackOpen(run.ID)
+		if err != nil {
+			return err
+		}
+		e.mu.Lock()
+		e.ciHandbackReleased = isOpen
+		e.mu.Unlock()
+	}
 	logDir := e.paths.RunLogDir(run.ID)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
@@ -548,6 +565,13 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	if reconciled {
 		return completeReconciledGate()
+	}
+	if response.action == actionCIFollowup {
+		index, err := e.prepareRestart(run.ID, types.StepReview, gate.index)
+		if err != nil {
+			return e.failRun(run, repo, err, ctx)
+		}
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, index, true)
 	}
 
 	approvalFields := telemetry.Fields{
@@ -762,6 +786,15 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 	}
 	if gate == nil {
 		return nil, fmt.Errorf("recovered run has no approval gate")
+	}
+	if gate.step.Name() == types.StepCI {
+		receipt, err := e.db.LatestCIHandback(runID)
+		if err != nil {
+			return nil, err
+		}
+		if receipt != nil && receipt.AcceptedHead != nil && receipt.RoundID == gate.lastRoundID {
+			return nil, fmt.Errorf("accepted CI follow-up requires fresh validation; its old conflict gate cannot be recovered")
+		}
 	}
 	return gate, nil
 }
@@ -1435,6 +1468,9 @@ rounds:
 				phaseStart = time.Now()
 				goto done
 			}
+			if response.action == actionCIFollowup {
+				return false, types.StepReview, nil
+			}
 
 			approvalFields := telemetry.Fields{
 				"step":       telemetry.StepName(stepName),
@@ -1845,11 +1881,43 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 	defer timer.Stop()
 	for {
 		select {
+		case request := <-e.ciHandbackCh:
+			handler, ok := step.(CIHandbackStep)
+			if !ok || step.Name() != types.StepCI || e.autoFixLimit(types.StepCI) != 0 {
+				request.reply <- ciHandbackReply{err: fmt.Errorf("handback requires a published CI conflict with automatic CI repair disabled")}
+				continue
+			}
+			copyContext := *sctx
+			operationContext, cancel := context.WithCancel(request.ctx)
+			stop := context.AfterFunc(ctx, cancel)
+			copyContext.Ctx = operationContext
+			result, err := handler.HandbackCI(&copyContext, request.params)
+			stop()
+			cancel()
+			if err == nil {
+				e.mu.Lock()
+				e.ciHandbackReleased = !request.params.Resume
+				if request.params.Resume {
+					e.waiting = false
+				}
+				e.mu.Unlock()
+			}
+			request.reply <- ciHandbackReply{result: result, err: err}
+			if err == nil && request.params.Resume {
+				return approvalResponse{action: actionCIFollowup}, false, nil
+			}
 		case response := <-e.approvalCh:
 			return response, false, nil
 		case <-ctx.Done():
 			return approvalResponse{}, false, context.Cause(ctx)
 		case <-timer.C:
+			e.mu.Lock()
+			isReleased := e.ciHandbackReleased
+			e.mu.Unlock()
+			if isReleased {
+				timer.Reset(e.gateReconcileInterval)
+				continue
+			}
 			// A resumer runs first and returns a RESPONSE rather than a
 			// completion, so the gate re-enters its step exactly as it would
 			// for an operator's own action. Claiming the gate here is the same
@@ -1924,6 +1992,12 @@ func (e *Executor) resumeApprovalGate(ctx context.Context, step Step, sctx *Step
 }
 
 func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *StepContext, findingsJSON string) (bool, error) {
+	if step.Name() == types.StepCI {
+		isOpen, err := e.ciHandbackOpen(sctx.Run.ID)
+		if err != nil || isOpen {
+			return false, err
+		}
+	}
 	reconciler, ok := step.(ApprovalGateReconciler)
 	if !ok {
 		return false, nil

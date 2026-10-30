@@ -24,6 +24,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
 // Harness wires together the temp filesystem state needed to run the real
@@ -34,7 +35,7 @@ type Harness struct {
 
 	NMBin       string // absolute path to the no-mistakes binary under test
 	FakeAgent   string // absolute path to the fake agent binary
-	BinDir      string // temp dir holding agent symlinks; prepended to PATH
+	BinDir      string // temp dir holding agent links; prepended to PATH
 	NMHome      string // value used as $NM_HOME (daemon DB, socket, config)
 	HomeDir     string // value used as $HOME so git operations don't read user state
 	UpstreamDir string // bare repo serving as origin for the working clone
@@ -119,10 +120,10 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	}
 	h.writeLoginShellPathSeed()
 
-	// Symlink each agent name to the same fake binary. Native agents dispatch
-	// by argv[0] basename; opencode does the same. Symlinks (not
-	// copies) keep the build cheap on subsequent tests. The `gh` and `tea`
-	// symlinks are a guard rail: BinDir is prepended to PATH, so any stray
+	// Hard-link each agent name to the same fake binary. Native agents dispatch
+	// by argv[0] basename; opencode does the same. Hard links need no Windows
+	// symlink privilege and keep the build cheap. The `gh` and `tea`
+	// links are a guard rail: BinDir is prepended to PATH, so any stray
 	// invocation of gh/tea by the pipeline (e.g. PR/CI on a misconfigured
 	// origin) hits the fakeagent stub instead of a real, authenticated
 	// system CLI. antigravity gets a second link under its probed binary
@@ -130,8 +131,8 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	// name).
 	for _, name := range []string{"claude", "codex", "grok", "opencode", "pi", "antigravity", "agy", "gh", "tea"} {
 		linkPath := filepath.Join(h.BinDir, executableName(name))
-		if err := os.Symlink(fakeBin, linkPath); err != nil {
-			t.Fatalf("symlink %s: %v", linkPath, err)
+		if err := os.Link(fakeBin, linkPath); err != nil {
+			t.Fatalf("link %s: %v", linkPath, err)
 		}
 	}
 
@@ -300,6 +301,7 @@ func (h *Harness) RunInDirWithEnv(dir string, env map[string]string, args ...str
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.NMBin, args...)
+	winproc.Harden(cmd)
 	cmd.Dir = dir
 	cmd.Env = mergedEnv(os.Environ(), env)
 	out, err := cmd.CombinedOutput()
@@ -699,6 +701,7 @@ type Invocation struct {
 
 func (h *Harness) runGit(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
+	winproc.Harden(cmd)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"GIT_AUTHOR_NAME=E2E Test",
@@ -742,6 +745,7 @@ func (h *Harness) shutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.NMBin, "daemon", "stop")
+	winproc.Harden(cmd)
 	cmd.Dir = h.daemonStopDir()
 	cmd.Env = os.Environ()
 	_ = cmd.Run()
@@ -794,6 +798,7 @@ func buildBinaries(t *testing.T) (nmBin, fakeBin string) {
 			{fake, "./cmd/fakeagent"},
 		} {
 			cmd := exec.Command("go", "build", "-o", target.out, target.pkg)
+			winproc.Harden(cmd)
 			cmd.Dir = repoRoot
 			out, err := cmd.CombinedOutput()
 			if err != nil {
