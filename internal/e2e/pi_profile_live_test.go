@@ -7,11 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
+	"github.com/kunchenguid/no-mistakes/internal/e2edaemon"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -419,11 +419,20 @@ func TestLivePiProfileResumeAfterDaemonRestartKeepsPin(t *testing.T) {
 	if err != nil || pid <= 0 {
 		t.Fatalf("read daemon pid: %v (pid=%d)", err, pid)
 	}
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatalf("find daemon %d: %v", pid, err)
+	}
+	defer process.Release()
+	if err := process.Kill(); err != nil {
 		t.Fatalf("kill daemon %d: %v", pid, err)
 	}
 	for attempt := 0; attempt < 100; attempt++ {
-		if err := syscall.Kill(pid, 0); err != nil {
+		isAlive, err := e2edaemon.ProcessAlive(pid)
+		if err != nil {
+			t.Fatalf("inspect daemon %d: %v", pid, err)
+		}
+		if !isAlive {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)

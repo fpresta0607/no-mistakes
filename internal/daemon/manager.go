@@ -111,11 +111,12 @@ type recoveredRunPlan struct {
 	forge   *forgecontext.Context
 }
 
-func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPlan {
+func (m *RunManager) recoverableParkedRuns(ctx context.Context) ([]recoveredRunPlan, map[string]struct{}) {
+	preserved := make(map[string]struct{})
 	runs, err := m.db.GetActiveRuns()
 	if err != nil {
 		slog.Error("failed to list active runs for recovery", "error", err)
-		return nil
+		return nil, preserved
 	}
 	plans := make([]recoveredRunPlan, 0, len(runs))
 	branchCounts := make(map[string]int, len(runs))
@@ -123,6 +124,14 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPl
 		branchCounts[run.RepoID+"\x00"+run.Branch]++
 	}
 	for _, run := range runs {
+		isHandbackPending, err := pipeline.CIHandbackRecoveryPending(m.db, run.ID)
+		if isHandbackPending {
+			preserved[run.ID] = struct{}{}
+		}
+		if err != nil {
+			slog.Warn("CI handback recovery evidence is unreadable; preserving run", "run_id", run.ID, "error", err)
+			continue
+		}
 		if branchCounts[run.RepoID+"\x00"+run.Branch] != 1 {
 			slog.Warn("active run cannot be safely resumed", "run_id", run.ID, "error", "conflicting active run for branch")
 			continue
@@ -133,13 +142,20 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPl
 			continue
 		}
 		plans = append(plans, *plan)
+		preserved[run.ID] = struct{}{}
 	}
-	return plans
+	return plans, preserved
 }
 
 func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*recoveredRunPlan, error) {
-	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil || run.Branch == "" {
+	if run == nil || run.Status != types.RunRunning || run.Branch == "" {
 		return nil, fmt.Errorf("run is not a parked running run")
+	}
+	if run.AwaitingAgentSince == nil {
+		receipt, err := m.db.LatestCIHandback(run.ID)
+		if err != nil || receipt == nil || receipt.AcceptedHead == nil || receipt.Candidate == nil {
+			return nil, fmt.Errorf("run is not a parked running run or checkpointed CI follow-up")
+		}
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
 	if err != nil {
@@ -152,10 +168,6 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if info, err := os.Stat(workDir); err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("worktree is missing")
 	}
-	headSHA, err := git.HeadSHA(ctx, workDir)
-	if err != nil || headSHA != run.HeadSHA {
-		return nil, fmt.Errorf("worktree head does not match run head")
-	}
 	gateDir := m.paths.RepoDir(repo.ID)
 	commonDir, err := git.Run(ctx, workDir, "rev-parse", "--git-common-dir")
 	if err != nil {
@@ -163,6 +175,21 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	}
 	if !samePath(resolveGitPath(workDir, commonDir), gateDir) {
 		return nil, fmt.Errorf("worktree does not belong to its gate repository")
+	}
+	isHandbackPending, err := pipeline.CIHandbackRecoveryPending(m.db, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	receipt, err := m.db.LatestCIHandback(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if isHandbackPending && receipt != nil && receipt.Candidate != nil {
+		if _, err := steps.CIHandbackManagedHead(&pipeline.StepContext{Ctx: ctx, WorkDir: workDir, GateDir: gateDir}, receipt); err != nil {
+			return nil, err
+		}
+	} else if headSHA, err := git.HeadSHA(ctx, workDir); err != nil || headSHA != run.HeadSHA {
+		return nil, fmt.Errorf("worktree head does not match run head")
 	}
 
 	cfg, err := m.loadRecoveredConfig(ctx, run, repo, workDir)
@@ -176,6 +203,17 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	forgeCtx, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
 	if err != nil {
 		return nil, fmt.Errorf("resolve forge profile: %w", err)
+	}
+	if isHandbackPending && receipt != nil && receipt.Candidate != nil {
+		recoveryContext, cancel := context.WithTimeout(ctx, 90*time.Second)
+		defer cancel()
+		if err := steps.RecoverCIHandback(&pipeline.StepContext{Ctx: recoveryContext, Run: run, Repo: repo, WorkDir: workDir, GateDir: gateDir, Config: cfg, ForgeContext: forgeCtx, DB: m.db}, receipt); err != nil {
+			return nil, err
+		}
+	}
+	headSHA, err := git.HeadSHA(ctx, workDir)
+	if err != nil || headSHA != run.HeadSHA {
+		return nil, fmt.Errorf("worktree head does not match run head")
 	}
 	ag, err := m.newRunPipelineAgent(ctx, run, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx))
 	if err != nil {
@@ -1377,6 +1415,19 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	if m.shuttingDown.Load() {
 		trackStartFailure("daemon_shutdown")
 		return "", fmt.Errorf("daemon is shutting down")
+	}
+	active, err := m.db.GetActiveRun(repo.ID, branch)
+	if err != nil {
+		return "", err
+	}
+	if active != nil {
+		handback, err := m.db.LatestCIHandback(active.ID)
+		if err != nil {
+			return "", err
+		}
+		if handback != nil {
+			return "", fmt.Errorf("run %s retains its CI handback and budget history; use axi handback --resume for the caller follow-up", active.ID)
+		}
 	}
 	// Best-effort only: a clone's remotes may change after init. Refresh the
 	// registered URLs before constructing any run-owned Git operation, but keep

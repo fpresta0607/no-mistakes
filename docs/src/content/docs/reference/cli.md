@@ -223,7 +223,8 @@ Backgrounding a call is fine for an agent harness, but the run never advances pa
 When the CI step is still monitoring an open PR and checks are green - or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) with no registered checks - `axi run` exits successfully with `outcome: checks-passed` instead of waiting for a human merge. A generic empty check list without that declaration is not ready.
 Treat that as the agent stopping point: ask the user to review and merge the PR from the `help` line.
 If that PR later falls behind the default branch or hits a merge conflict, do not run `axi run`, `rerun`, or a manual rebase while the CI monitor is still running.
-The monitor auto-rebases onto the base, resolves actual conflicts, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push; a PR that is merely behind but clean needs no command.
+When automatic CI repair is enabled, the monitor auto-rebases onto the base, resolves actual conflicts, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push; a PR that is merely behind but clean needs no command.
+For a published GitHub conflict parked with automatic CI repair disabled, see [`axi handback`](#no-mistakes-axi-handback).
 After that monitor ends, see [`no-mistakes rerun`](#no-mistakes-rerun) for the restart conditions.
 Successful outcomes (`checks-passed`, `passed`, `passed-with-override`, and `passed-with-skips`) also carry `help` instructions telling the agent to summarize the run.
 `passed-with-override` is a completed run with an explicitly approved Test exception or a CI approval over still-failing checks.
@@ -436,6 +437,41 @@ For older active runs with no recorded activity timestamp, AXI falls back to the
 Finding descriptions are always rendered in full, so an `ask-user` finding can be relayed verbatim. Gate summaries are bounded in this default status view because a command gate's summary carries its command output; a truncated summary discloses its original length, and the gate help points to `no-mistakes axi logs --step <step> --full` for an implicitly resolved run or `no-mistakes axi logs --run <id> --step <step> --full` for an explicitly selected run.
 Relevant current-branch states also include a cached `branch_sync` object with full SHAs, the run's status, the persisted pipeline push binding, target kind and ref, relation, safety result, PR lifecycle, and a structured next action.
 Cached home and status rendering performs no network read and labels the remote observation `pipeline_push`; only explicit sync check or apply reports `live` freshness.
+
+## no-mistakes axi handback
+
+Returns a published GitHub CI merge conflict to its exact clean caller for an additive follow-up in the same run.
+
+```bash
+no-mistakes axi sync
+no-mistakes axi handback
+# Merge the current PR base into this branch, resolve conflicts, and commit.
+no-mistakes axi handback --resume
+```
+
+Release requires a CI `awaiting_approval` gate containing an unresolved merge-conflict finding, automatic CI repair disabled (`auto_fix.ci: 0`), and every preceding step completed.
+The caller must be a unique, completely clean checkout of the exact recorded and published head in the registered repository.
+The daemon verifies the managed worktree, gate lane, live PR identity and head, live push target, branch ref and push generation before recording the receipt.
+Dirty callers, moved heads, active writers, ambiguous ownership and mismatched publication evidence refuse without moving the caller or resolving the gate.
+
+The run stays active and CI stays `awaiting_approval` with its conflict findings intact.
+Release invokes no fixer and records no approve, skip or declined-finding decision.
+It reserves the gate against ordinary responses and automatic reconciliation while the caller works.
+The receipt retains the run, PR, released head, base head and push provenance; previous validation rounds and repair selections remain unchanged.
+`axi status` exposes `ci_handback.state: released` alongside the original findings.
+Release returns `handback: released`, the run ID, PR URL and full `released_head`.
+
+`--resume` accepts a changed, clean head from that same caller worktree only after proving that it contains the released published head, the recorded base head and the freshly resolved live PR base through an additive merge.
+It imports the head without a receive-hook push, revokes the previous review approval and readiness, and restarts Review, Test, Document, Lint, Push, PR and CI in the same run.
+The original intent, submitted head, PR identity, round history and spent automatic repair budget remain intact.
+The integration proof replaces another rebase; publication preserves the accepted follow-up, including the released head, as an ancestor and refuses any update requiring force.
+Fresh required validation and live checks must establish readiness for the resulting concrete head.
+Resubmission returns the full `accepted_head` and follows the next decision point, bounded by `--wait` (default `8m`).
+After acceptance, `axi status` reports `ci_handback.state: accepted` and the full `accepted_head`.
+Acceptance records the exact candidate checkpoint before moving the managed head; if acceptance fails, it restores the released managed head only while that checkpoint still matches.
+[Crash recovery](/no-mistakes/concepts/daemon/#crash-recovery) owns interrupted resubmissions and reservations whose recovery evidence cannot be verified.
+The IPC method is `ci_handback`, binding `repo_id`, `run_id`, `branch`, `caller_dir`, `head_sha` and the `resume` boolean; an older daemon refuses the unknown method.
+The CLI selects only the current branch's active run and accepts no `--run` override.
 
 ## no-mistakes axi sync
 

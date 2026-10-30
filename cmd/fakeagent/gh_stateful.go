@@ -10,19 +10,22 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
 // ghStatefulPR is one pull request the stateful gh stub remembers, keyed by
 // its head branch. The body is exactly what the pipeline last wrote, so a
 // later `gh pr view --json body` reads it back the way a real forge would.
 type ghStatefulPR struct {
-	Number int    `json:"number"`
-	URL    string `json:"url"`
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-	Base   string `json:"base"`
-	Head   string `json:"head"`
-	State  string `json:"state"`
+	Number    int    `json:"number"`
+	URL       string `json:"url"`
+	Title     string `json:"title"`
+	Body      string `json:"body"`
+	Base      string `json:"base"`
+	Head      string `json:"head"`
+	State     string `json:"state"`
+	Mergeable string `json:"mergeable,omitempty"`
 }
 
 type ghStatefulState struct {
@@ -157,6 +160,10 @@ func runGhStatefulPRStub(args []string) int {
 		return 0
 	}
 	// view
+	mergeable := pr.Mergeable
+	if mergeable == "" {
+		mergeable = "MERGEABLE"
+	}
 	fields := map[string]any{
 		"number":      pr.Number,
 		"url":         pr.URL,
@@ -165,7 +172,7 @@ func runGhStatefulPRStub(args []string) int {
 		"state":       pr.State,
 		"baseRefName": pr.Base,
 		"headRefName": pr.Head,
-		"mergeable":   "MERGEABLE",
+		"mergeable":   mergeable,
 		"headRefOid":  ghStatefulHeadOID(repo, pr.Head),
 	}
 	if jq := argAfter(args, "--jq"); strings.HasPrefix(jq, ".") {
@@ -205,7 +212,9 @@ func (s *ghStatefulState) lookup(args []string) *ghStatefulPR {
 // ghStatefulHeadOID reads the PR head from the forge's git remote (the e2e
 // harness rewrites the github.com URL to its local upstream).
 func ghStatefulHeadOID(repo, head string) string {
-	out, err := exec.Command("git", "ls-remote", "https://github.com/"+repo+".git", "refs/heads/"+head).Output()
+	command := exec.Command("git", "ls-remote", "https://github.com/"+repo+".git", "refs/heads/"+head)
+	winproc.Harden(command)
+	out, err := command.Output()
 	if err != nil {
 		return ""
 	}

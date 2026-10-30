@@ -88,6 +88,20 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 		fields = append(fields, toon.Field{Key: "current_branch", Value: branch})
 	}
 	fields = append(fields, runObjectFieldWithKey(runKey, rv))
+	handback, err := env.d.LatestCIHandback(run.ID)
+	if err != nil {
+		return emitError(cmd, 1, err.Error())
+	}
+	if handback != nil {
+		state := "released"
+		handbackFields := []toon.Field{{Key: "released_head", Value: handback.ReleasedHead}}
+		if handback.AcceptedHead != nil {
+			state = "accepted"
+			handbackFields = append(handbackFields, toon.Field{Key: "accepted_head", Value: *handback.AcceptedHead})
+		}
+		handbackFields = append(handbackFields, toon.Field{Key: "state", Value: state})
+		fields = append(fields, toon.Field{Key: "ci_handback", Value: toon.NewObject(handbackFields...)})
+	}
 	if syncField := cachedBranchSyncField(cmd, run.ID); syncField != nil {
 		fields = append(fields, *syncField)
 	}
@@ -102,7 +116,11 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 		if !branchScopedCommandsSafe {
 			fields = append(fields, inspectionOnlyGateFields(gate, run.ID)...)
 		} else {
-			fields = append(fields, gateFields(gate)...)
+			if handback != nil && handback.AcceptedHead == nil {
+				fields = append(fields, gateFieldsWithHelp(gate, []string{"The published CI conflict is released to its recorded caller worktree. Commit an additive merge there, then submit it with no-mistakes axi handback --resume; the same run requires fresh validation."})...)
+			} else {
+				fields = append(fields, gateFields(gate)...)
+			}
 		}
 	} else if terminalStatus(rv.Status) {
 		fields = append(fields, toon.Field{Key: "outcome", Value: outcomeForRun(rv)})

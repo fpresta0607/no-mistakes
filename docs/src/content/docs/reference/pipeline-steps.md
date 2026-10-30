@@ -401,6 +401,8 @@ Monitors PR health after creation and auto-fixes CI failures. Mergeability polli
 
 **Default auto-fix limit:** `3` total CI auto-fix attempts.
 
+With automatic CI repair disabled, the [`axi handback` reference](/no-mistakes/reference/cli/#no-mistakes-axi-handback) owns the guarded caller follow-up for a published GitHub merge conflict in the same run.
+
 **Default transient rerun budget:** `0` reruns per provider-attributed check per run. GitHub pre-run failure detection is disabled at this value.
 
 ## Step statuses

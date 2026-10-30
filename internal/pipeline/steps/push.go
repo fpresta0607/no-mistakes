@@ -154,6 +154,18 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 // the ordinary Push step.
 func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate string, attestationSteps []*db.StepResult) error {
 	ctx := sctx.Ctx
+	handback, err := sctx.DB.LatestCIHandback(sctx.Run.ID)
+	if err != nil {
+		return err
+	}
+	if handback != nil {
+		if handback.AcceptedHead == nil {
+			return fmt.Errorf("published CI head is released for a caller follow-up, not publication")
+		}
+		if _, err := stepGitRun(sctx, "merge-base", "--is-ancestor", *handback.AcceptedHead, headBeingPushed); err != nil {
+			return fmt.Errorf("publication must preserve the accepted CI follow-up and its released head as ancestors")
+		}
+	}
 	ref := normalizedBranchRef(sctx.Run.Branch)
 	branch := strings.TrimPrefix(ref, "refs/heads/")
 
@@ -194,6 +206,9 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA)
 	if err != nil {
 		return fmt.Errorf("push to %s: %w", pushTarget, err)
+	}
+	if handback != nil && !decision.upToDate && !decision.fastForward {
+		return fmt.Errorf("a published CI handback follow-up must publish without force")
 	}
 	if !decision.upToDate {
 		if err := refuseFilesOverGitHubLimit(sctx, headBeingPushed, decision.remoteSHA); err != nil {
