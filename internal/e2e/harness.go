@@ -141,6 +141,10 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	// daemon re-execs itself, also inheriting them.
 	t.Setenv("PATH", h.BinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("HOME", h.HomeDir)
+	t.Setenv("USERPROFILE", h.HomeDir)
+	if home, err := os.UserHomeDir(); err != nil || home != h.HomeDir {
+		t.Fatalf("fixture user home = %q, %v; want %q", home, err, h.HomeDir)
+	}
 	t.Setenv("NM_HOME", h.NMHome)
 	t.Setenv("FAKEAGENT_LOG", h.AgentLog)
 	if h.Scenario != "" {

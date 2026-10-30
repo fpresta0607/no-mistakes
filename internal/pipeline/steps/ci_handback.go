@@ -1,9 +1,12 @@
 package steps
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -16,7 +19,7 @@ import (
 
 // HandbackCI runs only inside the executor's serialized, idle CI gate.
 // Release changes no Git state and leaves the conflict round undecided.
-func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackParams) (*ipc.CIHandbackResult, error) {
+func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackParams) (_ *ipc.CIHandbackResult, returnErr error) {
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read handback run: %w", err)
@@ -227,12 +230,36 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 	if err := checkManaged(); err != nil {
 		return nil, err
 	}
+	defer func() {
+		if returnErr == nil {
+			return
+		}
+		cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(sctx.Ctx), 30*time.Second)
+		defer cancel()
+		cleanup := *sctx
+		cleanup.Ctx = cleanupContext
+		head, err := stepGitHeadSHA(&cleanup)
+		if err != nil || (head != receipt.ReleasedHead && head != request.HeadSHA) {
+			returnErr = errors.Join(returnErr, fmt.Errorf("cannot restore released CI head: managed head changed or is unreadable"))
+			return
+		}
+		if _, err := stepGitRun(&cleanup, "reset", "--keep", receipt.ReleasedHead); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("restore released CI head: %w", err))
+			return
+		}
+		if head, err := stepGitHeadSHA(&cleanup); err != nil || head != receipt.ReleasedHead {
+			returnErr = errors.Join(returnErr, fmt.Errorf("released CI head was not restored"))
+		}
+	}()
 	if _, err := stepGitRun(sctx, "merge", "--ff-only", "--no-edit", request.HeadSHA); err != nil {
 		return nil, err
 	}
 	acceptedHead, err := stepGitHeadSHA(sctx)
 	if err != nil || acceptedHead != request.HeadSHA {
 		return nil, fmt.Errorf("managed follow-up head changed during acceptance")
+	}
+	if err := sctx.Ctx.Err(); err != nil {
+		return nil, err
 	}
 	if err := sctx.DB.AcceptCIHandback(receipt, request.HeadSHA, repo); err != nil {
 		return nil, err
