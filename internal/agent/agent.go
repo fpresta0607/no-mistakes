@@ -379,7 +379,7 @@ func textResult(text string, usage TokenUsage) *Result {
 
 func finalizeTextResult(agentName, text string, schema json.RawMessage, usage TokenUsage) (*Result, error) {
 	if text == "" {
-		err := fmt.Errorf("%s returned no text output", agentName)
+		err := &NoTextOutputError{Agent: agentName}
 		if len(schema) > 0 {
 			return resultFromUsage(usage), rejectStructuredOutput(err)
 		}
@@ -1132,6 +1132,23 @@ type SchemaViolation struct {
 }
 
 func (e *SchemaViolation) Error() string { return e.Message }
+
+// NoTextOutputError is a turn that ended without any answer text. It is not an
+// empty answer: a review that found nothing still writes its JSON, so a caller
+// must never read this as a clean result. Detail names what the adapter saw in
+// place of the answer, such as a turn cut at the output token limit, when it
+// can tell.
+type NoTextOutputError struct {
+	Agent  string
+	Detail string
+}
+
+func (e *NoTextOutputError) Error() string {
+	if e.Detail == "" {
+		return e.Agent + " returned no text output"
+	}
+	return e.Agent + " returned no text output: " + e.Detail
+}
 
 func schemaViolation(field, format string, args ...any) error {
 	return &SchemaViolation{Field: field, Message: fmt.Sprintf(format, args...)}
