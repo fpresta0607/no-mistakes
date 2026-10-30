@@ -50,6 +50,9 @@ func TestPublishCIHandbackPreservesAcceptedFollowup(t *testing.T) {
 	gitCmd(t, dir, "add", "followup.txt")
 	gitCmd(t, dir, "commit", "-m", "resolve conflict")
 	accepted := gitCmd(t, dir, "rev-parse", "HEAD")
+	if err := sctx.DB.PrepareCIHandback(receipt, accepted, base, "feature", sctx.Repo); err != nil {
+		t.Fatal(err)
+	}
 	if err := sctx.DB.AcceptCIHandback(receipt, accepted, sctx.Repo); err != nil {
 		t.Fatal(err)
 	}

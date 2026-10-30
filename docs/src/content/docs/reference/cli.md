@@ -467,6 +467,9 @@ The original intent, submitted head, PR identity, round history and spent automa
 The integration proof replaces another rebase; publication preserves the released head as an ancestor and refuses any update requiring force.
 Fresh required validation and live checks must establish readiness for the resulting concrete head.
 Resubmission returns the full `accepted_head` and follows the next decision point, bounded by `--wait` (default `8m`).
+Interrupted resubmissions recover only from the recorded candidate checkpoint.
+An unaccepted candidate returns to its open reservation; an accepted candidate resumes fresh Review.
+Changed or ambiguous recovery evidence remains reserved for operator inspection.
 The IPC method is `ci_handback`, binding `repo_id`, `run_id`, `branch`, `caller_dir`, `head_sha` and the `resume` boolean; an older daemon refuses the unknown method.
 The CLI selects only the current branch's active run and accepts no `--run` override.
 

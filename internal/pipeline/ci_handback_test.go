@@ -66,6 +66,9 @@ func TestExecutorRecoveredCIHandbackPreservesReservation(t *testing.T) {
 				t.Fatal(err)
 			}
 			if isAccepted {
+				if err := database.PrepareCIHandback(receipt, "followup", "base", "HEAD", repo); err != nil {
+					t.Fatal(err)
+				}
 				if err := database.AcceptCIHandback(receipt, "followup", repo); err != nil {
 					t.Fatal(err)
 				}

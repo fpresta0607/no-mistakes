@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -23,19 +24,89 @@ type CIHandback struct {
 	TargetFingerprint string
 	PushRef           string
 	AcceptedHead      *string
+	Candidate         *CIHandbackCandidate
+}
+
+type CIHandbackCandidate struct {
+	Head          string
+	BaseHead      string
+	ManagedBranch string
+	UpstreamURL   string
+	ForkURL       string
+	ReviewRoundID string
 }
 
 func (d *DB) LatestCIHandback(runID string) (*CIHandback, error) {
 	var receipt CIHandback
-	err := d.sql.QueryRow(`SELECT id, run_id, round_id, caller_dir, released_head, pr_url, base_branch, base_head, push_generation, target_fingerprint, push_ref, accepted_head FROM ci_handbacks WHERE run_id = ? ORDER BY id DESC LIMIT 1`, runID).Scan(
-		&receipt.ID, &receipt.RunID, &receipt.RoundID, &receipt.CallerDir, &receipt.ReleasedHead, &receipt.PRURL, &receipt.BaseBranch, &receipt.BaseHead, &receipt.PushGeneration, &receipt.TargetFingerprint, &receipt.PushRef, &receipt.AcceptedHead)
+	var candidateJSON *string
+	err := d.sql.QueryRow(`SELECT id, run_id, round_id, caller_dir, released_head, pr_url, base_branch, base_head, push_generation, target_fingerprint, push_ref, accepted_head, candidate_json FROM ci_handbacks WHERE run_id = ? ORDER BY id DESC LIMIT 1`, runID).Scan(
+		&receipt.ID, &receipt.RunID, &receipt.RoundID, &receipt.CallerDir, &receipt.ReleasedHead, &receipt.PRURL, &receipt.BaseBranch, &receipt.BaseHead, &receipt.PushGeneration, &receipt.TargetFingerprint, &receipt.PushRef, &receipt.AcceptedHead, &candidateJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read CI handback: %w", err)
 	}
+	if candidateJSON != nil {
+		if err := json.Unmarshal([]byte(*candidateJSON), &receipt.Candidate); err != nil {
+			return nil, fmt.Errorf("read CI handback candidate: %w", err)
+		}
+		if receipt.Candidate == nil || receipt.Candidate.Head == "" || receipt.Candidate.BaseHead == "" || receipt.Candidate.ManagedBranch == "" || receipt.Candidate.UpstreamURL == "" {
+			return nil, fmt.Errorf("CI handback candidate is incomplete")
+		}
+	}
 	return &receipt, nil
+}
+
+func (d *DB) LatestReviewRoundID(runID string) (string, error) {
+	var id string
+	err := d.sql.QueryRow(`SELECT COALESCE((SELECT round.id FROM step_rounds round JOIN step_results s ON s.id = round.step_result_id WHERE s.run_id = ? AND s.step_name = 'review' ORDER BY round.round DESC, round.id DESC LIMIT 1), '')`, runID).Scan(&id)
+	return id, err
+}
+
+func (d *DB) PrepareCIHandback(receipt *CIHandback, head, baseHead, managedBranch string, repo *Repo) error {
+	reviewRoundID, err := d.LatestReviewRoundID(receipt.RunID)
+	if err != nil {
+		return err
+	}
+	candidate := &CIHandbackCandidate{Head: head, BaseHead: baseHead, ManagedBranch: managedBranch, UpstreamURL: repo.UpstreamURL, ForkURL: repo.ForkURL, ReviewRoundID: reviewRoundID}
+	encoded, err := json.Marshal(candidate)
+	if err != nil {
+		return err
+	}
+	result, err := d.sql.Exec(`UPDATE ci_handbacks SET candidate_json = ? WHERE id = ? AND run_id = ? AND accepted_head IS NULL AND candidate_json IS NULL
+		AND EXISTS (SELECT 1 FROM runs r JOIN repos p ON p.id = r.repo_id WHERE r.id = ci_handbacks.run_id
+		AND r.status = 'running' AND r.head_sha = ci_handbacks.released_head AND r.last_pushed_sha = r.head_sha
+		AND r.push_generation = ci_handbacks.push_generation AND r.push_target_fingerprint = ci_handbacks.target_fingerprint AND r.push_ref = ci_handbacks.push_ref
+		AND r.pr_url = ci_handbacks.pr_url AND r.pr_state = 'open' AND COALESCE(r.push_active, 0) = 0 AND r.custody_returned_at IS NULL
+		AND p.id = ? AND p.upstream_url = ? AND COALESCE(p.fork_url, '') = ?
+		AND NOT EXISTS (SELECT 1 FROM runs other WHERE other.repo_id = r.repo_id AND other.branch = r.branch AND other.id <> r.id AND other.status NOT IN ('completed', 'failed', 'cancelled', 'ci_monitor_interrupted'))
+		AND EXISTS (SELECT 1 FROM step_results s JOIN step_rounds round ON round.step_result_id = s.id WHERE s.run_id = r.id AND s.step_name = 'ci' AND s.status = 'awaiting_approval' AND s.auto_fix_limit IS NULL AND round.id = ci_handbacks.round_id AND round.findings_json = s.findings_json))`,
+		string(encoded), receipt.ID, receipt.RunID, repo.ID, repo.UpstreamURL, repo.ForkURL)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return fmt.Errorf("CI handback binding changed before checkpoint")
+	}
+	receipt.Candidate = candidate
+	return nil
+}
+
+func (d *DB) ClearCIHandbackCandidate(receipt *CIHandback) error {
+	encoded, err := json.Marshal(receipt.Candidate)
+	if err != nil {
+		return err
+	}
+	result, err := d.sql.Exec(`UPDATE ci_handbacks SET candidate_json = NULL WHERE id = ? AND run_id = ? AND accepted_head IS NULL AND candidate_json = ?`, receipt.ID, receipt.RunID, string(encoded))
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return fmt.Errorf("CI handback checkpoint changed before restoration")
+	}
+	receipt.Candidate = nil
+	return nil
 }
 
 func (d *DB) ReleaseCIHandback(receipt *CIHandback, run *Run, repo *Repo, findings string) error {
@@ -63,6 +134,13 @@ func (d *DB) ReleaseCIHandback(receipt *CIHandback, run *Run, repo *Repo, findin
 }
 
 func (d *DB) AcceptCIHandback(receipt *CIHandback, head string, repo *Repo) error {
+	if receipt.Candidate == nil || receipt.Candidate.Head != head || receipt.Candidate.UpstreamURL != repo.UpstreamURL || receipt.Candidate.ForkURL != repo.ForkURL {
+		return fmt.Errorf("CI handback has no matching candidate checkpoint")
+	}
+	encoded, err := json.Marshal(receipt.Candidate)
+	if err != nil {
+		return err
+	}
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return err
@@ -70,11 +148,11 @@ func (d *DB) AcceptCIHandback(receipt *CIHandback, head string, repo *Repo) erro
 	defer tx.Rollback()
 	result, err := tx.Exec(`UPDATE runs SET head_sha = ?, review_approved_head_sha = NULL, ci_ready_at = NULL, ci_ready_no_ci = 0, updated_at = ?
 		WHERE id = ? AND status = 'running' AND head_sha = ? AND last_pushed_sha = ? AND push_generation = ? AND push_target_fingerprint = ? AND push_ref = ? AND pr_url = ? AND pr_state = 'open' AND COALESCE(push_active, 0) = 0
-		AND EXISTS (SELECT 1 FROM ci_handbacks WHERE id = ? AND accepted_head IS NULL)
+		AND EXISTS (SELECT 1 FROM ci_handbacks WHERE id = ? AND run_id = runs.id AND accepted_head IS NULL AND candidate_json = ?)
 		AND repo_id = ? AND EXISTS (SELECT 1 FROM repos WHERE id = ? AND upstream_url = ? AND COALESCE(fork_url, '') = ?)
 		AND NOT EXISTS (SELECT 1 FROM runs other WHERE other.repo_id = runs.repo_id AND other.branch = runs.branch AND other.id <> runs.id AND other.status NOT IN ('completed', 'failed', 'cancelled', 'ci_monitor_interrupted'))
 		AND EXISTS (SELECT 1 FROM step_results s JOIN step_rounds round ON round.step_result_id = s.id WHERE s.run_id = runs.id AND s.step_name = 'ci' AND s.status = 'awaiting_approval' AND s.auto_fix_limit IS NULL AND round.id = ? AND round.findings_json = s.findings_json)`,
-		head, now(), receipt.RunID, receipt.ReleasedHead, receipt.ReleasedHead, receipt.PushGeneration, receipt.TargetFingerprint, receipt.PushRef, receipt.PRURL, receipt.ID,
+		head, now(), receipt.RunID, receipt.ReleasedHead, receipt.ReleasedHead, receipt.PushGeneration, receipt.TargetFingerprint, receipt.PushRef, receipt.PRURL, receipt.ID, string(encoded),
 		repo.ID, repo.ID, repo.UpstreamURL, repo.ForkURL, receipt.RoundID)
 	if err != nil {
 		return err

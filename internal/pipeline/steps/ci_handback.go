@@ -122,33 +122,9 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 	if err := checkManaged(); err != nil {
 		return nil, err
 	}
-	if resolvedProvider(sctx) != scm.ProviderGitHub {
-		return nil, fmt.Errorf("published CI handback currently requires GitHub head verification")
-	}
-	host, reason := buildHost(sctx, scm.ProviderGitHub)
-	if host == nil {
-		return nil, fmt.Errorf("cannot verify handback PR: %s", reason)
-	}
-	if err := host.Available(sctx.Ctx); err != nil {
-		return nil, err
-	}
-	pr, err := host.FindPR(sctx.Ctx, run.Branch, "")
+	host, pr, err := ciHandbackPR(sctx, run, run.HeadSHA)
 	if err != nil {
 		return nil, err
-	}
-	if pr == nil || pr.URL != *run.PRURL || pr.BaseBranch == "" {
-		return nil, fmt.Errorf("live PR does not match handback ownership")
-	}
-	prState, err := host.GetPRState(sctx.Ctx, pr)
-	if err != nil || prState != scm.PRStateOpen {
-		return nil, fmt.Errorf("handback PR is not verifiably open")
-	}
-	pr.HeadSHA = run.HeadSHA
-	if _, err := host.GetChecks(sctx.Ctx, pr); err != nil {
-		return nil, err
-	}
-	if pr.HeadSHA != run.HeadSHA {
-		return nil, fmt.Errorf("live PR head moved before handback")
 	}
 	if !request.Resume {
 		mergeable, err := host.GetMergeableState(sctx.Ctx, pr)
@@ -230,6 +206,13 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 	if err := checkManaged(); err != nil {
 		return nil, err
 	}
+	managedBranch, err := git.CurrentBranch(sctx.Ctx, sctx.WorkDir)
+	if err != nil || (managedBranch != "HEAD" && "refs/heads/"+managedBranch != receipt.PushRef) {
+		return nil, fmt.Errorf("managed checkout does not match the handback lane")
+	}
+	if err := sctx.DB.PrepareCIHandback(receipt, request.HeadSHA, baseHead, managedBranch, repo); err != nil {
+		return nil, err
+	}
 	defer func() {
 		if returnErr == nil {
 			return
@@ -238,19 +221,16 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 		defer cancel()
 		cleanup := *sctx
 		cleanup.Ctx = cleanupContext
-		head, err := stepGitHeadSHA(&cleanup)
-		if err != nil || (head != receipt.ReleasedHead && head != request.HeadSHA) {
-			returnErr = errors.Join(returnErr, fmt.Errorf("cannot restore released CI head: managed head changed or is unreadable"))
-			return
-		}
-		if _, err := stepGitRun(&cleanup, "reset", "--keep", receipt.ReleasedHead); err != nil {
+		if err := restoreCIHandbackHead(&cleanup, receipt); err != nil {
 			returnErr = errors.Join(returnErr, fmt.Errorf("restore released CI head: %w", err))
-			return
-		}
-		if head, err := stepGitHeadSHA(&cleanup); err != nil || head != receipt.ReleasedHead {
-			returnErr = errors.Join(returnErr, fmt.Errorf("released CI head was not restored"))
 		}
 	}()
+	if err := checkCaller(); err != nil {
+		return nil, err
+	}
+	if err := checkManaged(); err != nil {
+		return nil, err
+	}
 	if _, err := stepGitRun(sctx, "merge", "--ff-only", "--no-edit", request.HeadSHA); err != nil {
 		return nil, err
 	}

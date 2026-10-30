@@ -426,7 +426,13 @@ type recoveredGate struct {
 }
 
 func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
-	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil {
+	if run == nil || run.Status != types.RunRunning {
+		return fmt.Errorf("run is not a recoverable parked run")
+	}
+	if index, err := CIHandbackReviewRestart(database, run, steps); err != nil || index >= 0 {
+		return err
+	}
+	if run.AwaitingAgentSince == nil {
 		return fmt.Errorf("run is not a recoverable parked run")
 	}
 	_, err := (&Executor{db: database, steps: steps}).recoveredGate(run.ID)
@@ -445,6 +451,31 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if err := ValidateRecoveredRun(e.db, run, e.steps); err != nil {
 		return err
 	}
+	restartIndex, err := CIHandbackReviewRestart(e.db, run, e.steps)
+	if err != nil {
+		return err
+	}
+	logDir := e.paths.RunLogDir(run.ID)
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
+	}
+	if err := recordCommandConfiguration(logDir, "resume", e.config); err != nil {
+		return e.failRun(run, repo, err)
+	}
+	e.initializeRunScopes(run.ID)
+	defer e.shared.Close()
+	if restartIndex >= 0 {
+		if err := e.db.ResetStepsFrom(run.ID, types.StepReview.Order()); err != nil {
+			return err
+		}
+		if run.AwaitingAgentSince != nil {
+			if err := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(time.Unix(*run.AwaitingAgentSince, 0)).Milliseconds()); err != nil {
+				return err
+			}
+			run.AwaitingAgentSince = nil
+		}
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, true)
+	}
 	gate, err := e.recoveredGate(run.ID)
 	if err != nil {
 		return err
@@ -458,16 +489,6 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		e.ciHandbackReleased = isOpen
 		e.mu.Unlock()
 	}
-	logDir := e.paths.RunLogDir(run.ID)
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
-	}
-	if err := recordCommandConfiguration(logDir, "resume", e.config); err != nil {
-		return e.failRun(run, repo, err)
-	}
-	e.initializeRunScopes(run.ID)
-	defer e.shared.Close()
-
 	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
 	duration := recoveredStepDuration(gate.stepResult)
 	completeRecoveredGate := func() error {

@@ -62,10 +62,23 @@ func TestCIHandbackKeepsConflictAndBudgetHistory(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(receipt, stored) {
 		t.Fatalf("receipt = %#v %v", stored, err)
 	}
+	if err := database.AcceptCIHandback(receipt, "additive", repo); err == nil {
+		t.Fatal("accepted an uncheckpointed follow-up")
+	}
+	if err := database.PrepareCIHandback(receipt, "additive", "new-base", "HEAD", repo); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.PrepareCIHandback(receipt, "different", "new-base", "HEAD", repo); err == nil {
+		t.Fatal("replaced an unfinished candidate checkpoint")
+	}
+	stored, err = database.LatestCIHandback(run.ID)
+	if err != nil || !reflect.DeepEqual(receipt, stored) {
+		t.Fatalf("candidate checkpoint = %#v %v", stored, err)
+	}
 	if _, err := database.ReplaceRepoURLs(repo.ID, "https://github.com/other/fixture.git", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.AcceptCIHandback(receipt, "wrong-target", repo); err == nil {
+	if err := database.AcceptCIHandback(receipt, "additive", repo); err == nil {
 		t.Fatal("accepted a follow-up after the repository target changed")
 	}
 	if _, err := database.ReplaceRepoURLs(repo.ID, repo.UpstreamURL, repo.ForkURL); err != nil {
