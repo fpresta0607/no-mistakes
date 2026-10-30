@@ -300,15 +300,16 @@ The CI step deliberately keeps watching the PR after checks pass, so
 blocking on the human merge. Never poll or re-run waiting for the merge yourself.
 Never treat "no CI checks reported" alone as green.
 
-Because that monitor stays live, a PR that falls behind the default branch or
-hits a merge conflict after checks pass - commonly because another PR merged
-first - needs **no command from you**: never hand-rebase. When the CI monitor
-sees an actual conflict and automatic CI repair is enabled it **rebases onto the base, resolves it, revalidates from Review
-because rebasing cannot prove continuity with the reviewed head, and re-pushes
-the branch through Push**; a PR that is merely behind but still clean needs nothing
-either, since the platform merges it. The one exception is when that monitor is
+With automatic CI repair enabled, a PR that falls behind the default branch or hits a merge conflict after checks pass - commonly because another PR merged first - needs **no command from you**: never hand-rebase.
+When that live CI monitor sees an actual conflict it **rebases onto the base, resolves it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push**.
+A PR that is merely behind but still clean needs nothing either, since the platform merges it.
+For a published GitHub CI merge conflict parked with automatic CI repair disabled, run `no-mistakes axi sync` to reach the exact published head, then `no-mistakes axi handback`.
+Only after `handback: released`, resolve and commit an additive merge in that same caller worktree, preserving every published and pipeline commit, then run `no-mistakes axi handback --resume`.
+This keeps the same run and PR, unresolved conflict findings and spent budgets, and requires fresh validation from Review before publication.
+Do not rebase or force-push the handback follow-up.
+Only when that monitor is
 no longer running - the PR was closed, the run was aborted or superseded, it
-idle-timed-out, or its auto-fix attempts were exhausted - in which case recover
+idle-timed-out, or its auto-fix attempts were exhausted - recover
 with `no-mistakes rerun`, subject to the clean-head check above. An accepted
 rerun cancels the stale monitor and re-runs the full pipeline including a
 deterministic rebase step. Do **not** reach for

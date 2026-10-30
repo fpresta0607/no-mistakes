@@ -20,10 +20,12 @@ import (
 
 // canonicalStaleMonitorPhrases are the load-bearing claims of the corrected
 // "PR fell behind / conflicted after checks pass" guidance: the live CI monitor
-// auto-rebases and re-pushes such a PR, so the agent runs no command and never
-// hand-rebases, and `no-mistakes rerun` is only the dead-monitor recovery,
-// subject to its clean caller-head check.
+// auto-rebases and re-pushes when automatic repair is enabled; disabled repair
+// has a guarded handback, and `no-mistakes rerun` is only the dead-monitor
+// recovery, subject to its clean caller-head check.
 var canonicalStaleMonitorPhrases = []string{
+	"automatic CI repair enabled",
+	"automatic CI repair disabled",
 	"never hand-rebase",
 	"revalidates from Review",
 	"cannot prove continuity with the reviewed head",
@@ -90,6 +92,84 @@ func TestStaleMonitorGuidance_SyncedAcrossSurfaces(t *testing.T) {
 			if !strings.Contains(content, phrase) {
 				t.Errorf("%s is missing rerun recovery guidance %q", name, phrase)
 			}
+		}
+	}
+}
+
+func TestStaleMonitorGuidance_DisabledRepairHandback(t *testing.T) {
+	generated, err := os.ReadFile(filepath.Join("..", "..", "skills", "no-mistakes", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	surfaces := map[string]string{
+		"axi help string":      staleMonitorGuidance,
+		"checks-passed output": renderDriveResultForGuidanceTest(t, true, types.RunRunning),
+		"skill body":           skill.Markdown(),
+		"generated skill":      string(generated),
+	}
+	for name, content := range surfaces {
+		t.Run(name, func(t *testing.T) {
+			if strings.Contains(name, "skill") {
+				var hasSection bool
+				_, content, hasSection = strings.Cut(content, "The CI step deliberately keeps watching")
+				if !hasSection {
+					t.Fatal("skill is missing its stale-monitor section")
+				}
+				content, _, hasSection = strings.Cut(content, "On a successful outcome")
+				if !hasSection {
+					t.Fatal("skill is missing the end of its stale-monitor section")
+				}
+			}
+			content = strings.Join(strings.Fields(content), " ")
+			enabledIndex := strings.Index(content, "With automatic CI repair enabled,")
+			noCommandIndex := strings.Index(content, "no command")
+			if enabledIndex < 0 || noCommandIndex < enabledIndex {
+				t.Fatal("no-command guidance must be conditional on automatic CI repair being enabled")
+			}
+			for _, phrase := range []string{
+				"published GitHub CI merge conflict parked with automatic CI repair disabled",
+				"`no-mistakes axi sync`",
+				"`no-mistakes axi handback`",
+				"`handback: released`",
+				"same caller worktree",
+				"additive merge",
+				"every published and pipeline commit",
+				"`no-mistakes axi handback --resume`",
+				"same run and PR",
+				"unresolved conflict findings",
+				"spent budgets",
+				"fresh validation from Review before publication",
+			} {
+				if !strings.Contains(content, phrase) {
+					t.Errorf("stale-monitor guidance is missing %q", phrase)
+				}
+			}
+		})
+	}
+
+	if !strings.Contains(readAgentsGuide(t), "[`axi handback`](/no-mistakes/reference/cli/#no-mistakes-axi-handback)") {
+		t.Error("agents guide must point to the handback owner")
+	}
+	reference, err := os.ReadFile(filepath.Join("..", "..", "docs", "src", "content", "docs", "reference", "cli.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, handback, hasSection := strings.Cut(string(reference), "## no-mistakes axi handback")
+	if !hasSection {
+		t.Fatal("CLI reference is missing the handback owner section")
+	}
+	handback, _, _ = strings.Cut(handback, "\n## ")
+	for _, phrase := range []string{
+		"published GitHub CI merge conflict",
+		"automatic CI repair disabled (`auto_fix.ci: 0`)",
+		"no-mistakes axi sync",
+		"no-mistakes axi handback --resume",
+		"same caller worktree",
+		"additive merge",
+		"restarts Review, Test, Document, Lint, Push, PR and CI in the same run",
+	} {
+		if !strings.Contains(handback, phrase) {
+			t.Errorf("handback owner is missing %q", phrase)
 		}
 	}
 }
