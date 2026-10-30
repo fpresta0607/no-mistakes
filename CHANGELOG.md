@@ -1,5 +1,56 @@
 # Changelog
 
+## [1.89.0](https://github.com/fpresta0607/no-mistakes/compare/v1.88.0...v1.89.0) (2026-10-30)
+
+
+### Features
+
+* **agentcfg:** prove a Pi selection in a launch assertion ([518468c](https://github.com/fpresta0607/no-mistakes/commit/518468c6ed20af84cc89f58979b4e1653a45e991))
+* **agentcfg:** prove launches whose arguments select nothing ([e1922ae](https://github.com/fpresta0607/no-mistakes/commit/e1922ae5eb56279d84c3a565f37e798616d74a32))
+* **ci:** end a run at the first green on the pushed head ([33f8607](https://github.com/fpresta0607/no-mistakes/commit/33f86072c864e4b60a7acdc5936854f50750f0ef))
+* **daemon:** accept Claude Code selections in launch assertions ([8703d06](https://github.com/fpresta0607/no-mistakes/commit/8703d0635a2a356ed481afd4833718f915983814))
+* **daemon:** apply a launch selection before proving it ([99a4b3d](https://github.com/fpresta0607/no-mistakes/commit/99a4b3d0654862a00d50cfe7c34f3d9744f2c749))
+* **daemon:** prove trusted source and agent profile before launch ([cc9c9ec](https://github.com/fpresta0607/no-mistakes/commit/cc9c9eccb443386db5fb8f903d68183d31cf2a78))
+* **daemon:** prove trusted source and agent profile before launch ([fb63f2e](https://github.com/fpresta0607/no-mistakes/commit/fb63f2e916bfef8c3acf1b92e83c9bcb67495b2e))
+* land PRs 4 to 10 on main and keep PR 11 ([4deb712](https://github.com/fpresta0607/no-mistakes/commit/4deb7126fc0451a54f0fe88c03e73dd6e378b9ad))
+* **pipeline:** start test and document work beside the review ([3c17fdb](https://github.com/fpresta0607/no-mistakes/commit/3c17fdb4dea2a3302647f2d9f016f61e8ee0cdc3))
+* **test:** bound the live check by surface, budget and environment ([2f19e61](https://github.com/fpresta0607/no-mistakes/commit/2f19e61af0d28c210a959b9ca956ccb61304d7ca))
+* **test:** start the baseline test command behind a machine wrapper ([47d5119](https://github.com/fpresta0607/no-mistakes/commit/47d5119fb7231a6fdffac724bc5715587ca2464a))
+
+
+### Bug Fixes
+
+* **agent:** keep a codex opt-out at zero after a global project doc pin ([b05697a](https://github.com/fpresta0607/no-mistakes/commit/b05697a381a144e11c7d293e6da8130bcc109d30))
+* **ci:** shard the Windows pipeline/steps tests into three parts ([47ed7c6](https://github.com/fpresta0607/no-mistakes/commit/47ed7c688199e7d4633f6eed57d321ec1d716108))
+* **ci:** shard the Windows pipeline/steps tests into three parts ([b99fde1](https://github.com/fpresta0607/no-mistakes/commit/b99fde184612d238d22709c5f753d77e0c03dc7c)), closes [#13](https://github.com/fpresta0607/no-mistakes/issues/13)
+* **cli:** assert launch receipt facts through the toon encoder ([93d5836](https://github.com/fpresta0607/no-mistakes/commit/93d5836dd7dc4c92b94fbcb3d2dfd8404eb00406))
+* **cli:** assert receipt facts through the toon encoder ([9ace071](https://github.com/fpresta0607/no-mistakes/commit/9ace071745120c7630d756235c09befe100bf4e9)), closes [#27](https://github.com/fpresta0607/no-mistakes/issues/27)
+* **daemon:** own temporary files for the daemon lifetime ([f23a641](https://github.com/fpresta0607/no-mistakes/commit/f23a6414d8d481b73150b8dd793eab24125a38f9))
+* **daemon:** own temporary files for the daemon lifetime ([f1de785](https://github.com/fpresta0607/no-mistakes/commit/f1de78567fae80fd1ad6a39d7d27f2cb33d430a3))
+* **daemon:** recover from a dead IPC endpoint owner ([6bd81f2](https://github.com/fpresta0607/no-mistakes/commit/6bd81f211330d7107b1118ada6074e6abf0646f7))
+* **daemon:** recover from a dead IPC endpoint owner ([c8533cf](https://github.com/fpresta0607/no-mistakes/commit/c8533cf5af6de21d85d46d02c81f2102743a1747))
+* **daemon:** refuse case-variant launch assertion fields ([3983010](https://github.com/fpresta0607/no-mistakes/commit/39830109a3fae7bfc3861d8ecd7020db03efee10))
+* **daemon:** write the launch proof with its run row ([17917ac](https://github.com/fpresta0607/no-mistakes/commit/17917ac06aa2793c44e612c7747f34bd92f2cacf))
+* **db:** index per-run step and round history lookups ([fb55cf4](https://github.com/fpresta0607/no-mistakes/commit/fb55cf4ee2b06f0fd60b28fbea8edda0993852fb))
+* **db:** index per-run step and round history lookups ([12a3b1a](https://github.com/fpresta0607/no-mistakes/commit/12a3b1a9b4966eb897f2f40137a2d30d5dc21d81))
+* **gatecontext:** stop ancestry at a reused parent pid on Windows ([8cf1c98](https://github.com/fpresta0607/no-mistakes/commit/8cf1c98e379af9817b1051081eee5aad626166dc))
+* **gatecontext:** stop ancestry at a reused parent pid on Windows ([b6645a4](https://github.com/fpresta0607/no-mistakes/commit/b6645a48f20427e3c3d2d63f64e04bdefb8a6dd6))
+* **pipeline:** commit only the untracked files a correction wrote ([7d8102a](https://github.com/fpresta0607/no-mistakes/commit/7d8102ab19c75e9cf91b3e959fc16bbbb2880e41))
+* **pipeline:** commit only the untracked files a correction wrote ([e3dce7f](https://github.com/fpresta0607/no-mistakes/commit/e3dce7fe6d854b9215c9e8857702ffb7f85e5642))
+* **pipeline:** keep test agent scratch out of correction commits ([53d5262](https://github.com/fpresta0607/no-mistakes/commit/53d526280b183eb9af4c2015adf085f65fc0392b))
+* **pipeline:** leave untracked files over 100 MiB out of corrections ([6f1f7fd](https://github.com/fpresta0607/no-mistakes/commit/6f1f7fd8b905d86ef544ffb4948b3217d176d47b))
+* **push:** refuse files over github's limit before uploading ([f11b6e9](https://github.com/fpresta0607/no-mistakes/commit/f11b6e9b7eb307b41f06b166b43fbb97c9286bb5))
+* **push:** refuse files over GitHub's limit before uploading ([da97a14](https://github.com/fpresta0607/no-mistakes/commit/da97a14414e2e539177d206daed1d4067d7c6676))
+* **review:** tell a review that wrote no answer from a schema slip ([f91cd37](https://github.com/fpresta0607/no-mistakes/commit/f91cd37967c5b545a15e9bc09b67c1067edeb4a3))
+* **review:** tell a review that wrote no answer from a schema slip ([e3a802b](https://github.com/fpresta0607/no-mistakes/commit/e3a802bc880fe902ab8d93fb2188c7d4ece464e4))
+* **test:** find a placed agent's extension as os/exec does ([363c5ea](https://github.com/fpresta0607/no-mistakes/commit/363c5eae39bade2621c03e7489bdaea97946fb06))
+* **test:** give the test agent a scratch directory the step deletes ([b6ba8f9](https://github.com/fpresta0607/no-mistakes/commit/b6ba8f9701efb10e044b91df2dfe36fb723833a9))
+* **test:** hand the correction turn the whole refused payload ([8729f0f](https://github.com/fpresta0607/no-mistakes/commit/8729f0fc7702f3596493a7c866bb89ec2ab7f993))
+* **test:** hand the correction turn the whole refused payload ([634d214](https://github.com/fpresta0607/no-mistakes/commit/634d2142f87ddbe81eb71a83752464cc4dc2d24f))
+* **test:** park when the test command wrapper cannot start ([34caeb0](https://github.com/fpresta0607/no-mistakes/commit/34caeb0b3c78b36081b74171254658cfb93ff200))
+* **test:** start the test step's agents on a hidden desktop ([c1712d5](https://github.com/fpresta0607/no-mistakes/commit/c1712d5aafebc66b0a252b89db992899725688d0))
+* **test:** start the test step's agents on a hidden desktop ([83d4038](https://github.com/fpresta0607/no-mistakes/commit/83d4038bc13af55d7f040a124be0d1b8b27b224d))
+
 ## [1.88.0](https://github.com/kunchenguid/no-mistakes/compare/v1.87.1...v1.88.0) (2026-10-05)
 
 
