@@ -85,7 +85,7 @@ func Run() (retErr error) {
 	}()
 
 	environmentStarted := time.Now()
-	if err := prepareDaemonEnvironment(); err != nil {
+	if err := prepareDaemonEnvironment(p); err != nil {
 		return err
 	}
 	logStartupPhase("environment", environmentStarted)
@@ -113,7 +113,7 @@ func Run() (retErr error) {
 	return runWithOptionsLocked(p, d, globalCfg, nil, startupStarted)
 }
 
-func prepareDaemonEnvironment() error {
+func prepareDaemonEnvironment(p *paths.Paths) error {
 	nmHome := os.Getenv("NM_HOME")
 	for _, key := range []string{
 		"CLAUDECODE",
@@ -128,6 +128,27 @@ func prepareDaemonEnvironment() error {
 	}
 	if err := applyLoginShellEnvironment(applyShellEnvToProcess, nmHome); err != nil {
 		return fmt.Errorf("apply login shell environment: %w", err)
+	}
+	// The daemon outlives its launcher, and the login shell can replace its
+	// environment. Pin temporary files to the already-resolved daemon home.
+	tempDir, err := filepath.Abs(filepath.Join(p.Root(), "tmp"))
+	if err != nil {
+		return fmt.Errorf("resolve daemon temporary directory: %w", err)
+	}
+	if err := os.MkdirAll(tempDir, 0o700); err != nil {
+		return fmt.Errorf("create daemon temporary directory %q: %w", tempDir, err)
+	}
+	probe, err := os.CreateTemp(tempDir, ".write-test-*")
+	if err != nil {
+		return fmt.Errorf("write daemon temporary directory %q: %w", tempDir, err)
+	}
+	if err := errors.Join(probe.Close(), os.Remove(probe.Name())); err != nil {
+		return fmt.Errorf("clean daemon temporary directory probe %q: %w", tempDir, err)
+	}
+	for _, key := range []string{"TEMP", "TMP", "TMPDIR", "GOTMPDIR"} {
+		if err := os.Setenv(key, tempDir); err != nil {
+			return fmt.Errorf("set %s: %w", key, err)
+		}
 	}
 	logDaemonPathSummary()
 	return nil
