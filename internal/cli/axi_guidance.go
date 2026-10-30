@@ -5,8 +5,9 @@ package cli
 // behind the default branch or hits a merge conflict (commonly because another
 // PR merged first). The live CI monitor keeps running after checks pass and
 // auto-rebases onto the base, resolves the conflict, revalidates from Review,
-// and re-pushes itself, so the agent runs no command and never hand-rebases. `no-mistakes
-// rerun` is only the recovery for a monitor that is no longer running, and a
+// and re-pushes itself when automatic CI repair is enabled. With automatic
+// repair disabled, qualifying published GitHub conflicts use `axi handback`.
+// `no-mistakes rerun` is only the recovery for a monitor that is no longer running, and a
 // known clean caller head must match the head rerun already selects.
 //
 // The skill body (internal/skill/skill.go) owns the full driving guidance; the

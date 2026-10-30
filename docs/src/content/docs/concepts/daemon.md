@@ -109,11 +109,13 @@ An existing unit picks up the policy when `no-mistakes daemon start` or `restart
 
 ## Concurrent push handling
 
-If you push to the same branch while a run is already active, the daemon:
+If you push to the same branch while a run is already active and has no retained [CI handback receipt](/no-mistakes/reference/cli/#no-mistakes-axi-handback), the daemon:
 
 1. Cancels the in-progress run (reason: "cancelled: superseded by new push")
 2. Waits for it to finish
 3. Starts a new run with the latest push
+
+An active run retaining a CI handback receipt refuses replacement runs.
 
 Pushes to different branches run concurrently.
 
@@ -125,10 +127,16 @@ reason about in one long-lived process than inside independent hook invocations.
 On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon crashed while they were active):
 
 - Completes legacy active rows whose persisted PR state is already `merged` or `closed`, including their CI step, before active-run recovery and parked-run planning
-- Resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
+- Resumes fully recorded parked approval gates and interrupted CI handbacks only when their worktree and step history can be validated; incomplete or ambiguous active runs fail closed
 - Rebuilds a parked run with the repository gate list pinned in `runs.gates_json` when that run started, never the current default-branch list. An absent pin on an older run means the core pipeline, while an invalid pin refuses recovery
 - Re-resolves and validates any configured repository forge profile before rebuilding the recovered run, so resumed provider checks and agents use the same repository-scoped identity model rather than persisted credentials or ambient active accounts
-- Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked. The [`protected_paths` refusal exception](/no-mistakes/reference/repo-config/#protected_paths) prevents automatic reconciliation
+- Reconciles interrupted [CI handback](/no-mistakes/reference/cli/#no-mistakes-axi-handback) candidates before the generic managed-head mismatch and stale-run handling, using the exact candidate and checkpoint recorded before managed movement.
+  Recovery rechecks the caller, managed checkout, gate lane, run and conflict round, publication generation, configured targets, live PR and published head.
+  An unaccepted candidate restores the managed checkout to the released head and retains the open reservation without changing caller commits or the published head.
+  An accepted candidate resumes fresh Review, including when acceptance committed before the validation steps were reset; it never recovers the old conflict gate as approval for that head.
+  An open reservation or accepted follow-up still awaiting its fresh Review is kept active when its evidence is unreadable, dirty, changed or ambiguous, without guessed recovery or stale-run cleanup.
+- Before resuming a parked CI gate without an open handback reservation, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked.
+  The [`protected_paths` refusal exception](/no-mistakes/reference/repo-config/#protected_paths) also prevents automatic reconciliation.
 - Preserves a run that was actively monitoring CI for an already-created PR as `ci_monitor_interrupted` rather than failing it: the PR is still open, so a restart mid-monitor is not a pipeline failure. That run is terminal and never resumed
 - Before failing any other stale active run, verifies its managed worktree head and pins an unpublished descendant under the run-specific recovery ref so later rerun or guarded custody recovery does not fall back to a stale gate branch
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"

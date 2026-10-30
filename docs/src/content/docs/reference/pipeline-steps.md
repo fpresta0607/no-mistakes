@@ -401,10 +401,7 @@ Monitors PR health after creation and auto-fixes CI failures. Mergeability polli
 
 **Default auto-fix limit:** `3` total CI auto-fix attempts.
 
-With automatic CI repair disabled, a published GitHub merge conflict can be returned to its exact clean caller using [`axi handback`](/no-mistakes/reference/cli/#no-mistakes-axi-handback).
-CI remains unresolved while the caller commits an additive merge.
-`axi handback --resume` submits that head to the same run for fresh validation from Review, preserving the conflict round and spent repair budget.
-This transition never invokes the CI fixer or approves the conflict, and its later publication refuses rewrites and force-pushes.
+With automatic CI repair disabled, the [`axi handback` reference](/no-mistakes/reference/cli/#no-mistakes-axi-handback) owns the guarded caller follow-up for a published GitHub merge conflict in the same run.
 
 **Default transient rerun budget:** `0` reruns per provider-attributed check per run. GitHub pre-run failure detection is disabled at this value.
 
