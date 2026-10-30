@@ -104,6 +104,28 @@ func TestReapWorktreesHonorsRetentionAndSparesActiveRuns(t *testing.T) {
 	}
 }
 
+func TestReapWorktreesPreservesAnUnresolvedNativeSafetyRefusal(t *testing.T) {
+	f := newWorktreeReapFixture(t)
+	runID := f.seed("safety-refusal", types.RunFailed, 30*24*time.Hour)
+	step, err := f.db.InsertStepResult(runID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"agent-safety-refusal","severity":"error","description":"This content was flagged for possible cybersecurity risk.","action":"ask-user"}]}`
+	if err := f.db.SetStepFindings(step.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateStepStatusWithDuration(step.ID, types.StepStatusFixReview, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	reapWorktrees(f.db, f.p, worktreeReapPolicy{Retention: time.Hour}, time.Now())
+
+	if !f.exists(runID) {
+		t.Fatal("shutdown or recovery must not discard work held at a native safety refusal")
+	}
+}
+
 // TestReapWorktreesTrimsToTheRunCeilingOldestFirst covers the second bound: a
 // burst of leftovers that all land inside the retention window still cannot
 // grow the tree without limit.

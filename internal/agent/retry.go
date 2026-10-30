@@ -76,8 +76,8 @@ func runWithRetry(
 		startedAt := time.Now()
 		result, err := runOnce()
 		emitAgentAttempt(opts, name, result, err, startedAt, time.Now())
-		if err == nil {
-			return result, nil
+		if err == nil || IsSafetyRefusal(err) {
+			return result, err
 		}
 		lastResult = result
 		label, retry := classify(err)

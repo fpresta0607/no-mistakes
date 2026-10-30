@@ -91,6 +91,8 @@ func HasUnreadableReviewQuestionHistory(findingsJSON string) bool {
 // accepted.
 func approvalRefusal(step types.StepName, findingsJSON string) string {
 	switch {
+	case HasSafetyRefusal(findingsJSON):
+		return "cannot approve a native agent safety refusal: automatic execution stopped; inspect the refusal and preserved work before making an explicit decision"
 	case HasProtectedPathRefusal(findingsJSON):
 		return fmt.Sprintf("cannot approve a protected-path refusal: resolve the reported edit, then use fix to retry %s; approval would skip unfinished work", step)
 	case HasUnvalidatedWorkRefusal(findingsJSON):

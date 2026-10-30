@@ -1302,6 +1302,10 @@ rounds:
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
+		if refusal := safetyRefusalOutcome(err); refusal != nil {
+			writeLog(safeurl.RedactText(err.Error()))
+			outcome, err = refusal, nil
+		}
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
@@ -2063,7 +2067,7 @@ func (e *Executor) resumeApprovalGate(ctx context.Context, step Step, sctx *Step
 	if !ok {
 		return "", false, nil
 	}
-	if HasProtectedPathRefusal(findingsJSON) {
+	if HasProtectedPathRefusal(findingsJSON) || HasSafetyRefusal(findingsJSON) {
 		return "", false, nil
 	}
 	timeout := e.gateReconcileTimeout
@@ -2088,7 +2092,7 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 	if !ok {
 		return false, nil
 	}
-	if HasProtectedPathRefusal(findingsJSON) {
+	if HasProtectedPathRefusal(findingsJSON) || HasSafetyRefusal(findingsJSON) {
 		return false, nil
 	}
 	timeout := e.gateReconcileTimeout

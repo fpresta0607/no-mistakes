@@ -63,6 +63,16 @@ func TestFallbackAgentFallsBackOnLaunchFailure(t *testing.T) {
 	}
 }
 
+func TestFallbackAgentSafetyRefusalDoesNotStartAnotherProvider(t *testing.T) {
+	refusal := errors.New("codex exited: exit status 1: This content was flagged for possible cybersecurity risk.")
+	first := &fallbackTestAgent{name: "codex", run: func() (*Result, error) { return nil, refusal }}
+	second := &fallbackTestAgent{name: "claude", run: func() (*Result, error) { return &Result{Text: "unexpected"}, nil }}
+	_, err := NewFallback([]Agent{first, second}).Run(context.Background(), RunOpts{})
+	if !errors.Is(err, refusal) || first.calls != 1 || second.calls != 0 {
+		t.Fatalf("refusal must stop the provider chain: error=%v calls=%d/%d", err, first.calls, second.calls)
+	}
+}
+
 func TestFallbackAgentDoesNotFallBackOnFindingsResult(t *testing.T) {
 	first := &fallbackTestAgent{
 		name: "codex",

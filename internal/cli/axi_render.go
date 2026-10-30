@@ -599,6 +599,12 @@ func gateFields(gate stepView) []toon.Field {
 			"Have the operator inspect and resolve the reported protected-path edit through the repository's authorized workflow, then run `no-mistakes axi respond --action fix` to retry the refused step, including its commit and publication.",
 		}
 	}
+	if pipeline.HasSafetyRefusal(gate.FindingsJSON) {
+		help = []string{
+			"A native agent safety refusal stopped automatic execution; Approve is rejected.",
+			"Have the operator inspect the refusal and preserved work before deciding how to proceed.",
+		}
+	}
 	skip := "Run `no-mistakes axi respond --action skip` to skip this step"
 	if pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON) {
 		help = []string{
