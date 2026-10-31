@@ -19,6 +19,57 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestRespondWithoutExecutorDistinguishesMissingRunsFromUnreadableOwnership(t *testing.T) {
+	for _, state := range []string{"missing", "existing", "unreadable"} {
+		t.Run(state, func(t *testing.T) {
+			fixture := newEvidenceFixture(t)
+			manager := NewRunManager(fixture.db, fixture.p, nil)
+			runID := "missing-run"
+			if state != "missing" {
+				run, err := fixture.db.InsertRun(fixture.repo.ID, "feature", "head", "base")
+				if err != nil {
+					t.Fatal(err)
+				}
+				runID = run.ID
+			}
+			want := "no active executor for run " + runID
+			if state == "unreadable" {
+				if err := fixture.db.Close(); err != nil {
+					t.Fatal(err)
+				}
+				want = "cannot read run ownership; preserve its source"
+			}
+
+			for _, action := range []types.ApprovalAction{types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAbort, types.ActionAnswer} {
+				for _, err := range []error{
+					manager.HandleRespond(runID, types.StepReview, action, nil),
+					manager.HandleRespondWithOverrides(runID, types.StepReview, action, nil, nil, nil, ""),
+				} {
+					if err == nil || err.Error() != want {
+						t.Errorf("%s response = %v, want %q", action, err, want)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestRespondToMissingRunReportsNoActiveExecutorOverIPC(t *testing.T) {
+	locations, _ := startTestDaemon(t)
+	client, err := ipc.Dial(locations.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	for _, action := range []types.ApprovalAction{types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAbort, types.ActionAnswer} {
+		err := client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: "missing-run", Step: types.StepReview, Action: action}, nil)
+		if err == nil || !strings.Contains(err.Error(), "no active executor for run missing-run") {
+			t.Errorf("%s response to missing run = %v, want no active executor", action, err)
+		}
+	}
+}
+
 func TestCIRevalidationExecutorFreeAbortRetainsTheAdoptedSourceAndHistory(t *testing.T) {
 	for _, name := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "NM_HOME", "CFO_ROOT", "CFO_HOME", "CODE_GOBLINS_ROOT", "GOBLINS_ROOT"} {
 		t.Setenv(name, t.TempDir())

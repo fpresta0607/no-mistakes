@@ -2061,10 +2061,12 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 	m.mu.Unlock()
 
 	if !ok {
-		if run, err := m.db.GetRun(runID); err != nil || run == nil {
+		if run, err := m.db.GetRun(runID); err != nil {
 			return fmt.Errorf("cannot read run ownership; preserve its source")
-		} else if held, err := m.ciRepairHeld(context.Background(), run); held || err != nil {
-			return fmt.Errorf("retained CI source requires explicit revalidation; no ordinary response is accepted")
+		} else if run != nil {
+			if held, err := m.ciRepairHeld(context.Background(), run); held || err != nil {
+				return fmt.Errorf("retained CI source requires explicit revalidation; no ordinary response is accepted")
+			}
 		}
 		return fmt.Errorf("no active executor for run %s", runID)
 	}
