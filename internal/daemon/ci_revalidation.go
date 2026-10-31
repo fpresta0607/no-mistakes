@@ -39,8 +39,11 @@ func (m *RunManager) ciRepairHeld(ctx context.Context, run *db.Run) (bool, error
 
 func (m *RunManager) cancelPreservedCIRepair(runID string) error {
 	run, err := m.db.GetRun(runID)
-	if err != nil || run == nil {
-		return fmt.Errorf("cannot read preserved run %s", runID)
+	if err != nil {
+		return fmt.Errorf("cannot read preserved run %s: %w", runID, err)
+	}
+	if run == nil {
+		return nil
 	}
 	_, err = m.withBranchLock(run.RepoID, run.Branch, func() (string, error) {
 		m.mu.Lock()

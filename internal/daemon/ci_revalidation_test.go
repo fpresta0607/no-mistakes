@@ -68,6 +68,47 @@ func TestRespondToMissingRunReportsNoActiveExecutorOverIPC(t *testing.T) {
 			t.Errorf("%s response to missing run = %v, want no active executor", action, err)
 		}
 	}
+	var result ipc.CancelRunResult
+	if err := client.Call(ipc.MethodCancelRun, &ipc.CancelRunParams{RunID: "missing-run"}, &result); err != nil || !result.OK {
+		t.Fatalf("cancel confirmed missing run = %+v, %v, want a successful no-op", result, err)
+	}
+}
+
+func TestCancelWithoutExecutorOnlyAcceptsConfirmedMissingRuns(t *testing.T) {
+	for _, state := range []string{"missing", "existing", "unreadable", "unknown custody"} {
+		t.Run(state, func(t *testing.T) {
+			fixture := newEvidenceFixture(t)
+			manager := NewRunManager(fixture.db, fixture.p, nil)
+			runID := "missing-run"
+			if state == "existing" || state == "unknown custody" {
+				run, err := fixture.db.InsertRun(fixture.repo.ID, "feature", "head", "base")
+				if err != nil {
+					t.Fatal(err)
+				}
+				runID = run.ID
+				if state == "unknown custody" {
+					if err := fixture.db.UpdateRunStatus(runID, types.RunRunning); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if state == "unreadable" {
+				if err := fixture.db.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			err := manager.HandleCancel(runID)
+
+			if state == "missing" {
+				if err != nil {
+					t.Fatalf("cancel confirmed missing run: %v", err)
+				}
+			} else if err == nil {
+				t.Fatalf("cancel accepted %s ownership without an executor", state)
+			}
+		})
+	}
 }
 
 func TestCIRevalidationExecutorFreeAbortRetainsTheAdoptedSourceAndHistory(t *testing.T) {
@@ -76,36 +117,38 @@ func TestCIRevalidationExecutorFreeAbortRetainsTheAdoptedSourceAndHistory(t *tes
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
 	gate := config.Gate{Name: "fixture", After: types.StepLint, Command: "unused"}
+	fixture := newEvidenceFixture(t)
+	repo, submitted := setupTestGitRepo(t, fixture.p, fixture.db, "cancel-preserved")
+	gitCmd(t, repo.WorkingPath, "switch", "-c", "feature")
+	gitCmd(t, repo.WorkingPath, "commit", "--allow-empty", "-m", "prior publication after submission")
+	public := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/feature")
+	gitCmd(t, repo.WorkingPath, "remote", "add", "origin", repo.UpstreamURL)
+	gateDir := fixture.p.RepoDir(repo.ID)
+	gitCmd(t, gateDir, "remote", "set-url", "origin", repo.UpstreamURL)
+	sourceDir := filepath.Join(t.TempDir(), "source")
+	gitCmd(t, gateDir, "worktree", "add", "--detach", sourceDir, public)
+	gitCmd(t, sourceDir, "config", "user.name", "Test")
+	gitCmd(t, sourceDir, "config", "user.email", "test@test.com")
+	if err := os.WriteFile(filepath.Join(sourceDir, "retained.txt"), []byte("retain the adopted source\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, sourceDir, "add", "retained.txt")
+	gitCmd(t, sourceDir, "commit", "-m", "retain the repair")
+	candidate := gitOutput(t, sourceDir, "rev-parse", "HEAD")
 	for _, entry := range []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint, gate.StepName(), types.StepPush, types.StepCI, "recorded-push"} {
 		t.Run(string(entry), func(t *testing.T) {
 			isRecorded := entry == "recorded-push"
 			if isRecorded {
 				entry = types.StepPush
 			}
-			fixture := newEvidenceFixture(t)
-			repo, public := setupTestGitRepo(t, fixture.p, fixture.db, "cancel-preserved")
-			run, err := fixture.db.InsertRun(repo.ID, "feature", public, public)
+			run, err := fixture.db.InsertRun(repo.ID, "feature", submitted, submitted)
 			if err != nil {
 				t.Fatal(err)
 			}
-			submitted := public
-			gitCmd(t, repo.WorkingPath, "switch", "-c", "feature")
-			gitCmd(t, repo.WorkingPath, "commit", "--allow-empty", "-m", "prior publication after submission")
-			public = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
-			gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/feature")
-			gitCmd(t, repo.WorkingPath, "remote", "add", "origin", repo.UpstreamURL)
-			gateDir := fixture.p.RepoDir(repo.ID)
-			gitCmd(t, gateDir, "remote", "set-url", "origin", repo.UpstreamURL)
+			gitCmd(t, gateDir, "update-ref", "refs/heads/feature", public)
 			workDir := fixture.p.WorktreeDir(repo.ID, run.ID)
-			gitCmd(t, gateDir, "worktree", "add", "--detach", workDir, public)
-			gitCmd(t, workDir, "config", "user.name", "Test")
-			gitCmd(t, workDir, "config", "user.email", "test@test.com")
-			if err := os.WriteFile(filepath.Join(workDir, "retained.txt"), []byte("retain the adopted source\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			gitCmd(t, workDir, "add", "retained.txt")
-			gitCmd(t, workDir, "commit", "-m", "retain the repair")
-			candidate := gitOutput(t, workDir, "rev-parse", "HEAD")
+			gitCmd(t, gateDir, "worktree", "add", "--detach", workDir, candidate)
 			gates, err := json.Marshal([]config.Gate{gate})
 			if err != nil {
 				t.Fatal(err)

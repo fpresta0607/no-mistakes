@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -445,35 +446,22 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 		command := exec.CommandContext(ctx, h.NMBin, arguments...)
 		winproc.Harden(command)
 		command.Dir, command.Env = caller, os.Environ()
-		reader, writer := io.Pipe()
-		command.Stdout, command.Stderr = writer, writer
-		var output bytes.Buffer
-		readDone := make(chan struct{})
-		go func() {
-			defer close(readDone)
-			scanner := bufio.NewScanner(reader)
-			for scanner.Scan() {
-				line := scanner.Text()
-				fmt.Fprintln(&output, line)
-				if !strings.Contains(line, os.Getenv("FAKE_CLI_PUBLICATION_SECRET")) {
-					t.Logf("elapsed %s: CLI %s", time.Since(started).Round(time.Millisecond), line)
+		lastState, traceLines := "", 0
+		observe := func() error {
+			if shouldCancelAfterDaemonExit {
+				isAlive, err := e2edaemon.ProcessAlive(daemonPID)
+				if err != nil {
+					return fmt.Errorf("observe owned publication-crash daemon: %w", err)
+				}
+				if !isAlive {
+					t.Logf("elapsed %s: owned daemon exited; end the crash-following CLI", time.Since(started).Round(time.Millisecond))
+					cancel()
 				}
 			}
-			if err := scanner.Err(); err != nil {
-				t.Errorf("read streamed CLI output: %v", err)
-			}
-			_ = reader.Close()
-		}()
-		finished := make(chan error, 1)
-		go func() { err := command.Run(); _ = writer.Close(); finished <- err }()
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		lastState, traceLines := "", 0
-		observe := func() {
 			stored, err := database.ReadCIRepairSnapshot(run.ID)
 			if err != nil {
 				t.Logf("durable observation failed: %v", err)
-				return
+				return nil
 			}
 			var state strings.Builder
 			fmt.Fprintf(&state, "%s parked=%t push_active=%t", stored.ExpectedRun.Status, stored.ExpectedRun.AwaitingAgentSince != nil, stored.ExpectedRun.PushActive)
@@ -489,35 +477,25 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 			}
 			trace, err := os.ReadFile(publicationTrace)
 			if err != nil && !os.IsNotExist(err) {
-				t.Fatal(err)
+				return err
 			}
 			lines := strings.FieldsFunc(string(trace), func(r rune) bool { return r == '\n' })
 			for _, line := range lines[traceLines:] {
 				t.Logf("elapsed %s: external %s", time.Since(started).Round(time.Millisecond), line)
 			}
 			traceLines = len(lines)
+			return nil
 		}
-		for {
-			select {
-			case err := <-finished:
-				<-readDone
-				observe()
-				h.syncDaemonOwnership()
-				return output.String(), err
-			case <-ticker.C:
-				observe()
-				if shouldCancelAfterDaemonExit {
-					isAlive, err := e2edaemon.ProcessAlive(daemonPID)
-					if err != nil {
-						t.Fatalf("observe owned publication-crash daemon: %v", err)
-					}
-					if !isAlive {
-						t.Logf("elapsed %s: owned daemon exited; end the crash-following CLI", time.Since(started).Round(time.Millisecond))
-						cancel()
-					}
-				}
+		output, err, observationError := runObservedCICommand(command, cancel, observe, func(line string) {
+			if !strings.Contains(line, os.Getenv("FAKE_CLI_PUBLICATION_SECRET")) {
+				t.Logf("elapsed %s: CLI %s", time.Since(started).Round(time.Millisecond), line)
 			}
+		})
+		h.syncDaemonOwnership()
+		if observationError != nil {
+			t.Fatal(observationError)
 		}
+		return output, err
 	}
 	output, err = runObserved(false, adoptArgs...)
 	t.Logf("elapsed %s: initial adoption returned", time.Since(started).Round(time.Millisecond))
@@ -695,6 +673,127 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 	if err != nil || strings.Contains(string(encodedEvent), os.Getenv("FAKE_CLI_PUBLICATION_SECRET")) {
 		t.Fatal("credential leaked into durable adoption")
 	}
+}
+
+func runObservedCICommand(command *exec.Cmd, cancel context.CancelFunc, observe func() error, logLine func(string)) (string, error, error) {
+	reader, writer := io.Pipe()
+	command.Stdout, command.Stderr = writer, writer
+	var output bytes.Buffer
+	var readError error
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		defer reader.Close()
+		scanner := bufio.NewScanner(reader)
+		for scanner.Scan() {
+			line := scanner.Text()
+			fmt.Fprintln(&output, line)
+			logLine(line)
+		}
+		readError = scanner.Err()
+	}()
+	finished := make(chan error, 1)
+	go func() { err := command.Run(); _ = writer.Close(); finished <- err }()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-finished:
+			<-readDone
+			return output.String(), err, errors.Join(readError, observe())
+		case <-ticker.C:
+			if err := observe(); err != nil {
+				cancel()
+				runError := <-finished
+				<-readDone
+				return output.String(), runError, errors.Join(err, readError)
+			}
+		}
+	}
+}
+
+func TestCIRevalidationObservedCommandJoinsBeforeReturning(t *testing.T) {
+	for _, mode := range []string{"normal completion", "probe error", "dead daemon"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCIRevalidationObservedCommandChild$")
+			winproc.Harden(command)
+			command.Env = append(os.Environ(), "NM_CI_OBSERVED_CHILD="+mode)
+			ready := make(chan struct{})
+			observed := make(chan struct{})
+			releaseScanner := make(chan struct{})
+			probeError := errors.New("owned daemon probe failed")
+			observe := func() error {
+				<-ready
+				switch mode {
+				case "probe error":
+					close(observed)
+					return probeError
+				case "dead daemon":
+					cancel()
+				}
+				return nil
+			}
+
+			var output string
+			var err, observationError error
+			finished := make(chan struct{})
+			go func() {
+				output, err, observationError = runObservedCICommand(command, cancel, observe, func(line string) {
+					if line == "ready" {
+						close(ready)
+						if mode == "probe error" {
+							<-releaseScanner
+						}
+					}
+				})
+				close(finished)
+			}()
+			if mode == "probe error" {
+				<-observed
+				select {
+				case <-finished:
+					t.Error("returned before the scanner finished")
+				case <-time.After(100 * time.Millisecond):
+				}
+				close(releaseScanner)
+			}
+			<-finished
+
+			isAlive, probeErr := e2edaemon.ProcessAlive(command.Process.Pid)
+			if probeErr != nil || isAlive {
+				t.Errorf("command was not joined before return: alive=%t, err=%v", isAlive, probeErr)
+			}
+			if !strings.Contains(output, "ready\n") {
+				t.Errorf("scanner output was not collected before return: %q", output)
+			}
+			if mode == "normal completion" {
+				if err != nil || observationError != nil || !strings.Contains(output, "completed\n") {
+					t.Fatalf("normal command = %q, %v, observation=%v", output, err, observationError)
+				}
+			} else if mode == "probe error" {
+				if !errors.Is(observationError, probeError) {
+					t.Fatalf("probe failure lost: %v", observationError)
+				}
+			} else if err == nil || observationError != nil {
+				t.Fatalf("dead daemon did not cancel the command cleanly: %v, observation=%v", err, observationError)
+			}
+		})
+	}
+}
+
+func TestCIRevalidationObservedCommandChild(t *testing.T) {
+	mode := os.Getenv("NM_CI_OBSERVED_CHILD")
+	if mode == "" {
+		return
+	}
+	fmt.Println("ready")
+	if mode == "normal completion" {
+		fmt.Println("completed")
+		return
+	}
+	time.Sleep(30 * time.Second)
 }
 
 func crashCIRevalidationDaemon(t *testing.T, harness *Harness) {
