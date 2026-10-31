@@ -92,6 +92,9 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: scenario, GlobalConfigExtra: "side_by_side: true\nsession_reuse: true\n"})
 	t.Cleanup(func() {
 		if t.Failed() {
+			if trace, err := os.ReadFile(filepath.Join(isolation, "publication-trace")); err == nil {
+				t.Logf("external publication boundaries:\n%s", trace)
+			}
 			h.dumpDebugState()
 		}
 	})
@@ -428,9 +431,17 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 			t.Fatalf("%s mutation refusal wrote adoption: %v", mutation, err)
 		}
 	}
-	runObserved := func(arguments ...string) (string, error) {
+	runObserved := func(shouldCancelAfterDaemonExit bool, arguments ...string) (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
+		daemonPID := 0
+		if shouldCancelAfterDaemonExit {
+			var err error
+			daemonPID, err = daemon.ReadPID(paths.WithRoot(h.NMHome))
+			if err != nil || daemonPID <= 0 {
+				t.Fatalf("read owned publication-crash daemon PID: %d %v", daemonPID, err)
+			}
+		}
 		command := exec.CommandContext(ctx, h.NMBin, arguments...)
 		winproc.Harden(command)
 		command.Dir, command.Env = caller, os.Environ()
@@ -495,10 +506,20 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 				return output.String(), err
 			case <-ticker.C:
 				observe()
+				if shouldCancelAfterDaemonExit {
+					isAlive, err := e2edaemon.ProcessAlive(daemonPID)
+					if err != nil {
+						t.Fatalf("observe owned publication-crash daemon: %v", err)
+					}
+					if !isAlive {
+						t.Logf("elapsed %s: owned daemon exited; end the crash-following CLI", time.Since(started).Round(time.Millisecond))
+						cancel()
+					}
+				}
 			}
 		}
 	}
-	output, err = runObserved(adoptArgs...)
+	output, err = runObserved(false, adoptArgs...)
 	t.Logf("elapsed %s: initial adoption returned", time.Since(started).Round(time.Millisecond))
 	if err != nil && !strings.Contains(output, "elapsed while driving the run") {
 		t.Fatalf("explicit same-run adoption is unsupported: %v\n%s", err, output)
@@ -556,7 +577,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 	if err := os.WriteFile(publicationReject, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	output, err = runObserved(reselectArgs...)
+	output, err = runObserved(false, reselectArgs...)
 	t.Logf("elapsed %s: selected push rejection returned", time.Since(started).Round(time.Millisecond))
 	if err != nil && !strings.Contains(output, "elapsed while driving the run") {
 		t.Fatalf("failed selected publication did not remain recoverable: %v\n%s", err, output)
@@ -580,7 +601,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 	}
 	// The fake forge accepts only the selected Git environment, then kills
 	// this disposable daemon after the remote update but before its SQL receipt.
-	_, _ = runObserved(reselectArgs...)
+	_, _ = runObserved(true, reselectArgs...)
 	t.Logf("elapsed %s: publication crash returned", time.Since(started).Round(time.Millisecond))
 	fresh, err = database.GetRun(run.ID)
 	if err != nil || fresh.PushGeneration == nil || *fresh.PushGeneration != *stored.PushGeneration || fresh.LastPushedSHA == nil || *fresh.LastPushedSHA != submitted || h.UpstreamBranchSHA(branch) != candidate || !fresh.PushActive {
@@ -590,7 +611,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 		t.Fatalf("recover after exact publication crash: %v\n%s", err, output)
 	}
 	t.Logf("elapsed %s: begin final publication reselection", time.Since(started).Round(time.Millisecond))
-	output, err = runObserved(reselectArgs...)
+	output, err = runObserved(false, reselectArgs...)
 	t.Logf("elapsed %s: final reselection returned: %v\n%s", time.Since(started).Round(time.Millisecond), err, output)
 	if err != nil && !strings.Contains(output, "elapsed while driving the run") {
 		t.Fatalf("retry original publication after crash: %v\n%s", err, output)

@@ -375,7 +375,8 @@ This is separate from the configured-command waiver and trusted repository opt-i
 `--instructions` remains fix guidance, not an approval-reason input.
 
 A committed CI repair whose publication failed can remain in the managed worktree while the run and public branch still record the preceding head.
-From the original contributor branch, explicitly adopt that exact retained commit as unvalidated contents:
+The run must still be parked on its unpublished CI repair round with complete original step and round history; required preceding steps must have completed (Intent may have been skipped).
+From the clean original contributor worktree, still at its submitted or preceding public head, explicitly adopt that exact retained commit as unvalidated contents:
 
 ```sh
 no-mistakes axi respond --action revalidate --candidate <full-sha> --reason "validate these retained contents" --publication-gh-config-dir <absolute-existing-directory> --publication-login <existing-login>
@@ -383,22 +384,27 @@ no-mistakes axi respond --action revalidate --candidate <full-sha> --reason "val
 
 This keeps the same run and PR, revokes current approvals, and starts fresh required validation at Review.
 Original findings, rounds, spent automatic repair selections, and original per-step limits remain recorded.
+Adoption itself launches no CI fixer and renews no repair budget.
+An immutable local audit records the authenticated operator process, reason, candidate, caller, and original state in the same transaction that revokes approval and resets validation.
 Adoption grants no review or publication authority.
-It refuses moved or dirty worktrees, changed publication bindings, competing writers, and unreadable identities.
-Ordinary approve, fix, reconciliation, or replacement cannot consume the retained-candidate hold.
+It refuses moved or dirty worktrees, changed publication bindings, competing writers of the retained source or branch, and unreadable identities.
+Ordinary approve and fix cannot consume the retained-candidate hold.
+Publication requires the exact adopted candidate: a later Document, Lint, fixer, or formatter commit holds publication even when it descends from that candidate.
+Credential reselection cannot authorize that changed head or reset validation.
 
 Publication selection supports credential-free HTTPS GitHub remotes and an existing single-account GitHub CLI directory.
 It changes neither sign-in nor shared Git, daemon, or credential configuration, and retains no token or selection in the run database.
-After a daemon restart loses that temporary selection, repeat the command with `--reselect-publication` to resume the accepted adoption at its durable pending step or fresh approval gate.
-Completed fresh validation stays completed, and an interrupted agent step stays held rather than replaying its tools.
-An interrupted Push can repeat the existing guarded publication only for the exact freshly reviewed and tested head, including settling an already updated remote.
+The selection ends when that publication is durably recorded; PR updates, CI monitoring, and later operations use the run's original forge context.
+If the selection is lost or publication fails, repeat the command with `--reselect-publication`, the same candidate, and the same original caller worktree and head, even if the new publication has already been recorded.
+This restores publication credentials without resetting completed fresh validation; [daemon recovery](/no-mistakes/concepts/daemon/#crash-recovery) owns which interrupted steps can resume and when a preserved Push can settle an already updated remote.
 The ordinary Push baseline guard still runs after a daemon restart; if it requires fresh validation, publication stays held without dispatching a fixer or resetting completed steps.
 Revalidation cannot be combined with `--yes` or finding actions.
 
 After the explicit response, `--yes` uses the same [auto-resolution behavior and exceptions as `axi run --yes`](#no-mistakes-axi-run).
 Each `axi respond` blocks until the next gate, CI-ready decision point, or final outcome, subject to the same default `--wait 8m` boundary as `axi run`. That boundary also covers its initial active-run and run-state reads plus event-subscription acknowledgement, so a caller can interrupt establishment as well as the later event wait.
 If it returns another `gate:`, answer that gate; do not idle-wait for the run to move forward by itself.
-When the daemon is already running, `axi respond` can continue an active run even if the global config file has become invalid, because it is not starting a fresh run.
+When the daemon is already running, ordinary approve, fix, and skip responses can continue an active run even if the global config file has become invalid, because they are not starting a fresh run.
+CI adoption or credential reselection that must rebuild an executor still requires readable current configuration.
 The same successful-output reporting instructions apply to `axi respond` results.
 
 ## no-mistakes axi answer

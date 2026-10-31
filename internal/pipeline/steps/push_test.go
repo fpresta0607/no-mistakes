@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -117,10 +118,15 @@ func TestPushStep_AdoptedPublicationRequiresTheExactCandidate(t *testing.T) {
 				}
 				gitCmd(t, directory, "add", "document.txt")
 				gitCmd(t, directory, "commit", "-m", "document the candidate")
-			case "formatter edit":
-				sctx.Config.Commands.Format = "printf 'formatted\\n' > formatter.txt"
-			case "formatter commit":
-				sctx.Config.Commands.Format = "printf 'formatted\\n' > formatter.txt && git add formatter.txt && git commit -m formatter"
+			case "formatter edit", "formatter commit":
+				formatCommand := "printf 'formatted\\n' > formatter.txt"
+				if runtime.GOOS == "windows" {
+					formatCommand = "echo formatted>formatter.txt"
+				}
+				if change == "formatter commit" {
+					formatCommand += " && git add formatter.txt && git commit -m formatter"
+				}
+				sctx.Config.Commands.Format = formatCommand
 			}
 
 			outcome, err := (&PushStep{}).Execute(sctx)
@@ -137,6 +143,15 @@ func TestPushStep_AdoptedPublicationRequiresTheExactCandidate(t *testing.T) {
 				if !errors.Is(err, pipeline.ErrCIAdoptionHeadChanged) || outcome != nil || *stored.LastPushedSHA != public || *stored.PushGeneration != *snapshot.ExpectedRun.PushGeneration || gitCmd(t, upstream, "rev-parse", "refs/heads/feature") != public || gitCmd(t, directory, "rev-parse", "HEAD") == candidate {
 					t.Fatalf("changed candidate was published or discarded: %+v, %v", stored, err)
 				}
+			}
+			if strings.HasPrefix(change, "formatter") {
+				content, err := os.ReadFile(filepath.Join(directory, "formatter.txt"))
+				if err != nil || strings.TrimSpace(string(content)) != "formatted" {
+					t.Fatalf("formatter did not write its intended contents: %q, %v", content, err)
+				}
+			}
+			if change == "formatter commit" && gitCmd(t, directory, "log", "-1", "--format=%s") != "formatter" {
+				t.Fatal("formatter did not create its own commit")
 			}
 		})
 	}
