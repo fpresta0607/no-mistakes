@@ -217,6 +217,20 @@ func TestCIRepairAdoptionRejectsStaleDurableBindings(t *testing.T) {
 			if _, err := database.sql.Exec(change); err != nil {
 				t.Fatal(err)
 			}
+			before, err := database.ReadCIRepairSnapshot(request.ExpectedRun.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.CompareCIRepairSnapshot(&request); err == nil {
+				t.Fatal("stale selection passed proof comparison")
+			}
+			if err := database.CompleteCIRepairReselection(&request, 15); err == nil {
+				t.Fatal("stale selection consumed the gate")
+			}
+			after, err := database.ReadCIRepairSnapshot(request.ExpectedRun.ID)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatal("stale selection mutated the durable state")
+			}
 			assertCIRepairAdoptionRefused(t, database, request)
 		})
 	}
@@ -333,12 +347,22 @@ func TestCIRepairAdoptionRejectsCompetingRunsAndAgents(t *testing.T) {
 		{name: "running same branch", branch: "fix/retained-repair", status: types.RunRunning, isRefused: true},
 		{name: "terminal same branch", branch: "fix/retained-repair", status: types.RunCompleted},
 		{name: "idle other branch", branch: "fix/other", status: types.RunRunning},
-		{name: "agent on another branch", branch: "fix/other", status: types.RunRunning, hasAgent: true, isRefused: true},
+		{name: "agent on another branch", branch: "fix/other", status: types.RunRunning, hasAgent: true},
+		{name: "agent in another repository", branch: "fix/other", status: types.RunRunning, hasAgent: true},
+		{name: "agent on retained worktree", branch: "retained writer", status: types.RunRunning, hasAgent: true, isRefused: true},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			database, request := seedCIRepairAdoption(t)
-			other, err := database.InsertRun(request.ExpectedRepo.ID, testCase.branch, request.ExpectedRun.HeadSHA, request.ExpectedRun.BaseSHA)
+			repoID := request.ExpectedRepo.ID
+			if testCase.name == "agent in another repository" {
+				repo, err := database.InsertRepo(t.TempDir(), "https://example.test/other.git", "main")
+				if err != nil {
+					t.Fatal(err)
+				}
+				repoID = repo.ID
+			}
+			other, err := database.InsertRun(repoID, testCase.branch, request.ExpectedRun.HeadSHA, request.ExpectedRun.BaseSHA)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -346,7 +370,21 @@ func TestCIRepairAdoptionRejectsCompetingRunsAndAgents(t *testing.T) {
 				t.Fatal(err)
 			}
 			if testCase.hasAgent {
-				step, err := database.InsertStepResult(other.ID, types.StepReview)
+				owner := other.ID
+				if testCase.name == "agent on retained worktree" {
+					owner = request.ExpectedRun.ID
+				}
+				var step *StepResult
+				var err error
+				if owner == request.ExpectedRun.ID {
+					for _, original := range request.Steps {
+						if original.Snapshot.StepName == types.StepReview {
+							step = &original.Snapshot
+						}
+					}
+				} else {
+					step, err = database.InsertStepResult(owner, types.StepReview)
+				}
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -354,6 +392,9 @@ func TestCIRepairAdoptionRejectsCompetingRunsAndAgents(t *testing.T) {
 				if err := database.SetStepAgentActivity(step.ID, "agent running", &processID); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if testCase.name == "agent on retained worktree" {
+				refreshCIRepairAdoption(t, database, &request, request.ExpectedRun.ID)
 			}
 			if testCase.isRefused {
 				assertCIRepairAdoptionRefused(t, database, request)

@@ -22,6 +22,15 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
+func requireCIRepairSnapshot(t *testing.T, database *db.DB, runID string) *db.CIRepairAdoption {
+	t.Helper()
+	snapshot, err := database.ReadCIRepairSnapshot(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
 func prepareCIAdoptionRecovery(t *testing.T, database *db.DB, run *db.Run, entry types.StepName, status types.StepStatus) (*db.Run, *db.CIRepairAdoption, []types.StepName) {
 	t.Helper()
 	public := strings.Repeat("a", 40)
@@ -160,7 +169,7 @@ func TestCIAdoptionInterruptionCauseAndValidationBoundaryMatrix(t *testing.T) {
 					}
 					go func() {
 						if mode == "recovered gate" || mode == "pending" {
-							done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, nil, "")
+							done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, nil, "", requireCIRepairSnapshot(t, database, run.ID))
 						} else {
 							done <- executor.Execute(ctx, run, repo, workDir)
 						}
@@ -287,7 +296,7 @@ func TestCIAdoptionEveryRecoveryEntryHoldsAPushValidationRestart(t *testing.T) {
 				defer cancel()
 				done := make(chan error, 1)
 				go func() {
-					done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, publication, "fixture-operator")
+					done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, publication, "fixture-operator", requireCIRepairSnapshot(t, database, run.ID))
 				}()
 				isEntryGate := status == types.StepStatusAwaitingApproval
 				for {
@@ -355,7 +364,7 @@ func TestCIRepairSnapshotBindsOriginalRoundsAndEffectiveLimits(t *testing.T) {
 		}
 	}
 
-	snapshot, err := ReadCIRepairSnapshot(database, run.ID)
+	snapshot, err := database.ReadCIRepairSnapshot(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +381,7 @@ func TestCIRepairSnapshotBindsOriginalRoundsAndEffectiveLimits(t *testing.T) {
 	if _, err := database.InsertStepRound(snapshot.Steps[1].Snapshot.ID, 2, "auto_fix", nil, nil, 1); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := ReadCIRepairSnapshot(database, run.ID)
+	changed, err := database.ReadCIRepairSnapshot(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +455,7 @@ func TestCIPublicationHoldSurvivesLiveAndRecoveredInterruption(t *testing.T) {
 		workDir := t.TempDir()
 		go func() {
 			if isRecovered {
-				done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, nil, "")
+				done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, nil, "", requireCIRepairSnapshot(t, database, run.ID))
 			} else {
 				done <- executor.Execute(ctx, run, repo, workDir)
 			}
@@ -523,7 +532,7 @@ func TestCIPublicationUserAbortCancelsLiveAndRecoveredHolds(t *testing.T) {
 			workDir := t.TempDir()
 			go func() {
 				if mode == "recovered" {
-					done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, nil, "")
+					done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, nil, "", requireCIRepairSnapshot(t, database, run.ID))
 				} else {
 					done <- executor.Execute(ctx, run, repo, workDir)
 				}
@@ -705,7 +714,7 @@ func TestCIAdoptionResumesRecordedPushWithoutAnotherPublication(t *testing.T) {
 			}
 			executor := NewExecutor(database, locations, nil, nil, steps, nil)
 
-			if err := executor.ResumeCIAdoption(t.Context(), interrupted, repo, t.TempDir(), event, &forgecontext.Context{}, "operator"); err != nil {
+			if err := executor.ResumeCIAdoption(t.Context(), interrupted, repo, t.TempDir(), event, &forgecontext.Context{}, "operator", requireCIRepairSnapshot(t, database, run.ID)); err != nil {
 				t.Fatal(err)
 			}
 
@@ -793,7 +802,11 @@ func TestCIPublicationReselectionCannotConsumeFreshValidationHold(t *testing.T) 
 					t.Fatalf("ordinary %s consumed the hold", action)
 				}
 			}
-			err = executor.ReselectPublication(&forgecontext.Context{}, "operator")
+			snapshot, err := database.ReadCIRepairSnapshot(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = executor.ReselectPublication(snapshot, func() (*forgecontext.Context, error) { return &forgecontext.Context{}, nil }, "operator")
 			if findingID == PublicationSelectionFindingID {
 				if err != nil || executor.waiting || len(executor.approvalCh) != 1 {
 					t.Fatalf("explicit credential reselection refused: %v", err)
@@ -1020,7 +1033,9 @@ func TestCIAdoptionRestartsOnlyAnExactlyReviewedInterruptedPush(t *testing.T) {
 				defer cancel()
 				done := make(chan error, 1)
 				workDir := t.TempDir()
-				go func() { done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, nil, "") }()
+				go func() {
+					done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, nil, "", requireCIRepairSnapshot(t, database, run.ID))
+				}()
 				select {
 				case <-parked:
 				case err := <-done:
@@ -1047,6 +1062,220 @@ func TestCIAdoptionRestartsOnlyAnExactlyReviewedInterruptedPush(t *testing.T) {
 				}
 			} else if err == nil {
 				t.Fatal("interrupted validation or writer was replayable")
+			}
+		})
+	}
+}
+
+func TestCIPublicationReselectionRejectsSnapshotChangesAtEveryHandoff(t *testing.T) {
+	for _, boundary := range []string{"before proof", "during proof", "queued", "recovered entry"} {
+		for _, field := range []string{"repository", "run", "publication", "gates", "step", "limit", "round"} {
+			t.Run(boundary+"/"+field, func(t *testing.T) {
+				database, locations, run, repo := setupTest(t)
+				run, event, _ := prepareCIAdoptionRecovery(t, database, run, types.StepPush, types.StepStatusAwaitingApproval)
+				expected := requireCIRepairSnapshot(t, database, run.ID)
+				var push db.StepResult
+				for _, original := range expected.Steps {
+					if original.Snapshot.StepName == types.StepPush {
+						push = original.Snapshot
+					}
+				}
+				change := func() {
+					var err error
+					switch field {
+					case "repository":
+						_, err = database.UpdateRepoMetadata(repo.ID, repo.UpstreamURL, "moved")
+					case "run":
+						err = database.UpdateRunHeadSHA(run.ID, strings.Repeat("e", 40))
+					case "publication":
+						err = database.SetRunPushActive(run.ID, true)
+					case "gates":
+						err = database.SetRunGates(run.ID, "[]")
+					case "step":
+						err = database.SetStepFindings(push.ID, `{"findings":[]}`)
+					case "limit":
+						err = database.SetStepAutoFixLimit(push.ID, 99)
+					case "round":
+						_, err = database.InsertStepRound(push.ID, 2, "initial", push.FindingsJSON, nil, 1)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				executor := NewExecutor(database, locations, nil, nil, nil, nil)
+				executor.runID, executor.adoption = run.ID, event
+				executor.waiting, executor.waitingStep, executor.publicationSelectionRequired = true, types.StepPush, true
+				proofCalls := 0
+				prove := func() (*forgecontext.Context, error) {
+					proofCalls++
+					if boundary == "during proof" {
+						change()
+					}
+					return &forgecontext.Context{}, nil
+				}
+				if boundary == "before proof" || boundary == "recovered entry" {
+					change()
+				}
+				var err error
+				if boundary == "recovered entry" {
+					err = executor.ResumeCIAdoption(t.Context(), run, repo, t.TempDir(), event, &forgecontext.Context{}, "operator", expected)
+				} else {
+					err = executor.ReselectPublication(expected, prove, "operator")
+					if boundary == "queued" {
+						if err != nil {
+							t.Fatal(err)
+						}
+						change()
+						response := <-executor.approvalCh
+						before := requireCIRepairSnapshot(t, database, run.ID)
+						err = executor.consumePublicationSelection(response, 10)
+						after := requireCIRepairSnapshot(t, database, run.ID)
+						if !reflect.DeepEqual(before, after) {
+							t.Fatal("stale response mutated the park before refusing")
+						}
+					}
+				}
+				if err == nil || !executor.publicationSelectionRequired || len(executor.approvalCh) != 0 {
+					t.Fatal("stale snapshot authorized publication or consumed its hold")
+				}
+				if (boundary == "before proof" || boundary == "recovered entry") && proofCalls != 0 {
+					t.Fatal("stale request reached credential proof")
+				}
+				stored, err := database.GetRun(run.ID)
+				if err != nil || stored.AwaitingAgentSince == nil || stored.Status != types.RunRunning {
+					t.Fatal("stale selection terminalized or released the retained run")
+				}
+			})
+		}
+	}
+}
+
+func TestCIPublicationConcurrentReselectionsCannotClaimTheNextPushPark(t *testing.T) {
+	database, locations, run, _ := setupTest(t)
+	run, event, _ := prepareCIAdoptionRecovery(t, database, run, types.StepPush, types.StepStatusAwaitingApproval)
+	expected := requireCIRepairSnapshot(t, database, run.ID)
+	executor := NewExecutor(database, locations, nil, nil, nil, nil)
+	executor.runID, executor.adoption = run.ID, event
+	executor.waiting, executor.waitingStep, executor.publicationSelectionRequired = true, types.StepPush, true
+	entered, release := make(chan struct{}), make(chan struct{})
+	first, second := make(chan error, 1), make(chan error, 1)
+	go func() {
+		first <- executor.ReselectPublication(expected, func() (*forgecontext.Context, error) {
+			close(entered)
+			<-release
+			return &forgecontext.Context{}, nil
+		}, "operator")
+	}()
+	<-entered
+	secondStarted := make(chan struct{})
+	go func() {
+		close(secondStarted)
+		second <- executor.ReselectPublication(expected, func() (*forgecontext.Context, error) {
+			t.Error("concurrent stale request reached another credential proof")
+			return &forgecontext.Context{}, nil
+		}, "operator")
+	}()
+	<-secondStarted
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-second; err == nil {
+		t.Fatal("two requests claimed one reserved park")
+	}
+	response := <-executor.approvalCh
+	if err := executor.consumePublicationSelection(response, 10); err != nil {
+		t.Fatal(err)
+	}
+	var push db.StepResult
+	for _, original := range expected.Steps {
+		if original.Snapshot.StepName == types.StepPush {
+			push = original.Snapshot
+		}
+	}
+	if _, err := database.InsertStepRound(push.ID, 2, "initial", push.FindingsJSON, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.ParkStepForApproval(run.ID, push.ID, types.StepStatusAwaitingApproval, 0, 1, push.FindingsJSON); err != nil {
+		t.Fatal(err)
+	}
+	executor.waiting, executor.waitingStep, executor.publicationSelectionRequired = true, types.StepPush, true
+	before := requireCIRepairSnapshot(t, database, run.ID)
+	if err := executor.ReselectPublication(expected, func() (*forgecontext.Context, error) {
+		t.Error("old request claimed the next Push park by finding ID")
+		return &forgecontext.Context{}, nil
+	}, "operator"); err == nil {
+		t.Fatal("old snapshot claimed a newer Push round")
+	}
+	after := requireCIRepairSnapshot(t, database, run.ID)
+	if !reflect.DeepEqual(before, after) || !executor.waiting || len(executor.approvalCh) != 0 {
+		t.Fatal("stale concurrent selection changed the next park")
+	}
+}
+
+func TestCIRetainedBeforeAdoptionRespectsCancellationCause(t *testing.T) {
+	for _, isAbort := range []bool{false, true} {
+		t.Run(map[bool]string{false: "shutdown", true: "explicit abort"}[isAbort], func(t *testing.T) {
+			database, locations, run, repo := setupTest(t)
+			workDir := t.TempDir()
+			initGitRepo(t, workDir)
+			public, err := git.HeadSHA(t.Context(), workDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := git.Run(t.Context(), workDir, "commit", "--allow-empty", "-m", "retained repair"); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunPublication(run.ID, db.PushBinding{HeadSHA: public, TargetKind: "upstream", TargetFingerprint: "bound", Ref: "refs/heads/" + run.Branch}); err != nil {
+				t.Fatal(err)
+			}
+			run, err = database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parked := make(chan struct{}, 1)
+			step := &adaptiveCallStep{name: types.StepCI, fn: func(*StepContext) (*StepOutcome, error) {
+				return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"failed-publication","severity":"error","action":"ask-user","description":"the repair remains unpublished"}]}`}, nil
+			}}
+			executor := NewExecutor(database, locations, nil, nil, []Step{step}, func(observed ipc.Event) {
+				if observed.Type == ipc.EventStepCompleted && observed.Status != nil && *observed.Status == string(types.StepStatusAwaitingApproval) {
+					parked <- struct{}{}
+				}
+			})
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(context.Canceled)
+			done := make(chan error, 1)
+			go func() { done <- executor.Execute(ctx, run, repo, workDir) }()
+			select {
+			case <-parked:
+			case err := <-done:
+				t.Fatalf("retained CI did not park: %v", err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("retained CI did not park")
+			}
+			cause := error(context.Canceled)
+			if isAbort {
+				cause = errors.New(types.RunCancelReasonAbortedByUser)
+			}
+			cancel(cause)
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("retained CI did not stop")
+			}
+			stored, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if isAbort {
+				if stored.Status != types.RunCancelled || stored.AwaitingAgentSince != nil {
+					t.Fatal("explicit cancellation failed to release pre-adoption ownership")
+				}
+			} else if stored.Status != types.RunRunning || stored.AwaitingAgentSince == nil {
+				t.Fatal("shutdown terminalized the pre-adoption retained source")
+			}
+			if *stored.LastPushedSHA != public || *stored.PushGeneration != *run.PushGeneration {
+				t.Fatal("interruption fabricated a publication")
 			}
 		})
 	}

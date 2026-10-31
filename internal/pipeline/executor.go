@@ -37,14 +37,15 @@ const (
 )
 
 type approvalResponse struct {
-	action           types.ApprovalAction
-	findingIDs       []string
-	instructions     map[string]string
-	addedFindings    []types.Finding
-	approvalReason   string
-	adoption         *db.CIRepairAdoption
-	publication      *forgecontext.Context
-	publicationLogin string
+	action              types.ApprovalAction
+	findingIDs          []string
+	instructions        map[string]string
+	addedFindings       []types.Finding
+	approvalReason      string
+	adoption            *db.CIRepairAdoption
+	publication         *forgecontext.Context
+	publicationLogin    string
+	publicationSnapshot *db.CIRepairAdoption
 }
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
@@ -70,6 +71,7 @@ type Executor struct {
 	ciAdoptionReserved           bool
 	publicationForge             *forgecontext.Context
 	publicationLogin             string
+	publicationSnapshot          *db.CIRepairAdoption
 	publicationSelectionRequired bool
 	publicationOnlyResume        bool
 	// stepRecords are this Execute's step rows by name. They let the review
@@ -572,15 +574,23 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if e.publicationSelectionRequired && e.publicationForge != nil && hasFindingID(gate.findings, PublicationSelectionFindingID) {
 		e.mu.Lock()
 		e.waiting = false
-		e.approvalCh <- approvalResponse{action: types.ActionRevalidate, publication: e.publicationForge, publicationLogin: e.publicationLogin}
+		e.ciAdoptionReserved = true
+		e.approvalCh <- approvalResponse{action: types.ActionRevalidate, publication: e.publicationForge, publicationLogin: e.publicationLogin, publicationSnapshot: e.publicationSnapshot}
 		e.mu.Unlock()
 	}
 
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
+	if err == nil && ctx.Err() != nil {
+		err = context.Cause(ctx)
+	}
 	if err != nil && e.preserveCIAdoption(run, ctx) {
 		return err
 	}
-	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
+	if err == nil && response.action == types.ActionRevalidate && response.adoption == nil {
+		if err := e.consumePublicationSelection(response, time.Since(parkStart).Milliseconds()); err != nil {
+			return err
+		}
+	} else if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
 	}
 	if err != nil {
@@ -608,12 +618,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	telemetry.Track("approval", approvalFields)
 	switch response.action {
 	case types.ActionRevalidate:
-		if response.adoption == nil && gate.step.Name() == types.StepPush && e.publicationSelectionRequired {
-			e.mu.Lock()
-			e.publicationForge, e.publicationLogin = response.publication, response.publicationLogin
-			e.publicationSelectionRequired = false
-			e.publicationOnlyResume = true
-			e.mu.Unlock()
+		if response.adoption == nil && gate.step.Name() == types.StepPush {
 			state, err := e.durableExecutionState(gate.stepResult.ID)
 			if err != nil {
 				return err
@@ -1507,10 +1512,17 @@ rounds:
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), effectiveFindings, "", &executionMS)
 
 			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true)
+			if err == nil && ctx.Err() != nil {
+				err = context.Cause(ctx)
+			}
 			if err != nil && e.preserveCIAdoption(run, ctx) {
 				return false, "", err
 			}
-			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
+			if err == nil && response.action == types.ActionRevalidate && response.adoption == nil {
+				if err := e.consumePublicationSelection(response, time.Since(parkStart).Milliseconds()); err != nil {
+					return false, "", err
+				}
+			} else if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
 			}
 			if err != nil {
@@ -1544,14 +1556,9 @@ rounds:
 					e.acceptCIAdoption(run, response.adoption, response.publication, response.publicationLogin)
 					return false, types.StepReview, nil
 				}
-				if stepName != types.StepPush || e.adoption == nil || !e.publicationSelectionRequired {
+				if stepName != types.StepPush || e.adoption == nil {
 					return false, "", fmt.Errorf("invalid publication reselection response")
 				}
-				e.mu.Lock()
-				e.publicationForge, e.publicationLogin = response.publication, response.publicationLogin
-				e.publicationSelectionRequired = false
-				e.publicationOnlyResume = true
-				e.mu.Unlock()
 				phaseStart = time.Now()
 				if err := markRunning(); err != nil {
 					return false, "", err

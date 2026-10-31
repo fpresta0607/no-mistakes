@@ -169,14 +169,89 @@ func validateCIRepairAdoptionRequest(adoption CIRepairAdoption) error {
 	return nil
 }
 
+func (d *DB) ReadCIRepairSnapshot(runID string) (*CIRepairAdoption, error) {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	return readCIRepairSnapshot(tx, runID)
+}
+
+func readCIRepairSnapshot(tx *sql.Tx, runID string) (*CIRepairAdoption, error) {
+	var snapshot CIRepairAdoption
+	if err := scanRun(tx.QueryRow(`SELECT `+runColumns+` FROM runs WHERE id = ?`, runID), &snapshot.ExpectedRun); err != nil {
+		return nil, err
+	}
+	repo := &snapshot.ExpectedRepo
+	if err := tx.QueryRow(`SELECT id, working_path, upstream_url, COALESCE(fork_url, ''), default_branch, created_at FROM repos WHERE id = ?`, snapshot.ExpectedRun.RepoID).Scan(&repo.ID, &repo.WorkingPath, &repo.UpstreamURL, &repo.ForkURL, &repo.DefaultBranch, &repo.CreatedAt); err != nil {
+		return nil, err
+	}
+	var gates sql.NullString
+	if err := tx.QueryRow(`SELECT gates_json FROM runs WHERE id = ?`, runID).Scan(&gates); err != nil {
+		return nil, err
+	}
+	snapshot.ExpectedGatesJSON = gates.String
+	var err error
+	snapshot.Steps, err = readCIRepairAdoptionSteps(tx, runID)
+	return &snapshot, err
+}
+
+func compareCIRepairSnapshot(tx *sql.Tx, expected *CIRepairAdoption) error {
+	current, err := readCIRepairSnapshot(tx, expected.ExpectedRun.ID)
+	if err != nil {
+		return err
+	}
+	repo := expected.ExpectedRepo
+	repo.URLsVerified = false
+	if !reflect.DeepEqual(current.ExpectedRepo, repo) || !reflect.DeepEqual(current.ExpectedRun, expected.ExpectedRun) || current.ExpectedGatesJSON != expected.ExpectedGatesJSON || !reflect.DeepEqual(current.Steps, expected.Steps) {
+		return fmt.Errorf("CI repair repository, run, publication, gates, steps, limits or rounds changed")
+	}
+	var competingRun, activeAgent bool
+	if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM runs WHERE repo_id = ? AND branch = ? AND id != ? AND status IN ('pending', 'running'))`, expected.ExpectedRun.RepoID, expected.ExpectedRun.Branch, expected.ExpectedRun.ID).Scan(&competingRun); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM step_results WHERE run_id = ? AND agent_pid IS NOT NULL AND agent_pid != 0)`, expected.ExpectedRun.ID).Scan(&activeAgent); err != nil {
+		return err
+	}
+	if competingRun || activeAgent {
+		return fmt.Errorf("CI repair source or branch has an active owner")
+	}
+	return nil
+}
+
+func (d *DB) CompareCIRepairSnapshot(expected *CIRepairAdoption) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	return compareCIRepairSnapshot(tx, expected)
+}
+
+func (d *DB) CompleteCIRepairReselection(expected *CIRepairAdoption, parkedMS int64) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE runs SET id = id WHERE id = ?`, expected.ExpectedRun.ID); err != nil {
+		return err
+	}
+	if err := compareCIRepairSnapshot(tx, expected); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE runs SET awaiting_agent_since = NULL, parked_ms = COALESCE(parked_ms, 0) + CASE WHEN awaiting_agent_since IS NOT NULL THEN ? ELSE 0 END, updated_at = ? WHERE id = ?`, parkedMS, now(), expected.ExpectedRun.ID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func compareCIRepairAdoptionSnapshot(tx *sql.Tx, adoption CIRepairAdoption) error {
-	var run Run
-	if err := scanRun(tx.QueryRow(`SELECT `+runColumns+` FROM runs WHERE id = ?`, adoption.ExpectedRun.ID), &run); err != nil {
-		return fmt.Errorf("read CI repair run: %w", err)
+	if err := compareCIRepairSnapshot(tx, &adoption); err != nil {
+		return err
 	}
-	if !reflect.DeepEqual(run, adoption.ExpectedRun) {
-		return fmt.Errorf("CI repair run snapshot changed")
-	}
+	run := adoption.ExpectedRun
 	if run.Status != types.RunRunning || run.PRState == nil || *run.PRState != "open" || run.PRStateObservedAt == nil || run.PRURL == nil || strings.TrimSpace(*run.PRURL) == "" || run.CustodyReturnedAt != nil || run.PushActive || run.AwaitingAgentSince == nil || run.TerminalHeadVerifiedAt != nil {
 		return fmt.Errorf("CI repair adoption requires an active parked run with an observed open PR and pipeline custody")
 	}
@@ -186,39 +261,7 @@ func compareCIRepairAdoptionSnapshot(tx *sql.Tx, adoption CIRepairAdoption) erro
 	if run.WorktreeDir != nil && *run.WorktreeDir != adoption.ManagedDir {
 		return fmt.Errorf("CI repair adoption managed directory changed")
 	}
-	var repo Repo
-	if err := tx.QueryRow(`SELECT id, working_path, upstream_url, COALESCE(fork_url, ''), default_branch, created_at FROM repos WHERE id = ?`, run.RepoID).Scan(
-		&repo.ID, &repo.WorkingPath, &repo.UpstreamURL, &repo.ForkURL, &repo.DefaultBranch, &repo.CreatedAt); err != nil {
-		return fmt.Errorf("read CI repair repository: %w", err)
-	}
-	if !reflect.DeepEqual(repo, adoption.ExpectedRepo) {
-		return fmt.Errorf("CI repair repository snapshot changed")
-	}
-	var gates sql.NullString
-	if err := tx.QueryRow(`SELECT gates_json FROM runs WHERE id = ?`, run.ID).Scan(&gates); err != nil {
-		return fmt.Errorf("read CI repair gate pin: %w", err)
-	}
-	if gates.String != adoption.ExpectedGatesJSON {
-		return fmt.Errorf("CI repair gate pin changed")
-	}
-	var competingRun, activeAgent bool
-	if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM runs WHERE repo_id = ? AND branch = ? AND id != ? AND status IN ('pending', 'running'))`, run.RepoID, run.Branch, run.ID).Scan(&competingRun); err != nil {
-		return fmt.Errorf("read competing CI repair runs: %w", err)
-	}
-	if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM step_results WHERE agent_pid IS NOT NULL AND agent_pid != 0)`).Scan(&activeAgent); err != nil {
-		return fmt.Errorf("read CI repair agent ownership: %w", err)
-	}
-	if competingRun || activeAgent {
-		return fmt.Errorf("CI repair adoption refused while another run or agent owns work")
-	}
-	steps, err := readCIRepairAdoptionSteps(tx, run.ID)
-	if err != nil {
-		return err
-	}
-	if !reflect.DeepEqual(steps, adoption.Steps) {
-		return fmt.Errorf("CI repair step snapshots, limits, or round history changed")
-	}
-	return validateCIRepairAdoptionSteps(steps, gates.String)
+	return validateCIRepairAdoptionSteps(adoption.Steps, adoption.ExpectedGatesJSON)
 }
 
 func readCIRepairAdoptionSteps(tx *sql.Tx, runID string) ([]CIRepairAdoptionStep, error) {

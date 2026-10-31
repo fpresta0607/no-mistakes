@@ -26,7 +26,7 @@ func runAxiCIRevalidation(cmd *cobra.Command, env *axiEnv, ctx context.Context, 
 	if !filepath.IsAbs(args.ghConfigDir) || strings.TrimSpace(args.expectedLogin) == "" {
 		return emitError(cmd, 2, "select existing publication credentials with --publication-gh-config-dir <absolute directory> and --publication-login <login>")
 	}
-	snapshot, err := pipeline.ReadCIRepairSnapshot(env.d, runID)
+	snapshot, err := env.d.ReadCIRepairSnapshot(runID)
 	if err != nil {
 		return emitError(cmd, 1, fmt.Sprintf("read original CI binding: %v", err))
 	}

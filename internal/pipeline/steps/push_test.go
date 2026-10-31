@@ -80,7 +80,7 @@ func TestPushStep_AdoptedPublicationRequiresTheExactCandidate(t *testing.T) {
 					}
 				}
 			}
-			snapshot, err := pipeline.ReadCIRepairSnapshot(sctx.DB, run.ID)
+			snapshot, err := sctx.DB.ReadCIRepairSnapshot(run.ID)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -16,7 +16,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
-	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
 
 func TestCIRevalidationWaitBoundsTheMutationRequestWithoutRetry(t *testing.T) {
@@ -47,7 +46,7 @@ func TestCIRevalidationWaitBoundsTheMutationRequestWithoutRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, err := pipeline.ReadCIRepairSnapshot(database, run.ID)
+	before, err := database.ReadCIRepairSnapshot(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +102,7 @@ func TestCIRevalidationWaitBoundsTheMutationRequestWithoutRetry(t *testing.T) {
 	if len(requests) != 0 {
 		t.Fatal("timed-out adoption mutation was retried")
 	}
-	after, err := pipeline.ReadCIRepairSnapshot(database, run.ID)
+	after, err := database.ReadCIRepairSnapshot(run.ID)
 	if err != nil || !reflect.DeepEqual(before, after) {
 		t.Fatalf("timed-out follow altered the retained snapshot: %v", err)
 	}

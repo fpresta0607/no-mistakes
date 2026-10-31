@@ -34,20 +34,10 @@ func (m *RunManager) ciRepairHeld(ctx context.Context, run *db.Run) (bool, error
 	if held, err := pipeline.CIAdoptionHeld(m.db, run, event); held || err != nil {
 		return held, err
 	}
-	results, err := m.db.GetStepsByRun(run.ID)
-	if err != nil {
-		return true, err
-	}
-	for _, result := range results {
-		if result.StepName != types.StepCI || (result.Status != types.StepStatusAwaitingApproval && result.Status != types.StepStatusFixReview) {
-			continue
-		}
-		return pipeline.RetainedCIHead(ctx, run, worktrees.RecordedDir(m.paths, run.WorktreePath(), run.RepoID, run.ID))
-	}
-	return false, nil
+	return pipeline.RetainedCIRepairHeld(m.db, ctx, run, worktrees.RecordedDir(m.paths, run.WorktreePath(), run.RepoID, run.ID))
 }
 
-func (m *RunManager) cancelPreservedCIAdoption(runID string) error {
+func (m *RunManager) cancelPreservedCIRepair(runID string) error {
 	run, err := m.db.GetRun(runID)
 	if err != nil || run == nil {
 		return fmt.Errorf("cannot read preserved run %s", runID)
@@ -64,12 +54,8 @@ func (m *RunManager) cancelPreservedCIAdoption(runID string) error {
 		if err != nil || run == nil || run.Status != types.RunRunning {
 			return "", fmt.Errorf("no active run %s", runID)
 		}
-		event, err := m.db.GetCIRepairAdoption(runID)
-		if err != nil {
-			return "", fmt.Errorf("cannot read adoption ownership; preserve the source")
-		}
-		if held, err := pipeline.CIAdoptionHeld(m.db, run, event); !held || err != nil {
-			return "", fmt.Errorf("no exclusively preserved adoption for run %s", runID)
+		if held, err := m.ciRepairHeld(context.Background(), run); !held || err != nil {
+			return "", fmt.Errorf("no exclusively preserved CI repair for run %s", runID)
 		}
 		repo, err := m.db.GetRepo(run.RepoID)
 		if err != nil || repo == nil {
@@ -84,6 +70,7 @@ func (m *RunManager) cancelPreservedCIAdoption(runID string) error {
 			return "", err
 		}
 		workDir := worktrees.RecordedDir(m.paths, run.WorktreePath(), repo.ID, run.ID)
+		m.sweepRunWorktreeProcesses(repo.ID, runID, workDir)
 		head, verified := preserveRunHead(m.db, workDir, run)
 		if !verified {
 			return "", fmt.Errorf("cannot preserve the adopted source before cancellation")
@@ -151,7 +138,7 @@ func (m *RunManager) HandleCIRevalidation(ctx context.Context, params ipc.Respon
 			}
 			return run.ID, nil
 		}
-		snapshot, err := pipeline.ReadCIRepairSnapshot(m.db, run.ID)
+		snapshot, err := m.db.ReadCIRepairSnapshot(run.ID)
 		if err != nil {
 			return "", err
 		}
@@ -194,12 +181,18 @@ func (m *RunManager) HandleCIRevalidation(ctx context.Context, params ipc.Respon
 				}
 			}
 		}
-		publication, err := forgecontext.ResolvePublication(proofCtx, snapshot.ExpectedRepo.UpstreamURL, snapshot.ExpectedRepo.ForkURL, forgecontext.PublicationSelection{ConfigDir: request.GHConfigDir, ExpectedLogin: request.ExpectedLogin})
-		if err != nil {
-			return "", err
-		}
-		if err := forgecontext.VerifyPublication(proofCtx, request.CallerDir, publication, request.ExpectedLogin); err != nil {
-			return "", err
+		selectPublication := func() (*forgecontext.Context, error) {
+			publication, err := forgecontext.ResolvePublication(proofCtx, snapshot.ExpectedRepo.UpstreamURL, snapshot.ExpectedRepo.ForkURL, forgecontext.PublicationSelection{ConfigDir: request.GHConfigDir, ExpectedLogin: request.ExpectedLogin})
+			if err != nil {
+				return nil, err
+			}
+			if err := forgecontext.VerifyPublication(proofCtx, request.CallerDir, publication, request.ExpectedLogin); err != nil {
+				return nil, err
+			}
+			if err := m.proveCIRepairGit(proofCtx, snapshot, request, request.CandidateSHA, publication); err != nil {
+				return nil, err
+			}
+			return publication, nil
 		}
 		if request.ReselectPublication {
 			if event == nil || event.CandidateSHA != request.CandidateSHA {
@@ -212,22 +205,35 @@ func (m *RunManager) HandleCIRevalidation(ctx context.Context, params ipc.Respon
 			executor := m.executors[run.ID]
 			m.mu.Unlock()
 			if executor != nil {
-				if err := m.proveCIRepairGit(proofCtx, snapshot, request, snapshot.ExpectedRun.HeadSHA, publication); err != nil {
-					return "", err
-				}
-				return run.ID, executor.ReselectPublication(publication, request.ExpectedLogin)
+				return run.ID, executor.ReselectPublication(snapshot, selectPublication, request.ExpectedLogin)
+			}
+			if err := m.db.CompareCIRepairSnapshot(snapshot); err != nil {
+				return "", err
+			}
+			publication, err := selectPublication()
+			if err != nil {
+				return "", err
 			}
 			plan, err := m.prepareCIAdoption(proofCtx, &snapshot.ExpectedRun, event, publication, request.ExpectedLogin)
 			if err != nil {
 				return "", err
 			}
-			if err := m.proveCIRepairGit(proofCtx, snapshot, request, snapshot.ExpectedRun.HeadSHA, publication); err != nil {
+			if err := m.db.CompareCIRepairSnapshot(snapshot); err != nil {
 				_ = plan.agent.Close()
 				return "", err
 			}
+			plan.publicationSnapshot = snapshot
 			m.resumeRecoveredRun(*plan)
 			return run.ID, nil
 		}
+		publication, err := forgecontext.ResolvePublication(proofCtx, snapshot.ExpectedRepo.UpstreamURL, snapshot.ExpectedRepo.ForkURL, forgecontext.PublicationSelection{ConfigDir: request.GHConfigDir, ExpectedLogin: request.ExpectedLogin})
+		if err != nil {
+			return "", err
+		}
+		if err := forgecontext.VerifyPublication(proofCtx, request.CallerDir, publication, request.ExpectedLogin); err != nil {
+			return "", err
+		}
+
 		snapshot.CandidateSHA, snapshot.CallerDir, snapshot.CallerHeadSHA = request.CandidateSHA, request.CallerDir, request.CallerHeadSHA
 		snapshot.ManagedDir = worktrees.RecordedDir(m.paths, snapshot.ExpectedRun.WorktreePath(), run.RepoID, run.ID)
 		snapshot.GateDir, snapshot.GateBranch = m.paths.RepoDir(run.RepoID), run.Branch
@@ -303,24 +309,43 @@ func (m *RunManager) proveCIRepairLocal(ctx context.Context, snapshot *db.CIRepa
 			}
 		}
 	}
-	common, err := git.Run(ctx, managed, "rev-parse", "--git-common-dir")
-	if err != nil || !samePath(resolveGitPath(managed, common), gateDir) {
-		return "", fmt.Errorf("managed worktree gate identity changed")
+	managedIdentity, err := git.Run(ctx, managed, "rev-parse", "--git-common-dir", "HEAD", candidate+"^{commit}")
+	managedParts := strings.Split(managedIdentity, "\n")
+	if err != nil || len(managedParts) != 3 || !samePath(resolveGitPath(managed, managedParts[0]), gateDir) || managedParts[1] != candidate || managedParts[2] != candidate {
+		return "", fmt.Errorf("managed gate identity or exact candidate changed")
 	}
-	callerCommon, err := git.Run(ctx, request.CallerDir, "rev-parse", "--git-common-dir")
-	repoCommon, repoErr := git.Run(ctx, repo.WorkingPath, "rev-parse", "--git-common-dir")
-	if err != nil || repoErr != nil || !samePath(resolveGitPath(request.CallerDir, callerCommon), resolveGitPath(repo.WorkingPath, repoCommon)) {
+	callerIdentity, err := git.Run(ctx, request.CallerDir, "rev-parse", "--git-common-dir", "HEAD", "--abbrev-ref", "HEAD")
+	callerParts := strings.Split(callerIdentity, "\n")
+	if err != nil || len(callerParts) != 3 || callerParts[2] != run.Branch {
+		return "", fmt.Errorf("caller repository or branch changed")
+	}
+	repoCommon := callerParts[0]
+	if !samePath(request.CallerDir, repo.WorkingPath) {
+		repoCommon, err = git.Run(ctx, repo.WorkingPath, "rev-parse", "--git-common-dir")
+		if err != nil {
+			return "", fmt.Errorf("caller repository identity is unreadable")
+		}
+	}
+	if !samePath(resolveGitPath(request.CallerDir, callerParts[0]), resolveGitPath(repo.WorkingPath, repoCommon)) {
 		return "", fmt.Errorf("caller repository identity changed")
 	}
-	branch, err := git.CurrentBranch(ctx, request.CallerDir)
-	if err != nil || branch != run.Branch {
-		return "", fmt.Errorf("caller branch changed")
+	callerRun := run
+	if request.ReselectPublication {
+		event, err := m.db.GetCIRepairAdoption(run.ID)
+		if err != nil || event == nil || !samePath(event.CallerDir, request.CallerDir) || event.CallerHeadSHA != request.CallerHeadSHA || event.CandidateSHA != candidate {
+			return "", fmt.Errorf("accepted caller or candidate binding changed")
+		}
+		callerRun = &event.ExpectedRun
 	}
-	callerHead, err := git.HeadSHA(ctx, request.CallerDir)
-	if err != nil || callerHead != request.CallerHeadSHA || (callerHead != *run.LastPushedSHA && (run.SubmittedHeadSHA == nil || callerHead != *run.SubmittedHeadSHA)) {
+	callerHead := callerParts[1]
+	if callerHead != request.CallerHeadSHA || (callerHead != *callerRun.LastPushedSHA && (callerRun.SubmittedHeadSHA == nil || callerHead != *callerRun.SubmittedHeadSHA)) {
 		return "", fmt.Errorf("caller head changed or has unrelated work")
 	}
-	for _, directory := range []string{managed, gateDir, repo.WorkingPath, request.CallerDir} {
+	directories := []string{managed, gateDir, repo.WorkingPath}
+	if !samePath(request.CallerDir, repo.WorkingPath) {
+		directories = append(directories, request.CallerDir)
+	}
+	for _, directory := range directories {
 		remotes, err := git.GetConfiguredRemoteURLs(ctx, directory, "origin")
 		if err != nil || len(remotes) != 1 {
 			return "", fmt.Errorf("repository origin identity is ambiguous")
@@ -333,12 +358,6 @@ func (m *RunManager) proveCIRepairLocal(ctx context.Context, snapshot *db.CIRepa
 	gateHead, exists, err := git.DirectRefTarget(ctx, gateDir, *run.PushRef)
 	if err != nil || !exists {
 		return "", fmt.Errorf("gate branch identity is unreadable")
-	}
-	if head, err := git.HeadSHA(ctx, managed); err != nil || head != candidate {
-		return "", fmt.Errorf("retained candidate moved or is unreadable")
-	}
-	if resolved, err := git.Run(ctx, managed, "rev-parse", "--verify", candidate+"^{commit}"); err != nil || resolved != candidate {
-		return "", fmt.Errorf("candidate must be an exact full commit object ID")
 	}
 	if _, err := git.Run(ctx, managed, "merge-base", "--is-ancestor", *run.LastPushedSHA, candidate); err != nil {
 		return "", fmt.Errorf("candidate does not retain the exact public history")

@@ -25,15 +25,26 @@ func TestCIRevalidationExecutorFreeAbortRetainsTheAdoptedSourceAndHistory(t *tes
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
 	gate := config.Gate{Name: "fixture", After: types.StepLint, Command: "unused"}
-	for _, entry := range []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint, gate.StepName(), types.StepPush} {
+	for _, entry := range []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint, gate.StepName(), types.StepPush, types.StepCI, "recorded-push"} {
 		t.Run(string(entry), func(t *testing.T) {
+			isRecorded := entry == "recorded-push"
+			if isRecorded {
+				entry = types.StepPush
+			}
 			fixture := newEvidenceFixture(t)
 			repo, public := setupTestGitRepo(t, fixture.p, fixture.db, "cancel-preserved")
 			run, err := fixture.db.InsertRun(repo.ID, "feature", public, public)
 			if err != nil {
 				t.Fatal(err)
 			}
+			submitted := public
+			gitCmd(t, repo.WorkingPath, "switch", "-c", "feature")
+			gitCmd(t, repo.WorkingPath, "commit", "--allow-empty", "-m", "prior publication after submission")
+			public = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+			gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/feature")
+			gitCmd(t, repo.WorkingPath, "remote", "add", "origin", repo.UpstreamURL)
 			gateDir := fixture.p.RepoDir(repo.ID)
+			gitCmd(t, gateDir, "remote", "set-url", "origin", repo.UpstreamURL)
 			workDir := fixture.p.WorktreeDir(repo.ID, run.ID)
 			gitCmd(t, gateDir, "worktree", "add", "--detach", workDir, public)
 			gitCmd(t, workDir, "config", "user.name", "Test")
@@ -53,7 +64,7 @@ func TestCIRevalidationExecutorFreeAbortRetainsTheAdoptedSourceAndHistory(t *tes
 				fixture.db.UpdateRunStatus(run.ID, types.RunRunning),
 				fixture.db.UpdateRunPRURL(run.ID, "https://github.com/test/repo/pull/1"),
 				fixture.db.UpdateRunPRState(run.ID, "open"),
-				fixture.db.UpdateRunPublication(run.ID, db.PushBinding{HeadSHA: public, TargetKind: "upstream", TargetFingerprint: "bound", Ref: "refs/heads/feature"}),
+				fixture.db.UpdateRunPublication(run.ID, db.PushBinding{HeadSHA: public, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(repo.UpstreamURL), Ref: "refs/heads/feature"}),
 				fixture.db.SetRunGates(run.ID, string(gates)),
 			} {
 				if err != nil {
@@ -91,7 +102,7 @@ func TestCIRevalidationExecutorFreeAbortRetainsTheAdoptedSourceAndHistory(t *tes
 					}
 				}
 			}
-			snapshot, err := pipeline.ReadCIRepairSnapshot(fixture.db, run.ID)
+			snapshot, err := fixture.db.ReadCIRepairSnapshot(run.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -99,29 +110,48 @@ func TestCIRevalidationExecutorFreeAbortRetainsTheAdoptedSourceAndHistory(t *tes
 			snapshot.CallerDir, snapshot.CallerHeadSHA, snapshot.ManagedDir = repo.WorkingPath, public, workDir
 			snapshot.GateDir, snapshot.GateBranch = gateDir, run.Branch
 			snapshot.Operator, snapshot.Reason = "authenticated fixture operator", "validate the retained contents"
-			adoption, _, err := fixture.db.AdoptCIRepairForRevalidation(*snapshot)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, original := range snapshot.Steps {
-				step := original.Snapshot
-				if step.StepName.Order() < types.StepReview.Order() {
-					continue
-				}
-				if step.StepName == entry {
-					if err := fixture.db.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
-						t.Fatal(err)
-					}
-					break
-				} else if err := fixture.db.CompleteStep(step.ID, 0, 1, ""); err != nil {
+			var adoption *db.CIRepairAdoption
+			if entry != types.StepCI {
+				adoption, _, err = fixture.db.AdoptCIRepairForRevalidation(*snapshot)
+				if err != nil {
 					t.Fatal(err)
 				}
+				for _, original := range snapshot.Steps {
+					step := original.Snapshot
+					if step.StepName.Order() < types.StepReview.Order() {
+						continue
+					}
+					if step.StepName == entry {
+						if err := fixture.db.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
+							t.Fatal(err)
+						}
+						break
+					} else if err := fixture.db.CompleteStep(step.ID, 0, 1, ""); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
-			before, err := pipeline.ReadCIRepairSnapshot(fixture.db, run.ID)
+			if isRecorded {
+				if err := fixture.db.UpdateRunPublication(run.ID, db.PushBinding{HeadSHA: candidate, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(repo.UpstreamURL), Ref: "refs/heads/feature"}); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, gateDir, "update-ref", "refs/heads/feature", candidate, public)
+			}
+			before, err := fixture.db.ReadCIRepairSnapshot(run.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
 			manager := NewRunManager(fixture.db, fixture.p, nil)
+			if entry == types.StepPush {
+				request := &ipc.CIRevalidationParams{CallerDir: repo.WorkingPath, CallerHeadSHA: public, CandidateSHA: candidate, ReselectPublication: true}
+				if _, err := manager.proveCIRepairLocal(t.Context(), before, request, candidate); err != nil {
+					t.Fatalf("accepted old-public caller was refused after receipt=%t: %v", isRecorded, err)
+				}
+				request.CallerHeadSHA = submitted
+				if _, err := manager.proveCIRepairLocal(t.Context(), before, request, candidate); err == nil {
+					t.Fatal("reselection accepted a different caller head")
+				}
+			}
 			plans, preserved, err := manager.recoverableParkedRuns(t.Context())
 			if err != nil || len(plans) != 0 {
 				t.Fatalf("preserved recovery unexpectedly created an executor: %v", err)
@@ -135,10 +165,10 @@ func TestCIRevalidationExecutorFreeAbortRetainsTheAdoptedSourceAndHistory(t *tes
 			}
 
 			stored, err := fixture.db.GetRun(run.ID)
-			if err != nil || stored.Status != types.RunCancelled || stored.AwaitingAgentSince != nil || stored.PushActive || stored.HeadSHA != candidate || *stored.LastPushedSHA != public || *stored.PushGeneration != *snapshot.ExpectedRun.PushGeneration {
+			if err != nil || stored.Status != types.RunCancelled || stored.AwaitingAgentSince != nil || stored.PushActive || stored.HeadSHA != candidate || *stored.LastPushedSHA != *before.ExpectedRun.LastPushedSHA || *stored.PushGeneration != *before.ExpectedRun.PushGeneration {
 				t.Fatalf("executor-free cancellation lost the source or publication truth: %+v, %v", stored, err)
 			}
-			after, err := pipeline.ReadCIRepairSnapshot(fixture.db, run.ID)
+			after, err := fixture.db.ReadCIRepairSnapshot(run.ID)
 			if err != nil || !reflect.DeepEqual(before.Steps, after.Steps) {
 				t.Fatalf("cancellation rewrote validation or spent rounds: %v", err)
 			}
@@ -146,8 +176,13 @@ func TestCIRevalidationExecutorFreeAbortRetainsTheAdoptedSourceAndHistory(t *tes
 			if err != nil || !reflect.DeepEqual(adoption, retainedEvent) {
 				t.Fatalf("cancellation rewrote the adoption receipt: %v", err)
 			}
-			if head := gitOutput(t, gateDir, "rev-parse", "refs/no-mistakes/recover/"+run.ID); head != candidate {
-				t.Fatal("cancellation failed to anchor the retained source")
+			if head := gitOutput(t, gateDir, "rev-parse", "refs/heads/feature"); isRecorded && head != candidate {
+				t.Fatal("cancellation lost its recorded publication")
+			}
+			if !isRecorded {
+				if head := gitOutput(t, gateDir, "rev-parse", "refs/no-mistakes/recover/"+run.ID); head != candidate {
+					t.Fatal("cancellation failed to anchor the retained source")
+				}
 			}
 			if _, err := os.Stat(workDir); !os.IsNotExist(err) {
 				t.Fatalf("cancellation did not clean its worktree: %v", err)
@@ -406,7 +441,7 @@ func TestCIRevalidationStartupPreservesTheReceiptUntilPushCompletes(t *testing.T
 			}
 		}
 	}
-	snapshot, err := pipeline.ReadCIRepairSnapshot(database, run.ID)
+	snapshot, err := database.ReadCIRepairSnapshot(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

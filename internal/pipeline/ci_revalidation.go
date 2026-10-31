@@ -15,49 +15,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// ReadCIRepairSnapshot captures the original inputs to the adoption CAS.
-// The transaction independently reloads every value before accepting them.
-func ReadCIRepairSnapshot(database *db.DB, runID string) (*db.CIRepairAdoption, error) {
-	run, err := database.GetRun(runID)
-	if err != nil {
-		return nil, fmt.Errorf("read CI repair run: %w", err)
-	}
-	if run == nil {
-		return nil, fmt.Errorf("CI repair run is missing")
-	}
-	repo, err := database.GetRepo(run.RepoID)
-	if err != nil {
-		return nil, fmt.Errorf("read CI repair repository: %w", err)
-	}
-	if repo == nil {
-		return nil, fmt.Errorf("CI repair repository is missing")
-	}
-	pin, err := database.GetRunGates(runID)
-	if err != nil {
-		return nil, err
-	}
-	steps, err := database.GetStepsByRun(runID)
-	if err != nil {
-		return nil, err
-	}
-	snapshot := &db.CIRepairAdoption{ExpectedRepo: *repo, ExpectedRun: *run, ExpectedGatesJSON: pin}
-	for _, step := range steps {
-		original := db.CIRepairAdoptionStep{Snapshot: *step}
-		if step.AutoFixLimit != nil {
-			original.EffectiveAutoFixLimit = *step.AutoFixLimit
-		}
-		rounds, err := database.GetRoundsByStep(step.ID)
-		if err != nil {
-			return nil, err
-		}
-		for _, round := range rounds {
-			original.Rounds = append(original.Rounds, *round)
-		}
-		snapshot.Steps = append(snapshot.Steps, original)
-	}
-	return snapshot, nil
-}
-
 func CIRepairSnapshotDigest(snapshot *db.CIRepairAdoption) (string, error) {
 	data, err := json.Marshal(struct {
 		Repo  db.Repo
@@ -83,6 +40,19 @@ func RetainedCIHead(ctx context.Context, run *db.Run, workDir string) (bool, err
 		return true, fmt.Errorf("cannot read retained CI head; preserve the source")
 	}
 	return head != run.HeadSHA, nil
+}
+
+func RetainedCIRepairHeld(database *db.DB, ctx context.Context, run *db.Run, workDir string) (bool, error) {
+	results, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		return true, err
+	}
+	for _, result := range results {
+		if result.StepName == types.StepCI && (result.Status == types.StepStatusAwaitingApproval || result.Status == types.StepStatusFixReview) {
+			return RetainedCIHead(ctx, run, workDir)
+		}
+	}
+	return false, nil
 }
 
 func CIAdoptionHeld(database *db.DB, run *db.Run, event *db.CIRepairAdoption) (bool, error) {
@@ -121,6 +91,10 @@ func (e *Executor) preserveCIAdoption(run *db.Run, ctx context.Context) bool {
 			return true
 		}
 	}
+	if event == nil {
+		held, err := RetainedCIRepairHeld(e.db, context.WithoutCancel(ctx), run, e.workDir)
+		return held || err != nil
+	}
 	held, err := CIAdoptionHeld(e.db, run, event)
 	return held || err != nil
 }
@@ -145,27 +119,52 @@ func (e *Executor) AdoptCIRepair(adopt func() (*db.CIRepairAdoption, error), pub
 	return nil
 }
 
-func (e *Executor) ReselectPublication(publication *forgecontext.Context, login string) error {
+func (e *Executor) ReselectPublication(expected *db.CIRepairAdoption, prove func() (*forgecontext.Context, error), login string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.adoption == nil || !e.waiting || e.waitingStep != types.StepPush || !e.publicationSelectionRequired {
+	if e.adoption == nil || e.ciAdoptionReserved || !e.waiting || e.waitingStep != types.StepPush || !e.publicationSelectionRequired {
 		return fmt.Errorf("publication credential reselection requires the preserved Push credential gate")
 	}
-	results, err := e.db.GetStepsByRun(e.runID)
-	if err != nil {
+	if err := e.db.CompareCIRepairSnapshot(expected); err != nil {
 		return err
 	}
 	isSelectionGate := false
-	for _, result := range results {
-		if result.StepName == types.StepPush && result.FindingsJSON != nil && hasFindingID(*result.FindingsJSON, PublicationSelectionFindingID) {
+	for _, original := range expected.Steps {
+		result := original.Snapshot
+		if result.StepName == types.StepPush && result.FindingsJSON != nil && hasFindingID(*result.FindingsJSON, PublicationSelectionFindingID) && !hasFindingID(*result.FindingsJSON, PublicationRevalidationFindingID) && !HasProtectedPathRefusal(*result.FindingsJSON) {
 			isSelectionGate = true
 		}
 	}
 	if !isSelectionGate {
 		return fmt.Errorf("fresh validation is required; credential reselection cannot authorize it")
 	}
+	e.ciAdoptionReserved = true
+	publication, err := prove()
+	if err == nil {
+		err = e.db.CompareCIRepairSnapshot(expected)
+	}
+	if err != nil {
+		e.ciAdoptionReserved = false
+		return err
+	}
 	e.waiting = false
-	e.approvalCh <- approvalResponse{action: types.ActionRevalidate, publication: publication, publicationLogin: login}
+	e.approvalCh <- approvalResponse{action: types.ActionRevalidate, publication: publication, publicationLogin: login, publicationSnapshot: expected}
+	return nil
+}
+
+func (e *Executor) consumePublicationSelection(response approvalResponse, parkedMS int64) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if response.publicationSnapshot == nil || !e.ciAdoptionReserved || !e.publicationSelectionRequired {
+		return fmt.Errorf("publication reselection has no reserved snapshot")
+	}
+	if err := e.db.CompleteCIRepairReselection(response.publicationSnapshot, parkedMS); err != nil {
+		return err
+	}
+	e.publicationForge, e.publicationLogin = response.publication, response.publicationLogin
+	e.publicationSelectionRequired, e.ciAdoptionReserved = false, false
+	e.publicationOnlyResume = true
+	e.publicationSnapshot = nil
 	return nil
 }
 
@@ -300,17 +299,23 @@ func (e *Executor) restartIndex(runID string, name types.StepName, currentIndex 
 
 // ResumeCIAdoption continues only a durable pending prefix. A parked fresh
 // validation uses ordinary Resume; an interrupted writer remains held.
-func (e *Executor) ResumeCIAdoption(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, event *db.CIRepairAdoption, publication *forgecontext.Context, login string) (resumeErr error) {
+func (e *Executor) ResumeCIAdoption(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, event *db.CIRepairAdoption, publication *forgecontext.Context, login string, expected *db.CIRepairAdoption) (resumeErr error) {
 	e.workDir, e.runID = workDir, run.ID
 	defer func() {
 		if resumeErr != nil && IsUserAbort(ctx) && run.Status == types.RunRunning {
 			resumeErr = e.failRun(run, repo, resumeErr, ctx)
 		}
 	}()
+	if expected != nil {
+		if err := e.db.CompareCIRepairSnapshot(expected); err != nil {
+			return err
+		}
+	}
 	e.mu.Lock()
 	e.adoption, e.publicationForge, e.publicationLogin = event, publication, login
 	e.mu.Unlock()
 	if run.AwaitingAgentSince != nil {
+		e.publicationSnapshot = expected
 		return e.Resume(ctx, run, repo, workDir)
 	}
 	start, err := CIAdoptionPendingIndex(e.db, run, e.steps, event)

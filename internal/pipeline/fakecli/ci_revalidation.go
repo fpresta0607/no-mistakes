@@ -47,8 +47,21 @@ func fakeCIRevalidationHandler(args []string) {
 		}
 		os.Exit(0)
 	}
+	recordBoundary := func(name string) {
+		if path := os.Getenv("FAKE_CLI_PUBLICATION_TRACE"); path != "" {
+			file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+			if err != nil {
+				os.Exit(1)
+			}
+			_, err = fmt.Fprintf(file, "%d %s\n", time.Now().UnixMilli(), name)
+			if closeErr := file.Close(); err != nil || closeErr != nil {
+				os.Exit(1)
+			}
+		}
+	}
 	joined := strings.Join(args, " ")
 	if binaryName == "gh" && strings.Contains(joined, "auth git-credential") {
+		recordBoundary("Git credential proof")
 		if os.Getenv("GH_CONFIG_DIR") != os.Getenv("FAKE_CLI_PUBLICATION_CONFIG") {
 			os.Exit(1)
 		}
@@ -61,6 +74,7 @@ func fakeCIRevalidationHandler(args []string) {
 	if binaryName == "gh" && len(args) > 0 && args[0] == "api" {
 		for _, arg := range args {
 			if arg == "user" || arg == "/user" {
+				recordBoundary("forge credential proof")
 				if strings.Contains(joined, "--jq") {
 					fmt.Println("fixture-operator")
 				} else {
@@ -89,6 +103,7 @@ func fakeCIRevalidationHandler(args []string) {
 			return
 		}
 		if len(args) > 1 && args[0] == "push" && args[1] == os.Getenv("FAKE_CLI_REVALIDATION_URL") {
+			recordBoundary("Git push entered")
 			if os.Getenv("GH_CONFIG_DIR") == os.Getenv("FAKE_CLI_PUBLICATION_CONFIG") && os.Remove(os.Getenv("FAKE_CLI_PUBLICATION_REJECT")) == nil {
 				fmt.Fprintln(os.Stderr, "selected publication transport rejected")
 				os.Exit(1)
@@ -120,6 +135,7 @@ func fakeCIRevalidationHandler(args []string) {
 			os.Exit(1)
 		}
 		if len(args) > 1 && args[0] == "push" && args[1] == os.Getenv("FAKE_CLI_REVALIDATION_URL") && os.Getenv("GH_CONFIG_DIR") == os.Getenv("FAKE_CLI_PUBLICATION_CONFIG") {
+			recordBoundary("selected Git push confirmed")
 			if err := os.Remove(os.Getenv("FAKE_CLI_PUBLICATION_CRASH")); err == nil {
 				root := os.Getenv("NM_HOME")
 				if !strings.Contains(filepath.Base(filepath.Dir(root)), "nm-e2e-") {
@@ -149,6 +165,7 @@ func fakeCIRevalidationHandler(args []string) {
 	}
 	head, err := readGit("--git-dir", remote, "rev-parse", "--verify", "refs/heads/"+branch)
 	if binaryName == "gh" && strings.Contains(joined, "repos/example/revalidation/pulls/42") {
+		recordBoundary("live PR proof")
 		proofPath := os.Getenv("FAKE_CLI_PUBLICATION_PROOF")
 		if proofPath != "" && os.Remove(proofPath+".arm") == nil {
 			if err := os.WriteFile(proofPath+".pending", nil, 0o600); err != nil {

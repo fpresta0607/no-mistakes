@@ -3,7 +3,12 @@
 package e2e
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -127,6 +132,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 	publicationCrash := filepath.Join(isolation, "crash-after-public-push")
 	publicationReject := filepath.Join(isolation, "reject-selected-push")
 	publicationProof := filepath.Join(isolation, "publication-proof")
+	publicationTrace := filepath.Join(isolation, "publication-trace")
 	if err := os.WriteFile(publicationCrash, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -153,6 +159,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 		"FAKE_CLI_PUBLICATION_CRASH":  publicationCrash,
 		"FAKE_CLI_PUBLICATION_REJECT": publicationReject,
 		"FAKE_CLI_PUBLICATION_PROOF":  publicationProof,
+		"FAKE_CLI_PUBLICATION_TRACE":  publicationTrace,
 	} {
 		t.Setenv(key, value)
 	}
@@ -281,7 +288,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 		}
 	}
 	adoptArgs := []string{"axi", "respond", "--action", "revalidate", "--candidate", candidate, "--reason", "adopt these exact unvalidated contents for fresh required validation", "--publication-gh-config-dir", profile, "--publication-login", "fixture-operator", "--wait", "30s"}
-	beforeRefusals, err := pipeline.ReadCIRepairSnapshot(database, run.ID)
+	beforeRefusals, err := database.ReadCIRepairSnapshot(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +312,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 				t.Fatal(err)
 			}
 		}
-		after, err := pipeline.ReadCIRepairSnapshot(database, run.ID)
+		after, err := database.ReadCIRepairSnapshot(run.ID)
 		if err != nil || !reflect.DeepEqual(beforeRefusals, after) || h.UpstreamBranchSHA(branch) != submitted {
 			t.Fatalf("%s refusal mutated original state: %v", invalid, err)
 		}
@@ -413,7 +420,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 		if err := os.Remove(publicationProof + ".pending"); err != nil {
 			t.Fatal(err)
 		}
-		after, err := pipeline.ReadCIRepairSnapshot(database, run.ID)
+		after, err := database.ReadCIRepairSnapshot(run.ID)
 		if err != nil || !reflect.DeepEqual(beforeRefusals, after) || h.UpstreamBranchSHA(branch) != submitted {
 			t.Fatalf("%s mutation refusal changed original state: %v", mutation, err)
 		}
@@ -421,7 +428,77 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 			t.Fatalf("%s mutation refusal wrote adoption: %v", mutation, err)
 		}
 	}
-	output, err = h.RunInDir(caller, adoptArgs...)
+	runObserved := func(arguments ...string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		command := exec.CommandContext(ctx, h.NMBin, arguments...)
+		winproc.Harden(command)
+		command.Dir, command.Env = caller, os.Environ()
+		reader, writer := io.Pipe()
+		command.Stdout, command.Stderr = writer, writer
+		var output bytes.Buffer
+		readDone := make(chan struct{})
+		go func() {
+			defer close(readDone)
+			scanner := bufio.NewScanner(reader)
+			for scanner.Scan() {
+				line := scanner.Text()
+				fmt.Fprintln(&output, line)
+				if !strings.Contains(line, os.Getenv("FAKE_CLI_PUBLICATION_SECRET")) {
+					t.Logf("elapsed %s: CLI %s", time.Since(started).Round(time.Millisecond), line)
+				}
+			}
+			if err := scanner.Err(); err != nil {
+				t.Errorf("read streamed CLI output: %v", err)
+			}
+			_ = reader.Close()
+		}()
+		finished := make(chan error, 1)
+		go func() { err := command.Run(); _ = writer.Close(); finished <- err }()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		lastState, traceLines := "", 0
+		observe := func() {
+			stored, err := database.ReadCIRepairSnapshot(run.ID)
+			if err != nil {
+				t.Logf("durable observation failed: %v", err)
+				return
+			}
+			var state strings.Builder
+			fmt.Fprintf(&state, "%s parked=%t push_active=%t", stored.ExpectedRun.Status, stored.ExpectedRun.AwaitingAgentSince != nil, stored.ExpectedRun.PushActive)
+			if stored.ExpectedRun.PushGeneration != nil {
+				fmt.Fprintf(&state, " generation=%d", *stored.ExpectedRun.PushGeneration)
+			}
+			for _, step := range stored.Steps {
+				fmt.Fprintf(&state, " %s=%s/%d", step.Snapshot.StepName, step.Snapshot.Status, len(step.Rounds))
+			}
+			if state.String() != lastState {
+				lastState = state.String()
+				t.Logf("elapsed %s: durable %s", time.Since(started).Round(time.Millisecond), lastState)
+			}
+			trace, err := os.ReadFile(publicationTrace)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			lines := strings.FieldsFunc(string(trace), func(r rune) bool { return r == '\n' })
+			for _, line := range lines[traceLines:] {
+				t.Logf("elapsed %s: external %s", time.Since(started).Round(time.Millisecond), line)
+			}
+			traceLines = len(lines)
+		}
+		for {
+			select {
+			case err := <-finished:
+				<-readDone
+				observe()
+				h.syncDaemonOwnership()
+				return output.String(), err
+			case <-ticker.C:
+				observe()
+			}
+		}
+	}
+	output, err = runObserved(adoptArgs...)
 	t.Logf("elapsed %s: initial adoption returned", time.Since(started).Round(time.Millisecond))
 	if err != nil && !strings.Contains(output, "elapsed while driving the run") {
 		t.Fatalf("explicit same-run adoption is unsupported: %v\n%s", err, output)
@@ -479,7 +556,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 	if err := os.WriteFile(publicationReject, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	output, err = h.RunInDir(caller, reselectArgs...)
+	output, err = runObserved(reselectArgs...)
 	t.Logf("elapsed %s: selected push rejection returned", time.Since(started).Round(time.Millisecond))
 	if err != nil && !strings.Contains(output, "elapsed while driving the run") {
 		t.Fatalf("failed selected publication did not remain recoverable: %v\n%s", err, output)
@@ -503,7 +580,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 	}
 	// The fake forge accepts only the selected Git environment, then kills
 	// this disposable daemon after the remote update but before its SQL receipt.
-	_, _ = h.RunInDir(caller, reselectArgs...)
+	_, _ = runObserved(reselectArgs...)
 	t.Logf("elapsed %s: publication crash returned", time.Since(started).Round(time.Millisecond))
 	fresh, err = database.GetRun(run.ID)
 	if err != nil || fresh.PushGeneration == nil || *fresh.PushGeneration != *stored.PushGeneration || fresh.LastPushedSHA == nil || *fresh.LastPushedSHA != submitted || h.UpstreamBranchSHA(branch) != candidate || !fresh.PushActive {
@@ -513,7 +590,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 		t.Fatalf("recover after exact publication crash: %v\n%s", err, output)
 	}
 	t.Logf("elapsed %s: begin final publication reselection", time.Since(started).Round(time.Millisecond))
-	output, err = h.RunInDir(caller, reselectArgs...)
+	output, err = runObserved(reselectArgs...)
 	t.Logf("elapsed %s: final reselection returned: %v\n%s", time.Since(started).Round(time.Millisecond), err, output)
 	if err != nil && !strings.Contains(output, "elapsed while driving the run") {
 		t.Fatalf("retry original publication after crash: %v\n%s", err, output)

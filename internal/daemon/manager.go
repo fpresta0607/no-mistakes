@@ -101,17 +101,18 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 }
 
 type recoveredRunPlan struct {
-	run              *db.Run
-	repo             *db.Repo
-	workDir          string
-	gateDir          string
-	cfg              *config.Config
-	agent            agent.Agent
-	steps            []pipeline.Step
-	forge            *forgecontext.Context
-	adoption         *db.CIRepairAdoption
-	publication      *forgecontext.Context
-	publicationLogin string
+	run                 *db.Run
+	repo                *db.Repo
+	workDir             string
+	gateDir             string
+	cfg                 *config.Config
+	agent               agent.Agent
+	steps               []pipeline.Step
+	forge               *forgecontext.Context
+	adoption            *db.CIRepairAdoption
+	publication         *forgecontext.Context
+	publicationLogin    string
+	publicationSnapshot *db.CIRepairAdoption
 }
 
 func (m *RunManager) recoverableParkedRuns(ctx context.Context) ([]recoveredRunPlan, map[string]struct{}, error) {
@@ -489,7 +490,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 
 		resume := func() error {
 			if plan.adoption != nil {
-				return executor.ResumeCIAdoption(runCtx, plan.run, plan.repo, plan.workDir, plan.adoption, plan.publication, plan.publicationLogin)
+				return executor.ResumeCIAdoption(runCtx, plan.run, plan.repo, plan.workDir, plan.adoption, plan.publication, plan.publicationLogin, plan.publicationSnapshot)
 			}
 			return executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
 		}
@@ -2262,7 +2263,7 @@ func (m *RunManager) HandleCancel(runID string) error {
 	m.mu.Unlock()
 
 	if !ok {
-		return m.cancelPreservedCIAdoption(runID)
+		return m.cancelPreservedCIRepair(runID)
 	}
 
 	cancel(fmt.Errorf(types.RunCancelReasonAbortedByUser))
