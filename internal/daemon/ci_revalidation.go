@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -30,23 +31,77 @@ func (m *RunManager) ciRepairHeld(ctx context.Context, run *db.Run) (bool, error
 	if err != nil {
 		return true, err
 	}
-	if event != nil && (run.PushGeneration == nil || event.ExpectedRun.PushGeneration == nil || *run.PushGeneration <= *event.ExpectedRun.PushGeneration) {
-		return true, nil
+	if held, err := pipeline.CIAdoptionHeld(m.db, run, event); held || err != nil {
+		return held, err
 	}
 	results, err := m.db.GetStepsByRun(run.ID)
 	if err != nil {
 		return true, err
 	}
 	for _, result := range results {
-		if event != nil && ((result.StepName == types.StepPush || result.StepName == types.StepPR) && result.Status != types.StepStatusCompleted || result.StepName == types.StepCI && result.Status == types.StepStatusPending) {
-			return true, nil
-		}
 		if result.StepName != types.StepCI || (result.Status != types.StepStatusAwaitingApproval && result.Status != types.StepStatusFixReview) {
 			continue
 		}
 		return pipeline.RetainedCIHead(ctx, run, worktrees.RecordedDir(m.paths, run.WorktreePath(), run.RepoID, run.ID))
 	}
 	return false, nil
+}
+
+func (m *RunManager) cancelPreservedCIAdoption(runID string) error {
+	run, err := m.db.GetRun(runID)
+	if err != nil || run == nil {
+		return fmt.Errorf("cannot read preserved run %s", runID)
+	}
+	_, err = m.withBranchLock(run.RepoID, run.Branch, func() (string, error) {
+		m.mu.Lock()
+		cancel := m.cancels[runID]
+		m.mu.Unlock()
+		if cancel != nil {
+			cancel(fmt.Errorf(types.RunCancelReasonAbortedByUser))
+			return runID, nil
+		}
+		run, err := m.db.GetRun(runID)
+		if err != nil || run == nil || run.Status != types.RunRunning {
+			return "", fmt.Errorf("no active run %s", runID)
+		}
+		event, err := m.db.GetCIRepairAdoption(runID)
+		if err != nil {
+			return "", fmt.Errorf("cannot read adoption ownership; preserve the source")
+		}
+		if held, err := pipeline.CIAdoptionHeld(m.db, run, event); !held || err != nil {
+			return "", fmt.Errorf("no exclusively preserved adoption for run %s", runID)
+		}
+		repo, err := m.db.GetRepo(run.RepoID)
+		if err != nil || repo == nil {
+			return "", fmt.Errorf("cannot read preserved repository")
+		}
+		global, err := config.LoadGlobal(m.paths.ConfigFile())
+		if err != nil {
+			return "", err
+		}
+		cfg := config.Merge(global, &config.RepoConfig{})
+		if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
+			return "", err
+		}
+		workDir := worktrees.RecordedDir(m.paths, run.WorktreePath(), repo.ID, run.ID)
+		head, verified := preserveRunHead(m.db, workDir, run)
+		if !verified {
+			return "", fmt.Errorf("cannot preserve the adopted source before cancellation")
+		}
+		if err := m.db.ClearRunAwaitingAgent(runID); err != nil {
+			return "", err
+		}
+		if err := m.db.UpdateRunErrorStatusWithVerifiedHead(runID, types.RunCancelReasonAbortedByUser, types.RunCancelled, head); err != nil {
+			return "", err
+		}
+		status, reason := string(types.RunCancelled), types.RunCancelReasonAbortedByUser
+		m.broadcast(ipc.Event{Type: ipc.EventRunCompleted, RunID: runID, RepoID: repo.ID, Branch: &run.Branch, Status: &status, Error: &reason, PRURL: run.PRURL})
+		m.closeSubscribers(runID)
+		m.removeRunWorktree(repo.ID, runID, m.paths.RepoDir(repo.ID), workDir, "preserved_adoption_cancelled")
+		m.cleanupRunEvidence(cfg, runID)
+		return runID, nil
+	})
+	return err
 }
 
 func (m *RunManager) refuseCIRepairReplacement(ctx context.Context, repoID, branch string) error {

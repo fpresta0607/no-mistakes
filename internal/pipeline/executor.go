@@ -296,7 +296,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	for i := 0; i < len(e.steps); i++ {
 		step := e.steps[i]
 		if ctx.Err() != nil {
-			return e.failRun(run, repo, context.Cause(ctx))
+			return e.failRun(run, repo, context.Cause(ctx), ctx)
 		}
 
 		sr := stepRecords[step.Name()]
@@ -577,7 +577,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
-	if err != nil && e.publicationSelectionRequired && !IsUserAbort(ctx) {
+	if err != nil && e.preserveCIAdoption(run, ctx) {
 		return err
 	}
 	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
@@ -1283,6 +1283,9 @@ rounds:
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
 		outcome, err := e.executeWithPublicationSelection(step, sctx)
+		if err != nil && e.preserveCIAdoption(run, ctx) {
+			return false, "", err
+		}
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
@@ -1504,7 +1507,7 @@ rounds:
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), effectiveFindings, "", &executionMS)
 
 			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true)
-			if err != nil && e.publicationSelectionRequired && !IsUserAbort(ctx) {
+			if err != nil && e.preserveCIAdoption(run, ctx) {
 				return false, "", err
 			}
 			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
@@ -2082,8 +2085,12 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 			break
 		}
 	}
-	if e.adoption != nil && e.publicationSelectionRequired && errMsg != types.RunCancelReasonAbortedByUser {
-		return err
+	if errMsg != types.RunCancelReasonAbortedByUser {
+		for _, ctx := range append(ctxs, context.Background()) {
+			if e.preserveCIAdoption(run, ctx) {
+				return err
+			}
+		}
 	}
 	runStatus := types.RunFailed
 	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded {

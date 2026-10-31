@@ -25,6 +25,7 @@ import (
 )
 
 func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *testing.T) {
+	started := time.Now()
 	isolation := t.TempDir()
 	for _, name := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "NM_HOME", "CFO_ROOT", "CFO_HOME", "CODE_GOBLINS_ROOT", "GOBLINS_ROOT"} {
 		directory := filepath.Join(isolation, name)
@@ -313,6 +314,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 		}
 	}
 	for _, mutation := range []string{"caller contents", "managed contents", "caller writer", "managed writer", "caller branch", "caller head", "origin", "gate ref"} {
+		t.Logf("elapsed %s: begin mutable proof %s", time.Since(started).Round(time.Millisecond), mutation)
 		if err := os.WriteFile(publicationProof+".arm", nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -420,6 +422,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 		}
 	}
 	output, err = h.RunInDir(caller, adoptArgs...)
+	t.Logf("elapsed %s: initial adoption returned", time.Since(started).Round(time.Millisecond))
 	if err != nil && !strings.Contains(output, "elapsed while driving the run") {
 		t.Fatalf("explicit same-run adoption is unsupported: %v\n%s", err, output)
 	}
@@ -477,6 +480,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 		t.Fatal(err)
 	}
 	output, err = h.RunInDir(caller, reselectArgs...)
+	t.Logf("elapsed %s: selected push rejection returned", time.Since(started).Round(time.Millisecond))
 	if err != nil && !strings.Contains(output, "elapsed while driving the run") {
 		t.Fatalf("failed selected publication did not remain recoverable: %v\n%s", err, output)
 	}
@@ -500,6 +504,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 	// The fake forge accepts only the selected Git environment, then kills
 	// this disposable daemon after the remote update but before its SQL receipt.
 	_, _ = h.RunInDir(caller, reselectArgs...)
+	t.Logf("elapsed %s: publication crash returned", time.Since(started).Round(time.Millisecond))
 	fresh, err = database.GetRun(run.ID)
 	if err != nil || fresh.PushGeneration == nil || *fresh.PushGeneration != *stored.PushGeneration || fresh.LastPushedSHA == nil || *fresh.LastPushedSHA != submitted || h.UpstreamBranchSHA(branch) != candidate || !fresh.PushActive {
 		t.Fatalf("publication crash boundary not reached: %+v %v", fresh, err)
@@ -507,7 +512,9 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 	if output, err := h.Run("daemon", "start"); err != nil {
 		t.Fatalf("recover after exact publication crash: %v\n%s", err, output)
 	}
+	t.Logf("elapsed %s: begin final publication reselection", time.Since(started).Round(time.Millisecond))
 	output, err = h.RunInDir(caller, reselectArgs...)
+	t.Logf("elapsed %s: final reselection returned: %v\n%s", time.Since(started).Round(time.Millisecond), err, output)
 	if err != nil && !strings.Contains(output, "elapsed while driving the run") {
 		t.Fatalf("retry original publication after crash: %v\n%s", err, output)
 	}

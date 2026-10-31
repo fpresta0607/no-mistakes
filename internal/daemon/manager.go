@@ -471,7 +471,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			}
 			cancel(nil)
 			_ = plan.agent.Close()
-			if plan.adoption == nil || plan.run.Status != types.RunRunning {
+			if plan.run.Status != types.RunRunning {
 				m.closeSubscribers(plan.run.ID)
 				m.removeRunWorktree(plan.repo.ID, plan.run.ID, plan.gateDir, plan.workDir, "resumed_run_finished")
 				// A recovered run is a finished run too. This is the second of the
@@ -494,7 +494,12 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			return executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
 		}
 		if err := resume(); err != nil {
-			if plan.run.Status == types.RunRunning && (plan.adoption == nil || pipeline.IsUserAbort(runCtx)) {
+			event, ownershipErr := m.db.GetCIRepairAdoption(plan.run.ID)
+			held := false
+			if ownershipErr == nil {
+				held, ownershipErr = pipeline.CIAdoptionHeld(m.db, plan.run, event)
+			}
+			if plan.run.Status == types.RunRunning && ((!held && ownershipErr == nil) || pipeline.IsUserAbort(runCtx)) {
 				errMsg := err.Error()
 				status := types.RunFailed
 				if pipeline.IsUserAbort(runCtx) {
@@ -2257,7 +2262,7 @@ func (m *RunManager) HandleCancel(runID string) error {
 	m.mu.Unlock()
 
 	if !ok {
-		return fmt.Errorf("no active run %s", runID)
+		return m.cancelPreservedCIAdoption(runID)
 	}
 
 	cancel(fmt.Errorf(types.RunCancelReasonAbortedByUser))

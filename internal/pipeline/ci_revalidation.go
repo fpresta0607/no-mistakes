@@ -85,6 +85,46 @@ func RetainedCIHead(ctx context.Context, run *db.Run, workDir string) (bool, err
 	return head != run.HeadSHA, nil
 }
 
+func CIAdoptionHeld(database *db.DB, run *db.Run, event *db.CIRepairAdoption) (bool, error) {
+	if event == nil {
+		return false, nil
+	}
+	stored, err := database.GetRun(run.ID)
+	if err != nil || stored == nil {
+		return true, fmt.Errorf("cannot read durable adoption ownership")
+	}
+	run = stored
+	if run.PushGeneration == nil || event.ExpectedRun.PushGeneration == nil || *run.PushGeneration <= *event.ExpectedRun.PushGeneration {
+		return true, nil
+	}
+	results, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		return true, err
+	}
+	for _, result := range results {
+		if (result.StepName == types.StepPush || result.StepName == types.StepPR) && result.Status != types.StepStatusCompleted || result.StepName == types.StepCI && result.Status == types.StepStatusPending {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (e *Executor) preserveCIAdoption(run *db.Run, ctx context.Context) bool {
+	if IsUserAbort(ctx) || (ctx.Err() == nil && !e.publicationSelectionRequired) {
+		return false
+	}
+	event := e.adoption
+	if event == nil {
+		var err error
+		event, err = e.db.GetCIRepairAdoption(run.ID)
+		if err != nil {
+			return true
+		}
+	}
+	held, err := CIAdoptionHeld(e.db, run, event)
+	return held || err != nil
+}
+
 // AdoptCIRepair reserves an existing CI gate while the caller proves and
 // atomically adopts its exact snapshot. Ordinary responses and reconciliation
 // cannot claim the gate between the proof and the durable transition.
@@ -171,7 +211,7 @@ func (e *Executor) executeWithPublicationSelection(step Step, sctx *StepContext)
 		return step.Execute(sctx)
 	}
 	defer func() {
-		if IsUserAbort(sctx.Ctx) {
+		if sctx.Ctx.Err() != nil {
 			outcome, err = nil, context.Cause(sctx.Ctx)
 		}
 	}()
@@ -212,12 +252,10 @@ func (e *Executor) executeWithPublicationSelection(step Step, sctx *StepContext)
 		}
 		return e.publicationSelectionHold(), nil
 	}
-	if e.publicationOnlyResume {
-		if outcome.RestartFrom != "" {
-			return e.publicationRevalidationHold(), nil
-		}
-		e.publicationOnlyResume = false
+	if outcome.RestartFrom != "" {
+		return e.publicationRevalidationHold(), nil
 	}
+	e.publicationOnlyResume = false
 	stored, err = e.db.GetRun(sctx.Run.ID)
 	if err != nil || stored == nil {
 		return e.publicationSelectionHold(), nil

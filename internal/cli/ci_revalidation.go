@@ -55,7 +55,10 @@ func runAxiCIRevalidation(cmd *cobra.Command, env *axiEnv, ctx context.Context, 
 	}
 	request := &ipc.RespondParams{RunID: runID, Step: types.StepCI, Action: types.ActionRevalidate,
 		CIRevalidation: &ipc.CIRevalidationParams{CandidateSHA: args.candidate, SnapshotDigest: digest, Reason: args.reason, CallerDir: caller, CallerHeadSHA: head, GHConfigDir: args.ghConfigDir, ExpectedLogin: args.expectedLogin, ReselectPublication: args.reselectPublication}}
-	if err := env.client.Call(ipc.MethodRespond, request, nil); err != nil {
+	if err := env.client.CallWithContext(ctx, ipc.MethodRespond, request, nil, 0); err != nil {
+		if isAxiWaitElapsed(cmd.Context(), ctx, err) {
+			return emitAxiWaitElapsed(cmd, args.wait, "no-mistakes axi status")
+		}
 		return emitError(cmd, 1, fmt.Sprintf("revalidate retained CI contents: %v", err))
 	}
 	if gate, ok := view.awaitingStep(); ok && !isReplay && (!args.reselectPublication || gate.Name == string(types.StepPush)) {

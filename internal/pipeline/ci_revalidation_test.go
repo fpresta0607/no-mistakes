@@ -3,7 +3,11 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -11,9 +15,328 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
+
+func prepareCIAdoptionRecovery(t *testing.T, database *db.DB, run *db.Run, entry types.StepName, status types.StepStatus) (*db.Run, *db.CIRepairAdoption, []types.StepName) {
+	t.Helper()
+	public := strings.Repeat("a", 40)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunPublication(run.ID, db.PushBinding{HeadSHA: public, TargetKind: "upstream", TargetFingerprint: "bound", Ref: "refs/heads/" + run.Branch}); err != nil {
+		t.Fatal(err)
+	}
+	original, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := &db.CIRepairAdoption{ExpectedRun: *original, CandidateSHA: run.HeadSHA}
+	if err := database.UpdateRunHeadSHA(run.ID, event.CandidateSHA); err != nil {
+		t.Fatal(err)
+	}
+	names := []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.CustomGateStepName(types.StepLint, "fixture"), types.StepPush, types.StepPR, types.StepCI}
+	isAfterEntry := false
+	for _, name := range names {
+		step, err := database.InsertStepResult(run.ID, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := database.SetStepAutoFixLimit(step.ID, 1); err != nil {
+			t.Fatal(err)
+		}
+		if isAfterEntry {
+			continue
+		}
+		if name == entry {
+			isAfterEntry = true
+			if status == types.StepStatusPending {
+				continue
+			}
+		}
+		if err := database.StartStepWithAutoFixLimit(step.ID, 1); err != nil {
+			t.Fatal(err)
+		}
+		findings := `{"findings":[],"tested_head_sha":"` + event.CandidateSHA + `"}`
+		if name == entry && (status == types.StepStatusAwaitingApproval || status == types.StepStatusFixReview) {
+			findingID := "operator-decision"
+			if entry == types.StepPush {
+				findingID = PublicationSelectionFindingID
+			}
+			findings = `{"findings":[{"id":"` + findingID + `","severity":"warning","action":"ask-user","description":"preserve this decision"}]}`
+		}
+		if _, err := database.InsertReviewStepRound(step.ID, 1, "initial", &findings, nil, event.CandidateSHA, 1); err != nil {
+			t.Fatal(err)
+		}
+		if name == entry {
+			if err := database.ParkStepForApproval(run.ID, step.ID, status, 0, 1, &findings); err != nil {
+				t.Fatal(err)
+			}
+		} else if name == types.StepReview {
+			if err := database.CompleteReviewStep(step.ID, run.ID, event.CandidateSHA, 0, 1, ""); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			if err := database.SetStepFindings(step.ID, findings); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.CompleteStep(step.ID, 0, 1, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return run, event, names
+}
+
+func TestCIAdoptionInterruptionCauseAndValidationBoundaryMatrix(t *testing.T) {
+	entries := []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.CustomGateStepName(types.StepLint, "fixture"), types.StepPush}
+	for _, entry := range entries {
+		for _, mode := range []string{"live gate", "recovered gate", "pending", "executing"} {
+			for _, cause := range []string{"shutdown", "cancelled", "abort"} {
+				t.Run(string(entry)+"/"+mode+"/"+cause, func(t *testing.T) {
+					database, locations, run, repo := setupTest(t)
+					run.HeadSHA = strings.Repeat("c", 40)
+					if err := database.UpdateRunHeadSHA(run.ID, run.HeadSHA); err != nil {
+						t.Fatal(err)
+					}
+					var event *db.CIRepairAdoption
+					var names []types.StepName
+					if mode == "recovered gate" || mode == "pending" {
+						status := types.StepStatusAwaitingApproval
+						if mode == "pending" {
+							status = types.StepStatusPending
+						}
+						run, event, names = prepareCIAdoptionRecovery(t, database, run, entry, status)
+					} else {
+						event = &db.CIRepairAdoption{ExpectedRun: *run, CandidateSHA: run.HeadSHA}
+						names = entries
+					}
+					ctx, cancel := context.WithCancelCause(t.Context())
+					defer cancel(nil)
+					var cancellation error
+					if cause == "abort" {
+						cancellation = errors.New(types.RunCancelReasonAbortedByUser)
+					} else if cause == "shutdown" {
+						cancellation = errors.New("daemon shutting down")
+					}
+					ready := make(chan struct{}, 1)
+					var steps []Step
+					for _, name := range names {
+						steps = append(steps, &adaptiveCallStep{name: name, fn: func(sctx *StepContext) (*StepOutcome, error) {
+							if sctx.Ctx.Err() != nil {
+								return nil, context.Cause(sctx.Ctx)
+							}
+							outcome := &StepOutcome{ReviewApprovedHeadSHA: run.HeadSHA, Findings: `{"findings":[],"tested_head_sha":"` + run.HeadSHA + `"}`}
+							if name == entry {
+								outcome.NeedsApproval = true
+							}
+							return outcome, nil
+						}})
+					}
+					executor := NewExecutor(database, locations, nil, nil, steps, func(observed ipc.Event) {
+						if observed.StepName == nil || *observed.StepName != entry {
+							return
+						}
+						if mode == "executing" && observed.Type == ipc.EventStepStarted {
+							ready <- struct{}{}
+							<-ctx.Done()
+						} else if observed.Type == ipc.EventStepCompleted && observed.Status != nil && *observed.Status == string(types.StepStatusAwaitingApproval) {
+							ready <- struct{}{}
+						}
+					})
+					executor.adoption = event
+					workDir := t.TempDir()
+					done := make(chan error, 1)
+					if mode == "pending" {
+						cancel(cancellation)
+					}
+					go func() {
+						if mode == "recovered gate" || mode == "pending" {
+							done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, nil, "")
+						} else {
+							done <- executor.Execute(ctx, run, repo, workDir)
+						}
+					}()
+					if mode != "pending" {
+						select {
+						case <-ready:
+						case err := <-done:
+							t.Fatalf("validation never reached its boundary: %v", err)
+						case <-time.After(5 * time.Second):
+							t.Fatal("validation boundary never became observable")
+						}
+					}
+					before, err := database.GetStepsByRun(run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					cancel(cancellation)
+					select {
+					case err := <-done:
+						if err == nil {
+							t.Fatal("interruption returned success")
+						}
+					case <-time.After(5 * time.Second):
+						t.Fatal("interrupted validation did not return")
+					}
+					stored, err := database.GetRun(run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if cause == "abort" {
+						if stored.Status != types.RunCancelled || stored.AwaitingAgentSince != nil || stored.PushActive || stored.Error == nil || *stored.Error != types.RunCancelReasonAbortedByUser {
+							t.Fatalf("explicit cancellation stayed held: %+v", stored)
+						}
+					} else {
+						after, err := database.GetStepsByRun(run.ID)
+						if err != nil || stored.Status != types.RunRunning || !reflect.DeepEqual(before, after) {
+							t.Fatalf("interruption changed retained validation: %+v, %v", stored, err)
+						}
+						if (mode == "live gate" || mode == "recovered gate") && stored.AwaitingAgentSince == nil {
+							t.Fatal("shutdown cleared the parked gate")
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCIAdoptionEveryRecoveryEntryHoldsAPushValidationRestart(t *testing.T) {
+	for _, name := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "NM_HOME", "CFO_ROOT", "CFO_HOME", "CODE_GOBLINS_ROOT", "GOBLINS_ROOT"} {
+		t.Setenv(name, t.TempDir())
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+	binDir := t.TempDir()
+	ghName := "gh"
+	if runtime.GOOS == "windows" {
+		ghName += ".exe"
+	}
+	build := exec.CommandContext(t.Context(), "go", "build", "-o", filepath.Join(binDir, ghName), "./fakecli")
+	winproc.Harden(build)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build fake credential service: %v\n%s", err, output)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	profile := t.TempDir()
+	if err := os.WriteFile(filepath.Join(profile, "hosts.yml"), []byte("github.com:\n  user: fixture-operator\n  users:\n    fixture-operator: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	realGit, err := testgit.RealGit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range map[string]string{"FAKE_CLI_MODE": "ci-revalidation", "FAKE_CLI_REAL_GIT": realGit, "FAKE_CLI_PUBLICATION_CONFIG": profile, "FAKE_CLI_PUBLICATION_SECRET": "disposable-credential-proof", "FAKE_CLI_PUBLICATION_LOST": filepath.Join(t.TempDir(), "absent")} {
+		t.Setenv(key, value)
+	}
+	publication, err := forgecontext.ResolvePublication(t.Context(), "https://github.com/test/repo", "", forgecontext.PublicationSelection{ConfigDir: profile, ExpectedLogin: "fixture-operator"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.CustomGateStepName(types.StepLint, "fixture"), types.StepPush} {
+		for _, status := range []types.StepStatus{types.StepStatusPending, types.StepStatusAwaitingApproval} {
+			t.Run(string(entry)+"/"+string(status), func(t *testing.T) {
+				database, locations, run, repo := setupTest(t)
+				workDir := t.TempDir()
+				initGitRepo(t, workDir)
+				run.HeadSHA, err = git.HeadSHA(t.Context(), workDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				run, event, names := prepareCIAdoptionRecovery(t, database, run, entry, status)
+				var steps []Step
+				pushCalls, testCalls := 0, 0
+				for _, name := range names {
+					steps = append(steps, &adaptiveCallStep{name: name, fn: func(sctx *StepContext) (*StepOutcome, error) {
+						if name == types.StepPush {
+							pushCalls++
+							if _, _, recorded := sctx.Shared.Baseline(); recorded {
+								t.Error("recovery fabricated an in-memory Test baseline")
+							}
+							return &StepOutcome{RestartFrom: types.StepTest}, nil
+						}
+						if name == types.StepTest {
+							testCalls++
+							if name.Order() < entry.Order() || testCalls > 1 {
+								t.Error("Push reset completed Test validation")
+								return &StepOutcome{NeedsApproval: true}, nil
+							}
+						}
+						return &StepOutcome{ReviewApprovedHeadSHA: run.HeadSHA, Findings: `{"findings":[],"tested_head_sha":"` + run.HeadSHA + `"}`}, nil
+					}})
+				}
+				parked := make(chan types.StepName, 2)
+				executor := NewExecutor(database, locations, &config.Config{SideBySide: true}, nil, steps, func(observed ipc.Event) {
+					if observed.Type == ipc.EventStepCompleted && observed.StepName != nil && observed.Status != nil && *observed.Status == string(types.StepStatusAwaitingApproval) {
+						parked <- *observed.StepName
+					}
+				})
+				before, err := database.GetStepsByRun(run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				done := make(chan error, 1)
+				go func() {
+					done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, publication, "fixture-operator")
+				}()
+				isEntryGate := status == types.StepStatusAwaitingApproval
+				for {
+					select {
+					case name := <-parked:
+						if isEntryGate && name == entry {
+							isEntryGate = false
+							if entry != types.StepPush {
+								if err := executor.Respond(entry, types.ActionApprove, nil); err != nil {
+									t.Fatal(err)
+								}
+							}
+							continue
+						}
+						if name != types.StepPush {
+							t.Fatalf("validation restarted at %s", name)
+						}
+						results, err := database.GetStepsByRun(run.ID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						push := results[len(results)-3]
+						if push.FindingsJSON == nil || !hasFindingID(*push.FindingsJSON, PublicationRevalidationFindingID) {
+							t.Fatalf("Push did not preserve its validation requirement: %+v", push)
+						}
+					case err := <-done:
+						t.Fatalf("recovered validation escaped its hold: %v", err)
+					case <-time.After(10 * time.Second):
+						t.Fatal("recovered validation did not reach its Push hold")
+					}
+					break
+				}
+				cancel()
+				if err := <-done; !errors.Is(err, context.Canceled) {
+					t.Fatalf("hold interruption = %v", err)
+				}
+				after, err := database.GetStepsByRun(run.ID)
+				if err != nil || pushCalls != 1 {
+					t.Fatalf("publication guard calls = %d, %v", pushCalls, err)
+				}
+				for index, original := range before {
+					if original.Status == types.StepStatusCompleted && !reflect.DeepEqual(original, after[index]) {
+						t.Fatalf("Push changed completed %s validation", original.StepName)
+					}
+				}
+			})
+		}
+	}
+}
 
 func TestCIRepairSnapshotBindsOriginalRoundsAndEffectiveLimits(t *testing.T) {
 	database, _, run, _ := setupTest(t)
