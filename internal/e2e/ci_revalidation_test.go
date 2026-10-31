@@ -168,13 +168,16 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 	submitted := h.CommitChange(branch, "feature.txt", "feature\n", "add the fixture feature")
 	caller := h.AddWorktree(branch)
 	output, err := h.RunInDir(caller, "axi", "run", "--intent", "retain and revalidate the exact failed-publication candidate", "--wait", "45s")
-	if err != nil {
+	if err != nil && !strings.Contains(output, "elapsed while driving the run") {
 		t.Fatalf("initial public run: %v\n%s", err, output)
 	}
-	for gateCount := 0; gateCount < 6; gateCount++ {
+	t.Logf("initial public CLI result:\n%s", output)
+	initialDeadline := time.Now().Add(75 * time.Second)
+	isCIParked := false
+	for time.Now().Before(initialDeadline) {
 		active := h.ActiveRun(branch)
-		if active == nil {
-			t.Fatalf("fixture run disappeared before CI:\n%s", output)
+		if active == nil || active.Status.Terminal() {
+			t.Fatalf("fixture left active validation before CI: %+v", active)
 		}
 		var gate *ipc.StepResultInfo
 		for index := range active.Steps {
@@ -184,7 +187,12 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 				break
 			}
 		}
-		if gate == nil || gate.StepName == types.StepCI {
+		if gate == nil {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		if gate.StepName == types.StepCI {
+			isCIParked = true
 			break
 		}
 		if gate.FindingsJSON == nil {
@@ -194,24 +202,14 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 		if parseErr != nil || len(findings.Items) != 0 {
 			t.Fatalf("fixture requires an unexpected decision: %v\n%s", parseErr, *gate.FindingsJSON)
 		}
-		output, err = h.RunInDir(caller, "axi", "respond", "--action", "approve", "--wait", "45s")
+		wait := min(45*time.Second, time.Until(initialDeadline))
+		output, err = h.RunInDir(caller, "axi", "respond", "--action", "approve", "--wait", wait.String())
 		if err != nil && !strings.Contains(output, "elapsed while driving the run") {
 			t.Fatalf("approve clean fixture gate: %v\n%s", err, output)
 		}
 	}
-	ciGateDeadline := time.Now().Add(75 * time.Second)
-	for time.Now().Before(ciGateDeadline) {
-		active := h.ActiveRun(branch)
-		isParked := false
-		if active != nil {
-			for _, step := range active.Steps {
-				isParked = isParked || (step.StepName == types.StepCI && (step.Status == types.StepStatusAwaitingApproval || step.Status == types.StepStatusFixReview))
-			}
-		}
-		if isParked {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
+	if !isCIParked {
+		t.Fatalf("initial run never reached its preserved CI gate: %+v", h.ActiveRun(branch))
 	}
 	run := h.ActiveRun(branch)
 	if run == nil {
@@ -503,5 +501,5 @@ func waitCIRevalidationGate(t *testing.T, harness *Harness, branch string, name 
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("run never reached its preserved %s gate", name)
+	t.Fatalf("run never reached its preserved %s gate: %+v", name, harness.ActiveRun(branch))
 }
