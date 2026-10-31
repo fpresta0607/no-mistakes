@@ -6,10 +6,12 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -205,6 +207,48 @@ func TestCIAdoptionReservationPreventsOldGateReconciliation(t *testing.T) {
 	resolved, err := executor.reconcileApprovalGate(t.Context(), step, &StepContext{Ctx: t.Context(), Run: run, Repo: repo}, `{"findings":[]}`)
 	if err != nil || resolved || step.calls.Load() != 0 {
 		t.Fatalf("old CI reconciled after adoption reservation: resolved=%v error=%v calls=%d", resolved, err, step.calls.Load())
+	}
+}
+
+func TestCIRetainedGuardLeavesProtectedPathRetryOwnership(t *testing.T) {
+	database, locations, run, repo := setupTest(t)
+	if err := database.UpdateRunPublication(run.ID, db.PushBinding{HeadSHA: run.HeadSHA, TargetKind: "upstream", TargetFingerprint: "bound", Ref: "refs/heads/" + run.Branch}); err != nil {
+		t.Fatal(err)
+	}
+	step := &protectedPathReconcilerStep{reconcilingApprovalStep: reconcilingApprovalStep{name: types.StepCI}}
+	parked := make(chan struct{}, 2)
+	executor := NewExecutor(database, locations, nil, nil, []Step{step}, func(event ipc.Event) {
+		if event.Type == ipc.EventStepCompleted && event.Status != nil && (*event.Status == string(types.StepStatusAwaitingApproval) || *event.Status == string(types.StepStatusFixReview)) {
+			parked <- struct{}{}
+		}
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	workDir := t.TempDir()
+	go func() { done <- executor.Execute(ctx, run, repo, workDir) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("protected-path executor did not stop")
+		}
+	})
+	select {
+	case <-parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("protected-path refusal did not park")
+	}
+	if err := executor.Respond(types.StepCI, types.ActionApprove, nil); err == nil || !strings.Contains(err.Error(), "use fix") {
+		t.Fatalf("retained guard displaced the protected-path decision: %v", err)
+	}
+	if err := executor.Respond(types.StepCI, types.ActionFix, nil); err != nil {
+		t.Fatalf("retained guard displaced the protected-path retry: %v", err)
+	}
+	select {
+	case <-parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("original protected-path retry did not execute")
 	}
 }
 

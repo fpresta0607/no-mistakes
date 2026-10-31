@@ -77,11 +77,12 @@ type Executor struct {
 	// Nil on a recovered run, which therefore starts nothing early.
 	stepRecords map[types.StepName]*db.StepResult
 
-	mu                     sync.Mutex
-	approvalCh             chan approvalResponse // buffered channel for approval responses
-	waiting                bool                  // true when blocked on approval
-	waitingStep            types.StepName        // which step is currently awaiting approval
-	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
+	mu                          sync.Mutex
+	approvalCh                  chan approvalResponse // buffered channel for approval responses
+	waiting                     bool                  // true when blocked on approval
+	waitingStep                 types.StepName        // which step is currently awaiting approval
+	waitingApprovalRefusal      string                // non-empty: why Approve is rejected at the waiting gate
+	waitingProtectedPathRefusal bool
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -215,7 +216,7 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		e.mu.Unlock()
 		return fmt.Errorf("step mismatch: responding to %q but %q is awaiting approval", step, e.waitingStep)
 	}
-	if step == types.StepCI && e.runID != "" {
+	if step == types.StepCI && e.runID != "" && !e.waitingProtectedPathRefusal {
 		run, err := e.db.GetRun(e.runID)
 		if err != nil || run == nil {
 			e.mu.Unlock()
@@ -555,6 +556,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
 	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
+	e.waitingProtectedPathRefusal = HasProtectedPathRefusal(gate.findings)
 	e.publicationSelectionRequired = e.adoption != nil && gate.step.Name() == types.StepPush && (hasFindingID(gate.findings, PublicationSelectionFindingID) || hasFindingID(gate.findings, PublicationRevalidationFindingID))
 	e.mu.Unlock()
 	e.emitStepEventWithFindingsAndError(
@@ -1477,6 +1479,7 @@ rounds:
 			e.waiting = true
 			e.waitingStep = stepName
 			e.waitingApprovalRefusal = approvalRefusal(stepName, effectiveFindings)
+			e.waitingProtectedPathRefusal = HasProtectedPathRefusal(effectiveFindings)
 			e.mu.Unlock()
 
 			// Parking starts before the gate becomes observable. This includes the

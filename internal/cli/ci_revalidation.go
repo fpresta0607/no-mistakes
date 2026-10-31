@@ -60,6 +60,9 @@ func runAxiCIRevalidation(cmd *cobra.Command, env *axiEnv, ctx context.Context, 
 	}
 	if gate, ok := view.awaitingStep(); ok && !isReplay && (!args.reselectPublication || gate.Name == string(types.StepPush)) {
 		if err := waitStepLeavesGate(ctx, env.p.Socket(), runID, gate.Name, gateIdentityFor(view, gate.Name)); err != nil {
+			if isAxiWaitElapsed(cmd.Context(), ctx, err) {
+				return emitAxiWaitElapsed(cmd, args.wait, "no-mistakes axi status")
+			}
 			return emitError(cmd, 1, fmt.Sprintf("wait for revalidation: %v", err))
 		}
 	}
