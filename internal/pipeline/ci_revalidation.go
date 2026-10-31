@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 
@@ -163,10 +164,17 @@ func (e *Executor) originalAdoptedReviewRound(stepResultID string, round int) bo
 const PublicationSelectionFindingID = "ci-publication-credentials"
 const PublicationRevalidationFindingID = "ci-publication-revalidation-required"
 
-func (e *Executor) executeWithPublicationSelection(step Step, sctx *StepContext) (*StepOutcome, error) {
+var ErrCIAdoptionHeadChanged = errors.New("publication requires the exact adopted reviewed candidate")
+
+func (e *Executor) executeWithPublicationSelection(step Step, sctx *StepContext) (outcome *StepOutcome, err error) {
 	if e.adoption == nil || step.Name() != types.StepPush {
 		return step.Execute(sctx)
 	}
+	defer func() {
+		if IsUserAbort(sctx.Ctx) {
+			outcome, err = nil, context.Cause(sctx.Ctx)
+		}
+	}()
 	stored, err := e.db.GetRun(sctx.Run.ID)
 	if err != nil || stored == nil {
 		return e.publicationSelectionHold(), nil
@@ -185,14 +193,20 @@ func (e *Executor) executeWithPublicationSelection(step Step, sctx *StepContext)
 		}
 		return step.Execute(sctx)
 	}
+	if stored.HeadSHA != e.adoption.CandidateSHA {
+		return e.publicationRevalidationHold(), nil
+	}
 	if e.publicationForge == nil || forgecontext.VerifyPublication(sctx.Ctx, sctx.WorkDir, e.publicationForge, e.publicationLogin) != nil {
 		return e.publicationSelectionHold(), nil
 	}
 	copyContext := *sctx
 	copyContext.ForgeContext = e.publicationForge
 	copyContext.Ctx = git.WithEnvironment(sctx.Ctx, e.publicationForge.Environment)
-	outcome, err := step.Execute(&copyContext)
+	outcome, err = step.Execute(&copyContext)
 	if err != nil {
+		if errors.Is(err, ErrCIAdoptionHeadChanged) {
+			return e.publicationRevalidationHold(), nil
+		}
 		if ProtectedPathOutcome(err) != nil {
 			return outcome, err
 		}
@@ -200,10 +214,7 @@ func (e *Executor) executeWithPublicationSelection(step Step, sctx *StepContext)
 	}
 	if e.publicationOnlyResume {
 		if outcome.RestartFrom != "" {
-			e.mu.Lock()
-			e.publicationSelectionRequired = true
-			e.mu.Unlock()
-			return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"ci-publication-revalidation-required","severity":"error","action":"ask-user","description":"The publication safety check requires fresh validation. Credential reselection cannot reset validation or dispatch a fixer; the source and completed results are preserved."}]}`}, nil
+			return e.publicationRevalidationHold(), nil
 		}
 		e.publicationOnlyResume = false
 	}
@@ -215,6 +226,13 @@ func (e *Executor) executeWithPublicationSelection(step Step, sctx *StepContext)
 		e.publicationForge, e.publicationLogin = nil, ""
 	}
 	return outcome, err
+}
+
+func (e *Executor) publicationRevalidationHold() *StepOutcome {
+	e.mu.Lock()
+	e.publicationSelectionRequired = true
+	e.mu.Unlock()
+	return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"ci-publication-revalidation-required","severity":"error","action":"ask-user","description":"The exact adopted candidate or its publication safety requirements changed. Credential reselection cannot authorize another head, reset validation or dispatch a fixer; the source and completed results are preserved."}]}`}
 }
 
 func (e *Executor) publicationSelectionHold() *StepOutcome {
@@ -244,7 +262,13 @@ func (e *Executor) restartIndex(runID string, name types.StepName, currentIndex 
 
 // ResumeCIAdoption continues only a durable pending prefix. A parked fresh
 // validation uses ordinary Resume; an interrupted writer remains held.
-func (e *Executor) ResumeCIAdoption(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, event *db.CIRepairAdoption, publication *forgecontext.Context, login string) error {
+func (e *Executor) ResumeCIAdoption(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, event *db.CIRepairAdoption, publication *forgecontext.Context, login string) (resumeErr error) {
+	e.workDir, e.runID = workDir, run.ID
+	defer func() {
+		if resumeErr != nil && IsUserAbort(ctx) && run.Status == types.RunRunning {
+			resumeErr = e.failRun(run, repo, resumeErr, ctx)
+		}
+	}()
 	e.mu.Lock()
 	e.adoption, e.publicationForge, e.publicationLogin = event, publication, login
 	e.mu.Unlock()
@@ -261,7 +285,6 @@ func (e *Executor) ResumeCIAdoption(ctx context.Context, run *db.Run, repo *db.R
 	} else if e.steps[start].Name().Order() > types.StepPush.Order() {
 		e.publicationForge, e.publicationLogin = nil, ""
 	}
-	e.workDir, e.runID = workDir, run.ID
 	ctx = e.runContext(ctx)
 	e.initializeRunScopes(run.ID)
 	defer func() { e.shared.Close() }()

@@ -227,16 +227,22 @@ func (m *RunManager) proveCIRepairLocal(ctx context.Context, snapshot *db.CIRepa
 	if *run.PushTargetKind != kind || *run.PushTargetFingerprint != branchsync.TargetFingerprint(repo.PushURL()) {
 		return "", fmt.Errorf("CI publication target changed")
 	}
+	writerStates := []string{"index.lock", "HEAD.lock", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"}
+	writerArguments := []string{"rev-parse"}
+	for _, state := range writerStates {
+		writerArguments = append(writerArguments, "--git-path", state)
+	}
 	for _, directory := range []string{managed, request.CallerDir} {
 		status, err := git.Run(ctx, directory, "status", "--porcelain=v1", "--untracked-files=all")
 		if err != nil || status != "" {
 			return "", fmt.Errorf("CI revalidation requires readable clean caller and managed worktrees")
 		}
-		for _, state := range []string{"index.lock", "HEAD.lock", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"} {
-			path, err := git.Run(ctx, directory, "rev-parse", "--git-path", state)
-			if err != nil {
-				return "", fmt.Errorf("cannot read Git writer state")
-			}
+		output, err := git.Run(ctx, directory, writerArguments...)
+		writerPaths := strings.Split(output, "\n")
+		if err != nil || len(writerPaths) != len(writerStates) {
+			return "", fmt.Errorf("cannot read Git writer state")
+		}
+		for _, path := range writerPaths {
 			if _, err := os.Stat(resolveGitPath(directory, path)); !os.IsNotExist(err) {
 				return "", fmt.Errorf("Git writer or interrupted operation requires preservation")
 			}

@@ -84,6 +84,11 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 		t.Fatal(err)
 	}
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: scenario, GlobalConfigExtra: "side_by_side: true\nsession_reuse: true\n"})
+	t.Cleanup(func() {
+		if t.Failed() {
+			h.dumpDebugState()
+		}
+	})
 	realGit, err := testgit.RealGit()
 	if err != nil {
 		t.Fatal(err)

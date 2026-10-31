@@ -158,6 +158,113 @@ func TestCIPublicationHoldSurvivesLiveAndRecoveredInterruption(t *testing.T) {
 	}
 }
 
+func TestCIPublicationUserAbortCancelsLiveAndRecoveredHolds(t *testing.T) {
+	for _, mode := range []string{"live", "recovered"} {
+		t.Run(mode, func(t *testing.T) {
+			database, locations, run, repo := setupTest(t)
+			step := newPassStep(types.StepPush)
+			event := &db.CIRepairAdoption{ExpectedRun: *run, CandidateSHA: run.HeadSHA}
+			if mode == "recovered" {
+				if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+					t.Fatal(err)
+				}
+				result, err := database.InsertStepResult(run.ID, types.StepPush)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := database.StartStepWithAutoFixLimit(result.ID, 0); err != nil {
+					t.Fatal(err)
+				}
+				findings := `{"findings":[{"id":"ci-publication-credentials","severity":"warning","action":"ask-user","description":"credentials unavailable"}]}`
+				if _, err := database.InsertStepRound(result.ID, 1, "initial", &findings, nil, 1); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.ParkStepForApproval(run.ID, result.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
+					t.Fatal(err)
+				}
+				run, err = database.GetRun(run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			parked := make(chan struct{}, 1)
+			executor := NewExecutor(database, locations, nil, nil, []Step{step}, func(event ipc.Event) {
+				if event.Type == ipc.EventStepCompleted && event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
+					parked <- struct{}{}
+				}
+			})
+			executor.adoption = event
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			done := make(chan error, 1)
+			workDir := t.TempDir()
+			go func() {
+				if mode == "recovered" {
+					done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, nil, "")
+				} else {
+					done <- executor.Execute(ctx, run, repo, workDir)
+				}
+			}()
+			select {
+			case <-parked:
+			case err := <-done:
+				t.Fatalf("hold returned before abort: %v", err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("hold never parked")
+			}
+			cancel(errors.New(types.RunCancelReasonAbortedByUser))
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("explicit abort returned success")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("explicit abort did not finish")
+			}
+			stored, err := database.GetRun(run.ID)
+			if err != nil || stored.Status != types.RunCancelled || stored.Error == nil || *stored.Error != types.RunCancelReasonAbortedByUser || stored.AwaitingAgentSince != nil || stored.PushActive {
+				t.Fatalf("abort left a retained running hold: %+v, %v", stored, err)
+			}
+			if step.callCount() != 0 {
+				t.Fatal("aborting credentials launched publication")
+			}
+		})
+	}
+}
+
+func TestCIPublicationUserAbortCannotBecomeACredentialHold(t *testing.T) {
+	database, locations, run, repo := setupTest(t)
+	executor := NewExecutor(database, locations, nil, nil, nil, nil)
+	executor.adoption = &db.CIRepairAdoption{ExpectedRun: *run, CandidateSHA: run.HeadSHA}
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cause := errors.New(types.RunCancelReasonAbortedByUser)
+	cancel(cause)
+	step := newPassStep(types.StepPush)
+
+	outcome, err := executor.executeWithPublicationSelection(step, &StepContext{Ctx: ctx, Run: run, Repo: repo})
+
+	if outcome != nil || !errors.Is(err, cause) || step.callCount() != 0 {
+		t.Fatalf("abort became another publication hold: %+v, %v", outcome, err)
+	}
+}
+
+func TestCIPublicationChangedCandidateRequiresANewDecision(t *testing.T) {
+	database, locations, run, repo := setupTest(t)
+	executor := NewExecutor(database, locations, nil, nil, nil, nil)
+	executor.adoption = &db.CIRepairAdoption{ExpectedRun: *run, CandidateSHA: strings.Repeat("c", 40)}
+	step := newPassStep(types.StepPush)
+
+	outcome, err := executor.executeWithPublicationSelection(step, &StepContext{Ctx: t.Context(), Run: run, Repo: repo})
+
+	if err != nil || outcome == nil || !outcome.NeedsApproval || !hasFindingID(outcome.Findings, PublicationRevalidationFindingID) || !executor.publicationSelectionRequired || step.callCount() != 0 {
+		t.Fatalf("changed candidate was treated as a credential retry: %+v, %v", outcome, err)
+	}
+	stored, err := database.GetRun(run.ID)
+	if err != nil || stored.HeadSHA != run.HeadSHA || stored.PushGeneration != nil {
+		t.Fatalf("candidate refusal changed publication state: %+v, %v", stored, err)
+	}
+}
+
 func TestCIAdoptionReceiptReplayRefusesChangedPublicationBinding(t *testing.T) {
 	for _, name := range []string{"head", "target kind", "target fingerprint", "ref", "generation"} {
 		t.Run(name, func(t *testing.T) {
@@ -496,7 +603,7 @@ func TestCIAdoptionLimitsAndReviewCarrySurviveOrdinaryReset(t *testing.T) {
 func TestCIAdoptionRestartsOnlyAnExactlyReviewedInterruptedPush(t *testing.T) {
 	for _, name := range []string{"exact push", "inactive push", "parked handoff", "agent writer", "review missing", "interrupted test", "untested head", "validation hold", "protected hold", "interrupted pr"} {
 		t.Run(name, func(t *testing.T) {
-			database, _, run, _ := setupTest(t)
+			database, locations, run, repo := setupTest(t)
 			if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 				t.Fatal(err)
 			}
@@ -575,6 +682,45 @@ func TestCIAdoptionRestartsOnlyAnExactlyReviewedInterruptedPush(t *testing.T) {
 			if name == "exact push" || name == "inactive push" || name == "parked handoff" {
 				if err != nil || index != 2 {
 					t.Fatalf("exact publication replay refused: %d, %v", index, err)
+				}
+				before, err := database.GetStepsByRun(run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				parked := make(chan struct{}, 1)
+				executor := NewExecutor(database, locations, nil, nil, steps, func(event ipc.Event) {
+					if event.Type == ipc.EventStepCompleted && event.StepName != nil && *event.StepName == types.StepPush && event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
+						parked <- struct{}{}
+					}
+				})
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				done := make(chan error, 1)
+				workDir := t.TempDir()
+				go func() { done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, nil, "") }()
+				select {
+				case <-parked:
+				case err := <-done:
+					t.Fatalf("publication recovery did not reach its credential hold: %v", err)
+				case <-time.After(5 * time.Second):
+					t.Fatal("publication recovery did not park")
+				}
+				cancel()
+				select {
+				case err := <-done:
+					if !errors.Is(err, context.Canceled) {
+						t.Fatalf("recovery interruption = %v", err)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("publication recovery did not stop")
+				}
+				after, err := database.GetStepsByRun(run.ID)
+				if err != nil || !reflect.DeepEqual(before[:2], after[:2]) {
+					t.Fatalf("publication recovery reset completed validation: %v", err)
+				}
+				stored, err := database.GetRun(run.ID)
+				if err != nil || stored.Status != types.RunRunning || stored.AwaitingAgentSince == nil || *stored.PushGeneration != *event.ExpectedRun.PushGeneration {
+					t.Fatalf("publication recovery lost its original hold or generation: %+v, %v", stored, err)
 				}
 			} else if err == nil {
 				t.Fatal("interrupted validation or writer was replayable")

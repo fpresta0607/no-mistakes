@@ -494,11 +494,29 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			return executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
 		}
 		if err := resume(); err != nil {
-			if plan.run.Status == types.RunRunning && plan.adoption == nil {
+			if plan.run.Status == types.RunRunning && (plan.adoption == nil || pipeline.IsUserAbort(runCtx)) {
 				errMsg := err.Error()
-				plan.run.Status = types.RunFailed
+				status := types.RunFailed
+				if pipeline.IsUserAbort(runCtx) {
+					errMsg, status = types.RunCancelReasonAbortedByUser, types.RunCancelled
+					if dbErr := m.db.ClearRunAwaitingAgent(plan.run.ID); dbErr != nil {
+						slog.Error("failed to clear cancelled run gate", "run_id", plan.run.ID, "error", dbErr)
+					}
+				}
+				plan.run.Status = status
 				plan.run.Error = &errMsg
-				if dbErr := m.db.UpdateRunErrorStatus(plan.run.ID, errMsg, types.RunFailed); dbErr != nil {
+				verifiedHead, isVerified := "", false
+				if status == types.RunCancelled {
+					verifiedHead, isVerified = preserveRunHead(m.db, plan.workDir, plan.run)
+				}
+				var dbErr error
+				if isVerified {
+					plan.run.HeadSHA = verifiedHead
+					dbErr = m.db.UpdateRunErrorStatusWithVerifiedHead(plan.run.ID, errMsg, status, verifiedHead)
+				} else {
+					dbErr = m.db.UpdateRunErrorStatus(plan.run.ID, errMsg, status)
+				}
+				if dbErr != nil {
 					slog.Error("failed to mark recovered run failed", "run_id", plan.run.ID, "error", dbErr)
 				}
 			}

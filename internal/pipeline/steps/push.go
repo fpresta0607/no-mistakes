@@ -82,6 +82,9 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err != nil {
 		return nil, fmt.Errorf("resolve head before push: %w", err)
 	}
+	if err := assertReviewApprovedPushHead(sctx, headBeingPushed); err != nil {
+		return nil, err
+	}
 	// Under global side_by_side the baseline ran on the commit the review
 	// started on. Answer for every commit since, before anything is pushed.
 	afterTested, backToTest, err := baselineBeforePush(sctx, headBeingPushed)
@@ -462,6 +465,13 @@ func assertReviewApprovedPushHead(sctx *pipeline.StepContext, proposedHead strin
 	approvedHead, reason := reviewApprovedHead(sctx, run)
 	if approvedHead == "" {
 		return fmt.Errorf("refusing to push: %s", reason)
+	}
+	adoption, err := sctx.DB.GetCIRepairAdoption(sctx.Run.ID)
+	if err != nil {
+		return fmt.Errorf("load adoption binding before push: %w", err)
+	}
+	if adoption != nil && (run.PushGeneration == nil || adoption.ExpectedRun.PushGeneration == nil || *run.PushGeneration <= *adoption.ExpectedRun.PushGeneration) && (proposedHead != adoption.CandidateSHA || approvedHead != adoption.CandidateSHA) {
+		return pipeline.ErrCIAdoptionHeadChanged
 	}
 	if proposedHead == approvedHead {
 		return nil

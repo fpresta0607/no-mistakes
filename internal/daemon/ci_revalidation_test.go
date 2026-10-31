@@ -2,14 +2,71 @@ package daemon
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestCIRevalidationLocalProofRefusesEveryCallerAndManagedWriter(t *testing.T) {
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+	fixture := newEvidenceFixture(t)
+	repo, head := setupTestGitRepo(t, fixture.p, fixture.db, "writer-proof")
+	gateDir := fixture.p.RepoDir(repo.ID)
+	gitCmd(t, repo.WorkingPath, "switch", "-c", "feature")
+	gitCmd(t, repo.WorkingPath, "remote", "add", "origin", repo.UpstreamURL)
+	gitCmd(t, gateDir, "remote", "set-url", "origin", repo.UpstreamURL)
+	gitCmd(t, gateDir, "branch", "feature", head)
+	run, err := fixture.db.InsertRun(repo.ID, "feature", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := fixture.p.WorktreeDir(repo.ID, run.ID)
+	gitCmd(t, gateDir, "worktree", "add", "--detach", managed, head)
+	if err := fixture.db.SetRunWorktreeDir(run.ID, managed); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.UpdateRunPublication(run.ID, db.PushBinding{HeadSHA: head, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(repo.UpstreamURL), Ref: "refs/heads/feature"}); err != nil {
+		t.Fatal(err)
+	}
+	run, err = fixture.db.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewRunManager(fixture.db, fixture.p, nil)
+	snapshot := &db.CIRepairAdoption{ExpectedRun: *run, ExpectedRepo: *repo}
+	request := &ipc.CIRevalidationParams{CallerDir: repo.WorkingPath, CallerHeadSHA: head}
+	if gateHead, err := manager.proveCIRepairLocal(t.Context(), snapshot, request, head); err != nil || gateHead != head {
+		t.Fatalf("clean local identity was refused: %s, %v", gateHead, err)
+	}
+	for _, directory := range []string{repo.WorkingPath, managed} {
+		for _, marker := range []string{"index.lock", "HEAD.lock", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"} {
+			t.Run(filepath.Base(directory)+"/"+marker, func(t *testing.T) {
+				path := resolveGitPath(directory, gitOutput(t, directory, "rev-parse", "--git-path", marker))
+				if err := os.WriteFile(path, []byte(head+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Remove(path) })
+
+				if _, err := manager.proveCIRepairLocal(t.Context(), snapshot, request, head); err == nil {
+					t.Fatal("local identity accepted an existing Git writer or interrupted operation")
+				}
+				if _, err := os.Stat(path); err != nil {
+					t.Fatalf("refusal changed the existing writer: %v", err)
+				}
+			})
+		}
+	}
+}
 
 func TestCIRevalidationStartupPreservesUnreadableCandidateBeforeStaleCleanup(t *testing.T) {
 	locations := paths.WithRoot(t.TempDir())
@@ -65,6 +122,91 @@ func TestCIRevalidationStartupPreservesUnreadableCandidateBeforeStaleCleanup(t *
 	}
 	if err := manager.refuseCIRepairReplacement(context.Background(), repo.ID, run.Branch); err == nil {
 		t.Fatal("replacement consumed the hold")
+	}
+}
+
+func TestCIRevalidationUserAbortCleansUpRecoveredPublicationHold(t *testing.T) {
+	for _, name := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "NM_HOME", "CFO_ROOT", "CFO_HOME", "CODE_GOBLINS_ROOT", "GOBLINS_ROOT"} {
+		t.Setenv(name, t.TempDir())
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+	fixture := newEvidenceFixture(t)
+	repo, head := setupTestGitRepo(t, fixture.p, fixture.db, "abort-adoption")
+	run, err := fixture.db.InsertRun(repo.ID, "feature", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workDir := fixture.p.WorktreeDir(repo.ID, run.ID)
+	gateDir := fixture.p.RepoDir(repo.ID)
+	gitCmd(t, gateDir, "worktree", "add", "--detach", workDir, head)
+	gitCmd(t, workDir, "config", "user.email", "test@test.com")
+	gitCmd(t, workDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(workDir, "retained.txt"), []byte("retain this commit on abort\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, workDir, "add", "retained.txt")
+	gitCmd(t, workDir, "commit", "-m", "retain the unpublished change")
+	retained := gitOutput(t, workDir, "rev-parse", "HEAD")
+	if err := fixture.db.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.SetRunWorktreeDir(run.ID, workDir); err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.db.InsertStepResult(run.ID, types.StepPush)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.StartStepWithAutoFixLimit(result.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"ci-publication-credentials","severity":"warning","action":"ask-user","description":"credentials unavailable"}]}`
+	if _, err := fixture.db.InsertStepRound(result.ID, 1, "initial", &findings, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.ParkStepForApproval(run.ID, result.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
+		t.Fatal(err)
+	}
+	run, err = fixture.db.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidenceDir := filepath.Join(fixture.root, run.ID)
+	if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewRunManager(fixture.db, fixture.p, nil)
+	manager.resumeRecoveredRun(recoveredRunPlan{
+		run: run, repo: repo, workDir: workDir, gateDir: gateDir,
+		cfg: config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{}), agent: recoveredRunTestAgent{},
+		steps:    []pipeline.Step{&mockApprovalStep{name: types.StepPush}},
+		adoption: &db.CIRepairAdoption{ExpectedRun: *run, CandidateSHA: head},
+	})
+
+	if err := manager.HandleCancel(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan struct{})
+	go func() { manager.wg.Wait(); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("aborted recovered run did not finish cleanup")
+	}
+	stored, err := fixture.db.GetRun(run.ID)
+	if err != nil || stored.Status != types.RunCancelled || stored.Error == nil || *stored.Error != types.RunCancelReasonAbortedByUser || stored.AwaitingAgentSince != nil || stored.HeadSHA != retained {
+		t.Fatalf("explicit abort did not settle cancellation: %+v, %v", stored, err)
+	}
+	for _, directory := range []string{workDir, evidenceDir} {
+		if _, err := os.Stat(directory); !os.IsNotExist(err) {
+			t.Fatalf("cancellation left its disposable directory: %s, %v", directory, err)
+		}
+	}
+	if preserved := gitOutput(t, gateDir, "rev-parse", "refs/no-mistakes/recover/"+run.ID); preserved != retained {
+		t.Fatal("abort cleanup lost the unpublished commit")
+	}
+	if err := manager.refuseCIRepairReplacement(t.Context(), repo.ID, run.Branch); err != nil {
+		t.Fatalf("cancelled run still blocks replacement: %v", err)
 	}
 }
 
