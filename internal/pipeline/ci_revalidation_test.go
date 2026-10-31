@@ -3,7 +3,6 @@ package pipeline
 import (
 	"context"
 	"errors"
-	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -204,8 +203,8 @@ func TestCIAdoptionReceiptReplayRefusesChangedPublicationBinding(t *testing.T) {
 }
 
 func TestCIAdoptionResumesRecordedPushWithoutAnotherPublication(t *testing.T) {
-	for _, isPushActive := range []bool{true, false} {
-		t.Run(fmt.Sprint(isPushActive), func(t *testing.T) {
+	for _, boundary := range []string{"active push", "inactive push", "pending pr", "pending ci"} {
+		t.Run(boundary, func(t *testing.T) {
 			database, locations, run, repo := setupTest(t)
 			binding := db.PushBinding{HeadSHA: run.HeadSHA, TargetKind: "upstream", TargetFingerprint: "bound", Ref: "refs/heads/" + run.Branch}
 			if err := database.UpdateRunPublication(run.ID, binding); err != nil {
@@ -244,8 +243,13 @@ func TestCIAdoptionResumesRecordedPushWithoutAnotherPublication(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				if (name == types.StepPush && (boundary == "pending pr" || boundary == "pending ci")) || (name == types.StepPR && boundary == "pending ci") {
+					if err := database.CompleteStep(step.ID, 0, 1, ""); err != nil {
+						t.Fatal(err)
+					}
+				}
 				steps = append(steps, &adaptiveCallStep{name: name, fn: func(sctx *StepContext) (*StepOutcome, error) {
-					if name.Order() <= types.StepPush.Order() {
+					if name.Order() <= types.StepPush.Order() || (name == types.StepPR && boundary == "pending ci") {
 						t.Errorf("recorded publication replayed %s", name)
 					}
 					if sctx.ForgeContext != nil {
@@ -258,7 +262,7 @@ func TestCIAdoptionResumesRecordedPushWithoutAnotherPublication(t *testing.T) {
 			if err := database.UpdateRunPublication(run.ID, binding); err != nil {
 				t.Fatal(err)
 			}
-			if err := database.SetRunPushActive(run.ID, isPushActive); err != nil {
+			if err := database.SetRunPushActive(run.ID, boundary == "active push"); err != nil {
 				t.Fatal(err)
 			}
 			interrupted, err := database.GetRun(run.ID)
@@ -280,8 +284,13 @@ func TestCIAdoptionResumesRecordedPushWithoutAnotherPublication(t *testing.T) {
 				t.Fatalf("recorded receipt was not settled exactly once: %+v, %v", stored, err)
 			}
 			after, err := database.GetStepsByRun(run.ID)
-			if err != nil || !reflect.DeepEqual(before[:2], after[:2]) {
+			if err != nil {
 				t.Fatalf("receipt recovery changed completed validation: %v", err)
+			}
+			for index, step := range before {
+				if step.Status == types.StepStatusCompleted && !reflect.DeepEqual(step, after[index]) {
+					t.Fatalf("receipt recovery repeated completed %s", step.StepName)
+				}
 			}
 		})
 	}
@@ -485,13 +494,24 @@ func TestCIAdoptionLimitsAndReviewCarrySurviveOrdinaryReset(t *testing.T) {
 }
 
 func TestCIAdoptionRestartsOnlyAnExactlyReviewedInterruptedPush(t *testing.T) {
-	for _, name := range []string{"exact push", "agent writer", "review missing", "interrupted test"} {
+	for _, name := range []string{"exact push", "inactive push", "parked handoff", "agent writer", "review missing", "interrupted test", "untested head", "validation hold", "protected hold", "interrupted pr"} {
 		t.Run(name, func(t *testing.T) {
 			database, _, run, _ := setupTest(t)
 			if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 				t.Fatal(err)
 			}
+			if err := database.UpdateRunPublication(run.ID, db.PushBinding{HeadSHA: run.HeadSHA, TargetKind: "upstream", TargetFingerprint: "bound", Ref: "refs/heads/" + run.Branch}); err != nil {
+				t.Fatal(err)
+			}
+			run, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			event := &db.CIRepairAdoption{ExpectedRun: *run, CandidateSHA: run.HeadSHA}
 			run.Status, run.PushActive = types.RunRunning, true
+			if name == "inactive push" || name == "parked handoff" {
+				run.PushActive = false
+			}
 			head := run.HeadSHA
 			run.ReviewApprovedHeadSHA = &head
 			var steps []Step
@@ -522,12 +542,37 @@ func TestCIAdoptionRestartsOnlyAnExactlyReviewedInterruptedPush(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				if stepName == types.StepTest && name == "untested head" {
+					if err := database.SetStepFindings(step.ID, `{"findings":[],"tested_head_sha":"other"}`); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if stepName == types.StepPush && (name == "parked handoff" || name == "validation hold" || name == "protected hold") {
+					findingID := PublicationSelectionFindingID
+					if name == "validation hold" {
+						findingID = PublicationRevalidationFindingID
+					} else if name == "protected hold" {
+						findingID = "protected-path-refusal"
+					}
+					findings := `{"findings":[{"id":"` + findingID + `","description":"preserved hold","severity":"warning","action":"ask-user"}]}`
+					if err := database.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
+						t.Fatal(err)
+					}
+					if err := database.CompleteRunAwaitingAgent(run.ID, 0); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if stepName == types.StepPR && name == "interrupted pr" {
+					if err := database.UpdateStepStatus(step.ID, types.StepStatusRunning); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			if name == "review missing" {
 				run.ReviewApprovedHeadSHA = nil
 			}
-			index, err := CIAdoptionPendingIndex(database, run, steps, &db.CIRepairAdoption{})
-			if name == "exact push" {
+			index, err := CIAdoptionPendingIndex(database, run, steps, event)
+			if name == "exact push" || name == "inactive push" || name == "parked handoff" {
 				if err != nil || index != 2 {
 					t.Fatalf("exact publication replay refused: %d, %v", index, err)
 				}

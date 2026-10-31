@@ -136,7 +136,7 @@ func TestCIRevalidationStartupPreservesTheReceiptUntilPushCompletes(t *testing.T
 	if _, _, err := database.AdoptCIRepairForRevalidation(*snapshot); err != nil {
 		t.Fatal(err)
 	}
-	var pushID string
+	var pushID, prID, ciID string
 	for _, original := range snapshot.Steps {
 		step := original.Snapshot
 		if step.StepName.Order() < types.StepPush.Order() {
@@ -148,6 +148,10 @@ func TestCIRevalidationStartupPreservesTheReceiptUntilPushCompletes(t *testing.T
 			if err := database.StartStepWithAutoFixLimit(step.ID, 0); err != nil {
 				t.Fatal(err)
 			}
+		} else if step.StepName == types.StepPR {
+			prID = step.ID
+		} else if step.StepName == types.StepCI {
+			ciID = step.ID
 		}
 	}
 	if err := database.UpdateRunPublication(run.ID, db.PushBinding{HeadSHA: snapshot.CandidateSHA, TargetKind: "upstream", TargetFingerprint: "bound", Ref: "refs/heads/" + run.Branch}); err != nil {
@@ -178,7 +182,22 @@ func TestCIRevalidationStartupPreservesTheReceiptUntilPushCompletes(t *testing.T
 			t.Fatal("replacement consumed an interrupted delivery")
 		}
 	}
-	if err := database.CompleteStep(pushID, 0, 1, ""); err != nil {
+	for _, completedID := range []string{pushID, prID} {
+		if err := database.CompleteStep(completedID, 0, 1, ""); err != nil {
+			t.Fatal(err)
+		}
+		plans, preserved, err := manager.recoverableParkedRuns(t.Context())
+		if err != nil || len(plans) != 0 {
+			t.Fatalf("pending delivery recovery plans = %v, %v", plans, err)
+		}
+		if _, ok := preserved[run.ID]; !ok {
+			t.Fatal("startup lost a recorded publication before delivery reached CI")
+		}
+		if _, err := database.RecoverStaleRunsExcept("crashed", preserved); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.StartStepWithAutoFixLimit(ciID, 1); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := database.GetRun(run.ID)

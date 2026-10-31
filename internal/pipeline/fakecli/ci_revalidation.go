@@ -3,11 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
@@ -99,7 +101,15 @@ func fakeCIRevalidationHandler(args []string) {
 				}
 			}
 		}
-		command := exec.Command(realGit, args...)
+		transportArgs := args
+		for _, argument := range args {
+			if argument == "clone" || argument == "fetch" || argument == "ls-remote" || argument == "push" {
+				target := (&url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(remote), "/")}).String()
+				transportArgs = append([]string{"-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c", "url." + target + ".insteadOf=" + os.Getenv("FAKE_CLI_REVALIDATION_URL")}, args...)
+				break
+			}
+		}
+		command := exec.Command(realGit, transportArgs...)
 		winproc.Harden(command)
 		command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
 		if err := command.Run(); err != nil {
@@ -139,6 +149,22 @@ func fakeCIRevalidationHandler(args []string) {
 	}
 	head, err := readGit("--git-dir", remote, "rev-parse", "--verify", "refs/heads/"+branch)
 	if binaryName == "gh" && strings.Contains(joined, "repos/example/revalidation/pulls/42") {
+		proofPath := os.Getenv("FAKE_CLI_PUBLICATION_PROOF")
+		if proofPath != "" && os.Remove(proofPath+".arm") == nil {
+			if err := os.WriteFile(proofPath+".pending", nil, 0o600); err != nil {
+				os.Exit(1)
+			}
+			deadline := time.Now().Add(15 * time.Second)
+			for {
+				if os.Remove(proofPath+".release") == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					os.Exit(1)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
 		fmt.Printf(`{"html_url":"https://github.com/example/revalidation/pull/42","state":"open","head":{"sha":%q,"ref":%q,"repo":{"full_name":"example/revalidation"}},"base":{"ref":"main","repo":{"full_name":"example/revalidation"}}}`, head, branch)
 		return
 	}

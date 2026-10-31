@@ -204,7 +204,7 @@ func TestResolvePublicationRefusesAmbiguousGitEnvironment(t *testing.T) {
 
 func TestResolvePublicationRefusesIndirectGitConfiguration(t *testing.T) {
 	selection, _ := publicationFixture(t)
-	for _, key := range []string{"include.path", "includeIf.gitdir:/work.path", "url.https://elsewhere.test/.insteadOf"} {
+	for _, key := range []string{"include.path", "includeIf.gitdir:/work.path", "url.https://elsewhere.test/.insteadOf", "url.file:///fixture/.insteadOf", "url.file:///fixture/.pushInsteadOf", "url." + filepath.ToSlash(t.TempDir()) + "/.insteadOf"} {
 		t.Run(key, func(t *testing.T) {
 			t.Setenv("GIT_CONFIG_COUNT", "1")
 			t.Setenv("GIT_CONFIG_KEY_0", key)
@@ -331,7 +331,7 @@ func TestVerifyPublicationUsesFrozenHelperWithRealGit(t *testing.T) {
 	}
 }
 
-func TestVerifyPublicationPreservesLocalGitURLRewrite(t *testing.T) {
+func TestVerifyPublicationRefusesLocalGitURLRewrite(t *testing.T) {
 	selection, _ := publicationFixture(t)
 	realGit, err := testgit.RealGit()
 	if err != nil {
@@ -356,8 +356,8 @@ func TestVerifyPublicationPreservesLocalGitURLRewrite(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", filepath.Dir(realGit)+string(os.PathListSeparator)+os.Getenv("PATH"))
-			if err := VerifyPublication(context.Background(), localRepository, publication, selection.ExpectedLogin); err != nil {
-				t.Fatal(err)
+			if err := VerifyPublication(context.Background(), localRepository, publication, selection.ExpectedLogin); err == nil {
+				t.Fatal("publication accepted a local transport rewrite")
 			}
 			after, err := os.ReadFile(globalConfig)
 			if err != nil || string(before) != string(after) {

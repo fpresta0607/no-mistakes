@@ -4,7 +4,6 @@ package e2e
 
 import (
 	"encoding/json"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -121,6 +120,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 	lostSelection := filepath.Join(isolation, "lost-publication-selection")
 	publicationCrash := filepath.Join(isolation, "crash-after-public-push")
 	publicationReject := filepath.Join(isolation, "reject-selected-push")
+	publicationProof := filepath.Join(isolation, "publication-proof")
 	if err := os.WriteFile(publicationCrash, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -146,22 +146,19 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 		"FAKE_CLI_PUBLICATION_LOST":   lostSelection,
 		"FAKE_CLI_PUBLICATION_CRASH":  publicationCrash,
 		"FAKE_CLI_PUBLICATION_REJECT": publicationReject,
+		"FAKE_CLI_PUBLICATION_PROOF":  publicationProof,
 	} {
 		t.Setenv(key, value)
 	}
 	if err := os.WriteFile(filepath.Join(isolation, "pr-body"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	rewrite := (&url.URL{Scheme: "file", Path: "/" + strings.TrimPrefix(filepath.ToSlash(h.UpstreamDir), "/")}).String()
-	if output, err := h.runGit(t.Context(), h.WorkDir, "config", "--global", "url."+rewrite+".insteadOf", origin); err != nil {
-		t.Fatalf("rewrite fake origin locally: %v\n%s", err, output)
-	}
 	if output, err := h.runGit(t.Context(), h.WorkDir, "remote", "set-url", "origin", origin); err != nil {
 		t.Fatalf("set fake origin: %v\n%s", err, output)
 	}
 	configuration := "allow_repo_commands: true\nauto_fix:\n  ci: 1\ncommands:\n  test: baseline-check\n  lint: lint-check\ncommit:\n  trailers: []\n"
 	h.CommitChange("main", ".no-mistakes.yaml", configuration, "configure the disposable CI repair")
-	if output, err := h.runGit(t.Context(), h.WorkDir, "push", "origin", "main"); err != nil {
+	if output, err := h.runGit(t.Context(), h.WorkDir, "push", h.UpstreamDir, "main"); err != nil {
 		t.Fatalf("publish trusted fixture config: %v\n%s", err, output)
 	}
 	if output, err := h.Run("init"); err != nil {
@@ -258,7 +255,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 	// The base advances while the retained candidate is held. Recovery must
 	// neither integrate it automatically nor invent an approval for it.
 	h.CommitChange("main", "feature.txt", "conflicting base change\n", "advance the fixture default branch")
-	if output, err := h.runGit(t.Context(), h.WorkDir, "push", "origin", "main"); err != nil {
+	if output, err := h.runGit(t.Context(), h.WorkDir, "push", h.UpstreamDir, "main"); err != nil {
 		t.Fatalf("advance default branch: %v\n%s", err, output)
 	}
 	crashCIRevalidationDaemon(t, h)
@@ -308,6 +305,113 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 		}
 		if event, err := database.GetCIRepairAdoption(run.ID); err != nil || event != nil {
 			t.Fatalf("%s refusal wrote adoption: %v", invalid, err)
+		}
+	}
+	for _, mutation := range []string{"caller contents", "managed contents", "caller writer", "managed writer", "caller branch", "caller head", "origin", "gate ref"} {
+		if err := os.WriteFile(publicationProof+".arm", nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		type response struct {
+			output string
+			err    error
+		}
+		finished := make(chan response, 1)
+		go func() {
+			output, err := h.RunInDir(caller, adoptArgs...)
+			finished <- response{output, err}
+		}()
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			if _, err := os.Stat(publicationProof + ".pending"); err == nil {
+				break
+			}
+			select {
+			case result := <-finished:
+				t.Fatalf("%s proof never reached forge read: %v\n%s", mutation, result.err, result.output)
+			default:
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s proof never reached forge read", mutation)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		var changedPath string
+		switch mutation {
+		case "caller contents", "managed contents", "caller writer", "managed writer":
+			directory := caller
+			if strings.HasPrefix(mutation, "managed") {
+				directory = stored.WorktreePath()
+			}
+			changedPath = filepath.Join(directory, "during-proof.txt")
+			if strings.HasSuffix(mutation, "writer") {
+				path, err := h.runGit(t.Context(), directory, "rev-parse", "--git-path", "index.lock")
+				if err != nil {
+					t.Fatal(err)
+				}
+				changedPath = strings.TrimSpace(string(path))
+				if !filepath.IsAbs(changedPath) {
+					changedPath = filepath.Join(directory, changedPath)
+				}
+			}
+			if err := os.WriteFile(changedPath, []byte("preserve this writer\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		case "caller branch":
+			if output, err := h.runGit(t.Context(), caller, "switch", "-c", "feature/proof-moved"); err != nil {
+				t.Fatalf("move caller branch: %v\n%s", err, output)
+			}
+		case "caller head":
+			if output, err := h.runGit(t.Context(), caller, "commit", "--allow-empty", "-m", "move disposable caller during proof"); err != nil {
+				t.Fatalf("move caller head: %v\n%s", err, output)
+			}
+		case "origin":
+			if output, err := h.runGit(t.Context(), caller, "remote", "set-url", "origin", "https://github.com/example/changed.git"); err != nil {
+				t.Fatalf("move origin: %v\n%s", err, output)
+			}
+		case "gate ref":
+			if output, err := h.runGit(t.Context(), stored.WorktreePath(), "update-ref", "refs/heads/"+branch, candidate, submitted); err != nil {
+				t.Fatalf("move gate ref: %v\n%s", err, output)
+			}
+		}
+		if err := os.WriteFile(publicationProof+".release", nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		result := <-finished
+		if result.err == nil {
+			t.Fatalf("adoption accepted %s changed during its forge read:\n%s", mutation, result.output)
+		}
+		if changedPath != "" {
+			if err := os.Remove(changedPath); err != nil {
+				t.Fatal(err)
+			}
+		}
+		switch mutation {
+		case "caller branch":
+			if output, err := h.runGit(t.Context(), caller, "switch", branch); err != nil {
+				t.Fatalf("restore caller branch: %v\n%s", err, output)
+			}
+		case "caller head":
+			if output, err := h.runGit(t.Context(), caller, "update-ref", "refs/heads/"+branch, submitted); err != nil {
+				t.Fatalf("restore fixture caller: %v\n%s", err, output)
+			}
+		case "origin":
+			if output, err := h.runGit(t.Context(), caller, "remote", "set-url", "origin", origin); err != nil {
+				t.Fatalf("restore fixture origin: %v\n%s", err, output)
+			}
+		case "gate ref":
+			if output, err := h.runGit(t.Context(), stored.WorktreePath(), "update-ref", "refs/heads/"+branch, submitted, candidate); err != nil {
+				t.Fatalf("restore fixture gate ref: %v\n%s", err, output)
+			}
+		}
+		if err := os.Remove(publicationProof + ".pending"); err != nil {
+			t.Fatal(err)
+		}
+		after, err := pipeline.ReadCIRepairSnapshot(database, run.ID)
+		if err != nil || !reflect.DeepEqual(beforeRefusals, after) || h.UpstreamBranchSHA(branch) != submitted {
+			t.Fatalf("%s mutation refusal changed original state: %v", mutation, err)
+		}
+		if event, err := database.GetCIRepairAdoption(run.ID); err != nil || event != nil {
+			t.Fatalf("%s mutation refusal wrote adoption: %v", mutation, err)
 		}
 	}
 	output, err = h.RunInDir(caller, adoptArgs...)

@@ -118,7 +118,7 @@ func publicationEnvironment(dir, host, gh string) (runenv.Overlay, error) {
 			return runenv.Overlay{}, errors.New("publication refuses ambiguous Git credential environment")
 		}
 		lower := strings.ToLower(key)
-		if strings.HasPrefix(lower, "include.") || strings.HasPrefix(lower, "includeif.") || publicationUnsafeRewrite(key) {
+		if strings.HasPrefix(lower, "include.") || strings.HasPrefix(lower, "includeif.") || strings.HasPrefix(lower, "url.") {
 			return runenv.Overlay{}, errors.New("publication refuses ambiguous Git credential environment")
 		}
 		if strings.HasPrefix(lower, "credential.") || lower == "core.askpass" || publicationHTTPAuthKey(lower) {
@@ -148,25 +148,6 @@ func publicationHelper(gh string) string {
 
 func publicationHTTPAuthKey(key string) bool {
 	return strings.HasPrefix(key, "http.") && (strings.HasSuffix(key, ".extraheader") || strings.HasSuffix(key, ".cookiefile") || strings.HasSuffix(key, ".savecookies") || strings.HasSuffix(key, ".proxy"))
-}
-
-func publicationUnsafeRewrite(key string) bool {
-	lower := strings.ToLower(key)
-	if !strings.HasPrefix(lower, "url.") {
-		return false
-	}
-	for _, suffix := range []string{".insteadof", ".pushinsteadof"} {
-		if !strings.HasSuffix(lower, suffix) {
-			continue
-		}
-		target := key[len("url.") : len(key)-len(suffix)]
-		if filepath.IsAbs(target) && !strings.HasPrefix(filepath.ToSlash(target), "//") {
-			return false
-		}
-		parsed, err := url.Parse(target)
-		return err != nil || parsed.Scheme != "file" || parsed.Host != "" || parsed.User != nil || !strings.HasPrefix(parsed.Path, "/") || strings.HasPrefix(filepath.ToSlash(parsed.Path), "//") || parsed.RawQuery != "" || parsed.Fragment != ""
-	}
-	return true
 }
 
 // VerifyPublication proves the effective API account and independently checks
@@ -201,7 +182,6 @@ func VerifyPublication(ctx context.Context, workDir string, publication *Context
 		return errors.New("publication API identity could not be verified")
 	}
 	// HTTP headers/cookies and remote URL rewrites can bypass the credential helper.
-	// Local filesystem rewrites carry no remote authentication and remain usable.
 	settings, err := publicationOutput(ctx, workDir, environment, "", "git", "config", "--null", "--list")
 	if err != nil {
 		return errors.New("publication Git credential configuration could not be verified")
@@ -211,7 +191,7 @@ func VerifyPublication(ctx context.Context, workDir string, publication *Context
 			continue
 		}
 		key, value, _ := strings.Cut(entry, "\n")
-		if value != "" && (publicationHTTPAuthKey(strings.ToLower(key)) || publicationUnsafeRewrite(key)) {
+		if strings.HasPrefix(strings.ToLower(key), "url.") || (value != "" && publicationHTTPAuthKey(strings.ToLower(key))) {
 			return errors.New("publication Git credential configuration is ambiguous")
 		}
 	}

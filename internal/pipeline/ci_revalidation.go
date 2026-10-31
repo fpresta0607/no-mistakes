@@ -257,10 +257,9 @@ func (e *Executor) ResumeCIAdoption(ctx context.Context, run *db.Run, repo *db.R
 	}
 	isPublicationReplay := e.steps[start].Name() == types.StepPush
 	if isPublicationReplay {
-		if run.HeadSHA != event.CandidateSHA || run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != run.HeadSHA {
-			return fmt.Errorf("publication replay requires the exact freshly reviewed adopted head")
-		}
 		e.publicationOnlyResume = true
+	} else if e.steps[start].Name().Order() > types.StepPush.Order() {
+		e.publicationForge, e.publicationLogin = nil, ""
 	}
 	e.workDir, e.runID = workDir, run.ID
 	ctx = e.runContext(ctx)
@@ -293,7 +292,8 @@ func CIAdoptionPendingIndex(database *db.DB, run *db.Run, steps []Step, event *d
 			continue
 		}
 		if step.Status != types.StepStatusPending {
-			if start < 0 && step.StepName == types.StepPush && step.Status == types.StepStatusRunning && (run.PushActive || ciAdoptionPublicationRecorded(run, event)) && run.ReviewApprovedHeadSHA != nil && *run.ReviewApprovedHeadSHA == run.HeadSHA {
+			isCredentialHold := (step.Status == types.StepStatusAwaitingApproval || step.Status == types.StepStatusFixReview) && step.FindingsJSON != nil && hasFindingID(*step.FindingsJSON, PublicationSelectionFindingID) && !hasFindingID(*step.FindingsJSON, PublicationRevalidationFindingID) && !HasProtectedPathRefusal(*step.FindingsJSON)
+			if start < 0 && step.StepName == types.StepPush && (step.Status == types.StepStatusRunning || isCredentialHold) {
 				start = index
 				continue
 			}
@@ -306,7 +306,16 @@ func CIAdoptionPendingIndex(database *db.DB, run *db.Run, steps []Step, event *d
 	if start < 0 {
 		return 0, fmt.Errorf("adopted run has no pending validation")
 	}
-	if steps[start].Name() == types.StepPush {
+	if steps[start].Name().Order() >= types.StepPush.Order() {
+		if run.HeadSHA != event.CandidateSHA || run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != run.HeadSHA {
+			return 0, fmt.Errorf("publication recovery requires the exact freshly reviewed adopted head")
+		}
+		isOriginalPublication := run.PushGeneration != nil && event.ExpectedRun.PushGeneration != nil && *run.PushGeneration == *event.ExpectedRun.PushGeneration && run.LastPushedSHA != nil && event.ExpectedRun.LastPushedSHA != nil && *run.LastPushedSHA == *event.ExpectedRun.LastPushedSHA
+		isRecordedPublication := ciAdoptionPublicationRecorded(run, event)
+		if !isRecordedPublication && (!isOriginalPublication || steps[start].Name() != types.StepPush) {
+			return 0, fmt.Errorf("publication recovery has no exact original or completed publication binding")
+		}
+		hasTestEvidence := false
 		for _, step := range results[:start] {
 			if step.StepName == types.StepTest {
 				if step.FindingsJSON == nil {
@@ -316,7 +325,11 @@ func CIAdoptionPendingIndex(database *db.DB, run *db.Run, steps []Step, event *d
 				if err != nil || findings.TestedHeadSHA != run.HeadSHA {
 					return 0, fmt.Errorf("publication replay requires the exact freshly tested head")
 				}
+				hasTestEvidence = true
 			}
+		}
+		if !hasTestEvidence {
+			return 0, fmt.Errorf("publication recovery has no fresh Test evidence")
 		}
 	}
 	return start, nil

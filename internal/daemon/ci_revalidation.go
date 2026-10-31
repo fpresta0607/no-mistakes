@@ -38,7 +38,7 @@ func (m *RunManager) ciRepairHeld(ctx context.Context, run *db.Run) (bool, error
 		return true, err
 	}
 	for _, result := range results {
-		if event != nil && result.StepName == types.StepPush && result.Status != types.StepStatusCompleted {
+		if event != nil && ((result.StepName == types.StepPush || result.StepName == types.StepPR) && result.Status != types.StepStatusCompleted || result.StepName == types.StepCI && result.Status == types.StepStatusPending) {
 			return true, nil
 		}
 		if result.StepName != types.StepCI || (result.Status != types.StepStatusAwaitingApproval && result.Status != types.StepStatusFixReview) {
@@ -153,17 +153,21 @@ func (m *RunManager) HandleCIRevalidation(ctx context.Context, params ipc.Respon
 			if held, err := m.ciRepairHeld(proofCtx, &snapshot.ExpectedRun); !held || err != nil {
 				return "", fmt.Errorf("adopted publication is no longer held")
 			}
-			if err := m.proveCIRepairGit(proofCtx, snapshot, request, snapshot.ExpectedRun.HeadSHA, publication); err != nil {
-				return "", err
-			}
 			m.mu.Lock()
 			executor := m.executors[run.ID]
 			m.mu.Unlock()
 			if executor != nil {
+				if err := m.proveCIRepairGit(proofCtx, snapshot, request, snapshot.ExpectedRun.HeadSHA, publication); err != nil {
+					return "", err
+				}
 				return run.ID, executor.ReselectPublication(publication, request.ExpectedLogin)
 			}
 			plan, err := m.prepareCIAdoption(proofCtx, &snapshot.ExpectedRun, event, publication, request.ExpectedLogin)
 			if err != nil {
+				return "", err
+			}
+			if err := m.proveCIRepairGit(proofCtx, snapshot, request, snapshot.ExpectedRun.HeadSHA, publication); err != nil {
+				_ = plan.agent.Close()
 				return "", err
 			}
 			m.resumeRecoveredRun(*plan)
@@ -174,14 +178,14 @@ func (m *RunManager) HandleCIRevalidation(ctx context.Context, params ipc.Respon
 		snapshot.GateDir, snapshot.GateBranch = m.paths.RepoDir(run.RepoID), run.Branch
 		snapshot.Operator, snapshot.Reason = fmt.Sprintf("authenticated local IPC process %d", ipc.PeerPID(ctx)), request.Reason
 		adopt := func() (*db.CIRepairAdoption, error) {
-			if err := m.proveCIRepairGit(proofCtx, snapshot, request, request.CandidateSHA, publication); err != nil {
-				return nil, err
-			}
 			tree, err := git.Run(proofCtx, snapshot.ManagedDir, "rev-parse", "--verify", request.CandidateSHA+"^{tree}")
 			if err != nil {
 				return nil, fmt.Errorf("cannot read candidate tree")
 			}
 			snapshot.CandidateTreeSHA = tree
+			if err := m.proveCIRepairGit(proofCtx, snapshot, request, request.CandidateSHA, publication); err != nil {
+				return nil, err
+			}
 			accepted, _, err := m.db.AdoptCIRepairForRevalidation(*snapshot)
 			return accepted, err
 		}
@@ -209,74 +213,84 @@ func (m *RunManager) HandleCIRevalidation(ctx context.Context, params ipc.Respon
 	return err
 }
 
-func (m *RunManager) proveCIRepairGit(ctx context.Context, snapshot *db.CIRepairAdoption, request *ipc.CIRevalidationParams, candidate string, publication *forgecontext.Context) error {
+func (m *RunManager) proveCIRepairLocal(ctx context.Context, snapshot *db.CIRepairAdoption, request *ipc.CIRevalidationParams, candidate string) (string, error) {
 	run, repo := &snapshot.ExpectedRun, &snapshot.ExpectedRepo
 	managed := worktrees.RecordedDir(m.paths, run.WorktreePath(), repo.ID, run.ID)
 	gateDir := m.paths.RepoDir(repo.ID)
 	if run.LastPushedSHA == nil || run.PushRef == nil || *run.PushRef != "refs/heads/"+run.Branch || run.PushTargetKind == nil || run.PushTargetFingerprint == nil {
-		return fmt.Errorf("CI publication binding is incomplete")
+		return "", fmt.Errorf("CI publication binding is incomplete")
 	}
 	kind := "upstream"
 	if repo.ForkURL != "" {
 		kind = "fork"
 	}
 	if *run.PushTargetKind != kind || *run.PushTargetFingerprint != branchsync.TargetFingerprint(repo.PushURL()) {
-		return fmt.Errorf("CI publication target changed")
+		return "", fmt.Errorf("CI publication target changed")
 	}
 	for _, directory := range []string{managed, request.CallerDir} {
 		status, err := git.Run(ctx, directory, "status", "--porcelain=v1", "--untracked-files=all")
 		if err != nil || status != "" {
-			return fmt.Errorf("CI revalidation requires readable clean caller and managed worktrees")
+			return "", fmt.Errorf("CI revalidation requires readable clean caller and managed worktrees")
 		}
 		for _, state := range []string{"index.lock", "HEAD.lock", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"} {
 			path, err := git.Run(ctx, directory, "rev-parse", "--git-path", state)
 			if err != nil {
-				return fmt.Errorf("cannot read Git writer state")
+				return "", fmt.Errorf("cannot read Git writer state")
 			}
 			if _, err := os.Stat(resolveGitPath(directory, path)); !os.IsNotExist(err) {
-				return fmt.Errorf("Git writer or interrupted operation requires preservation")
+				return "", fmt.Errorf("Git writer or interrupted operation requires preservation")
 			}
 		}
 	}
 	common, err := git.Run(ctx, managed, "rev-parse", "--git-common-dir")
 	if err != nil || !samePath(resolveGitPath(managed, common), gateDir) {
-		return fmt.Errorf("managed worktree gate identity changed")
+		return "", fmt.Errorf("managed worktree gate identity changed")
 	}
 	callerCommon, err := git.Run(ctx, request.CallerDir, "rev-parse", "--git-common-dir")
 	repoCommon, repoErr := git.Run(ctx, repo.WorkingPath, "rev-parse", "--git-common-dir")
 	if err != nil || repoErr != nil || !samePath(resolveGitPath(request.CallerDir, callerCommon), resolveGitPath(repo.WorkingPath, repoCommon)) {
-		return fmt.Errorf("caller repository identity changed")
+		return "", fmt.Errorf("caller repository identity changed")
 	}
 	branch, err := git.CurrentBranch(ctx, request.CallerDir)
 	if err != nil || branch != run.Branch {
-		return fmt.Errorf("caller branch changed")
+		return "", fmt.Errorf("caller branch changed")
 	}
 	callerHead, err := git.HeadSHA(ctx, request.CallerDir)
 	if err != nil || callerHead != request.CallerHeadSHA || (callerHead != *run.LastPushedSHA && (run.SubmittedHeadSHA == nil || callerHead != *run.SubmittedHeadSHA)) {
-		return fmt.Errorf("caller head changed or has unrelated work")
+		return "", fmt.Errorf("caller head changed or has unrelated work")
 	}
-	for _, directory := range []string{managed, gateDir, repo.WorkingPath} {
+	for _, directory := range []string{managed, gateDir, repo.WorkingPath, request.CallerDir} {
 		remotes, err := git.GetConfiguredRemoteURLs(ctx, directory, "origin")
 		if err != nil || len(remotes) != 1 {
-			return fmt.Errorf("repository origin identity is ambiguous")
+			return "", fmt.Errorf("repository origin identity is ambiguous")
 		}
 		remote, err := url.Parse(remotes[0])
 		if err != nil || remote.Scheme != "https" || remote.User != nil || remote.RawQuery != "" || remote.Fragment != "" || branchsync.TargetFingerprint(remotes[0]) != branchsync.TargetFingerprint(repo.UpstreamURL) {
-			return fmt.Errorf("repository origin identity changed")
+			return "", fmt.Errorf("repository origin identity changed")
 		}
 	}
 	gateHead, exists, err := git.DirectRefTarget(ctx, gateDir, *run.PushRef)
 	if err != nil || !exists {
-		return fmt.Errorf("gate branch identity is unreadable")
+		return "", fmt.Errorf("gate branch identity is unreadable")
 	}
 	if head, err := git.HeadSHA(ctx, managed); err != nil || head != candidate {
-		return fmt.Errorf("retained candidate moved or is unreadable")
+		return "", fmt.Errorf("retained candidate moved or is unreadable")
 	}
 	if resolved, err := git.Run(ctx, managed, "rev-parse", "--verify", candidate+"^{commit}"); err != nil || resolved != candidate {
-		return fmt.Errorf("candidate must be an exact full commit object ID")
+		return "", fmt.Errorf("candidate must be an exact full commit object ID")
 	}
 	if _, err := git.Run(ctx, managed, "merge-base", "--is-ancestor", *run.LastPushedSHA, candidate); err != nil {
-		return fmt.Errorf("candidate does not retain the exact public history")
+		return "", fmt.Errorf("candidate does not retain the exact public history")
+	}
+	return gateHead, nil
+}
+
+func (m *RunManager) proveCIRepairGit(ctx context.Context, snapshot *db.CIRepairAdoption, request *ipc.CIRevalidationParams, candidate string, publication *forgecontext.Context) error {
+	run, repo := &snapshot.ExpectedRun, &snapshot.ExpectedRepo
+	managed := worktrees.RecordedDir(m.paths, run.WorktreePath(), repo.ID, run.ID)
+	gateHead, err := m.proveCIRepairLocal(ctx, snapshot, request, candidate)
+	if err != nil {
+		return err
 	}
 	networkCtx := git.WithEnvironment(ctx, publication.Environment)
 	remoteHead, err := git.LsRemote(networkCtx, managed, repo.PushURL(), *run.PushRef)
@@ -338,9 +352,12 @@ func (m *RunManager) proveCIRepairGit(ctx context.Context, snapshot *db.CIRepair
 	if json.Unmarshal(output, &pr) != nil || pr.State != "open" || pr.HTMLURL != *run.PRURL || pr.Head.SHA != remoteHead || pr.Head.Ref != run.Branch || pr.Head.Repo.FullName != github.RepoSlug(repo.PushURL()) || pr.Base.Repo.FullName != github.RepoSlug(repo.UpstreamURL) || pr.Base.Ref == "" {
 		return fmt.Errorf("live CI PR, head, branch or repository identity changed")
 	}
-	// Repeat mutable local reads immediately before the database CAS.
-	if head, err := git.HeadSHA(ctx, managed); err != nil || head != candidate {
-		return fmt.Errorf("candidate moved during adoption proof")
+	finalGateHead, err := m.proveCIRepairLocal(ctx, snapshot, request, candidate)
+	if err != nil {
+		return err
+	}
+	if finalGateHead != gateHead {
+		return fmt.Errorf("gate branch moved during adoption proof")
 	}
 	return nil
 }
