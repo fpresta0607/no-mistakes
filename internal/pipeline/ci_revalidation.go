@@ -164,32 +164,41 @@ const PublicationSelectionFindingID = "ci-publication-credentials"
 const PublicationRevalidationFindingID = "ci-publication-revalidation-required"
 
 func (e *Executor) executeWithPublicationSelection(step Step, sctx *StepContext) (*StepOutcome, error) {
-	if e.adoption == nil || step.Name().Order() < types.StepPush.Order() {
+	if e.adoption == nil || step.Name() != types.StepPush {
 		return step.Execute(sctx)
 	}
 	stored, err := e.db.GetRun(sctx.Run.ID)
 	if err != nil || stored == nil {
-		return nil, fmt.Errorf("cannot read publication state; preserve adopted validation")
+		return e.publicationSelectionHold(), nil
 	}
 	if stored.PushGeneration != nil && e.adoption.ExpectedRun.PushGeneration != nil && *stored.PushGeneration > *e.adoption.ExpectedRun.PushGeneration {
+		e.publicationForge, e.publicationLogin = nil, ""
+		if e.publicationOnlyResume {
+			if !ciAdoptionPublicationRecorded(stored, e.adoption) {
+				return e.publicationSelectionHold(), nil
+			}
+			if err := e.db.SetRunPushActive(sctx.Run.ID, false); err != nil {
+				return e.publicationSelectionHold(), nil
+			}
+			e.publicationOnlyResume = false
+			return &StepOutcome{}, nil
+		}
 		return step.Execute(sctx)
 	}
-	if e.publicationForge == nil && step.Name() != types.StepPush {
-		return nil, fmt.Errorf("publication selection is unavailable; preserve adopted validation")
-	}
-	if step.Name() == types.StepPush {
-		if e.publicationForge == nil || forgecontext.VerifyPublication(sctx.Ctx, sctx.WorkDir, e.publicationForge, e.publicationLogin) != nil {
-			e.mu.Lock()
-			e.publicationSelectionRequired = true
-			e.mu.Unlock()
-			return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"ci-publication-credentials","severity":"warning","action":"ask-user","description":"Publication credential selection is unavailable. Explicitly reselect it with axi respond --action revalidate --reselect-publication; completed fresh validation is retained."}]}`}, nil
-		}
+	if e.publicationForge == nil || forgecontext.VerifyPublication(sctx.Ctx, sctx.WorkDir, e.publicationForge, e.publicationLogin) != nil {
+		return e.publicationSelectionHold(), nil
 	}
 	copyContext := *sctx
 	copyContext.ForgeContext = e.publicationForge
 	copyContext.Ctx = git.WithEnvironment(sctx.Ctx, e.publicationForge.Environment)
 	outcome, err := step.Execute(&copyContext)
-	if step.Name() == types.StepPush && e.publicationOnlyResume && err == nil {
+	if err != nil {
+		if ProtectedPathOutcome(err) != nil {
+			return outcome, err
+		}
+		return e.publicationSelectionHold(), nil
+	}
+	if e.publicationOnlyResume {
 		if outcome.RestartFrom != "" {
 			e.mu.Lock()
 			e.publicationSelectionRequired = true
@@ -198,7 +207,31 @@ func (e *Executor) executeWithPublicationSelection(step Step, sctx *StepContext)
 		}
 		e.publicationOnlyResume = false
 	}
+	stored, err = e.db.GetRun(sctx.Run.ID)
+	if err != nil || stored == nil {
+		return e.publicationSelectionHold(), nil
+	}
+	if stored.PushGeneration != nil && e.adoption.ExpectedRun.PushGeneration != nil && *stored.PushGeneration > *e.adoption.ExpectedRun.PushGeneration {
+		e.publicationForge, e.publicationLogin = nil, ""
+	}
 	return outcome, err
+}
+
+func (e *Executor) publicationSelectionHold() *StepOutcome {
+	e.mu.Lock()
+	e.publicationSelectionRequired = true
+	e.mu.Unlock()
+	return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"ci-publication-credentials","severity":"warning","action":"ask-user","description":"Publication failed or its credentials or state are unavailable. Explicitly reselect with axi respond --action revalidate --reselect-publication; the source and completed fresh validation are retained."}]}`}
+}
+
+func ciAdoptionPublicationRecorded(run *db.Run, event *db.CIRepairAdoption) bool {
+	original := &event.ExpectedRun
+	return run.ID == original.ID && run.RepoID == original.RepoID && run.Branch == original.Branch &&
+		run.HeadSHA == event.CandidateSHA && run.LastPushedSHA != nil && *run.LastPushedSHA == run.HeadSHA &&
+		run.PushGeneration != nil && original.PushGeneration != nil && *run.PushGeneration == *original.PushGeneration+1 &&
+		run.PushTargetKind != nil && original.PushTargetKind != nil && *run.PushTargetKind == *original.PushTargetKind &&
+		run.PushTargetFingerprint != nil && original.PushTargetFingerprint != nil && *run.PushTargetFingerprint == *original.PushTargetFingerprint &&
+		run.PushRef != nil && original.PushRef != nil && *run.PushRef == *original.PushRef
 }
 
 func (e *Executor) restartIndex(runID string, name types.StepName, currentIndex int) (int, error) {
@@ -218,7 +251,7 @@ func (e *Executor) ResumeCIAdoption(ctx context.Context, run *db.Run, repo *db.R
 	if run.AwaitingAgentSince != nil {
 		return e.Resume(ctx, run, repo, workDir)
 	}
-	start, err := CIAdoptionPendingIndex(e.db, run, e.steps)
+	start, err := CIAdoptionPendingIndex(e.db, run, e.steps, event)
 	if err != nil {
 		return err
 	}
@@ -240,7 +273,7 @@ func (e *Executor) ResumeCIAdoption(ctx context.Context, run *db.Run, repo *db.R
 	return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, start, isPublicationReplay || e.steps[start].Name() == types.StepReview)
 }
 
-func CIAdoptionPendingIndex(database *db.DB, run *db.Run, steps []Step) (int, error) {
+func CIAdoptionPendingIndex(database *db.DB, run *db.Run, steps []Step, event *db.CIRepairAdoption) (int, error) {
 	if run.Status != types.RunRunning {
 		return 0, fmt.Errorf("adopted run is no longer active")
 	}
@@ -260,7 +293,7 @@ func CIAdoptionPendingIndex(database *db.DB, run *db.Run, steps []Step) (int, er
 			continue
 		}
 		if step.Status != types.StepStatusPending {
-			if start < 0 && step.StepName == types.StepPush && step.Status == types.StepStatusRunning && run.PushActive && run.ReviewApprovedHeadSHA != nil && *run.ReviewApprovedHeadSHA == run.HeadSHA {
+			if start < 0 && step.StepName == types.StepPush && step.Status == types.StepStatusRunning && (run.PushActive || ciAdoptionPublicationRecorded(run, event)) && run.ReviewApprovedHeadSHA != nil && *run.ReviewApprovedHeadSHA == run.HeadSHA {
 				start = index
 				continue
 			}
@@ -272,6 +305,19 @@ func CIAdoptionPendingIndex(database *db.DB, run *db.Run, steps []Step) (int, er
 	}
 	if start < 0 {
 		return 0, fmt.Errorf("adopted run has no pending validation")
+	}
+	if steps[start].Name() == types.StepPush {
+		for _, step := range results[:start] {
+			if step.StepName == types.StepTest {
+				if step.FindingsJSON == nil {
+					return 0, fmt.Errorf("publication replay requires the exact freshly tested head")
+				}
+				findings, err := types.ParseFindingsJSON(*step.FindingsJSON)
+				if err != nil || findings.TestedHeadSHA != run.HeadSHA {
+					return 0, fmt.Errorf("publication replay requires the exact freshly tested head")
+				}
+			}
+		}
 	}
 	return start, nil
 }

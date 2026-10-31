@@ -120,6 +120,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 	reject := filepath.Join(isolation, "reject-repair")
 	lostSelection := filepath.Join(isolation, "lost-publication-selection")
 	publicationCrash := filepath.Join(isolation, "crash-after-public-push")
+	publicationReject := filepath.Join(isolation, "reject-selected-push")
 	if err := os.WriteFile(publicationCrash, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -144,6 +145,7 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 		"FAKE_CLI_PUBLICATION_SECRET": strings.Repeat("fixture-credential-", 4),
 		"FAKE_CLI_PUBLICATION_LOST":   lostSelection,
 		"FAKE_CLI_PUBLICATION_CRASH":  publicationCrash,
+		"FAKE_CLI_PUBLICATION_REJECT": publicationReject,
 	} {
 		t.Setenv(key, value)
 	}
@@ -362,6 +364,30 @@ func TestCIRevalidationAdoptsRetainedFailedPublicationWithoutAnotherFixer(t *tes
 		t.Fatal(err)
 	}
 	reselectArgs := append(append([]string{}, adoptArgs...), "--reselect-publication")
+	if err := os.WriteFile(publicationReject, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output, err = h.RunInDir(caller, reselectArgs...)
+	if err != nil && !strings.Contains(output, "elapsed while driving the run") {
+		t.Fatalf("failed selected publication did not remain recoverable: %v\n%s", err, output)
+	}
+	waitCIRevalidationGate(t, h, branch, types.StepPush, 45*time.Second)
+	if _, err := os.Stat(publicationReject); !os.IsNotExist(err) {
+		t.Fatal("selected Git publication was never attempted after credential proof")
+	}
+	fresh, err = database.GetRun(run.ID)
+	if err != nil || fresh.Status != types.RunRunning || fresh.AwaitingAgentSince == nil || fresh.PushGeneration == nil || *fresh.PushGeneration != *stored.PushGeneration || h.UpstreamBranchSHA(branch) != submitted {
+		t.Fatalf("failed selected push did not preserve the run and old receipt: %+v, %v", fresh, err)
+	}
+	failedSteps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, step := range failedSteps {
+		if step.StepName.Order() < types.StepPush.Order() && !reflect.DeepEqual(step, afterReplay[index]) {
+			t.Fatalf("failed publication reset completed %s validation", step.StepName)
+		}
+	}
 	// The fake forge accepts only the selected Git environment, then kills
 	// this disposable daemon after the remote update but before its SQL receipt.
 	_, _ = h.RunInDir(caller, reselectArgs...)

@@ -471,13 +471,15 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			}
 			cancel(nil)
 			_ = plan.agent.Close()
-			m.closeSubscribers(plan.run.ID)
-			m.removeRunWorktree(plan.repo.ID, plan.run.ID, plan.gateDir, plan.workDir, "resumed_run_finished")
-			// A recovered run is a finished run too. This is the second of the
-			// two completion boundaries, and leaving it out is what let a run
-			// resumed after a daemon restart keep its empty evidence directory
-			// until some later run or restart happened to sweep it.
-			m.cleanupRunEvidence(plan.cfg, plan.run.ID)
+			if plan.adoption == nil || plan.run.Status != types.RunRunning {
+				m.closeSubscribers(plan.run.ID)
+				m.removeRunWorktree(plan.repo.ID, plan.run.ID, plan.gateDir, plan.workDir, "resumed_run_finished")
+				// A recovered run is a finished run too. This is the second of the
+				// two completion boundaries, and leaving it out is what let a run
+				// resumed after a daemon restart keep its empty evidence directory
+				// until some later run or restart happened to sweep it.
+				m.cleanupRunEvidence(plan.cfg, plan.run.ID)
+			}
 			m.mu.Lock()
 			delete(m.executors, plan.run.ID)
 			delete(m.cancels, plan.run.ID)
@@ -492,7 +494,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			return executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
 		}
 		if err := resume(); err != nil {
-			if plan.run.Status == types.RunRunning {
+			if plan.run.Status == types.RunRunning && plan.adoption == nil {
 				errMsg := err.Error()
 				plan.run.Status = types.RunFailed
 				plan.run.Error = &errMsg
@@ -1793,9 +1795,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			cancel(nil)
 			ag.Close()
 			// Close subscriber channels for this run.
-			m.closeSubscribers(run.ID)
-			m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_finished")
-			m.cleanupRunEvidence(cfg, run.ID)
+			if run.Status != types.RunRunning {
+				m.closeSubscribers(run.ID)
+				m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_finished")
+				m.cleanupRunEvidence(cfg, run.ID)
+			}
 			// Remove tracking.
 			m.mu.Lock()
 			delete(m.executors, run.ID)

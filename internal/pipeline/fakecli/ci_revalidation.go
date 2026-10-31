@@ -87,6 +87,10 @@ func fakeCIRevalidationHandler(args []string) {
 			return
 		}
 		if len(args) > 1 && args[0] == "push" && args[1] == os.Getenv("FAKE_CLI_REVALIDATION_URL") {
+			if os.Getenv("GH_CONFIG_DIR") == os.Getenv("FAKE_CLI_PUBLICATION_CONFIG") && os.Remove(os.Getenv("FAKE_CLI_PUBLICATION_REJECT")) == nil {
+				fmt.Fprintln(os.Stderr, "selected publication transport rejected")
+				os.Exit(1)
+			}
 			if _, err := os.Stat(os.Getenv("FAKE_CLI_REVALIDATION_REJECT")); err == nil && os.Getenv("GH_CONFIG_DIR") != os.Getenv("FAKE_CLI_PUBLICATION_CONFIG") {
 				source := strings.SplitN(args[len(args)-1], ":", 2)[0]
 				if _, err := readGit("cat-file", "-e", source+":ci-repair.txt"); err == nil {

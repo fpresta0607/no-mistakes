@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -87,6 +88,202 @@ func TestCIPublicationSelectionEndsAtItsDurablePublication(t *testing.T) {
 		if err != nil || outcome == nil || outcome.NeedsApproval {
 			t.Fatalf("ordinary operation after publication failed: %+v, %v", outcome, err)
 		}
+	}
+}
+
+func TestCIPublicationReadFailurePreservesValidation(t *testing.T) {
+	database, locations, run, repo := setupTest(t)
+	executor := NewExecutor(database, locations, nil, nil, nil, nil)
+	executor.adoption = &db.CIRepairAdoption{ExpectedRun: *run}
+	step := newPassStep(types.StepPush)
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := executor.executeWithPublicationSelection(step, &StepContext{Ctx: t.Context(), Run: run, Repo: repo})
+
+	if err != nil || outcome == nil || !outcome.NeedsApproval || !hasFindingID(outcome.Findings, PublicationSelectionFindingID) || !executor.publicationSelectionRequired || step.callCount() != 0 {
+		t.Fatalf("unreadable publication did not hold validation: %+v, %v", outcome, err)
+	}
+}
+
+func TestCIPublicationHoldSurvivesLiveAndRecoveredInterruption(t *testing.T) {
+	database, locations, run, repo := setupTest(t)
+	step := newPassStep(types.StepPush)
+	event := &db.CIRepairAdoption{ExpectedRun: *run, CandidateSHA: run.HeadSHA}
+	for _, isRecovered := range []bool{false, true} {
+		parked := make(chan struct{}, 1)
+		executor := NewExecutor(database, locations, nil, nil, []Step{step}, func(event ipc.Event) {
+			if event.Type == ipc.EventStepCompleted && event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
+				parked <- struct{}{}
+			}
+		})
+		executor.adoption = event
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		workDir := t.TempDir()
+		go func() {
+			if isRecovered {
+				done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, nil, "")
+			} else {
+				done <- executor.Execute(ctx, run, repo, workDir)
+			}
+		}()
+		select {
+		case <-parked:
+		case err := <-done:
+			cancel()
+			t.Fatalf("publication hold returned before parking: %v", err)
+		case <-time.After(5 * time.Second):
+			cancel()
+			t.Fatal("publication hold never parked")
+		}
+		cancel()
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("interruption = %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("publication hold did not stop")
+		}
+		var err error
+		run, err = database.GetRun(run.ID)
+		if err != nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil {
+			t.Fatalf("interruption terminalized publication: %+v, %v", run, err)
+		}
+		results, err := database.GetStepsByRun(run.ID)
+		if err != nil || results[0].Status != types.StepStatusAwaitingApproval || step.callCount() != 0 {
+			t.Fatalf("interruption consumed the durable hold: %+v, %v", results, err)
+		}
+	}
+}
+
+func TestCIAdoptionReceiptReplayRefusesChangedPublicationBinding(t *testing.T) {
+	for _, name := range []string{"head", "target kind", "target fingerprint", "ref", "generation"} {
+		t.Run(name, func(t *testing.T) {
+			database, locations, run, repo := setupTest(t)
+			binding := db.PushBinding{HeadSHA: run.HeadSHA, TargetKind: "upstream", TargetFingerprint: "bound", Ref: "refs/heads/" + run.Branch}
+			if err := database.UpdateRunPublication(run.ID, binding); err != nil {
+				t.Fatal(err)
+			}
+			original, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			event := &db.CIRepairAdoption{ExpectedRun: *original, CandidateSHA: strings.Repeat("c", 40)}
+			binding.HeadSHA = event.CandidateSHA
+			switch name {
+			case "head":
+				binding.HeadSHA = strings.Repeat("d", 40)
+			case "target kind":
+				binding.TargetKind = "fork"
+			case "target fingerprint":
+				binding.TargetFingerprint = "other"
+			case "ref":
+				binding.Ref = "refs/heads/other"
+			case "generation":
+				if err := database.UpdateRunPublication(run.ID, binding); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := database.UpdateRunPublication(run.ID, binding); err != nil {
+				t.Fatal(err)
+			}
+			executor := NewExecutor(database, locations, nil, nil, nil, nil)
+			executor.adoption, executor.publicationOnlyResume = event, true
+			step := newPassStep(types.StepPush)
+
+			outcome, err := executor.executeWithPublicationSelection(step, &StepContext{Ctx: t.Context(), Run: run, Repo: repo})
+
+			if err != nil || outcome == nil || !outcome.NeedsApproval || step.callCount() != 0 {
+				t.Fatalf("changed %s receipt was consumed: %+v, %v", name, outcome, err)
+			}
+		})
+	}
+}
+
+func TestCIAdoptionResumesRecordedPushWithoutAnotherPublication(t *testing.T) {
+	for _, isPushActive := range []bool{true, false} {
+		t.Run(fmt.Sprint(isPushActive), func(t *testing.T) {
+			database, locations, run, repo := setupTest(t)
+			binding := db.PushBinding{HeadSHA: run.HeadSHA, TargetKind: "upstream", TargetFingerprint: "bound", Ref: "refs/heads/" + run.Branch}
+			if err := database.UpdateRunPublication(run.ID, binding); err != nil {
+				t.Fatal(err)
+			}
+			original, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			event := &db.CIRepairAdoption{ExpectedRun: *original, CandidateSHA: strings.Repeat("c", 40)}
+			if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			var steps []Step
+			for _, name := range []types.StepName{types.StepReview, types.StepTest, types.StepPush, types.StepPR, types.StepCI} {
+				step, err := database.InsertStepResult(run.ID, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := database.StartStepWithAutoFixLimit(step.ID, 0); err != nil {
+					t.Fatal(err)
+				}
+				if name == types.StepReview {
+					if err := database.CompleteReviewStep(step.ID, run.ID, event.CandidateSHA, 0, 1, ""); err != nil {
+						t.Fatal(err)
+					}
+				} else if name == types.StepTest {
+					if err := database.SetStepFindings(step.ID, `{"findings":[],"tested_head_sha":"`+event.CandidateSHA+`"}`); err != nil {
+						t.Fatal(err)
+					}
+					if err := database.CompleteStep(step.ID, 0, 1, ""); err != nil {
+						t.Fatal(err)
+					}
+				} else if name != types.StepPush {
+					if err := database.UpdateStepStatus(step.ID, types.StepStatusPending); err != nil {
+						t.Fatal(err)
+					}
+				}
+				steps = append(steps, &adaptiveCallStep{name: name, fn: func(sctx *StepContext) (*StepOutcome, error) {
+					if name.Order() <= types.StepPush.Order() {
+						t.Errorf("recorded publication replayed %s", name)
+					}
+					if sctx.ForgeContext != nil {
+						t.Error("temporary credentials survived the receipt")
+					}
+					return &StepOutcome{}, nil
+				}})
+			}
+			binding.HeadSHA = event.CandidateSHA
+			if err := database.UpdateRunPublication(run.ID, binding); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.SetRunPushActive(run.ID, isPushActive); err != nil {
+				t.Fatal(err)
+			}
+			interrupted, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			executor := NewExecutor(database, locations, nil, nil, steps, nil)
+
+			if err := executor.ResumeCIAdoption(t.Context(), interrupted, repo, t.TempDir(), event, &forgecontext.Context{}, "operator"); err != nil {
+				t.Fatal(err)
+			}
+
+			stored, err := database.GetRun(run.ID)
+			if err != nil || stored.Status != types.RunCompleted || stored.PushGeneration == nil || *stored.PushGeneration != *original.PushGeneration+1 || stored.PushActive || executor.publicationForge != nil {
+				t.Fatalf("recorded receipt was not settled exactly once: %+v, %v", stored, err)
+			}
+			after, err := database.GetStepsByRun(run.ID)
+			if err != nil || !reflect.DeepEqual(before[:2], after[:2]) {
+				t.Fatalf("receipt recovery changed completed validation: %v", err)
+			}
+		})
 	}
 }
 
@@ -305,6 +502,11 @@ func TestCIAdoptionRestartsOnlyAnExactlyReviewedInterruptedPush(t *testing.T) {
 				}
 				steps = append(steps, newPassStep(stepName))
 				if stepName == types.StepReview || stepName == types.StepTest {
+					if stepName == types.StepTest {
+						if err := database.SetStepFindings(step.ID, `{"findings":[],"tested_head_sha":"`+head+`"}`); err != nil {
+							t.Fatal(err)
+						}
+					}
 					if err := database.CompleteStep(step.ID, 0, 1, ""); err != nil {
 						t.Fatal(err)
 					}
@@ -324,7 +526,7 @@ func TestCIAdoptionRestartsOnlyAnExactlyReviewedInterruptedPush(t *testing.T) {
 			if name == "review missing" {
 				run.ReviewApprovedHeadSHA = nil
 			}
-			index, err := CIAdoptionPendingIndex(database, run, steps)
+			index, err := CIAdoptionPendingIndex(database, run, steps, &db.CIRepairAdoption{})
 			if name == "exact push" {
 				if err != nil || index != 2 {
 					t.Fatalf("exact publication replay refused: %d, %v", index, err)

@@ -38,6 +38,9 @@ func (m *RunManager) ciRepairHeld(ctx context.Context, run *db.Run) (bool, error
 		return true, err
 	}
 	for _, result := range results {
+		if event != nil && result.StepName == types.StepPush && result.Status != types.StepStatusCompleted {
+			return true, nil
+		}
 		if result.StepName != types.StepCI || (result.Status != types.StepStatusAwaitingApproval && result.Status != types.StepStatusFixReview) {
 			continue
 		}
@@ -356,7 +359,7 @@ func (m *RunManager) prepareCIAdoption(ctx context.Context, run *db.Run, event *
 	if run.AwaitingAgentSince != nil {
 		err = pipeline.ValidateRecoveredRun(m.db, run, execSteps)
 	} else {
-		_, err = pipeline.CIAdoptionPendingIndex(m.db, run, execSteps)
+		_, err = pipeline.CIAdoptionPendingIndex(m.db, run, execSteps, event)
 	}
 	if err != nil {
 		return nil, err

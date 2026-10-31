@@ -577,6 +577,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
+	if err != nil && e.publicationSelectionRequired {
+		return err
+	}
 	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
 	}
@@ -1501,6 +1504,9 @@ rounds:
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), effectiveFindings, "", &executionMS)
 
 			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true)
+			if err != nil && e.publicationSelectionRequired {
+				return false, "", err
+			}
 			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
 			}
@@ -2064,6 +2070,9 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 // It accepts an optional context; if the context was cancelled with a cause,
 // the cause message is used as the run's error (more informative than "context canceled").
 func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
+	if e.adoption != nil && e.publicationSelectionRequired {
+		return err
+	}
 	errMsg := err.Error()
 	for _, ctx := range ctxs {
 		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {
