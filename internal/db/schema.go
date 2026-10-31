@@ -103,6 +103,22 @@ CREATE INDEX IF NOT EXISTS idx_step_results_run_order
 CREATE INDEX IF NOT EXISTS idx_step_rounds_step_round
     ON step_rounds (step_result_id, round);
 
+CREATE TABLE IF NOT EXISTS ci_repair_adoptions (
+    run_id      TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    id          TEXT NOT NULL UNIQUE,
+    event_json  TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS ci_repair_adoptions_immutable_update
+    BEFORE UPDATE ON ci_repair_adoptions
+    BEGIN SELECT RAISE(ABORT, 'CI repair adoption is immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS ci_repair_adoptions_immutable_delete
+    BEFORE DELETE ON ci_repair_adoptions
+    WHEN EXISTS (SELECT 1 FROM runs WHERE id = OLD.run_id)
+    BEGIN SELECT RAISE(ABORT, 'CI repair adoption is immutable'); END;
+
 CREATE TABLE IF NOT EXISTS agent_invocations (
     id                    TEXT PRIMARY KEY,
     run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
