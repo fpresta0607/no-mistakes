@@ -367,6 +367,36 @@ func TestVerifyPublicationPreservesLocalGitURLRewrite(t *testing.T) {
 	}
 }
 
+func TestPublicationGitUsesSelectedHelperForTheActualRepositoryPath(t *testing.T) {
+	selection, _ := publicationFixture(t)
+	realGit, err := testgit.RealGit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication, err := ResolvePublication(t.Context(), "https://github.com/parent/repo.git", "https://github.com/fork/repo.git", selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	command := exec.CommandContext(t.Context(), realGit, "init", workDir)
+	shellenv.ConfigureShellCommand(command)
+	if err := shellenv.RunShellCommand(command); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".git", "config"), []byte("[credential]\n helper = !exit 87\n[credential \"https://github.com/fork\"]\n helper = !exit 88\n[credential \"https://github.com/fork/repo.git\"]\n helper = !exit 89\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command = exec.CommandContext(t.Context(), realGit, "credential", "fill")
+	command.Dir = workDir
+	command.Env = publication.Environment.Apply(nil)
+	command.Stdin = strings.NewReader("protocol=https\nhost=github.com\npath=fork/repo.git\n\n")
+	shellenv.ConfigureShellCommand(command)
+	output, err := shellenv.OutputShellCommand(command)
+	if err != nil || !strings.Contains(string(output), os.Getenv("NM_PUBLICATION_TEST_SECRET")) {
+		t.Fatal("the actual push repository path did not use the selected frozen helper")
+	}
+}
+
 func publicationSettings(t *testing.T, environment map[string]string) map[string]string {
 	t.Helper()
 	count, err := strconv.Atoi(environment["GIT_CONFIG_COUNT"])

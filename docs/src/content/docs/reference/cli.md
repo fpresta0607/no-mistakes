@@ -354,11 +354,15 @@ no-mistakes axi respond --action skip
 
 | Flag             | Type     | Default       | Description                                                          |
 | ---------------- | -------- | ------------- | -------------------------------------------------------------------- |
-| `--action`       | `string` | (none)        | `approve`, `fix`, or `skip`; required. A reviewer's open question is answered with [`axi answer`](#no-mistakes-axi-answer), not here |
+| `--action`       | `string` | (none)        | `approve`, `fix`, `skip`, or `revalidate`; required. A reviewer's open question is answered with [`axi answer`](#no-mistakes-axi-answer), not here |
 | `--step`         | `string` | awaiting step | Step to respond to                                                   |
 | `--findings`     | `string` | (none)        | Comma-separated finding IDs for `--action fix`                       |
 | `--instructions` | `string` | (none)        | Guidance applied to selected findings with `--action fix`            |
-| `--reason`       | `string` | (none)        | Operator's exception explanation for Test approval only              |
+| `--reason`       | `string` | (none)        | Operator's exception explanation for Test approval, or required adoption reason for CI revalidation |
+| `--candidate` | `string` | (none) | Full retained commit SHA for `--action revalidate` |
+| `--publication-gh-config-dir` | `string` | (none) | Absolute existing GitHub CLI config directory for this publication attempt |
+| `--publication-login` | `string` | (none) | Expected existing account, independently verified for GitHub API and Git credentials |
+| `--reselect-publication` | `bool` | `false` | Restore a lost publication selection for an accepted adoption without resetting fresh validation |
 | `--add-finding`  | `string` | (none)        | JSON finding object to add and fix                                   |
 | `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve subsequent eligible gates until a decision point or outcome |
 | `--wait`         | `duration` | `8m`        | Maximum time for pre-drive reads and post-response driving before the caller must reattach |
@@ -369,6 +373,27 @@ The step retains its findings and exit code, and the reason is durable local evi
 Revalidation, a new fix round, or skipping the step clears that current-step approval so a later result cannot inherit it.
 This is separate from the configured-command waiver and trusted repository opt-in used by [PR enforcement](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation); neither that policy nor approval authority changes.
 `--instructions` remains fix guidance, not an approval-reason input.
+
+A committed CI repair whose publication failed can remain in the managed worktree while the run and public branch still record the preceding head.
+From the original contributor branch, explicitly adopt that exact retained commit as unvalidated contents:
+
+```sh
+no-mistakes axi respond --action revalidate --candidate <full-sha> --reason "validate these retained contents" --publication-gh-config-dir <absolute-existing-directory> --publication-login <existing-login>
+```
+
+This keeps the same run and PR, revokes current approvals, and starts fresh required validation at Review.
+Original findings, rounds, spent automatic repair selections, and original per-step limits remain recorded.
+Adoption grants no review or publication authority.
+It refuses moved or dirty worktrees, changed publication bindings, competing writers, and unreadable identities.
+Ordinary approve, fix, reconciliation, or replacement cannot consume the retained-candidate hold.
+
+Publication selection supports credential-free HTTPS GitHub remotes and an existing single-account GitHub CLI directory.
+It changes neither sign-in nor shared Git, daemon, or credential configuration, and retains no token or selection in the run database.
+After a daemon restart loses that temporary selection, repeat the command with `--reselect-publication` to resume the accepted adoption at its durable pending step or fresh approval gate.
+Completed fresh validation stays completed, and an interrupted agent step stays held rather than replaying its tools.
+An interrupted Push can repeat the existing guarded publication only for the exact freshly reviewed and tested head, including settling an already updated remote.
+The ordinary Push baseline guard still runs after a daemon restart; if it requires fresh validation, publication stays held without dispatching a fixer or resetting completed steps.
+Revalidation cannot be combined with `--yes` or finding actions.
 
 After the explicit response, `--yes` uses the same [auto-resolution behavior and exceptions as `axi run --yes`](#no-mistakes-axi-run).
 Each `axi respond` blocks until the next gate, CI-ready decision point, or final outcome, subject to the same default `--wait 8m` boundary as `axi run`. That boundary also covers its initial active-run and run-state reads plus event-subscription acknowledgement, so a caller can interrupt establishment as well as the later event wait.

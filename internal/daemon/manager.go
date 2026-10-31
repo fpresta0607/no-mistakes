@@ -101,28 +101,37 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 }
 
 type recoveredRunPlan struct {
-	run     *db.Run
-	repo    *db.Repo
-	workDir string
-	gateDir string
-	cfg     *config.Config
-	agent   agent.Agent
-	steps   []pipeline.Step
-	forge   *forgecontext.Context
+	run              *db.Run
+	repo             *db.Repo
+	workDir          string
+	gateDir          string
+	cfg              *config.Config
+	agent            agent.Agent
+	steps            []pipeline.Step
+	forge            *forgecontext.Context
+	adoption         *db.CIRepairAdoption
+	publication      *forgecontext.Context
+	publicationLogin string
 }
 
-func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPlan {
+func (m *RunManager) recoverableParkedRuns(ctx context.Context) ([]recoveredRunPlan, map[string]struct{}, error) {
 	runs, err := m.db.GetActiveRuns()
 	if err != nil {
 		slog.Error("failed to list active runs for recovery", "error", err)
-		return nil
+		return nil, nil, err
 	}
 	plans := make([]recoveredRunPlan, 0, len(runs))
+	preserved := make(map[string]struct{}, len(runs))
 	branchCounts := make(map[string]int, len(runs))
 	for _, run := range runs {
 		branchCounts[run.RepoID+"\x00"+run.Branch]++
 	}
 	for _, run := range runs {
+		if held, err := m.ciRepairHeld(ctx, run); held || err != nil {
+			preserved[run.ID] = struct{}{}
+			slog.Warn("retained CI work preserved without execution; explicit adoption or credential reselection required", "run_id", run.ID)
+			continue
+		}
 		if branchCounts[run.RepoID+"\x00"+run.Branch] != 1 {
 			slog.Warn("active run cannot be safely resumed", "run_id", run.ID, "error", "conflicting active run for branch")
 			continue
@@ -133,13 +142,17 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPl
 			continue
 		}
 		plans = append(plans, *plan)
+		preserved[run.ID] = struct{}{}
 	}
-	return plans
+	return plans, preserved, nil
 }
 
 func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*recoveredRunPlan, error) {
 	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil || run.Branch == "" {
 		return nil, fmt.Errorf("run is not a parked running run")
+	}
+	if held, err := m.ciRepairHeld(ctx, run); held || err != nil {
+		return nil, fmt.Errorf("retained CI source must be preserved pending explicit revalidation")
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
 	if err != nil {
@@ -187,15 +200,21 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 			return nil, err
 		}
 	}
+	adoption, err := m.db.GetCIRepairAdoption(run.ID)
+	if err != nil {
+		_ = ag.Close()
+		return nil, err
+	}
 	return &recoveredRunPlan{
-		run:     run,
-		repo:    repo,
-		workDir: workDir,
-		gateDir: gateDir,
-		cfg:     cfg,
-		agent:   ag,
-		steps:   execSteps,
-		forge:   forgeCtx,
+		run:      run,
+		repo:     repo,
+		workDir:  workDir,
+		gateDir:  gateDir,
+		cfg:      cfg,
+		agent:    ag,
+		steps:    execSteps,
+		forge:    forgeCtx,
+		adoption: adoption,
 	}, nil
 }
 
@@ -466,7 +485,13 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			m.mu.Unlock()
 		}()
 
-		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
+		resume := func() error {
+			if plan.adoption != nil {
+				return executor.ResumeCIAdoption(runCtx, plan.run, plan.repo, plan.workDir, plan.adoption, plan.publication, plan.publicationLogin)
+			}
+			return executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
+		}
+		if err := resume(); err != nil {
 			if plan.run.Status == types.RunRunning {
 				errMsg := err.Error()
 				plan.run.Status = types.RunFailed
@@ -1378,6 +1403,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("daemon_shutdown")
 		return "", fmt.Errorf("daemon is shutting down")
 	}
+	if err := m.refuseCIRepairReplacement(ctx, repo.ID, branch); err != nil {
+		return "", err
+	}
 	// Best-effort only: a clone's remotes may change after init. Refresh the
 	// registered URLs before constructing any run-owned Git operation, but keep
 	// the exact prior repo value and continue when discovery, validation, or the
@@ -1997,11 +2025,19 @@ func (m *RunManager) HandleRespond(runID string, step types.StepName, action typ
 // HandleRespondWithOverrides is like HandleRespond but also forwards user
 // instructions and user-authored findings to the executor.
 func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string) error {
+	if action == types.ActionRevalidate {
+		return fmt.Errorf("CI revalidation requires the typed candidate request")
+	}
 	m.mu.Lock()
 	exec, ok := m.executors[runID]
 	m.mu.Unlock()
 
 	if !ok {
+		if run, err := m.db.GetRun(runID); err != nil || run == nil {
+			return fmt.Errorf("cannot read run ownership; preserve its source")
+		} else if held, err := m.ciRepairHeld(context.Background(), run); held || err != nil {
+			return fmt.Errorf("retained CI source requires explicit revalidation; no ordinary response is accepted")
+		}
 		return fmt.Errorf("no active executor for run %s", runID)
 	}
 

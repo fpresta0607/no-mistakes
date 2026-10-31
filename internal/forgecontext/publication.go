@@ -170,7 +170,8 @@ func publicationUnsafeRewrite(key string) bool {
 }
 
 // VerifyPublication proves the effective API account and independently checks
-// the credential Git selects. Credential material stays in subprocess memory.
+// the credential Git selects. Credential material stays in private memory
+// and subprocess environments, never argv, errors or the returned context.
 func VerifyPublication(ctx context.Context, workDir string, publication *Context, expectedLogin string) error {
 	if publication == nil || publication.Provider != scm.ProviderGitHub || publication.Host == "" || strings.TrimSpace(expectedLogin) == "" {
 		return errors.New("publication identity context is invalid")

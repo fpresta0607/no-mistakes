@@ -37,11 +37,14 @@ const (
 )
 
 type approvalResponse struct {
-	action         types.ApprovalAction
-	findingIDs     []string
-	instructions   map[string]string
-	addedFindings  []types.Finding
-	approvalReason string
+	action           types.ApprovalAction
+	findingIDs       []string
+	instructions     map[string]string
+	addedFindings    []types.Finding
+	approvalReason   string
+	adoption         *db.CIRepairAdoption
+	publication      *forgecontext.Context
+	publicationLogin string
 }
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
@@ -58,9 +61,17 @@ type Executor struct {
 
 	// sessions manages this run's durable review-loop agent sessions; shared
 	// carries run-scoped step-to-step results. Both are created per Execute.
-	sessions *RunSessions
-	shared   *RunShared
-	workDir  string
+	sessions                     *RunSessions
+	shared                       *RunShared
+	workDir                      string
+	runID                        string
+	adoption                     *db.CIRepairAdoption
+	adoptionRestartPending       bool
+	ciAdoptionReserved           bool
+	publicationForge             *forgecontext.Context
+	publicationLogin             string
+	publicationSelectionRequired bool
+	publicationOnlyResume        bool
 	// stepRecords are this Execute's step rows by name. They let the review
 	// step be offered a context for another step's early work (side_by_side).
 	// Nil on a recovered run, which therefore starts nothing early.
@@ -204,6 +215,22 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		e.mu.Unlock()
 		return fmt.Errorf("step mismatch: responding to %q but %q is awaiting approval", step, e.waitingStep)
 	}
+	if step == types.StepCI && e.runID != "" {
+		run, err := e.db.GetRun(e.runID)
+		if err != nil || run == nil {
+			e.mu.Unlock()
+			return fmt.Errorf("cannot read CI ownership; preserve the gate")
+		}
+		held, err := RetainedCIHead(context.Background(), run, e.workDir)
+		if held || err != nil {
+			e.mu.Unlock()
+			return fmt.Errorf("retained CI contents require explicit adoption for fresh validation")
+		}
+	}
+	if e.publicationSelectionRequired {
+		e.mu.Unlock()
+		return fmt.Errorf("publication credentials must be explicitly reselected")
+	}
 	if action == types.ActionApprove && e.waitingApprovalRefusal != "" {
 		refusal := e.waitingApprovalRefusal
 		e.mu.Unlock()
@@ -228,6 +255,7 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 // the cause message is preserved as the run's error in the DB.
 func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
 	e.workDir = workDir
+	e.runID = run.ID
 	ctx = e.runContext(ctx)
 	// Mark run as running. Route write failures through failRun so the
 	// in-memory lifecycle and subscriber stream still become terminal instead
@@ -248,7 +276,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.failRun(run, repo, err)
 	}
 	e.initializeRunScopes(run.ID)
-	defer e.shared.Close()
+	defer func() { e.shared.Close() }()
 
 	// Create step result records in DB
 	stepRecords := make(map[types.StepName]*db.StepResult)
@@ -308,7 +336,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 			break
 		}
 		if restartFrom != "" {
-			restartIndex, err := e.prepareRestart(run.ID, restartFrom, i)
+			restartIndex, err := e.restartIndex(run.ID, restartFrom, i)
 			if err != nil {
 				return e.failRun(run, repo, fmt.Errorf("step %s requested invalid restart from %s", step.Name(), restartFrom), ctx)
 			}
@@ -391,6 +419,9 @@ func (e *Executor) durableExecutionState(stepResultID string) (stepExecutionStat
 		if round.SelectionSource != nil && *round.SelectionSource == db.RoundSelectionSourceAutoFix {
 			state.autoFixAttempts++
 		}
+		if e.originalAdoptedReviewRound(stepResultID, round.Round) {
+			continue
+		}
 		if round.FindingsJSON != nil {
 			state.outstandingFindings = *round.FindingsJSON
 		} else {
@@ -430,6 +461,7 @@ func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
 // an error so startup recovery can fail the run rather than guessing.
 func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
 	e.workDir = workDir
+	e.runID = run.ID
 	ctx = e.runContext(ctx)
 	if repo == nil {
 		return fmt.Errorf("recovered run has no repository")
@@ -449,7 +481,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, err)
 	}
 	e.initializeRunScopes(run.ID)
-	defer e.shared.Close()
+	defer func() { e.shared.Close() }()
 
 	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
 	duration := recoveredStepDuration(gate.stepResult)
@@ -523,6 +555,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
 	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
+	e.publicationSelectionRequired = e.adoption != nil && gate.step.Name() == types.StepPush && (hasFindingID(gate.findings, PublicationSelectionFindingID) || hasFindingID(gate.findings, PublicationRevalidationFindingID))
 	e.mu.Unlock()
 	e.emitStepEventWithFindingsAndError(
 		ipc.EventStepCompleted,
@@ -534,6 +567,12 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		"",
 		gate.stepResult.DurationMS,
 	)
+	if e.publicationSelectionRequired && e.publicationForge != nil && hasFindingID(gate.findings, PublicationSelectionFindingID) {
+		e.mu.Lock()
+		e.waiting = false
+		e.approvalCh <- approvalResponse{action: types.ActionRevalidate, publication: e.publicationForge, publicationLogin: e.publicationLogin}
+		e.mu.Unlock()
+	}
 
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
 	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
@@ -563,6 +602,36 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	telemetry.Track("approval", approvalFields)
 	switch response.action {
+	case types.ActionRevalidate:
+		if response.adoption == nil && gate.step.Name() == types.StepPush && e.publicationSelectionRequired {
+			e.mu.Lock()
+			e.publicationForge, e.publicationLogin = response.publication, response.publicationLogin
+			e.publicationSelectionRequired = false
+			e.publicationOnlyResume = true
+			e.mu.Unlock()
+			state, err := e.durableExecutionState(gate.stepResult.ID)
+			if err != nil {
+				return err
+			}
+			_, restart, err := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, state)
+			if err != nil {
+				return err
+			}
+			if restart != "" {
+				return fmt.Errorf("publication reselection cannot restart validation")
+			}
+			return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
+		}
+		if response.adoption == nil || gate.step.Name() != types.StepCI {
+			return fmt.Errorf("invalid CI adoption response")
+		}
+		e.acceptCIAdoption(run, response.adoption, response.publication, response.publicationLogin)
+		e.adoptionRestartPending = false
+		index, err := e.stepIndex(types.StepReview)
+		if err != nil {
+			return err
+		}
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, index, true)
 	case types.ActionApprove:
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if err := e.applyApprovalOverride(gate.step, reconcileCtx, gate.stepResult.ID, response.approvalReason); err != nil {
@@ -679,7 +748,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			return e.skipRecoveredRemainder(run, repo, gate.index+1)
 		}
 		if restartFrom != "" {
-			restartIndex, indexErr := e.prepareRestart(run.ID, restartFrom, gate.index)
+			restartIndex, indexErr := e.restartIndex(run.ID, restartFrom, gate.index)
 			if indexErr != nil {
 				return e.failRun(run, repo, fmt.Errorf("step %s requested invalid restart from %s", gate.step.Name(), restartFrom), ctx)
 			}
@@ -730,7 +799,7 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 				if round.SelectionSource != nil && *round.SelectionSource == db.RoundSelectionSourceAutoFix {
 					autoFixes++
 				}
-				if round.SelectedFindingIDs != nil {
+				if round.SelectedFindingIDs != nil && !e.originalAdoptedReviewRound(result.ID, round.Round) {
 					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, findingIDsFromSelectionJSON(*round.SelectedFindingIDs))
 				}
 			}
@@ -797,7 +866,7 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 			return e.skipRecoveredRemainder(run, repo, index+1)
 		}
 		if restartFrom != "" {
-			restartIndex, indexErr := e.prepareRestart(run.ID, restartFrom, index)
+			restartIndex, indexErr := e.restartIndex(run.ID, restartFrom, index)
 			if indexErr != nil {
 				return e.failRun(run, repo, fmt.Errorf("step %s requested invalid restart from %s", e.steps[index].Name(), restartFrom), ctx)
 			}
@@ -925,6 +994,14 @@ func (e *Executor) sideLaneContext(ctx context.Context, run *db.Run, repo *db.Re
 }
 
 func (e *Executor) autoFixLimit(stepName types.StepName) int {
+	if e.adoption != nil {
+		for _, original := range e.adoption.Steps {
+			if original.Snapshot.StepName == stepName {
+				return original.EffectiveAutoFixLimit
+			}
+		}
+		return 0
+	}
 	if e.config == nil {
 		return 0
 	}
@@ -1200,7 +1277,7 @@ rounds:
 	for {
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
-		outcome, err := step.Execute(sctx)
+		outcome, err := e.executeWithPublicationSelection(step, sctx)
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
@@ -1450,6 +1527,25 @@ rounds:
 			telemetry.Track("approval", approvalFields)
 
 			switch response.action {
+			case types.ActionRevalidate:
+				if response.adoption != nil && stepName == types.StepCI {
+					e.acceptCIAdoption(run, response.adoption, response.publication, response.publicationLogin)
+					return false, types.StepReview, nil
+				}
+				if stepName != types.StepPush || e.adoption == nil || !e.publicationSelectionRequired {
+					return false, "", fmt.Errorf("invalid publication reselection response")
+				}
+				e.mu.Lock()
+				e.publicationForge, e.publicationLogin = response.publication, response.publicationLogin
+				e.publicationSelectionRequired = false
+				e.publicationOnlyResume = true
+				e.mu.Unlock()
+				phaseStart = time.Now()
+				if err := markRunning(); err != nil {
+					return false, "", err
+				}
+				nextTrigger = "initial"
+				continue rounds
 			case types.ActionApprove:
 				// Approved - execution already frozen in executionMS, reset phaseStart
 				// so the done label computes no additional elapsed.
@@ -1927,6 +2023,25 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 	reconciler, ok := step.(ApprovalGateReconciler)
 	if !ok {
 		return false, nil
+	}
+	if step.Name() == types.StepCI && sctx != nil {
+		e.mu.Lock()
+		if e.ciAdoptionReserved {
+			e.mu.Unlock()
+			return false, nil
+		}
+		// Keep classification inside the adoption reservation: a post-CAS
+		// recorded head must never authorize the old CI gate to reconcile.
+		stored, err := e.db.GetRun(sctx.Run.ID)
+		if err != nil || stored == nil {
+			e.mu.Unlock()
+			return false, fmt.Errorf("cannot read CI ownership; preserving its gate")
+		}
+		held, err := RetainedCIHead(ctx, stored, sctx.WorkDir)
+		e.mu.Unlock()
+		if held || err != nil {
+			return false, err
+		}
 	}
 	if HasProtectedPathRefusal(findingsJSON) {
 		return false, nil
