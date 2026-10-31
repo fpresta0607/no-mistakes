@@ -177,6 +177,44 @@ func TestAxiAbortRefusesSuccessWhileTerminalQuiescenceUnconfirmed(t *testing.T) 
 // success without any terminal wait at all, and proves the confirmed path
 // still reports the completed abort with the observed terminal state.
 func TestAxiAbortByRunIDRefusesSuccessWhileTerminalQuiescenceUnconfirmed(t *testing.T) {
+	for _, surface := range []string{"explicit run", "branch scoped"} {
+		t.Run(surface+" missing run after accepted cancellation", func(t *testing.T) {
+			newAbortQuiescenceFixture(t, func(context.Context, int) (*ipc.RunInfo, error) {
+				return nil, errors.New("run not found: run-quiesce")
+			})
+			args := []string{"axi", "abort"}
+			if surface == "explicit run" {
+				args = append(args, "--run", "run-quiesce")
+			}
+			out, err := executeCmd(args...)
+			if surface == "explicit run" {
+				if err != nil || !strings.Contains(out, "aborted: false") || strings.Contains(out, "run_status") {
+					t.Fatalf("confirmed absent explicit run must be a truthful no-op: %v\n%s", err, out)
+				}
+			} else {
+				if err == nil {
+					t.Fatalf("previously observed branch run disappeared: %s", out)
+				}
+				assertUnconfirmedAbortOutput(t, surface, out)
+			}
+		})
+	}
+	t.Run("known run disappears", func(t *testing.T) {
+		newAbortQuiescenceFixture(t, func(ctx context.Context, call int) (*ipc.RunInfo, error) {
+			if call == 1 {
+				return runningRunForever(ctx, call)
+			}
+			return nil, errors.New("run not found: run-quiesce")
+		})
+		out, err := executeCmd("axi", "abort", "--run", "run-quiesce")
+		if err == nil {
+			t.Fatalf("known run disappearance must remain unconfirmed: %s", out)
+		}
+		assertUnconfirmedAbortOutput(t, "abort --run", out)
+		if !strings.Contains(out, "status: running") {
+			t.Fatalf("known run disappearance lost its last observed state: %s", out)
+		}
+	})
 	t.Run("terminalization delayed past bounded wait", func(t *testing.T) {
 		newAbortQuiescenceFixture(t, runningRunForever)
 		out, err := executeCmd("axi", "abort", "--run", "run-quiesce")
@@ -226,17 +264,26 @@ func TestAxiAbortStatusReadStallRespectsBoundedWait(t *testing.T) {
 		{name: "explicit run", args: []string{"axi", "abort", "--run", "run-quiesce"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			cancelRequested := make(chan time.Time, 1)
 			newAbortQuiescenceFixture(t, func(ctx context.Context, _ int) (*ipc.RunInfo, error) {
 				<-ctx.Done()
 				return nil, ctx.Err()
+			}, func() {
+				cancelRequested <- time.Now()
 			})
-			started := time.Now()
 			out, err := executeCmd(tc.args...)
+			finished := time.Now()
 			t.Logf("%s stalled-status-read CLI output:\n%s", tc.name, out)
 			if err == nil {
 				t.Fatalf("abort with a stalled status read must exit nonzero:\n%s", out)
 			}
-			if elapsed := time.Since(started); elapsed > time.Second {
+			var requestedAt time.Time
+			select {
+			case requestedAt = <-cancelRequested:
+			default:
+				t.Fatalf("abort did not reach the cancellation boundary: %s", out)
+			}
+			if elapsed := finished.Sub(requestedAt); elapsed > time.Second {
 				t.Fatalf("stalled status read exceeded bounded wait: %s\n%s", elapsed, out)
 			}
 			assertUnconfirmedAbortOutput(t, tc.name, out)

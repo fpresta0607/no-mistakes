@@ -271,10 +271,11 @@ const (
 type ApprovalAction string
 
 const (
-	ActionApprove ApprovalAction = "approve"
-	ActionFix     ApprovalAction = "fix"
-	ActionSkip    ApprovalAction = "skip"
-	ActionAbort   ApprovalAction = "abort"
+	ActionApprove    ApprovalAction = "approve"
+	ActionFix        ApprovalAction = "fix"
+	ActionSkip       ApprovalAction = "skip"
+	ActionAbort      ApprovalAction = "abort"
+	ActionRevalidate ApprovalAction = "revalidate"
 	// ActionAnswer releases a review gate that parked on the reviewer's own
 	// open questions, once every one of them is answered. It is neither a
 	// verdict on the round nor a request to fix anything: the same reviewer

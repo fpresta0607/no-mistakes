@@ -37,11 +37,15 @@ const (
 )
 
 type approvalResponse struct {
-	action         types.ApprovalAction
-	findingIDs     []string
-	instructions   map[string]string
-	addedFindings  []types.Finding
-	approvalReason string
+	action              types.ApprovalAction
+	findingIDs          []string
+	instructions        map[string]string
+	addedFindings       []types.Finding
+	approvalReason      string
+	adoption            *db.CIRepairAdoption
+	publication         *forgecontext.Context
+	publicationLogin    string
+	publicationSnapshot *db.CIRepairAdoption
 }
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
@@ -58,19 +62,29 @@ type Executor struct {
 
 	// sessions manages this run's durable review-loop agent sessions; shared
 	// carries run-scoped step-to-step results. Both are created per Execute.
-	sessions *RunSessions
-	shared   *RunShared
-	workDir  string
+	sessions                     *RunSessions
+	shared                       *RunShared
+	workDir                      string
+	runID                        string
+	adoption                     *db.CIRepairAdoption
+	adoptionRestartPending       bool
+	ciAdoptionReserved           bool
+	publicationForge             *forgecontext.Context
+	publicationLogin             string
+	publicationSnapshot          *db.CIRepairAdoption
+	publicationSelectionRequired bool
+	publicationOnlyResume        bool
 	// stepRecords are this Execute's step rows by name. They let the review
 	// step be offered a context for another step's early work (side_by_side).
 	// Nil on a recovered run, which therefore starts nothing early.
 	stepRecords map[types.StepName]*db.StepResult
 
-	mu                     sync.Mutex
-	approvalCh             chan approvalResponse // buffered channel for approval responses
-	waiting                bool                  // true when blocked on approval
-	waitingStep            types.StepName        // which step is currently awaiting approval
-	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
+	mu                          sync.Mutex
+	approvalCh                  chan approvalResponse // buffered channel for approval responses
+	waiting                     bool                  // true when blocked on approval
+	waitingStep                 types.StepName        // which step is currently awaiting approval
+	waitingApprovalRefusal      string                // non-empty: why Approve is rejected at the waiting gate
+	waitingProtectedPathRefusal bool
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -204,6 +218,22 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		e.mu.Unlock()
 		return fmt.Errorf("step mismatch: responding to %q but %q is awaiting approval", step, e.waitingStep)
 	}
+	if step == types.StepCI && e.runID != "" && !e.waitingProtectedPathRefusal {
+		run, err := e.db.GetRun(e.runID)
+		if err != nil || run == nil {
+			e.mu.Unlock()
+			return fmt.Errorf("cannot read CI ownership; preserve the gate")
+		}
+		held, err := RetainedCIHead(context.Background(), run, e.workDir)
+		if held || err != nil {
+			e.mu.Unlock()
+			return fmt.Errorf("retained CI contents require explicit adoption for fresh validation")
+		}
+	}
+	if e.publicationSelectionRequired {
+		e.mu.Unlock()
+		return fmt.Errorf("publication credentials must be explicitly reselected")
+	}
 	if action == types.ActionApprove && e.waitingApprovalRefusal != "" {
 		refusal := e.waitingApprovalRefusal
 		e.mu.Unlock()
@@ -228,6 +258,7 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 // the cause message is preserved as the run's error in the DB.
 func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
 	e.workDir = workDir
+	e.runID = run.ID
 	ctx = e.runContext(ctx)
 	// Mark run as running. Route write failures through failRun so the
 	// in-memory lifecycle and subscriber stream still become terminal instead
@@ -248,7 +279,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.failRun(run, repo, err)
 	}
 	e.initializeRunScopes(run.ID)
-	defer e.shared.Close()
+	defer func() { e.shared.Close() }()
 
 	// Create step result records in DB
 	stepRecords := make(map[types.StepName]*db.StepResult)
@@ -267,7 +298,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	for i := 0; i < len(e.steps); i++ {
 		step := e.steps[i]
 		if ctx.Err() != nil {
-			return e.failRun(run, repo, context.Cause(ctx))
+			return e.failRun(run, repo, context.Cause(ctx), ctx)
 		}
 
 		sr := stepRecords[step.Name()]
@@ -308,7 +339,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 			break
 		}
 		if restartFrom != "" {
-			restartIndex, err := e.prepareRestart(run.ID, restartFrom, i)
+			restartIndex, err := e.restartIndex(run.ID, restartFrom, i)
 			if err != nil {
 				return e.failRun(run, repo, fmt.Errorf("step %s requested invalid restart from %s", step.Name(), restartFrom), ctx)
 			}
@@ -391,6 +422,9 @@ func (e *Executor) durableExecutionState(stepResultID string) (stepExecutionStat
 		if round.SelectionSource != nil && *round.SelectionSource == db.RoundSelectionSourceAutoFix {
 			state.autoFixAttempts++
 		}
+		if e.originalAdoptedReviewRound(stepResultID, round.Round) {
+			continue
+		}
 		if round.FindingsJSON != nil {
 			state.outstandingFindings = *round.FindingsJSON
 		} else {
@@ -430,6 +464,7 @@ func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
 // an error so startup recovery can fail the run rather than guessing.
 func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
 	e.workDir = workDir
+	e.runID = run.ID
 	ctx = e.runContext(ctx)
 	if repo == nil {
 		return fmt.Errorf("recovered run has no repository")
@@ -449,7 +484,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, err)
 	}
 	e.initializeRunScopes(run.ID)
-	defer e.shared.Close()
+	defer func() { e.shared.Close() }()
 
 	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
 	duration := recoveredStepDuration(gate.stepResult)
@@ -523,6 +558,8 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
 	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
+	e.waitingProtectedPathRefusal = HasProtectedPathRefusal(gate.findings)
+	e.publicationSelectionRequired = e.adoption != nil && gate.step.Name() == types.StepPush && (hasFindingID(gate.findings, PublicationSelectionFindingID) || hasFindingID(gate.findings, PublicationRevalidationFindingID))
 	e.mu.Unlock()
 	e.emitStepEventWithFindingsAndError(
 		ipc.EventStepCompleted,
@@ -534,9 +571,26 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		"",
 		gate.stepResult.DurationMS,
 	)
+	if e.publicationSelectionRequired && e.publicationForge != nil && hasFindingID(gate.findings, PublicationSelectionFindingID) {
+		e.mu.Lock()
+		e.waiting = false
+		e.ciAdoptionReserved = true
+		e.approvalCh <- approvalResponse{action: types.ActionRevalidate, publication: e.publicationForge, publicationLogin: e.publicationLogin, publicationSnapshot: e.publicationSnapshot}
+		e.mu.Unlock()
+	}
 
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
-	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
+	if err == nil && ctx.Err() != nil {
+		err = context.Cause(ctx)
+	}
+	if err != nil && e.preserveCIAdoption(run, ctx) {
+		return err
+	}
+	if err == nil && response.action == types.ActionRevalidate && response.adoption == nil {
+		if err := e.consumePublicationSelection(response, time.Since(parkStart).Milliseconds()); err != nil {
+			return err
+		}
+	} else if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
 	}
 	if err != nil {
@@ -563,6 +617,31 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	telemetry.Track("approval", approvalFields)
 	switch response.action {
+	case types.ActionRevalidate:
+		if response.adoption == nil && gate.step.Name() == types.StepPush {
+			state, err := e.durableExecutionState(gate.stepResult.ID)
+			if err != nil {
+				return err
+			}
+			_, restart, err := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, state)
+			if err != nil {
+				return err
+			}
+			if restart != "" {
+				return fmt.Errorf("publication reselection cannot restart validation")
+			}
+			return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
+		}
+		if response.adoption == nil || gate.step.Name() != types.StepCI {
+			return fmt.Errorf("invalid CI adoption response")
+		}
+		e.acceptCIAdoption(run, response.adoption, response.publication, response.publicationLogin)
+		e.adoptionRestartPending = false
+		index, err := e.stepIndex(types.StepReview)
+		if err != nil {
+			return err
+		}
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, index, true)
 	case types.ActionApprove:
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if err := e.applyApprovalOverride(gate.step, reconcileCtx, gate.stepResult.ID, response.approvalReason); err != nil {
@@ -679,7 +758,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			return e.skipRecoveredRemainder(run, repo, gate.index+1)
 		}
 		if restartFrom != "" {
-			restartIndex, indexErr := e.prepareRestart(run.ID, restartFrom, gate.index)
+			restartIndex, indexErr := e.restartIndex(run.ID, restartFrom, gate.index)
 			if indexErr != nil {
 				return e.failRun(run, repo, fmt.Errorf("step %s requested invalid restart from %s", gate.step.Name(), restartFrom), ctx)
 			}
@@ -730,7 +809,7 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 				if round.SelectionSource != nil && *round.SelectionSource == db.RoundSelectionSourceAutoFix {
 					autoFixes++
 				}
-				if round.SelectedFindingIDs != nil {
+				if round.SelectedFindingIDs != nil && !e.originalAdoptedReviewRound(result.ID, round.Round) {
 					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, findingIDsFromSelectionJSON(*round.SelectedFindingIDs))
 				}
 			}
@@ -797,7 +876,7 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 			return e.skipRecoveredRemainder(run, repo, index+1)
 		}
 		if restartFrom != "" {
-			restartIndex, indexErr := e.prepareRestart(run.ID, restartFrom, index)
+			restartIndex, indexErr := e.restartIndex(run.ID, restartFrom, index)
 			if indexErr != nil {
 				return e.failRun(run, repo, fmt.Errorf("step %s requested invalid restart from %s", e.steps[index].Name(), restartFrom), ctx)
 			}
@@ -925,6 +1004,14 @@ func (e *Executor) sideLaneContext(ctx context.Context, run *db.Run, repo *db.Re
 }
 
 func (e *Executor) autoFixLimit(stepName types.StepName) int {
+	if e.adoption != nil {
+		for _, original := range e.adoption.Steps {
+			if original.Snapshot.StepName == stepName {
+				return original.EffectiveAutoFixLimit
+			}
+		}
+		return 0
+	}
 	if e.config == nil {
 		return 0
 	}
@@ -1200,7 +1287,10 @@ rounds:
 	for {
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
-		outcome, err := step.Execute(sctx)
+		outcome, err := e.executeWithPublicationSelection(step, sctx)
+		if err != nil && e.preserveCIAdoption(run, ctx) {
+			return false, "", err
+		}
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
@@ -1400,6 +1490,7 @@ rounds:
 			e.waiting = true
 			e.waitingStep = stepName
 			e.waitingApprovalRefusal = approvalRefusal(stepName, effectiveFindings)
+			e.waitingProtectedPathRefusal = HasProtectedPathRefusal(effectiveFindings)
 			e.mu.Unlock()
 
 			// Parking starts before the gate becomes observable. This includes the
@@ -1421,7 +1512,17 @@ rounds:
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), effectiveFindings, "", &executionMS)
 
 			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true)
-			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
+			if err == nil && ctx.Err() != nil {
+				err = context.Cause(ctx)
+			}
+			if err != nil && e.preserveCIAdoption(run, ctx) {
+				return false, "", err
+			}
+			if err == nil && response.action == types.ActionRevalidate && response.adoption == nil {
+				if err := e.consumePublicationSelection(response, time.Since(parkStart).Milliseconds()); err != nil {
+					return false, "", err
+				}
+			} else if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
 			}
 			if err != nil {
@@ -1450,6 +1551,20 @@ rounds:
 			telemetry.Track("approval", approvalFields)
 
 			switch response.action {
+			case types.ActionRevalidate:
+				if response.adoption != nil && stepName == types.StepCI {
+					e.acceptCIAdoption(run, response.adoption, response.publication, response.publicationLogin)
+					return false, types.StepReview, nil
+				}
+				if stepName != types.StepPush || e.adoption == nil {
+					return false, "", fmt.Errorf("invalid publication reselection response")
+				}
+				phaseStart = time.Now()
+				if err := markRunning(); err != nil {
+					return false, "", err
+				}
+				nextTrigger = "initial"
+				continue rounds
 			case types.ActionApprove:
 				// Approved - execution already frozen in executionMS, reset phaseStart
 				// so the done label computes no additional elapsed.
@@ -1928,6 +2043,25 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 	if !ok {
 		return false, nil
 	}
+	if step.Name() == types.StepCI && sctx != nil {
+		e.mu.Lock()
+		if e.ciAdoptionReserved {
+			e.mu.Unlock()
+			return false, nil
+		}
+		// Keep classification inside the adoption reservation: a post-CAS
+		// recorded head must never authorize the old CI gate to reconcile.
+		stored, err := e.db.GetRun(sctx.Run.ID)
+		if err != nil || stored == nil {
+			e.mu.Unlock()
+			return false, fmt.Errorf("cannot read CI ownership; preserving its gate")
+		}
+		held, err := RetainedCIHead(ctx, stored, sctx.WorkDir)
+		e.mu.Unlock()
+		if held || err != nil {
+			return false, err
+		}
+	}
 	if HasProtectedPathRefusal(findingsJSON) {
 		return false, nil
 	}
@@ -1942,6 +2076,11 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 	return reconciler.ReconcileApprovalGate(&copyCtx)
 }
 
+func IsUserAbort(ctx context.Context) bool {
+	cause := context.Cause(ctx)
+	return cause != nil && cause.Error() == types.RunCancelReasonAbortedByUser
+}
+
 // failRun marks a run as failed and returns the error.
 // It accepts an optional context; if the context was cancelled with a cause,
 // the cause message is used as the run's error (more informative than "context canceled").
@@ -1953,9 +2092,22 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 			break
 		}
 	}
+	if errMsg != types.RunCancelReasonAbortedByUser {
+		for _, ctx := range append(ctxs, context.Background()) {
+			if e.preserveCIAdoption(run, ctx) {
+				return err
+			}
+		}
+	}
 	runStatus := types.RunFailed
 	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded {
 		runStatus = types.RunCancelled
+	}
+	if errMsg == types.RunCancelReasonAbortedByUser {
+		if dbErr := e.db.ClearRunAwaitingAgent(run.ID); dbErr != nil {
+			slog.Error("failed to clear cancelled run gate", "run", run.ID, "error", dbErr)
+		}
+		run.AwaitingAgentSince = nil
 	}
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)
 	var dbErr error

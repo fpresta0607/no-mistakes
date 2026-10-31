@@ -109,12 +109,13 @@ An existing unit picks up the policy when `no-mistakes daemon start` or `restart
 
 ## Concurrent push handling
 
-If you push to the same branch while a run is already active, the daemon:
+For an ordinary active run, if you push to the same branch, the daemon:
 
 1. Cancels the in-progress run (reason: "cancelled: superseded by new push")
 2. Waits for it to finish
 3. Starts a new run with the latest push
 
+A retained CI repair hold instead refuses replacement of its run; use the explicit [CI adoption command](/no-mistakes/reference/cli/#no-mistakes-axi-respond) to continue that run.
 Pushes to different branches run concurrently.
 
 This is another reason the daemon exists: branch-level coordination is easier to
@@ -125,10 +126,12 @@ reason about in one long-lived process than inside independent hook invocations.
 On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon crashed while they were active):
 
 - Completes legacy active rows whose persisted PR state is already `merged` or `closed`, including their CI step, before active-run recovery and parked-run planning
-- Resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
+- Preserves retained unpublished CI repairs and unsettled adoptions as active holds without starting an executor, including when ownership or source reads fail; these runs are excluded from ordinary stale-run failure and worktree cleanup
+- For other active runs, resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
 - Rebuilds a parked run with the repository gate list pinned in `runs.gates_json` when that run started, never the current default-branch list. An absent pin on an older run means the core pipeline, while an invalid pin refuses recovery
 - Re-resolves and validates any configured repository forge profile before rebuilding the recovered run, so resumed provider checks and agents use the same repository-scoped identity model rather than persisted credentials or ambient active accounts
-- Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked. The [`protected_paths` refusal exception](/no-mistakes/reference/repo-config/#protected_paths) prevents automatic reconciliation
+- Before resuming an ordinary parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked.
+  Retained CI repairs and the [`protected_paths` refusal exception](/no-mistakes/reference/repo-config/#protected_paths) prevent automatic reconciliation
 - Preserves a run that was actively monitoring CI for an already-created PR as `ci_monitor_interrupted` rather than failing it: the PR is still open, so a restart mid-monitor is not a pipeline failure. That run is terminal and never resumed
 - Before failing any other stale active run, verifies its managed worktree head and pins an unpublished descendant under the run-specific recovery ref so later rerun or guarded custody recovery does not fall back to a stale gate branch
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
@@ -139,6 +142,11 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - For a validated legacy gate, installs or refreshes the no-mistakes-managed pre-receive admission and post-receive notification hooks, preserving an existing custom pre-receive hook behind the admission wrapper, then enables push-option support and reapplies per-worktree hook-path isolation
 - Records a content-versioned gate configuration stamp only after the whole migration succeeds. Normal restarts check current stamped gates from the filesystem without rerunning the mutating Git commands
 - Clears any parked-awaiting-agent marker so a recovered failed run is not shown as still waiting for `axi respond`
+
+For an accepted CI adoption, explicit [publication credential reselection](/no-mistakes/reference/cli/#no-mistakes-axi-respond) can resume a durable pending step or restore a fresh approval gate without resetting completed validation.
+An interrupted agent step remains held rather than replaying its tools.
+An interrupted Push may repeat guarded publication only for the exact freshly reviewed and tested candidate, including settling an already updated remote without recording a second publication generation.
+Crash and shutdown retain this ownership; explicit `axi abort` instead stops writers, preserves the committed source for custody recovery, terminalizes the run, and cleans up, including when no executor survived the restart.
 
 ## Logging
 
@@ -161,6 +169,6 @@ The [starting and stopping](#starting-and-stopping) section owns the active-run
 guard, the top-level `--force` override, and the separate validation-step
 containment rule.
 
-1. Cancels all active runs
+1. Cancels active execution, retaining CI holds under the [crash-recovery rules](#crash-recovery)
 2. Waits up to 30 seconds for goroutines to finish
 3. Removes the PID file and socket

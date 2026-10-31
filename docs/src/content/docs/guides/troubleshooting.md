@@ -177,9 +177,12 @@ If the overwrite is intentional, push manually to the actual remote after review
 ### Push fails with `refusing to allow an OAuth App to create or update workflow ... without workflow scope`
 
 This means the branch touches a `.github/workflows/*.yml` or `*.yaml` file and the push credential (a GitHub OAuth token or PAT stored for the push target's host) lacks the `workflow` scope.
-GitHub rejects the push before the pipeline can open or update the PR.
+GitHub rejects the branch update, including a CI repair push to an existing PR.
 
-Resolve it by adding the `workflow` scope to your GitHub credential before pushing through `no-mistakes` again:
+If a committed CI repair is retained in an active run and an existing authorized account is available, follow the [explicit CI adoption and publication selection reference](/no-mistakes/reference/cli/#no-mistakes-axi-respond).
+That reference owns eligibility, fresh validation, and retry restrictions.
+
+If the credential itself needs authorization, resolve that separately before an ordinary push through `no-mistakes`:
 
 ```sh
 # If you authenticated gh via OAuth (web browser):

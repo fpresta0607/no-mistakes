@@ -446,12 +446,12 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	}
 
 	parkedStarted := time.Now()
-	plans := mgr.recoverableParkedRuns(context.Background())
-	preserved := make(map[string]struct{}, len(plans))
-	for _, plan := range plans {
-		preserved[plan.run.ID] = struct{}{}
+	plans, preserved, recoveryErr := mgr.recoverableParkedRuns(context.Background())
+	if recoveryErr != nil {
+		slog.Error("cannot classify active ownership; startup cleanup refused", "error", recoveryErr)
+		return
 	}
-	logStartupPhase("parked_runs", parkedStarted, "preserved", len(plans))
+	logStartupPhase("parked_runs", parkedStarted, "preserved", len(preserved))
 
 	// Read while the runs that were executing when this daemon started still say
 	// so: recovery below turns them terminal, and they are the ones whose
@@ -1513,6 +1513,12 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		var p ipc.RespondParams
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if p.Action == types.ActionRevalidate || p.CIRevalidation != nil {
+			if err := mgr.HandleCIRevalidation(ctx, p); err != nil {
+				return nil, err
+			}
+			return &ipc.RespondResult{OK: true}, nil
 		}
 		if err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.Instructions, p.AddedFindings, p.ApprovalReason); err != nil {
 			return nil, err

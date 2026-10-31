@@ -1414,8 +1414,9 @@ func successReportHelp(fixes []fixRow) []string {
 }
 
 func newAxiRespondCmd() *cobra.Command {
-	var action, step, findings, instructions, addFinding, reason string
+	var action, step, findings, instructions, addFinding, reason, candidate, ghConfigDir, expectedLogin string
 	var autoYes bool
+	var reselectPublication bool
 	var wait time.Duration
 
 	cmd := &cobra.Command{
@@ -1423,6 +1424,8 @@ func newAxiRespondCmd() *cobra.Command {
 		Short: "Answer the current approval gate and continue the run",
 		Long: "Sends approve/fix/skip for the step currently awaiting approval, then\n" +
 			"blocks until the next gate, CI-ready decision point, or final outcome.\n\n" +
+			"Use revalidate with an exact retained CI candidate and existing publication\n" +
+			"credentials to adopt unvalidated contents for fresh required validation.\n\n" +
 			"--wait bounds this hold (default 8m) so an agent harness with a 10-minute\n" +
 			"tool cap gets a structured return instead of an unbounded hang. Elapsed wait\n" +
 			"is not a failed run: inspect with axi status and reattach. A slow live daemon\n" +
@@ -1437,23 +1440,31 @@ func newAxiRespondCmd() *cobra.Command {
 				"auto_yes": autoYes,
 			}, func() error {
 				return runAxiRespond(cmd, respondArgs{
-					action:       action,
-					step:         step,
-					findings:     findings,
-					instructions: instructions,
-					addFinding:   addFinding,
-					reason:       reason,
-					autoYes:      autoYes,
-					wait:         wait,
+					action:              action,
+					step:                step,
+					findings:            findings,
+					instructions:        instructions,
+					addFinding:          addFinding,
+					reason:              reason,
+					candidate:           candidate,
+					ghConfigDir:         ghConfigDir,
+					expectedLogin:       expectedLogin,
+					reselectPublication: reselectPublication,
+					autoYes:             autoYes,
+					wait:                wait,
 				})
 			})
 		},
 	}
-	cmd.Flags().StringVar(&action, "action", "", "approve | fix | skip (required)")
+	cmd.Flags().StringVar(&action, "action", "", "approve | fix | skip | revalidate (required)")
+	cmd.Flags().StringVar(&candidate, "candidate", "", "exact retained commit to adopt as unvalidated contents (with --action revalidate)")
+	cmd.Flags().StringVar(&ghConfigDir, "publication-gh-config-dir", "", "existing isolated GitHub config directory for this publication attempt")
+	cmd.Flags().StringVar(&expectedLogin, "publication-login", "", "expected existing GitHub account for both forge and Git credentials")
+	cmd.Flags().BoolVar(&reselectPublication, "reselect-publication", false, "restore the temporary publication selection without resetting fresh validation")
 	cmd.Flags().StringVar(&step, "step", "", "step to respond to (default: the step awaiting approval)")
 	cmd.Flags().StringVar(&findings, "findings", "", "comma-separated finding IDs to fix (with --action fix)")
 	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to the selected findings (with --action fix)")
-	cmd.Flags().StringVar(&reason, "reason", "", "exception reason preserved with Test approval (with --action approve)")
+	cmd.Flags().StringVar(&reason, "reason", "", "Test approval exception reason, or required operator reason for CI revalidation")
 	cmd.Flags().StringVar(&addFinding, "add-finding", "", "JSON finding object to add and fix (with --action fix)")
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve subsequent eligible gates until a decision point or outcome; protected-path and Test unvalidated-work refusals require an explicit response")
 	bindAxiWaitFlag(cmd, &wait)
@@ -1461,14 +1472,18 @@ func newAxiRespondCmd() *cobra.Command {
 }
 
 type respondArgs struct {
-	action       string
-	step         string
-	findings     string
-	instructions string
-	addFinding   string
-	reason       string
-	autoYes      bool
-	wait         time.Duration
+	action              string
+	step                string
+	findings            string
+	instructions        string
+	addFinding          string
+	reason              string
+	candidate           string
+	ghConfigDir         string
+	expectedLogin       string
+	reselectPublication bool
+	autoYes             bool
+	wait                time.Duration
 }
 
 func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
@@ -1484,13 +1499,16 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 
 	act := types.ApprovalAction(strings.TrimSpace(ra.action))
 	switch act {
-	case types.ActionApprove, types.ActionFix, types.ActionSkip:
+	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionRevalidate:
 	case "":
 		return emitError(cmd, 2, "--action is required",
 			"Run `no-mistakes axi respond --action approve|fix|skip`")
 	default:
 		return emitError(cmd, 2, fmt.Sprintf("unknown action %q", ra.action),
-			"Valid actions: approve, fix, skip")
+			"Valid actions: approve, fix, skip, revalidate")
+	}
+	if act != types.ActionRevalidate && (ra.candidate != "" || ra.ghConfigDir != "" || ra.expectedLogin != "" || ra.reselectPublication) {
+		return emitError(cmd, 2, "publication candidate and credential flags require --action revalidate")
 	}
 
 	env, err := openAxiDaemonEnv()
@@ -1528,6 +1546,9 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		return emitError(cmd, 1, "load run: daemon returned no run")
 	}
 	rv := runViewFromIPC(run)
+	if act == types.ActionRevalidate {
+		return runAxiCIRevalidation(cmd, env, driveCtx, runID, rv, ra)
+	}
 
 	stepName := types.StepName(strings.TrimSpace(ra.step))
 	if stepName == "" {
@@ -1675,7 +1696,7 @@ func runAxiAbort(cmd *cobra.Command, runID string) error {
 	// nonzero with the unconfirmed contract.
 	final, confirmed, reason := waitForTerminalRun(ctx, env.client, active.Run.ID, abortStateWaitTimeout)
 	if !confirmed {
-		return emitUnconfirmedAbort(cmd, active.Run.ID, active.Run.Branch, reason, runViewPtrFromIPC(final), true)
+		return emitUnconfirmedAbort(cmd, active.Run.ID, active.Run.Branch, reason.Error(), runViewPtrFromIPC(final), true)
 	}
 	fields := []toon.Field{
 		toon.Field{Key: "aborted", Value: true},
@@ -1717,7 +1738,7 @@ func runAxiAbort(cmd *cobra.Command, runID string) error {
 // confirmed false and a reason naming what prevented confirmation. Callers
 // must never present a completed abort or authoritative final ownership
 // guidance without confirmed true.
-func waitForTerminalRun(ctx context.Context, client *ipc.Client, runID string, timeout time.Duration) (run *ipc.RunInfo, confirmed bool, reason string) {
+func waitForTerminalRun(ctx context.Context, client *ipc.Client, runID string, timeout time.Duration) (run *ipc.RunInfo, confirmed bool, reason error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	ticker := time.NewTicker(50 * time.Millisecond)
@@ -1728,7 +1749,7 @@ func waitForTerminalRun(ctx context.Context, client *ipc.Client, runID string, t
 		if deadline, ok := waitCtx.Deadline(); ok {
 			remaining = time.Until(deadline)
 			if remaining <= 0 {
-				return last, false, fmt.Sprintf("the run did not report a terminal state within the bounded %s wait", timeout)
+				return last, false, fmt.Errorf("the run did not report a terminal state within the bounded %s wait", timeout)
 			}
 		}
 		var result ipc.GetRunResult
@@ -1736,34 +1757,34 @@ func waitForTerminalRun(ctx context.Context, client *ipc.Client, runID string, t
 		if err != nil {
 			switch waitCtx.Err() {
 			case context.Canceled:
-				return last, false, "the in-flight run state read was cancelled before a terminal state was observed"
+				return last, false, errors.New("the in-flight run state read was cancelled before a terminal state was observed")
 			case context.DeadlineExceeded:
-				return last, false, fmt.Sprintf("the in-flight run state read did not complete within the bounded %s wait", timeout)
+				return last, false, fmt.Errorf("the in-flight run state read did not complete within the bounded %s wait", timeout)
 			default:
 				var timeoutErr interface{ Timeout() bool }
 				if errors.As(err, &timeoutErr) && timeoutErr.Timeout() {
-					return last, false, fmt.Sprintf("the in-flight run state read did not complete within the bounded %s wait", timeout)
+					return last, false, fmt.Errorf("the in-flight run state read did not complete within the bounded %s wait", timeout)
 				}
-				return last, false, fmt.Sprintf("the run state could not be read: %v", err)
+				return last, false, fmt.Errorf("the run state could not be read: %w", err)
 			}
 		}
 		observed := result.Run
 		if observed == nil {
-			return last, false, "the run state response did not identify a run"
+			return last, false, errors.New("the run state response did not identify a run")
 		}
 		if observed.ID != runID {
-			return last, false, fmt.Sprintf("the run state response identified run %s instead of the requested run %s", observed.ID, runID)
+			return last, false, fmt.Errorf("the run state response identified run %s instead of the requested run %s", observed.ID, runID)
 		}
 		last = observed
 		if terminalStatus(string(observed.Status)) {
-			return observed, true, ""
+			return observed, true, nil
 		}
 		select {
 		case <-waitCtx.Done():
 			if waitCtx.Err() == context.Canceled {
-				return last, false, "the wait was cancelled before a terminal state was observed"
+				return last, false, errors.New("the wait was cancelled before a terminal state was observed")
 			}
-			return last, false, fmt.Sprintf("the run did not report a terminal state within the bounded %s wait", timeout)
+			return last, false, fmt.Errorf("the run did not report a terminal state within the bounded %s wait", timeout)
 		case <-ticker.C:
 		}
 	}
@@ -1845,7 +1866,15 @@ func runAxiAbortByRunID(cmd *cobra.Command, runID string) error {
 	// terminal state for the exact run.
 	final, confirmed, reason := waitForTerminalRun(cmd.Context(), client, runID, abortStateWaitTimeout)
 	if !confirmed {
-		return emitUnconfirmedAbort(cmd, runID, "", reason, runViewPtrFromIPC(final), true)
+		if final == nil && isExactRunNotFound(reason, runID) {
+			emitDoc(cmd,
+				toon.Field{Key: "aborted", Value: false},
+				toon.Field{Key: "run", Value: runID},
+				toon.Field{Key: "detail", Value: "no run with that id exists (no-op)"},
+			)
+			return nil
+		}
+		return emitUnconfirmedAbort(cmd, runID, "", reason.Error(), runViewPtrFromIPC(final), true)
 	}
 	emitDoc(cmd,
 		toon.Field{Key: "aborted", Value: true},

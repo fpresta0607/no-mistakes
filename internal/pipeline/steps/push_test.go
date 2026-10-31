@@ -1,19 +1,161 @@
 package steps
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestPushStep_AdoptedPublicationRequiresTheExactCandidate(t *testing.T) {
+	for _, name := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "NM_HOME", "CFO_ROOT", "CFO_HOME", "CODE_GOBLINS_ROOT", "GOBLINS_ROOT"} {
+		t.Setenv(name, t.TempDir())
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+	for _, change := range []string{"unchanged", "document commit", "formatter edit", "formatter commit"} {
+		t.Run(change, func(t *testing.T) {
+			upstream := t.TempDir()
+			gitCmd(t, upstream, "init", "--bare")
+			directory, public, candidate := setupGitRepo(t)
+			gitCmd(t, directory, "remote", "add", "origin", upstream)
+			gitCmd(t, directory, "push", "origin", public+":refs/heads/feature")
+			sctx := newTestContext(t, &mockAgent{name: "test"}, directory, public, candidate, config.Commands{})
+			repo, err := sctx.DB.InsertRepo(directory, "https://github.com/test/repo", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := sctx.DB.InsertRun(repo.ID, "feature", public, public)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sctx.Repo, sctx.Run = repo, run
+			setupGateMirror(t, sctx)
+			for _, err := range []error{
+				sctx.DB.UpdateRunStatus(run.ID, types.RunRunning),
+				sctx.DB.UpdateRunPRURL(run.ID, "https://github.com/test/repo/pull/1"),
+				sctx.DB.UpdateRunPRState(run.ID, "open"),
+				sctx.DB.UpdateRunPublication(run.ID, db.PushBinding{HeadSHA: public, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(upstream), Ref: "refs/heads/feature"}),
+			} {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			findings := `{"findings":[{"id":"red","severity":"error","action":"ask-user","description":"publication failed"}]}`
+			for _, name := range types.AllSteps() {
+				result, err := sctx.DB.InsertStepResult(run.ID, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := sctx.DB.StartStepWithAutoFixLimit(result.ID, 1); err != nil {
+					t.Fatal(err)
+				}
+				round, err := sctx.DB.InsertStepRound(result.ID, 1, "initial", &findings, nil, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := sctx.DB.CompleteStep(result.ID, 0, 1, ""); err != nil {
+					t.Fatal(err)
+				}
+				if name == types.StepCI {
+					selected := `["red"]`
+					if err := sctx.DB.SetStepRoundUserDecision(round.ID, &selected, db.RoundSelectionSourceAutoFix, nil); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := sctx.DB.InsertStepRound(result.ID, 2, "auto_fix", &findings, nil, 1); err != nil {
+						t.Fatal(err)
+					}
+					if err := sctx.DB.ParkStepForApproval(run.ID, result.ID, types.StepStatusFixReview, 0, 1, &findings); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			snapshot, err := sctx.DB.ReadCIRepairSnapshot(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot.CandidateSHA, snapshot.CandidateTreeSHA = candidate, gitCmd(t, directory, "rev-parse", candidate+"^{tree}")
+			snapshot.CallerDir, snapshot.CallerHeadSHA, snapshot.ManagedDir = directory, public, directory
+			snapshot.GateDir, snapshot.GateBranch = sctx.GateDir, run.Branch
+			snapshot.Operator, snapshot.Reason = "fixture local operator", "validate the exact retained candidate"
+			if _, _, err := sctx.DB.AdoptCIRepairForRevalidation(*snapshot); err != nil {
+				t.Fatal(err)
+			}
+			sctx.Run, err = sctx.DB.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recordReviewApproval(t, sctx, candidate)
+			for _, original := range snapshot.Steps {
+				if original.Snapshot.StepName.Order() < types.StepReview.Order() || original.Snapshot.StepName.Order() >= types.StepPush.Order() {
+					continue
+				}
+				if original.Snapshot.StepName == types.StepTest {
+					if err := sctx.DB.SetStepFindings(original.Snapshot.ID, `{"findings":[],"tested_head_sha":"`+candidate+`"}`); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := sctx.DB.CompleteStep(original.Snapshot.ID, 0, 1, ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sctx.Env, _ = fakeGH(t, "https://github.com/test/repo/pull/1")
+			switch change {
+			case "document commit":
+				if err := os.WriteFile(filepath.Join(directory, "document.txt"), []byte("documentation correction\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, directory, "add", "document.txt")
+				gitCmd(t, directory, "commit", "-m", "document the candidate")
+			case "formatter edit", "formatter commit":
+				formatCommand := "printf 'formatted\\n' > formatter.txt"
+				if runtime.GOOS == "windows" {
+					formatCommand = "echo formatted>formatter.txt"
+				}
+				if change == "formatter commit" {
+					formatCommand += " && git add formatter.txt && git commit -m formatter"
+				}
+				sctx.Config.Commands.Format = formatCommand
+			}
+
+			outcome, err := (&PushStep{}).Execute(sctx)
+
+			stored, readErr := sctx.DB.GetRun(run.ID)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if change == "unchanged" {
+				if err != nil || outcome == nil || *stored.LastPushedSHA != candidate || *stored.PushGeneration != *snapshot.ExpectedRun.PushGeneration+1 || gitCmd(t, upstream, "rev-parse", "refs/heads/feature") != candidate {
+					t.Fatalf("exact candidate did not publish normally: %+v, %v", stored, err)
+				}
+			} else {
+				if !errors.Is(err, pipeline.ErrCIAdoptionHeadChanged) || outcome != nil || *stored.LastPushedSHA != public || *stored.PushGeneration != *snapshot.ExpectedRun.PushGeneration || gitCmd(t, upstream, "rev-parse", "refs/heads/feature") != public || gitCmd(t, directory, "rev-parse", "HEAD") == candidate {
+					t.Fatalf("changed candidate was published or discarded: %+v, %v", stored, err)
+				}
+			}
+			if strings.HasPrefix(change, "formatter") {
+				content, err := os.ReadFile(filepath.Join(directory, "formatter.txt"))
+				if err != nil || strings.TrimSpace(string(content)) != "formatted" {
+					t.Fatalf("formatter did not write its intended contents: %q, %v", content, err)
+				}
+			}
+			if change == "formatter commit" && gitCmd(t, directory, "log", "-1", "--format=%s") != "formatter" {
+				t.Fatal("formatter did not create its own commit")
+			}
+		})
+	}
+}
 
 func setupGateMirror(t *testing.T, sctx *pipeline.StepContext) string {
 	t.Helper()
