@@ -74,6 +74,8 @@ func handleFakeCLI(mode string) {
 		fakeGitRemoteErrorHandler(args)
 	case "ci-gh":
 		fakeCIGHHandler(args)
+	case "ci-revalidation":
+		fakeCIRevalidationHandler(args)
 	case "ci-gh-seq":
 		fakeCIGHSequenceHandler(args)
 	case "ci-gh-nochecks":
