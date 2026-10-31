@@ -713,19 +713,29 @@ func runObservedCICommand(command *exec.Cmd, cancel context.CancelFunc, observe 
 }
 
 func TestCIRevalidationObservedCommandJoinsBeforeReturning(t *testing.T) {
-	for _, mode := range []string{"normal completion", "probe error", "dead daemon"} {
+	for _, mode := range []string{"startup failure", "early exit", "cancellation", "normal completion", "probe error", "dead daemon"} {
 		t.Run(mode, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+			ctx, stop := context.WithTimeout(t.Context(), 60*time.Second)
+			defer stop()
+			commandContext, cancel := context.WithCancel(ctx)
 			defer cancel()
-			command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestCIRevalidationObservedCommandChild$")
+			command := exec.CommandContext(commandContext, os.Args[0], "-test.run=^TestCIRevalidationObservedCommandChild$")
+			if mode == "startup failure" {
+				command = exec.CommandContext(commandContext, filepath.Join(t.TempDir(), "missing-command"))
+			}
 			winproc.Harden(command)
 			command.Env = append(os.Environ(), "NM_CI_OBSERVED_CHILD="+mode)
 			ready := make(chan struct{})
 			observed := make(chan struct{})
-			releaseScanner := make(chan struct{})
+			scannerContext, releaseScanner := context.WithCancel(ctx)
+			defer releaseScanner()
 			probeError := errors.New("owned daemon probe failed")
 			observe := func() error {
-				<-ready
+				select {
+				case <-ready:
+				default:
+					return nil
+				}
 				switch mode {
 				case "probe error":
 					close(observed)
@@ -744,26 +754,58 @@ func TestCIRevalidationObservedCommandJoinsBeforeReturning(t *testing.T) {
 					if line == "ready" {
 						close(ready)
 						if mode == "probe error" {
-							<-releaseScanner
+							<-scannerContext.Done()
+						}
+						if mode == "cancellation" {
+							cancel()
 						}
 					}
 				})
 				close(finished)
 			}()
 			if mode == "probe error" {
-				<-observed
+				select {
+				case <-observed:
+				case <-finished:
+					t.Fatal("command returned without observing the probe error")
+				case <-ctx.Done():
+					releaseScanner()
+					t.Fatal("probe did not complete within the command deadline")
+				}
 				select {
 				case <-finished:
 					t.Error("returned before the scanner finished")
 				case <-time.After(100 * time.Millisecond):
+				case <-ctx.Done():
 				}
-				close(releaseScanner)
+				releaseScanner()
 			}
-			<-finished
+			select {
+			case <-finished:
+			case <-ctx.Done():
+				releaseScanner()
+				t.Fatal("command and scanner did not finish within the command deadline")
+			}
 
+			if mode == "startup failure" {
+				if (!errors.Is(err, os.ErrNotExist) && !errors.Is(err, exec.ErrNotFound)) || observationError != nil || command.Process != nil {
+					t.Fatalf("startup failure = %q, %v, observation=%v, process=%v", output, err, observationError, command.Process)
+				}
+				return
+			}
+			if command.Process == nil || command.ProcessState == nil {
+				t.Fatalf("command did not start and finish: %v", err)
+			}
 			isAlive, probeErr := e2edaemon.ProcessAlive(command.Process.Pid)
 			if probeErr != nil || isAlive {
 				t.Errorf("command was not joined before return: alive=%t, err=%v", isAlive, probeErr)
+			}
+			if mode == "early exit" {
+				var exitError *exec.ExitError
+				if !errors.As(err, &exitError) || exitError.ExitCode() != 7 || observationError != nil || !strings.Contains(output, "exited before ready\n") {
+					t.Fatalf("early exit = %q, %v, observation=%v", output, err, observationError)
+				}
+				return
 			}
 			if !strings.Contains(output, "ready\n") {
 				t.Errorf("scanner output was not collected before return: %q", output)
@@ -787,6 +829,10 @@ func TestCIRevalidationObservedCommandChild(t *testing.T) {
 	mode := os.Getenv("NM_CI_OBSERVED_CHILD")
 	if mode == "" {
 		return
+	}
+	if mode == "early exit" {
+		fmt.Fprintln(os.Stderr, "exited before ready")
+		os.Exit(7)
 	}
 	fmt.Println("ready")
 	if mode == "normal completion" {

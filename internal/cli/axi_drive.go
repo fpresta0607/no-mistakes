@@ -1696,7 +1696,7 @@ func runAxiAbort(cmd *cobra.Command, runID string) error {
 	// nonzero with the unconfirmed contract.
 	final, confirmed, reason := waitForTerminalRun(ctx, env.client, active.Run.ID, abortStateWaitTimeout)
 	if !confirmed {
-		return emitUnconfirmedAbort(cmd, active.Run.ID, active.Run.Branch, reason, runViewPtrFromIPC(final), true)
+		return emitUnconfirmedAbort(cmd, active.Run.ID, active.Run.Branch, reason.Error(), runViewPtrFromIPC(final), true)
 	}
 	fields := []toon.Field{
 		toon.Field{Key: "aborted", Value: true},
@@ -1738,7 +1738,7 @@ func runAxiAbort(cmd *cobra.Command, runID string) error {
 // confirmed false and a reason naming what prevented confirmation. Callers
 // must never present a completed abort or authoritative final ownership
 // guidance without confirmed true.
-func waitForTerminalRun(ctx context.Context, client *ipc.Client, runID string, timeout time.Duration) (run *ipc.RunInfo, confirmed bool, reason string) {
+func waitForTerminalRun(ctx context.Context, client *ipc.Client, runID string, timeout time.Duration) (run *ipc.RunInfo, confirmed bool, reason error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	ticker := time.NewTicker(50 * time.Millisecond)
@@ -1749,7 +1749,7 @@ func waitForTerminalRun(ctx context.Context, client *ipc.Client, runID string, t
 		if deadline, ok := waitCtx.Deadline(); ok {
 			remaining = time.Until(deadline)
 			if remaining <= 0 {
-				return last, false, fmt.Sprintf("the run did not report a terminal state within the bounded %s wait", timeout)
+				return last, false, fmt.Errorf("the run did not report a terminal state within the bounded %s wait", timeout)
 			}
 		}
 		var result ipc.GetRunResult
@@ -1757,34 +1757,34 @@ func waitForTerminalRun(ctx context.Context, client *ipc.Client, runID string, t
 		if err != nil {
 			switch waitCtx.Err() {
 			case context.Canceled:
-				return last, false, "the in-flight run state read was cancelled before a terminal state was observed"
+				return last, false, errors.New("the in-flight run state read was cancelled before a terminal state was observed")
 			case context.DeadlineExceeded:
-				return last, false, fmt.Sprintf("the in-flight run state read did not complete within the bounded %s wait", timeout)
+				return last, false, fmt.Errorf("the in-flight run state read did not complete within the bounded %s wait", timeout)
 			default:
 				var timeoutErr interface{ Timeout() bool }
 				if errors.As(err, &timeoutErr) && timeoutErr.Timeout() {
-					return last, false, fmt.Sprintf("the in-flight run state read did not complete within the bounded %s wait", timeout)
+					return last, false, fmt.Errorf("the in-flight run state read did not complete within the bounded %s wait", timeout)
 				}
-				return last, false, fmt.Sprintf("the run state could not be read: %v", err)
+				return last, false, fmt.Errorf("the run state could not be read: %w", err)
 			}
 		}
 		observed := result.Run
 		if observed == nil {
-			return last, false, "the run state response did not identify a run"
+			return last, false, errors.New("the run state response did not identify a run")
 		}
 		if observed.ID != runID {
-			return last, false, fmt.Sprintf("the run state response identified run %s instead of the requested run %s", observed.ID, runID)
+			return last, false, fmt.Errorf("the run state response identified run %s instead of the requested run %s", observed.ID, runID)
 		}
 		last = observed
 		if terminalStatus(string(observed.Status)) {
-			return observed, true, ""
+			return observed, true, nil
 		}
 		select {
 		case <-waitCtx.Done():
 			if waitCtx.Err() == context.Canceled {
-				return last, false, "the wait was cancelled before a terminal state was observed"
+				return last, false, errors.New("the wait was cancelled before a terminal state was observed")
 			}
-			return last, false, fmt.Sprintf("the run did not report a terminal state within the bounded %s wait", timeout)
+			return last, false, fmt.Errorf("the run did not report a terminal state within the bounded %s wait", timeout)
 		case <-ticker.C:
 		}
 	}
@@ -1866,7 +1866,15 @@ func runAxiAbortByRunID(cmd *cobra.Command, runID string) error {
 	// terminal state for the exact run.
 	final, confirmed, reason := waitForTerminalRun(cmd.Context(), client, runID, abortStateWaitTimeout)
 	if !confirmed {
-		return emitUnconfirmedAbort(cmd, runID, "", reason, runViewPtrFromIPC(final), true)
+		if final == nil && isExactRunNotFound(reason, runID) {
+			emitDoc(cmd,
+				toon.Field{Key: "aborted", Value: false},
+				toon.Field{Key: "run", Value: runID},
+				toon.Field{Key: "detail", Value: "no run with that id exists (no-op)"},
+			)
+			return nil
+		}
+		return emitUnconfirmedAbort(cmd, runID, "", reason.Error(), runViewPtrFromIPC(final), true)
 	}
 	emitDoc(cmd,
 		toon.Field{Key: "aborted", Value: true},
