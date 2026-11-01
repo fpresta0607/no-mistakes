@@ -34,10 +34,11 @@ type RunShared struct {
 	closers []func()
 	closed  bool
 	// baseline is the last commit the Test step's baseline ran on in this
-	// executor lifetime, and whether it passed there.
-	baselineHead     string
-	baselinePassed   bool
-	baselineRecorded bool
+	// executor lifetime, its resolved comparison, and whether it passed there.
+	baselineHead       string
+	baselineComparison string
+	baselinePassed     bool
+	baselineRecorded   bool
 	// pushGuardRestarts counts how often the Push step sent the run back to
 	// Test because the baseline failed on the head to push.
 	pushGuardRestarts int
@@ -97,27 +98,28 @@ func (s *RunShared) Close() {
 	}
 }
 
-// RecordBaseline records the commit the Test step's baseline last ran on and
-// whether it passed there.
-func (s *RunShared) RecordBaseline(headSHA string, passed bool) {
+// RecordBaseline records the commit the Test step's baseline last ran on,
+// its resolved comparison, and whether it passed there.
+func (s *RunShared) RecordBaseline(headSHA, comparisonSHA string, passed bool) {
 	if s == nil {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.baselineHead, s.baselinePassed, s.baselineRecorded = headSHA, passed, true
+	s.baselineComparison = comparisonSHA
 }
 
 // Baseline returns what RecordBaseline last recorded. recorded is false when
 // nothing was, as after a daemon restart, and a caller must then treat the
 // head as untested.
-func (s *RunShared) Baseline() (headSHA string, passed, recorded bool) {
+func (s *RunShared) Baseline() (headSHA, comparisonSHA string, passed, recorded bool) {
 	if s == nil {
-		return "", false, false
+		return "", "", false, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.baselineHead, s.baselinePassed, s.baselineRecorded
+	return s.baselineHead, s.baselineComparison, s.baselinePassed, s.baselineRecorded
 }
 
 // CountPushGuardRestart counts one more return from Push to Test and returns

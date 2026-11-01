@@ -743,7 +743,11 @@ test_command_wrapper:
 The words are started with no shell in front of them, followed by exactly the program and arguments the command would have been started with: `sh -c <command>`, or `cmd.exe /c <command>` on Windows, with the shell as its resolved path.
 The command string therefore stays one argument, so `a && b` stands behind the wrapper whole.
 The working directory and the environment are those the command has without a wrapper.
-A word may name a run fact, filled in once: `{repo}` (the last element of the upstream URL), `{branch}`, `{run}` (the run id), and `{run_short}` (its first 8 characters).
+A word may name a run fact, filled in once: `{repo}` (the last element of the upstream URL), `{branch}`, `{run}` (the run id), `{run_short}` (its first 8 characters), and `{test_comparison_sha}` (the exact comparison already resolved by Test).
+`{test_comparison_sha}` is the full nonzero Git object ID (40 or 64 lowercase hexadecimal characters) used for Test's comparison, usually the merge-base with the fetched effective PR base branch, rather than the previous published ref stored in `runs.base_sha`.
+Head baseline commands, additional checks, and the base attribution invocation receive the same value, even though the attribution command runs in the base checkout.
+See [`side_by_side`](#side_by_side) for comparison reuse and pre-push proof requirements.
+A wrapper requesting this value never starts with an empty, zero, abbreviated, or unresolved comparison.
 Use the full path of the wrapper program unless it is on the daemon's own `PATH`.
 
 The wrapper is trusted to start what follows its words and to pass that program's output and exit code through.
@@ -809,15 +813,18 @@ A fix round never takes work started early.
 Nothing starts beside the review when a harness other than `claude` or `codex` is configured, since those are the harnesses known to serve two calls at once, or when the repository has submodules or Git LFS files, which a plain clone would not hold.
 The review's log says which.
 
+Taking a Test lane also takes its resolved comparison, and a pre-push baseline re-run keeps that comparison even if the default branch tip has moved.
+
 What is pushed is the hard part.
 The baseline ran on the commit the review started on, and the documentation pass, the Lint step and the formatter can each add a commit after it.
 So before anything is pushed, the Push step compares the head to push with the commit the baseline last ran on:
 
+- With a baseline configured, missing or malformed in-memory Test comparison proof refuses push until normal Test runs again.
+  This applies even to the tested commit itself or documentation-only changes, and after a daemon restart.
 - The tested commit itself is pushed as it is.
 - Otherwise every commit after the tested one is named in an informational note on the Push step.
 - When those commits change only paths the repository counts as documentation, by [`test.documentation_paths`](/no-mistakes/reference/repo-config/#testdocumentation_paths), the head is pushed without the baseline running again.
 - When they change anything else, the baseline runs again on the head to push. A pass pushes. A failure pushes nothing and sends the run back to the Test step, which owns failing tests and their fix rounds. A second such failure in one run fails the run with nothing pushed.
-- A tested commit the daemon no longer knows, as after a restart, counts as untested, so the baseline runs again.
 - With no baseline configured, or a failing baseline a person approved the Test step over, the commits are named and nothing runs again.
 
 This holds whether or not early work was taken.
