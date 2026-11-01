@@ -123,22 +123,20 @@ func TestProcessAliveRejectsInvalidPID(t *testing.T) {
 
 func TestDialProbeFailureDoesNotClassifyOwnerDead(t *testing.T) {
 	tests := []struct {
-		name    string
-		openErr error
-		waitErr error
+		name           string
+		openErr        error
+		shouldDenyWait bool
 	}{
 		{name: "access denied", openErr: windows.ERROR_ACCESS_DENIED},
 		{name: "other open failure", openErr: windows.ERROR_NOT_ENOUGH_MEMORY},
-		{name: "wait failure", waitErr: windows.ERROR_INVALID_HANDLE},
+		{name: "wait failure", shouldDenyWait: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			originalOpen := openEndpointProcess
-			originalWait := waitEndpointProcess
 			originalDial := dialNetworkWithTimeout
 			t.Cleanup(func() {
 				openEndpointProcess = originalOpen
-				waitEndpointProcess = originalWait
 				dialNetworkWithTimeout = originalDial
 			})
 			var opened windows.Handle
@@ -146,15 +144,19 @@ func TestDialProbeFailureDoesNotClassifyOwnerDead(t *testing.T) {
 				if test.openErr != nil {
 					return 0, test.openErr
 				}
+				if test.shouldDenyWait {
+					access = windows.PROCESS_QUERY_LIMITED_INFORMATION
+				}
 				var err error
 				opened, err = originalOpen(access, inherit, pid)
-				return opened, err
-			}
-			waitEndpointProcess = func(handle windows.Handle, milliseconds uint32) (uint32, error) {
-				if handle != opened || milliseconds != 0 {
-					t.Fatalf("wait(%d, %d), want retained handle %d and no wait", handle, milliseconds, opened)
+				if err == nil && test.shouldDenyWait {
+					state, waitErr := windows.WaitForSingleObject(opened, 0)
+					if state != windows.WAIT_FAILED || !errors.Is(waitErr, windows.ERROR_ACCESS_DENIED) {
+						windows.CloseHandle(opened)
+						t.Fatalf("wait without SYNCHRONIZE = %d, %v, want access denied", state, waitErr)
+					}
 				}
-				return windows.WAIT_FAILED, test.waitErr
+				return opened, err
 			}
 			connectErr := errors.New("connection unavailable")
 			dialNetworkWithTimeout = func(string, string, time.Duration) (net.Conn, error) {
@@ -176,7 +178,7 @@ func TestDialProbeFailureDoesNotClassifyOwnerDead(t *testing.T) {
 				t.Fatalf("Dial error = %v, want connection failure without dead-owner classification", err)
 			}
 			if opened != 0 {
-				if _, err := originalWait(opened, 0); !errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+				if _, err := windows.WaitForSingleObject(opened, 0); !errors.Is(err, windows.ERROR_INVALID_HANDLE) {
 					t.Fatalf("probe handle remains open: %v", err)
 				}
 			}

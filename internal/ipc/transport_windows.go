@@ -227,7 +227,6 @@ func restrictFileACL(path string) error {
 }
 
 var openEndpointProcess = windows.OpenProcess
-var waitEndpointProcess = windows.WaitForSingleObject
 
 func processAlive(pid int) bool {
 	if pid <= 0 || uint64(pid) > math.MaxUint32 {
@@ -240,6 +239,6 @@ func processAlive(pid int) bool {
 	defer windows.CloseHandle(handle)
 	// Only a signaled process proves termination; a failed probe must not
 	// authorize recovery of an endpoint that could still have a live owner.
-	state, err := waitEndpointProcess(handle, 0)
+	state, err := windows.WaitForSingleObject(handle, 0)
 	return err != nil || state != windows.WAIT_OBJECT_0
 }
