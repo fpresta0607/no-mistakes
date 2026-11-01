@@ -127,6 +127,7 @@ func TestCIHandbackRejectedFollowupRetainsRecoverableReservation(t *testing.T) {
 			gitCmd(t, caller, "merge", "--no-ff", "--no-edit", "main")
 			followup := gitCmd(t, caller, "rev-parse", "HEAD")
 			request.Resume, request.HeadSHA = true, followup
+			request.ReceiptID = released.ID
 			connection, err := sql.Open("sqlite", databasePath+"?_pragma=foreign_keys(on)")
 			if err != nil {
 				t.Fatal(err)
@@ -147,7 +148,6 @@ func TestCIHandbackRejectedFollowupRetainsRecoverableReservation(t *testing.T) {
 			}
 			timeout := 45 * time.Second
 			if failure == "post-move deadline" {
-				timeout = 20 * time.Second
 				sctx.Env = append(environment, "FAKE_CLI_HANDBACK_PAUSE=head")
 			} else if failure == "post-move cancellation" {
 				sctx.Env = append(environment, "FAKE_CLI_HANDBACK_PAUSE=merge")

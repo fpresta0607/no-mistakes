@@ -574,6 +574,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	)
 
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
+	if errors.Is(err, ErrCIHandbackSuspended) {
+		return err
+	}
 	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
 	}
@@ -1475,6 +1478,9 @@ rounds:
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), effectiveFindings, "", &executionMS)
 
 			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true)
+			if errors.Is(err, ErrCIHandbackSuspended) {
+				return false, "", err
+			}
 			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
 			}
@@ -1890,7 +1896,7 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 		case response := <-e.approvalCh:
 			return response, false, nil
 		case <-ctx.Done():
-			return approvalResponse{}, false, context.Cause(ctx)
+			return approvalResponse{}, false, e.approvalWaitError(ctx, sctx.Run.ID, step.Name())
 		}
 	}
 
@@ -1905,7 +1911,7 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 		case request := <-e.ciHandbackCh:
 			handler, ok := step.(CIHandbackStep)
 			if !ok || step.Name() != types.StepCI || e.autoFixLimit(types.StepCI) != 0 {
-				request.reply <- ciHandbackReply{err: fmt.Errorf("handback requires a published CI conflict with automatic CI repair disabled")}
+				request.reply <- ciHandbackReply{err: fmt.Errorf("handback requires a published CI gate with automatic CI repair disabled")}
 				continue
 			}
 			copyContext := *sctx
@@ -1930,7 +1936,7 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 		case response := <-e.approvalCh:
 			return response, false, nil
 		case <-ctx.Done():
-			return approvalResponse{}, false, context.Cause(ctx)
+			return approvalResponse{}, false, e.approvalWaitError(ctx, sctx.Run.ID, step.Name())
 		case <-timer.C:
 			e.mu.Lock()
 			isReleased := e.ciHandbackReleased
@@ -2041,6 +2047,9 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 // It accepts an optional context; if the context was cancelled with a cause,
 // the cause message is used as the run's error (more informative than "context canceled").
 func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
+	if errors.Is(err, ErrCIHandbackSuspended) {
+		return err
+	}
 	errMsg := err.Error()
 	for _, ctx := range ctxs {
 		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {

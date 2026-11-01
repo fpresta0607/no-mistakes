@@ -170,6 +170,9 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	branch := strings.TrimPrefix(ref, "refs/heads/")
 
 	pushURL := resolvePushURL(sctx)
+	if handback != nil && (branchsync.TargetFingerprint(pushURL) != handback.TargetFingerprint || branchsync.TargetFingerprint(sctx.Repo.PushURL()) != handback.TargetFingerprint || ref != handback.PushRef) {
+		return fmt.Errorf("CI handback publication target changed")
+	}
 	pushTarget := "upstream"
 	usingFork := strings.TrimSpace(sctx.Repo.ForkURL) != ""
 	if usingFork {

@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -10,6 +11,76 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestOrdinaryCIHandbackShutdownPreservesOnlyItsOpenCIGate(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		step        types.StepName
+		cause       error
+		isSuspended bool
+	}{
+		{"released CI", types.StepCI, ErrDaemonShutdown, true},
+		{"later review", types.StepReview, ErrDaemonShutdown, false},
+		{"explicit cancellation", types.StepCI, context.Canceled, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database, paths, run, repo := setupTest(t)
+			for _, err := range []error{
+				database.UpdateRunStatus(run.ID, types.RunRunning),
+				database.UpdateRunPRURL(run.ID, "https://github.com/test/repo/pull/1"),
+				database.UpdateRunPRState(run.ID, "open"),
+				database.UpdateRunPublication(run.ID, db.PushBinding{HeadSHA: run.HeadSHA, TargetKind: "upstream", TargetFingerprint: "target", Ref: "refs/heads/feature"}),
+				database.UpdateRunReviewApprovedHeadSHA(run.ID, run.HeadSHA),
+			} {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			step, err := database.InsertStepResult(run.ID, types.StepCI)
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings := `{"findings":[{"id":"ci-1","category":"ci-check","severity":"error","check":"tests","action":"auto-fix","description":"failed"}]}`
+			round, err := database.InsertStepRound(step.ID, 1, "initial", &findings, nil, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 0, 10, &findings); err != nil {
+				t.Fatal(err)
+			}
+			run, err = database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipt := &db.CIHandback{RunID: run.ID, RoundID: round.ID, CallerDir: "caller", ReleasedHead: run.HeadSHA, PRURL: *run.PRURL, BaseBranch: "main", BaseHead: "base", PushGeneration: *run.PushGeneration, TargetFingerprint: "target", PushRef: "refs/heads/feature",
+				Source: &db.CIHandbackSource{CallerHead: run.HeadSHA, SubmittedHead: *run.SubmittedHeadSHA, ReviewHead: *run.ReviewApprovedHeadSHA, PushKind: *run.PushTargetKind, PushedAt: *run.LastPushedAt, Findings: findings, AutoFixLimits: map[types.StepName]int{types.StepCI: 0}}}
+			if err := database.ReleaseCIHandback(receipt, run, repo, findings); err != nil {
+				t.Fatal(err)
+			}
+			if test.step != types.StepCI {
+				if err := database.PrepareCIHandback(receipt, "followup", "base", "HEAD", repo); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.AcceptCIHandback(receipt, "followup", repo); err != nil {
+					t.Fatal(err)
+				}
+			}
+			handler := newPassStep(test.step)
+			executor := NewExecutor(database, paths, &config.Config{}, nil, []Step{handler}, nil)
+			executor.waiting, executor.waitingStep = true, test.step
+			ctx, cancel := context.WithCancelCause(t.Context())
+			cancel(test.cause)
+			_, _, err = executor.waitForApprovalOrReconcile(ctx, handler, &StepContext{Run: run}, findings, false)
+			expected := test.cause
+			if test.isSuspended {
+				expected = ErrCIHandbackSuspended
+			}
+			if !errors.Is(err, expected) {
+				t.Fatalf("gate cancellation = %v, want %v", err, expected)
+			}
+		})
+	}
+}
 
 type handbackReconciler struct {
 	calls atomic.Int32

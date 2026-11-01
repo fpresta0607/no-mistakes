@@ -2,12 +2,35 @@ package cli
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	toon "github.com/toon-format/toon-go"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestAxiHandbackBoundedWaitKeepsItsAcceptedReceipt(t *testing.T) {
+	command := newRootCmd()
+	var output bytes.Buffer
+	command.SetOut(&output)
+	err := emitAxiWaitElapsed(command, time.Second, "no-mistakes axi run",
+		toon.Field{Key: "handback", Value: "accepted"},
+		toon.Field{Key: "receipt", Value: toon.NewObject(toon.Field{Key: "id", Value: "native-receipt"})},
+	)
+	if err == nil {
+		t.Fatal("bounded wait reported completion")
+	}
+	for _, required := range []string{"wait of 1s elapsed", "handback: accepted", "receipt:", "id: native-receipt", "axi run"} {
+		if !strings.Contains(output.String(), required) {
+			t.Fatalf("accepted wait lost %q:\n%s", required, output.String())
+		}
+	}
+}
 
 func TestAxiHandbackExplainsThePublishedConflictContract(t *testing.T) {
 	command := newRootCmd()
@@ -73,5 +96,24 @@ func TestAxiHandbackStatusKeepsConflictAndScopesFollowupHelp(t *testing.T) {
 		if strings.Contains(output, "axi respond") || (selectedRun == "" && !strings.Contains(output, "axi handback --resume")) || (selectedRun != "" && strings.Contains(output, "axi handback --resume")) {
 			t.Fatalf("status supplied an unsafe or missing follow-up command:\n%s", output)
 		}
+	}
+}
+
+func TestAxiHandbackRefusesMalformedExpectationBeforeOpeningTheDaemon(t *testing.T) {
+	for _, content := range []string{`{}`, `{"run_id":"stale","unexpected":true}`, `null`, `[]`, `{} {}`} {
+		t.Run(content, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "expect.json")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			command := newRootCmd()
+			var output bytes.Buffer
+			command.SetOut(&output)
+			command.SetErr(&output)
+			command.SetArgs([]string{"axi", "handback", "--expect", path})
+			if err := command.Execute(); err == nil || !strings.Contains(output.String(), "invalid handback expectation") {
+				t.Fatalf("expectation was not rejected before daemon access: %v\n%s", err, output.String())
+			}
+		})
 	}
 }

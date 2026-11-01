@@ -440,28 +440,33 @@ Cached home and status rendering performs no network read and labels the remote 
 
 ## no-mistakes axi handback
 
-Returns a published GitHub CI merge conflict to its exact clean caller for an additive follow-up in the same run.
+Returns eligible failed published GitHub CI to its author for a correction in the same run.
 
 ```bash
 no-mistakes axi sync
 no-mistakes axi handback
-# Merge the current PR base into this branch, resolve conflicts, and commit.
-no-mistakes axi handback --resume
+# Preserve the released source, make the correction, and commit.
+no-mistakes axi handback --resume --receipt <id>
 ```
 
-Release requires a CI `awaiting_approval` gate containing an unresolved merge-conflict finding, automatic CI repair disabled (`auto_fix.ci: 0`), and every preceding step completed.
-The caller must be a unique, completely clean checkout of the exact recorded and published head in the registered repository.
+Release requires the latest branch run's CI `awaiting_approval` gate, automatic CI repair disabled (`auto_fix.ci: 0`), and every preceding required step completed.
+A published GitHub CI merge conflict requires an unresolved merge-conflict finding and a clean, synchronized caller.
+An ordinary handback requires genuine provider-structured failed checks, exact completed Review and Test evidence for the published head, and no review-bot, transient, safety or protected-path refusal.
+An ordinary caller may be clean and genuinely divergent; release anchors its original head and the exact published head in both repositories without moving its branch.
+Follow `branch_sync.next_action.command` to integrate that preserved published output additively before committing the correction.
+Behind callers use the existing guarded synchronization first; dirty callers retain their work and refuse release.
 The daemon verifies the managed worktree, gate lane, live PR identity and head, live push target, branch ref and push generation before recording the receipt.
 Dirty callers, moved heads, active writers, ambiguous ownership and mismatched publication evidence refuse without moving the caller or resolving the gate.
 
-The run stays active and CI stays `awaiting_approval` with its conflict findings intact.
+The run stays active and CI stays `awaiting_approval` with its failed findings intact.
 Release invokes no fixer and records no approve, skip or declined-finding decision.
 It reserves the gate against ordinary responses and automatic reconciliation while the caller works.
 The receipt retains the run, PR, released head, base head and push provenance; previous validation rounds and repair selections remain unchanged.
 `axi status` exposes `ci_handback.state: released` alongside the original findings.
-Release returns `handback: released`, the run ID, PR URL and full `released_head`.
+Release returns `handback: released`, the run ID, PR URL, full `released_head`, and a native `receipt` containing its ID, run/repository/branch, original caller directory/head, current/published heads, publication generation, CI round and state.
 
-`--resume` accepts a changed, clean head from that same caller worktree only after proving that it contains the released published head, the recorded base head and the freshly resolved live PR base through an additive merge.
+`--resume --receipt <id>` accepts a changed, clean head from that same caller worktree only after proving that it preserves the released published head and original author history.
+Conflict receipts additionally require the recorded and freshly resolved live PR base heads through an additive merge.
 It imports the head without a receive-hook push, revokes the previous review approval and readiness, and restarts Review, Test, Document, Lint, Push, PR and CI in the same run.
 The original intent, submitted head, PR identity, round history and spent automatic repair budget remain intact.
 The integration proof replaces another rebase; publication preserves the accepted follow-up, including the released head, as an ancestor and refuses any update requiring force.
@@ -470,8 +475,18 @@ Resubmission returns the full `accepted_head` and follows the next decision poin
 After acceptance, `axi status` reports `ci_handback.state: accepted` and the full `accepted_head`.
 Acceptance records the exact candidate checkpoint before moving the managed head; if acceptance fails, it restores the released managed head only while that checkpoint still matches.
 [Crash recovery](/no-mistakes/concepts/daemon/#crash-recovery) owns interrupted resubmissions and reservations whose recovery evidence cannot be verified.
-The IPC method is `ci_handback`, binding `repo_id`, `run_id`, `branch`, `caller_dir`, `head_sha` and the `resume` boolean; an older daemon refuses the unknown method.
+Ordinary handback parks survive orderly daemon restart without turning failed CI into success or recreating cancelled work.
+Storage failures retain the source and durable reservation; exact accepted retries return the same receipt without restarting validation.
+The IPC method remains `ci_handback`; the daemon binds the source, native receipt, CI round, exact publication and authenticated operator.
 The CLI selects only the current branch's active run and accepts no `--run` override.
+
+Wrappers can require an exact identity with `--expect binding.json` on release and resume.
+The file must contain exactly `repo_id`, `run_id`, `branch`, `caller_dir`, `caller_head`, `current_head`, `published_head` and `push_generation`.
+Use the canonical absolute invoking worktree root, full lowercase commit IDs and a positive publication generation.
+These fields are comparisons, never a selector that adopts another or newer run.
+On resume, `caller_head` is the authored correction; `current_head`, `published_head` and `push_generation` remain the original released binding.
+Unknown or missing fields, changed identities and a wrong receipt refuse before custody changes.
+If the bounded resume wait ends, its structured output still includes the accepted native receipt; inspect progress with `axi status` or reattach with `axi run`.
 
 ## no-mistakes axi sync
 

@@ -134,7 +134,7 @@ func TestStaleMonitorGuidance_DisabledRepairHandback(t *testing.T) {
 				"same caller worktree",
 				"additive merge",
 				"every published and pipeline commit",
-				"`no-mistakes axi handback --resume`",
+				"`no-mistakes axi handback --resume --receipt <id>`",
 				"same run and PR",
 				"unresolved conflict findings",
 				"spent budgets",

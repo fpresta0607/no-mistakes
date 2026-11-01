@@ -94,7 +94,10 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 	}
 	if handback != nil {
 		state := "released"
-		handbackFields := []toon.Field{{Key: "released_head", Value: handback.ReleasedHead}}
+		handbackFields := []toon.Field{{Key: "id", Value: handback.ID}, {Key: "run_id", Value: handback.RunID}, {Key: "repo_id", Value: run.RepoID}, {Key: "branch", Value: run.Branch}, {Key: "caller_dir", Value: handback.CallerDir}, {Key: "released_head", Value: handback.ReleasedHead}, {Key: "published_head", Value: handback.ReleasedHead}, {Key: "push_generation", Value: handback.PushGeneration}, {Key: "round_id", Value: handback.RoundID}}
+		if handback.Source != nil {
+			handbackFields = append(handbackFields, toon.Field{Key: "caller_head", Value: handback.Source.CallerHead})
+		}
 		if handback.AcceptedHead != nil {
 			state = "accepted"
 			handbackFields = append(handbackFields, toon.Field{Key: "accepted_head", Value: *handback.AcceptedHead})
@@ -117,7 +120,7 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 			fields = append(fields, inspectionOnlyGateFields(gate, run.ID)...)
 		} else {
 			if handback != nil && handback.AcceptedHead == nil {
-				fields = append(fields, gateFieldsWithHelp(gate, []string{"The published CI conflict is released to its recorded caller worktree. Commit an additive merge there, then submit it with no-mistakes axi handback --resume; the same run requires fresh validation."})...)
+				fields = append(fields, gateFieldsWithHelp(gate, []string{"Failed published CI is released to its recorded caller worktree. Preserve both histories, commit the correction there, then submit it with no-mistakes axi handback --resume --receipt " + handback.ID + "; the same run requires fresh validation."})...)
 			} else {
 				fields = append(fields, gateFields(gate)...)
 			}

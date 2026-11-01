@@ -25,6 +25,19 @@ type CIHandback struct {
 	PushRef           string
 	AcceptedHead      *string
 	Candidate         *CIHandbackCandidate
+	Source            *CIHandbackSource
+}
+
+// Source distinguishes an ordinary failed-check return from conflict handback.
+// Its original caller and validation binding survive acceptance and restarts.
+type CIHandbackSource struct {
+	CallerHead    string
+	SubmittedHead string
+	ReviewHead    string
+	PushKind      string
+	PushedAt      int64
+	Findings      string
+	AutoFixLimits map[types.StepName]int
 }
 
 type CIHandbackCandidate struct {
@@ -39,13 +52,22 @@ type CIHandbackCandidate struct {
 func (d *DB) LatestCIHandback(runID string) (*CIHandback, error) {
 	var receipt CIHandback
 	var candidateJSON *string
-	err := d.sql.QueryRow(`SELECT id, run_id, round_id, caller_dir, released_head, pr_url, base_branch, base_head, push_generation, target_fingerprint, push_ref, accepted_head, candidate_json FROM ci_handbacks WHERE run_id = ? ORDER BY id DESC LIMIT 1`, runID).Scan(
-		&receipt.ID, &receipt.RunID, &receipt.RoundID, &receipt.CallerDir, &receipt.ReleasedHead, &receipt.PRURL, &receipt.BaseBranch, &receipt.BaseHead, &receipt.PushGeneration, &receipt.TargetFingerprint, &receipt.PushRef, &receipt.AcceptedHead, &candidateJSON)
+	var sourceJSON *string
+	err := d.sql.QueryRow(`SELECT id, run_id, round_id, caller_dir, released_head, pr_url, base_branch, base_head, push_generation, target_fingerprint, push_ref, accepted_head, candidate_json, source_json FROM ci_handbacks WHERE run_id = ? ORDER BY id DESC LIMIT 1`, runID).Scan(
+		&receipt.ID, &receipt.RunID, &receipt.RoundID, &receipt.CallerDir, &receipt.ReleasedHead, &receipt.PRURL, &receipt.BaseBranch, &receipt.BaseHead, &receipt.PushGeneration, &receipt.TargetFingerprint, &receipt.PushRef, &receipt.AcceptedHead, &candidateJSON, &sourceJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read CI handback: %w", err)
+	}
+	if sourceJSON != nil {
+		if err := json.Unmarshal([]byte(*sourceJSON), &receipt.Source); err != nil {
+			return nil, fmt.Errorf("read CI handback source: %w", err)
+		}
+		if receipt.Source == nil || receipt.Source.CallerHead == "" || receipt.Source.SubmittedHead == "" || receipt.Source.ReviewHead == "" || receipt.Source.PushKind == "" || receipt.Source.PushedAt == 0 || receipt.Source.Findings == "" || receipt.Source.AutoFixLimits == nil {
+			return nil, fmt.Errorf("CI handback source is incomplete")
+		}
 	}
 	if candidateJSON != nil {
 		if err := json.Unmarshal([]byte(*candidateJSON), &receipt.Candidate); err != nil {
@@ -110,16 +132,29 @@ func (d *DB) ClearCIHandbackCandidate(receipt *CIHandback) error {
 }
 
 func (d *DB) ReleaseCIHandback(receipt *CIHandback, run *Run, repo *Repo, findings string) error {
+	var sourceJSON *string
+	if receipt.Source != nil {
+		encoded, err := json.Marshal(receipt.Source)
+		if err != nil {
+			return err
+		}
+		value := string(encoded)
+		sourceJSON = &value
+	}
 	receipt.ID = newID()
-	result, err := d.sql.Exec(`INSERT INTO ci_handbacks (id, run_id, round_id, caller_dir, released_head, pr_url, base_branch, base_head, push_generation, target_fingerprint, push_ref, released_at)
-		SELECT ?, r.id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM runs r JOIN repos p ON p.id = r.repo_id
+	result, err := d.sql.Exec(`INSERT INTO ci_handbacks (id, run_id, round_id, caller_dir, released_head, pr_url, base_branch, base_head, push_generation, target_fingerprint, push_ref, released_at, source_json)
+		SELECT ?, r.id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM runs r JOIN repos p ON p.id = r.repo_id
 		WHERE r.id = ? AND r.status = ? AND r.head_sha = ? AND r.last_pushed_sha = r.head_sha AND r.push_generation = ?
 		AND r.push_target_fingerprint = ? AND r.push_ref = ? AND r.pr_url = ? AND r.pr_state = 'open' AND COALESCE(r.push_active, 0) = 0
 		AND p.upstream_url = ? AND COALESCE(p.fork_url, '') = ?
 		AND NOT EXISTS (SELECT 1 FROM runs other WHERE other.repo_id = r.repo_id AND other.branch = r.branch AND other.id <> r.id AND other.status IN ('pending', 'running'))
+		AND (? IS NULL OR (r.submitted_head_sha = ? AND r.review_approved_head_sha = ? AND r.push_target_kind = ? AND r.last_pushed_at = ?
+		AND NOT EXISTS (SELECT 1 FROM runs newer WHERE newer.repo_id = r.repo_id AND newer.branch = r.branch AND newer.id > r.id)
+		AND NOT EXISTS (SELECT 1 FROM step_results writer WHERE writer.run_id = r.id AND (writer.agent_pid IS NOT NULL OR (writer.step_name <> 'ci' AND writer.status <> 'completed')))))
 		AND EXISTS (SELECT 1 FROM step_results s JOIN step_rounds round ON round.step_result_id = s.id WHERE s.run_id = r.id AND s.step_name = 'ci' AND s.status = 'awaiting_approval' AND s.findings_json = ? AND s.auto_fix_limit IS NULL AND round.id = ? AND round.findings_json = s.findings_json)`,
-		receipt.ID, receipt.RoundID, receipt.CallerDir, receipt.ReleasedHead, receipt.PRURL, receipt.BaseBranch, receipt.BaseHead, receipt.PushGeneration, receipt.TargetFingerprint, receipt.PushRef, now(),
-		run.ID, types.RunRunning, receipt.ReleasedHead, receipt.PushGeneration, receipt.TargetFingerprint, receipt.PushRef, receipt.PRURL, repo.UpstreamURL, repo.ForkURL, findings, receipt.RoundID)
+		receipt.ID, receipt.RoundID, receipt.CallerDir, receipt.ReleasedHead, receipt.PRURL, receipt.BaseBranch, receipt.BaseHead, receipt.PushGeneration, receipt.TargetFingerprint, receipt.PushRef, now(), sourceJSON,
+		run.ID, types.RunRunning, receipt.ReleasedHead, receipt.PushGeneration, receipt.TargetFingerprint, receipt.PushRef, receipt.PRURL, repo.UpstreamURL, repo.ForkURL,
+		sourceJSON, run.SubmittedHeadSHA, run.ReviewApprovedHeadSHA, run.PushTargetKind, run.LastPushedAt, findings, receipt.RoundID)
 	if err != nil {
 		return fmt.Errorf("release CI handback: %w", err)
 	}

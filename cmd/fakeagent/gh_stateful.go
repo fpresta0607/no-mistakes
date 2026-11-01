@@ -29,7 +29,8 @@ type ghStatefulPR struct {
 }
 
 type ghStatefulState struct {
-	PRs map[string]*ghStatefulPR `json:"prs"`
+	PRs    map[string]*ghStatefulPR `json:"prs"`
+	Checks []json.RawMessage        `json:"checks,omitempty"`
 }
 
 // runGhStatefulPRStub is a tiny in-file GitHub: PRs persist across gh calls
@@ -74,7 +75,12 @@ func runGhStatefulPRStub(args []string) int {
 		}
 		switch {
 		case strings.Contains(query, "statusCheckRollup"):
-			fmt.Println(`{"data":{"repository":{"object":{"statusCheckRollup":null}}}}`)
+			if len(state.Checks) == 0 {
+				fmt.Println(`{"data":{"repository":{"object":{"statusCheckRollup":null}}}}`)
+			} else {
+				checks, _ := json.Marshal(state.Checks)
+				fmt.Printf(`{"data":{"repository":{"object":{"statusCheckRollup":{"contexts":{"nodes":%s,"pageInfo":{"hasNextPage":false,"endCursor":""}}}}}}}`+"\n", checks)
+			}
 			return 0
 		case strings.Contains(query, "reviewThreads"):
 			fmt.Println(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}}}`)

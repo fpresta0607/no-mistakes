@@ -60,4 +60,8 @@ func TestPublishCIHandbackPreservesAcceptedFollowup(t *testing.T) {
 	if err := publishRunHead(sctx, published, "", nil); err == nil || !strings.Contains(err.Error(), "accepted CI follow-up") {
 		t.Fatalf("publication could discard accepted head %s: %v", accepted, err)
 	}
+	recordReviewApproval(t, sctx, accepted)
+	if err := publishRunHead(sctx, accepted, "", nil); err == nil || !strings.Contains(err.Error(), "CI handback publication target changed") {
+		t.Fatalf("publication accepted a different target than its receipt: %v", err)
+	}
 }

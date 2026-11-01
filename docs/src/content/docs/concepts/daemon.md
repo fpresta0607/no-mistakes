@@ -128,6 +128,10 @@ reason about in one long-lived process than inside independent hook invocations.
 
 ## Crash recovery
 
+An ordinary failed-CI handback parked without an active writer retains its gate, worktree, evidence and frozen repair limits during orderly daemon shutdown.
+Restart restores that source-bound reservation instead of failing or approving its CI findings.
+An explicit user abort remains terminal and is never resumed by handback.
+
 On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon crashed while they were active):
 
 - Completes legacy active rows whose persisted PR state is already `merged` or `closed`, including their CI step, before active-run recovery and parked-run planning

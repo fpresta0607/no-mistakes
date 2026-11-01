@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -184,6 +186,13 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err != nil {
 		return nil, err
 	}
+	if receipt != nil && receipt.Source != nil {
+		origins, err := git.GetConfiguredRemoteURLs(ctx, repo.WorkingPath, "origin")
+		if err != nil || len(origins) != 1 || branchsync.TargetFingerprint(origins[0]) != branchsync.TargetFingerprint(repo.UpstreamURL) || branchsync.TargetFingerprint(repo.PushURL()) != receipt.TargetFingerprint {
+			return nil, fmt.Errorf("ordinary CI handback repository source changed during recovery")
+		}
+		repo.URLsVerified = true
+	}
 	if isHandbackPending && receipt != nil && receipt.Candidate != nil {
 		if _, err := steps.CIHandbackManagedHead(&pipeline.StepContext{Ctx: ctx, WorkDir: workDir, GateDir: gateDir}, receipt); err != nil {
 			return nil, err
@@ -195,6 +204,20 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	cfg, err := m.loadRecoveredConfig(ctx, run, repo, workDir)
 	if err != nil {
 		return nil, err
+	}
+	if receipt != nil && receipt.Source != nil {
+		limits := receipt.Source.AutoFixLimits
+		for _, name := range types.AllSteps() {
+			if limit, ok := limits[name]; !ok || limit < 0 {
+				return nil, fmt.Errorf("ordinary CI handback repair policy is incomplete")
+			}
+		}
+		cfg.AutoFix.Review = min(cfg.AutoFix.Review, limits[types.StepReview])
+		cfg.AutoFix.Test = min(cfg.AutoFix.Test, limits[types.StepTest])
+		cfg.AutoFix.Document = min(cfg.AutoFix.Document, limits[types.StepDocument])
+		cfg.AutoFix.Lint = min(cfg.AutoFix.Lint, limits[types.StepLint])
+		cfg.AutoFix.CI = min(cfg.AutoFix.CI, limits[types.StepCI])
+		cfg.AutoFix.Rebase = min(cfg.AutoFix.Rebase, limits[types.StepRebase])
 	}
 	execSteps := steps.WithCustomGates(m.steps(), cfg.Gates)
 	if err := pipeline.ValidateRecoveredRun(m.db, run, execSteps); err != nil {
@@ -269,8 +292,14 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	if repo.DefaultBranch != "" {
 		fetchCtx, cancel := context.WithTimeout(ctx, recoveredConfigFetchTimeout)
 		defer cancel()
-		if err := fetchRecoveredRemoteBranch(fetchCtx, workDir, "origin", repo.DefaultBranch); err != nil {
-			slog.Warn("failed to fetch default branch while recovering run; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
+		var fetchErr error
+		if repo.URLsVerified {
+			fetchErr = fetchRunDefaultBranch(fetchCtx, workDir, repo)
+		} else {
+			fetchErr = fetchRecoveredRemoteBranch(fetchCtx, workDir, "origin", repo.DefaultBranch)
+		}
+		if fetchErr != nil {
+			slog.Warn("failed to fetch default branch while recovering run; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", fetchErr)
 		} else if sha, err := git.ResolveRef(ctx, workDir, "refs/remotes/origin/"+repo.DefaultBranch); err != nil {
 			slog.Warn("failed to resolve default branch while recovering run; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
 		} else {
@@ -477,6 +506,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	m.wg.Add(1)
 	go func() {
 		startedAt := time.Now()
+		isSuspended := false
 		defer m.wg.Done()
 		defer close(done)
 		defer func() {
@@ -491,12 +521,16 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			cancel(nil)
 			_ = plan.agent.Close()
 			m.closeSubscribers(plan.run.ID)
-			m.removeRunWorktree(plan.repo.ID, plan.run.ID, plan.gateDir, plan.workDir, "resumed_run_finished")
+			if !isSuspended {
+				m.removeRunWorktree(plan.repo.ID, plan.run.ID, plan.gateDir, plan.workDir, "resumed_run_finished")
+			}
 			// A recovered run is a finished run too. This is the second of the
 			// two completion boundaries, and leaving it out is what let a run
 			// resumed after a daemon restart keep its empty evidence directory
 			// until some later run or restart happened to sweep it.
-			m.cleanupRunEvidence(plan.cfg, plan.run.ID)
+			if !isSuspended {
+				m.cleanupRunEvidence(plan.cfg, plan.run.ID)
+			}
 			m.mu.Lock()
 			delete(m.executors, plan.run.ID)
 			delete(m.cancels, plan.run.ID)
@@ -505,6 +539,10 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		}()
 
 		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
+			if errors.Is(err, pipeline.ErrCIHandbackSuspended) {
+				isSuspended = true
+				return
+			}
 			if plan.run.Status == types.RunRunning {
 				errMsg := err.Error()
 				plan.run.Status = types.RunFailed
@@ -1779,6 +1817,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	m.wg.Add(1)
 	go func() {
 		startedAt := time.Now()
+		isSuspended := false
 		defer m.wg.Done()
 		defer close(done)
 		defer func() {
@@ -1817,8 +1856,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			ag.Close()
 			// Close subscriber channels for this run.
 			m.closeSubscribers(run.ID)
-			m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_finished")
-			m.cleanupRunEvidence(cfg, run.ID)
+			if !isSuspended {
+				m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_finished")
+				m.cleanupRunEvidence(cfg, run.ID)
+			}
 			// Remove tracking.
 			m.mu.Lock()
 			delete(m.executors, run.ID)
@@ -1828,6 +1869,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}()
 
 		if err := executor.Execute(runCtx, run, repo, wtDir); err != nil {
+			if errors.Is(err, pipeline.ErrCIHandbackSuspended) {
+				isSuspended = true
+				return
+			}
 			fields := telemetry.Fields{
 				"action":      "finished",
 				"trigger":     trigger,
@@ -2214,8 +2259,8 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 	return result, nil
 }
 
-// Shutdown cancels all active runs. Called during daemon shutdown to prevent
-// orphaned goroutines from continuing agent calls and git operations.
+// Shutdown stops every run's goroutines. An ordinary CI handback already parked
+// without a writer keeps its durable gate for recovery; user cancellation does not.
 func (m *RunManager) Shutdown() {
 	m.shuttingDown.Store(true)
 
@@ -2227,7 +2272,7 @@ func (m *RunManager) Shutdown() {
 	m.mu.Unlock()
 
 	for id, cancel := range cancels {
-		cancel(fmt.Errorf("daemon shutting down"))
+		cancel(pipeline.ErrDaemonShutdown)
 		slog.Info("cancelled run on shutdown", "run_id", id)
 	}
 

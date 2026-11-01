@@ -221,10 +221,14 @@ Run the pipeline and decide on its findings as they come up:
    runs (after a `failed` or `cancelled` outcome), never to circumvent a
    gate.
 
-   A published GitHub CI merge conflict parked with automatic CI repair disabled has one explicit caller handback: synchronize to its exact published head, then run `no-mistakes axi handback`.
-   Only after it returns `handback: released` may you resolve the conflict in that recorded caller worktree through an additive merge that retains every published and pipeline commit.
-   Commit the merge and submit it with `no-mistakes axi handback --resume`, which preserves the same run, PR, unresolved conflict round and spent budgets while requiring fresh validation from Review.
+   Ordinary failed published GitHub checks and merge conflicts parked with automatic CI repair disabled have one explicit author handback: follow the supported synchronization guidance, then run `no-mistakes axi handback`.
+   Ordinary handback anchors a clean divergent author's history and the published output without moving the branch; follow the exact additive integration command in `branch_sync.next_action`.
+   Only after it returns `handback: released` may you make the authorized correction in that recorded caller worktree, preserving every published, author and pipeline commit.
+   Commit the follow-up and submit it with `no-mistakes axi handback --resume --receipt <id>`, which preserves the same run, PR, unresolved CI round and spent budgets while requiring fresh validation from Review.
    Do not rebase, force-push, start a replacement run, or use approve, skip or abort to obtain that control.
+   A wrapper must bind all source identities with `--expect binding.json` and resume with the returned native receipt ID.
+   The expectation contains exactly repo_id, run_id, branch, caller_dir, caller_head, current_head, published_head and push_generation; resume changes only caller_head to the authored correction.
+   An ordinary authored correction must retain both the original author and published histories and pass complete validation again in the same run, without granting another automatic repair allowance or deciding the failed CI findings.
 
     Each `respond` blocks until the next `gate:`, `checks-passed` decision point, or final outcome, subject to the same default `--wait 8m` hold.
 
@@ -304,7 +308,7 @@ With automatic CI repair enabled, a PR that falls behind the default branch or h
 When that live CI monitor sees an actual conflict it **rebases onto the base, resolves it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push**.
 A PR that is merely behind but still clean needs nothing either, since the platform merges it.
 For a published GitHub CI merge conflict parked with automatic CI repair disabled, run `no-mistakes axi sync` to reach the exact published head, then `no-mistakes axi handback`.
-Only after `handback: released`, resolve and commit an additive merge in that same caller worktree, preserving every published and pipeline commit, then run `no-mistakes axi handback --resume`.
+Only after `handback: released`, resolve and commit an additive merge in that same caller worktree, preserving every published and pipeline commit, then run `no-mistakes axi handback --resume --receipt <id>`.
 This keeps the same run and PR, unresolved conflict findings and spent budgets, and requires fresh validation from Review before publication.
 Do not rebase or force-push the handback follow-up.
 Only when that monitor is

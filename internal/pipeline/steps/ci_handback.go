@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -18,7 +20,7 @@ import (
 )
 
 // HandbackCI runs only inside the executor's serialized, idle CI gate.
-// Release changes no Git state and leaves the conflict round undecided.
+// Release preserves source refs and leaves the failed CI round undecided.
 func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackParams) (_ *ipc.CIHandbackResult, returnErr error) {
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
@@ -43,6 +45,36 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 	if run.LastPushedSHA == nil || *run.LastPushedSHA != run.HeadSHA || run.PushGeneration == nil || *run.PushGeneration < 1 || run.PushTargetFingerprint == nil || *run.PushTargetFingerprint != branchsync.TargetFingerprint(repo.PushURL()) || run.PushRef == nil || *run.PushRef != "refs/heads/"+run.Branch || run.PRURL == nil || run.PRState == nil || *run.PRState != "open" {
 		return nil, fmt.Errorf("handback requires exact published head, PR and push provenance")
 	}
+	step, err := sctx.DB.GetStepResult(sctx.StepResultID)
+	if err != nil || step == nil || step.Status != types.StepStatusAwaitingApproval || step.AutoFixLimit != nil || step.FindingsJSON == nil {
+		return nil, fmt.Errorf("handback requires a parked CI gate with automatic repair disabled")
+	}
+	findings, err := types.ParseFindingsJSON(*step.FindingsJSON)
+	if err != nil {
+		return nil, err
+	}
+	if pipeline.HasProtectedPathRefusal(*step.FindingsJSON) {
+		return nil, fmt.Errorf("CI handback cannot consume a protected-path refusal")
+	}
+	hasConflict := false
+	for _, finding := range findings.Items {
+		hasConflict = hasConflict || finding.Category == types.FindingCategoryCIMergeConflict
+	}
+	isOrdinary := !hasConflict
+	if isOrdinary {
+		if len(findings.Items) == 0 || sctx.Config.AutoFixLimit(types.StepCI) != 0 || run.SubmittedHeadSHA == nil || run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != run.HeadSHA || run.PushTargetKind == nil || run.LastPushedAt == nil || request.PublishedHead != run.HeadSHA || request.PushGeneration != *run.PushGeneration {
+			return nil, fmt.Errorf("ordinary CI handback requires exact reviewed publication and request identity with automatic repair disabled")
+		}
+		for _, finding := range findings.Items {
+			if finding.Category != types.FindingCategoryCICheck || finding.Severity != types.FindingSeverityError || finding.Check == "" || finding.ActionOrDefault() != types.ActionAutoFix {
+				return nil, fmt.Errorf("ordinary CI handback refuses safety, transient and review-bot findings")
+			}
+		}
+		rounds, err := sctx.DB.GetRoundsByStep(step.ID)
+		if err != nil || len(rounds) == 0 || rounds[len(rounds)-1].ID != request.RoundID {
+			return nil, fmt.Errorf("ordinary CI handback round changed")
+		}
+	}
 	caller, err := git.FindGitRoot(request.CallerDir)
 	if err != nil {
 		return nil, err
@@ -51,11 +83,14 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 	if err != nil {
 		return nil, err
 	}
+	if request.Expect != nil && *request.Expect != (ipc.CIHandbackBinding{RepoID: repo.ID, RunID: run.ID, Branch: run.Branch, CallerDir: caller, CallerHead: request.HeadSHA, CurrentHead: run.HeadSHA, PublishedHead: *run.LastPushedSHA, PushGeneration: *run.PushGeneration}) {
+		return nil, fmt.Errorf("handback expectation changed at the daemon boundary")
+	}
 	service := &branchsync.Service{DB: sctx.DB, Repo: repo, WorkDir: caller, GateDir: sctx.GateDir}
 	checkCaller := func() error {
 		state := service.InspectCached(sctx.Ctx)
 		if state.Pipeline.RunID != run.ID || !state.Local.Clean || state.Local.Branch != request.Branch || state.Local.Head != request.HeadSHA ||
-			(state.State != branchsync.StateSynchronized && (!request.Resume || state.State != branchsync.StateLocalAhead)) {
+			(state.State != branchsync.StateSynchronized && (!request.Resume || state.State != branchsync.StateLocalAhead) && (!isOrdinary || request.Resume || state.State != branchsync.StateDiverged)) {
 			return fmt.Errorf("handback requires the exact clean caller and unambiguous ownership: %s", state.Safety)
 		}
 		return nil
@@ -63,34 +98,46 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 	if err := checkCaller(); err != nil {
 		return nil, err
 	}
-	if !request.Resume && request.HeadSHA != run.HeadSHA {
+	if !isOrdinary && !request.Resume && request.HeadSHA != run.HeadSHA {
 		return nil, fmt.Errorf("synchronize the caller to the published head before handback")
-	}
-	step, err := sctx.DB.GetStepResult(sctx.StepResultID)
-	if err != nil || step == nil {
-		return nil, fmt.Errorf("cannot read parked CI step")
-	}
-	if step.Status != types.StepStatusAwaitingApproval || step.AutoFixLimit != nil || step.FindingsJSON == nil {
-		return nil, fmt.Errorf("handback requires a parked CI gate with automatic repair disabled")
-	}
-	findings, err := types.ParseFindingsJSON(*step.FindingsJSON)
-	if err != nil {
-		return nil, err
-	}
-	hasConflict := false
-	for _, finding := range findings.Items {
-		hasConflict = hasConflict || finding.Category == types.FindingCategoryCIMergeConflict
-	}
-	if !hasConflict {
-		return nil, fmt.Errorf("handback requires an unresolved CI merge-conflict finding")
 	}
 	results, err := sctx.DB.GetStepsByRun(run.ID)
 	if err != nil {
 		return nil, err
 	}
 	for _, result := range results {
+		if isOrdinary && result.AgentPID != nil {
+			return nil, fmt.Errorf("ordinary CI handback refuses an active writer")
+		}
 		if result.StepName != types.StepCI && result.Status != types.StepStatusCompleted {
 			return nil, fmt.Errorf("handback requires completed validation and no active writers: %s is %s", result.StepName, result.Status)
+		}
+	}
+	if isOrdinary {
+		expectedKind := "upstream"
+		if repo.ForkURL != "" {
+			expectedKind = "fork"
+		}
+		if run.PushTargetKind == nil || *run.PushTargetKind != expectedKind {
+			return nil, fmt.Errorf("ordinary CI publication target kind changed")
+		}
+		sequence := WithCustomGates(AllSteps(), sctx.Config.Gates)
+		if len(sequence) != len(results) {
+			return nil, fmt.Errorf("ordinary CI handback requires the complete validation sequence")
+		}
+		for index, result := range results {
+			if result.StepName != sequence[index].Name() {
+				return nil, fmt.Errorf("ordinary CI handback validation identity changed")
+			}
+			if result.StepName == types.StepTest {
+				if result.FindingsJSON == nil {
+					return nil, fmt.Errorf("ordinary CI handback has no completed Test evidence")
+				}
+				evidence, err := types.ParseFindingsJSON(*result.FindingsJSON)
+				if err != nil || evidence.TestedHeadSHA != run.HeadSHA {
+					return nil, fmt.Errorf("ordinary CI handback Test evidence does not bind the published head")
+				}
+			}
 		}
 	}
 	checkManaged := func() error {
@@ -101,6 +148,28 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 		freshRun, err := sctx.DB.GetRun(run.ID)
 		if err != nil || freshRun == nil || freshRun.Status != types.RunRunning || freshRun.PushActive || freshRun.HeadSHA != run.HeadSHA || freshRun.LastPushedSHA == nil || *freshRun.LastPushedSHA != run.HeadSHA || freshRun.PushGeneration == nil || *freshRun.PushGeneration != *run.PushGeneration || freshRun.PRURL == nil || *freshRun.PRURL != *run.PRURL || freshRun.PushTargetFingerprint == nil || *freshRun.PushTargetFingerprint != *run.PushTargetFingerprint {
 			return fmt.Errorf("handback publication binding changed")
+		}
+		if isOrdinary {
+			freshSteps, err := sctx.DB.GetStepsByRun(run.ID)
+			if err != nil || !reflect.DeepEqual(freshRun, run) || !reflect.DeepEqual(freshSteps, results) {
+				return fmt.Errorf("ordinary CI validation or writer identity changed")
+			}
+			common, err := git.Run(sctx.Ctx, sctx.WorkDir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+			if err != nil {
+				return fmt.Errorf("ordinary CI managed repository cannot be verified")
+			}
+			common, err = filepath.EvalSymlinks(common)
+			gate, gateErr := filepath.EvalSymlinks(sctx.GateDir)
+			if err != nil || gateErr != nil || common != gate {
+				return fmt.Errorf("ordinary CI managed worktree no longer belongs to its gate")
+			}
+			if run.WorktreeDir != nil {
+				recorded, err := filepath.EvalSymlinks(*run.WorktreeDir)
+				managed, managedErr := filepath.EvalSymlinks(sctx.WorkDir)
+				if err != nil || managedErr != nil || recorded != managed {
+					return fmt.Errorf("ordinary CI managed directory binding changed")
+				}
+			}
 		}
 		head, err := stepGitHeadSHA(sctx)
 		if err != nil || head != run.HeadSHA {
@@ -122,14 +191,40 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 	if err := checkManaged(); err != nil {
 		return nil, err
 	}
-	host, pr, err := ciHandbackPR(sctx, run, run.HeadSHA)
+	receipt, err := sctx.DB.LatestCIHandback(run.ID)
 	if err != nil {
 		return nil, err
 	}
-	if !request.Resume {
+	if (request.Resume && request.ReceiptID == "") || (request.ReceiptID != "" && (receipt == nil || receipt.ID != request.ReceiptID || receipt.AcceptedHead != nil)) {
+		return nil, fmt.Errorf("handback requires the exact native receipt before resume or replay")
+	}
+	host, pr, checks, err := ciHandbackPR(sctx, run, run.HeadSHA)
+	if err != nil {
+		return nil, err
+	}
+	if !request.Resume && !isOrdinary {
 		mergeable, err := host.GetMergeableState(sctx.Ctx, pr)
 		if err != nil || mergeable != scm.MergeableConflict {
 			return nil, fmt.Errorf("live PR no longer reports the parked merge conflict")
+		}
+	}
+	if isOrdinary && !request.Resume && (receipt == nil || receipt.AcceptedHead != nil) {
+		for _, check := range checks {
+			if _, isReviewBot := scm.ReviewBotForApp(check.App); isReviewBot && check.Failing() {
+				return nil, fmt.Errorf("ordinary CI handback cannot release a review-bot failure")
+			}
+		}
+		for _, finding := range findings.Items {
+			hasFailedCheck := false
+			for _, check := range checks {
+				_, isReviewBot := scm.ReviewBotForApp(check.App)
+				if !isReviewBot && check.Failing() && check.Name == finding.Check && (finding.CheckID == "" || finding.CheckID == check.ProviderID) {
+					hasFailedCheck = true
+				}
+			}
+			if !hasFailedCheck {
+				return nil, fmt.Errorf("ordinary CI handback requires a genuine structured failed check for %s", finding.Check)
+			}
 		}
 	}
 	baseRef := "refs/heads/" + pr.BaseBranch
@@ -142,10 +237,6 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 		return nil, fmt.Errorf("handback base branch is missing or ambiguous")
 	}
 	baseHead := baseFields[0]
-	receipt, err := sctx.DB.LatestCIHandback(run.ID)
-	if err != nil {
-		return nil, err
-	}
 	if receipt != nil && receipt.AcceptedHead == nil {
 		if receipt.CallerDir != caller || receipt.ReleasedHead != run.HeadSHA || receipt.PRURL != pr.URL || receipt.BaseBranch != pr.BaseBranch || receipt.PushGeneration != *run.PushGeneration || receipt.TargetFingerprint != *run.PushTargetFingerprint || receipt.PushRef != *run.PushRef {
 			return nil, fmt.Errorf("released CI handback binding changed")
@@ -158,20 +249,49 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 			return nil, fmt.Errorf("parked CI has no durable round")
 		}
 		receipt = &db.CIHandback{RunID: run.ID, RoundID: rounds[len(rounds)-1].ID, CallerDir: caller, ReleasedHead: run.HeadSHA, PRURL: pr.URL, BaseBranch: pr.BaseBranch, BaseHead: baseHead, PushGeneration: *run.PushGeneration, TargetFingerprint: *run.PushTargetFingerprint, PushRef: *run.PushRef}
-	}
-	result := &ipc.CIHandbackResult{RunID: run.ID, PRURL: pr.URL, ReleasedHead: receipt.ReleasedHead}
-	if request.Resume {
-		if request.HeadSHA == receipt.ReleasedHead {
-			return nil, fmt.Errorf("follow-up head must include an additive merge resolving the conflict")
-		}
-		for _, ancestor := range []string{receipt.ReleasedHead, receipt.BaseHead, baseHead} {
-			if _, err := git.Run(sctx.Ctx, caller, "merge-base", "--is-ancestor", ancestor, request.HeadSHA); err != nil {
-				return nil, fmt.Errorf("follow-up must preserve published head and both recorded and current base heads through an additive merge")
+		if isOrdinary {
+			receipt.Source = &db.CIHandbackSource{CallerHead: request.HeadSHA, SubmittedHead: *run.SubmittedHeadSHA, ReviewHead: *run.ReviewApprovedHeadSHA, PushKind: *run.PushTargetKind, PushedAt: *run.LastPushedAt, Findings: *step.FindingsJSON, AutoFixLimits: make(map[types.StepName]int, len(results))}
+			for _, result := range results {
+				limit := 0
+				if result.AutoFixLimit != nil {
+					limit = *result.AutoFixLimit
+				}
+				receipt.Source.AutoFixLimits[result.StepName] = limit
 			}
 		}
-		merges, err := git.Run(sctx.Ctx, caller, "rev-list", "--min-parents=2", receipt.ReleasedHead+".."+request.HeadSHA)
-		if err != nil || merges == "" {
-			return nil, fmt.Errorf("follow-up must contain an additive merge, never a replay")
+	}
+	if isOrdinary && (receipt.Source == nil || receipt.RoundID != request.RoundID || receipt.Source.SubmittedHead != *run.SubmittedHeadSHA || receipt.Source.ReviewHead != *run.ReviewApprovedHeadSHA || receipt.Source.PushKind != *run.PushTargetKind || receipt.Source.PushedAt != *run.LastPushedAt || receipt.Source.Findings != *step.FindingsJSON || (!request.Resume && receipt.Source.CallerHead != request.HeadSHA)) {
+		return nil, fmt.Errorf("ordinary CI handback source binding changed")
+	}
+	if receipt.ID != "" && receipt.Source != nil {
+		if err := VerifyCIHandbackSource(sctx, receipt); err != nil {
+			return nil, err
+		}
+	}
+	callerHead := receipt.ReleasedHead
+	if receipt.Source != nil {
+		callerHead = receipt.Source.CallerHead
+	}
+	result := &ipc.CIHandbackResult{RunID: run.ID, PRURL: pr.URL, ReleasedHead: receipt.ReleasedHead, RoundID: receipt.RoundID,
+		Binding: ipc.CIHandbackBinding{RepoID: repo.ID, RunID: run.ID, Branch: run.Branch, CallerDir: receipt.CallerDir, CallerHead: callerHead, CurrentHead: receipt.ReleasedHead, PublishedHead: receipt.ReleasedHead, PushGeneration: receipt.PushGeneration}}
+	if request.Resume {
+		if request.HeadSHA == receipt.ReleasedHead {
+			return nil, fmt.Errorf("follow-up head must include a committed correction preserving the released source")
+		}
+		ancestors := []string{receipt.ReleasedHead, receipt.BaseHead, baseHead}
+		if isOrdinary {
+			ancestors = []string{receipt.ReleasedHead, receipt.Source.CallerHead}
+		}
+		for _, ancestor := range ancestors {
+			if _, err := git.Run(sctx.Ctx, caller, "merge-base", "--is-ancestor", ancestor, request.HeadSHA); err != nil {
+				return nil, fmt.Errorf("follow-up must preserve every required source head through additive integration: %s", ancestor)
+			}
+		}
+		if !isOrdinary {
+			merges, err := git.Run(sctx.Ctx, caller, "rev-list", "--min-parents=2", receipt.ReleasedHead+".."+request.HeadSHA)
+			if err != nil || merges == "" {
+				return nil, fmt.Errorf("follow-up must contain an additive merge, never a replay")
+			}
 		}
 	}
 	// Recheck every local assumption after the provider calls, before any write.
@@ -190,10 +310,34 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 	}
 	if !request.Resume {
 		if receipt.ID == "" {
+			if isOrdinary {
+				anchor := fmt.Sprintf("refs/no-mistakes/ci-handback/%s/%d", run.ID, receipt.PushGeneration)
+				if _, err := stepGitRun(sctx, "fetch", "--no-tags", "--no-write-fetch-head", caller, request.HeadSHA); err != nil {
+					return nil, fmt.Errorf("retain original author objects: %w", err)
+				}
+				for _, source := range []struct{ ref, head string }{{anchor + "/published", run.HeadSHA}, {anchor + "/author", request.HeadSHA}} {
+					if err := custody.PreserveRecoveryAnchor(sctx.Ctx, caller, source.ref, source.head); err != nil {
+						return nil, fmt.Errorf("preserve ordinary CI source before release: %w", err)
+					}
+					if err := custody.PreserveRecoveryAnchor(sctx.Ctx, sctx.GateDir, source.ref, source.head); err != nil {
+						return nil, err
+					}
+				}
+				if err := VerifyCIHandbackSource(sctx, receipt); err != nil {
+					return nil, err
+				}
+				if err := checkCaller(); err != nil {
+					return nil, err
+				}
+				if err := checkManaged(); err != nil {
+					return nil, err
+				}
+			}
 			if err := sctx.DB.ReleaseCIHandback(receipt, run, repo, *step.FindingsJSON); err != nil {
 				return nil, err
 			}
 		}
+		result.ReceiptID = receipt.ID
 		return result, nil
 	}
 	// Import objects without firing the gate's receive hook or changing the caller.
@@ -249,5 +393,6 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 	sctx.Run.CIReadyAt = nil
 	sctx.Run.CIReadyNoCI = false
 	result.AcceptedHead = request.HeadSHA
+	result.ReceiptID = receipt.ID
 	return result, nil
 }

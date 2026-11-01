@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -10,6 +11,20 @@ import (
 )
 
 const actionCIFollowup types.ApprovalAction = "ci-followup"
+
+var ErrDaemonShutdown = errors.New("daemon shutting down")
+var ErrCIHandbackSuspended = errors.New("CI handback remains parked for daemon recovery")
+
+func (e *Executor) approvalWaitError(ctx context.Context, runID string, step types.StepName) error {
+	if step == types.StepCI && errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+		receipt, err := e.db.LatestCIHandback(runID)
+		run, runErr := e.db.GetRun(runID)
+		if err == nil && runErr == nil && run != nil && run.Status == types.RunRunning && receipt != nil && receipt.Source != nil && receipt.AcceptedHead == nil {
+			return ErrCIHandbackSuspended
+		}
+	}
+	return context.Cause(ctx)
+}
 
 type CIHandbackStep interface {
 	HandbackCI(*StepContext, ipc.CIHandbackParams) (*ipc.CIHandbackResult, error)
@@ -128,7 +143,11 @@ func CIHandbackReviewRestart(database *db.DB, run *db.Run, sequence []Step) (int
 		for _, finding := range findings.Items {
 			hasConflict = hasConflict || finding.Category == types.FindingCategoryCIMergeConflict
 		}
-		if !hasConflict {
+		if receipt.Source != nil {
+			if ci.FindingsJSON == nil || *ci.FindingsJSON != receipt.Source.Findings {
+				return -1, fmt.Errorf("accepted ordinary CI handback failure checkpoint changed")
+			}
+		} else if !hasConflict {
 			return -1, fmt.Errorf("accepted CI handback has no unresolved conflict")
 		}
 		for index, result := range results {

@@ -12,36 +12,50 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func ciHandbackPR(sctx *pipeline.StepContext, run *db.Run, publishedHead string) (scm.Host, *scm.PR, error) {
+func ciHandbackPR(sctx *pipeline.StepContext, run *db.Run, publishedHead string) (scm.Host, *scm.PR, []scm.Check, error) {
 	if resolvedProvider(sctx) != scm.ProviderGitHub {
-		return nil, nil, fmt.Errorf("published CI handback currently requires GitHub head verification")
+		return nil, nil, nil, fmt.Errorf("published CI handback currently requires GitHub head verification")
 	}
 	host, reason := buildHost(sctx, scm.ProviderGitHub)
 	if host == nil {
-		return nil, nil, fmt.Errorf("cannot verify handback PR: %s", reason)
+		return nil, nil, nil, fmt.Errorf("cannot verify handback PR: %s", reason)
 	}
 	if err := host.Available(sctx.Ctx); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	pr, err := host.FindPR(sctx.Ctx, run.Branch, "")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if run.PRURL == nil || pr == nil || pr.URL != *run.PRURL || pr.BaseBranch == "" {
-		return nil, nil, fmt.Errorf("live PR does not match handback ownership")
+		return nil, nil, nil, fmt.Errorf("live PR does not match handback ownership")
 	}
 	state, err := host.GetPRState(sctx.Ctx, pr)
 	if err != nil || state != scm.PRStateOpen {
-		return nil, nil, fmt.Errorf("handback PR is not verifiably open")
+		return nil, nil, nil, fmt.Errorf("handback PR is not verifiably open")
 	}
 	pr.HeadSHA = publishedHead
-	if _, err := host.GetChecks(sctx.Ctx, pr); err != nil {
-		return nil, nil, err
+	checks, err := host.GetChecks(sctx.Ctx, pr)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	if pr.HeadSHA != publishedHead {
-		return nil, nil, fmt.Errorf("live PR head moved before handback")
+		return nil, nil, nil, fmt.Errorf("live PR head moved before handback")
 	}
-	return host, pr, nil
+	return host, pr, checks, nil
+}
+
+func VerifyCIHandbackSource(sctx *pipeline.StepContext, receipt *db.CIHandback) error {
+	anchor := fmt.Sprintf("refs/no-mistakes/ci-handback/%s/%d", receipt.RunID, receipt.PushGeneration)
+	for _, directory := range []string{receipt.CallerDir, sctx.GateDir} {
+		for _, source := range []struct{ ref, head string }{{anchor + "/published", receipt.ReleasedHead}, {anchor + "/author", receipt.Source.CallerHead}} {
+			observed, err := git.Run(sctx.Ctx, directory, "for-each-ref", "--format=%(objectname) %(objecttype) %(symref)", source.ref)
+			if err != nil || observed != source.head+" commit" {
+				return fmt.Errorf("ordinary CI handback source anchor changed: %s", source.ref)
+			}
+		}
+	}
+	return nil
 }
 
 func CIHandbackManagedHead(sctx *pipeline.StepContext, receipt *db.CIHandback) (string, error) {
@@ -132,6 +146,9 @@ func RecoverCIHandback(sctx *pipeline.StepContext, receipt *db.CIHandback) error
 			if receipt.AcceptedHead == nil && (result.Status != types.StepStatusAwaitingApproval || result.AutoFixLimit != nil || result.FindingsJSON == nil || rounds[len(rounds)-1].FindingsJSON == nil || *result.FindingsJSON != *rounds[len(rounds)-1].FindingsJSON) {
 				return fmt.Errorf("interrupted CI handback conflict gate changed")
 			}
+			if receipt.Source != nil && receipt.AcceptedHead == nil && (result.FindingsJSON == nil || *result.FindingsJSON != receipt.Source.Findings) {
+				return fmt.Errorf("interrupted ordinary CI handback findings changed")
+			}
 		}
 	}
 	if receipt.AcceptedHead == nil {
@@ -139,12 +156,25 @@ func RecoverCIHandback(sctx *pipeline.StepContext, receipt *db.CIHandback) error
 			return fmt.Errorf("interrupted CI handback review checkpoint changed")
 		}
 	}
-	for _, ancestor := range []string{receipt.ReleasedHead, receipt.BaseHead, candidate.BaseHead} {
+	ancestors := []string{receipt.ReleasedHead, receipt.BaseHead, candidate.BaseHead}
+	if receipt.Source != nil {
+		if err := VerifyCIHandbackSource(sctx, receipt); err != nil {
+			return err
+		}
+		if run.SubmittedHeadSHA == nil || *run.SubmittedHeadSHA != receipt.Source.SubmittedHead || run.LastPushedAt == nil || *run.LastPushedAt != receipt.Source.PushedAt || *run.PushTargetKind != receipt.Source.PushKind {
+			return fmt.Errorf("interrupted ordinary CI handback source changed")
+		}
+		if receipt.Source.ReviewHead != receipt.ReleasedHead || (receipt.AcceptedHead == nil && (run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != receipt.Source.ReviewHead)) {
+			return fmt.Errorf("interrupted ordinary CI handback review identity changed")
+		}
+		ancestors = []string{receipt.ReleasedHead, receipt.Source.CallerHead}
+	}
+	for _, ancestor := range ancestors {
 		if _, err := stepGitRun(sctx, "merge-base", "--is-ancestor", ancestor, candidate.Head); err != nil {
 			return fmt.Errorf("interrupted CI handback lost its additive ancestry")
 		}
 	}
-	_, pr, err := ciHandbackPR(sctx, run, receipt.ReleasedHead)
+	_, pr, _, err := ciHandbackPR(sctx, run, receipt.ReleasedHead)
 	if err != nil {
 		return err
 	}

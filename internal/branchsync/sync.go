@@ -401,6 +401,7 @@ func (s *Service) Refresh(ctx context.Context) State {
 	}
 
 	s.classifyRelation(ctx, &state, bound, run.BaseSHA, true)
+	s.classifyCIHandback(ctx, &state, freshRun, s.workDir())
 	return state
 }
 
@@ -1849,7 +1850,71 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 	}
 
 	s.classifyRelation(ctx, &state, ptr(run.LastPushedSHA), run.BaseSHA, false)
+	if s.classifyCIHandback(ctx, &state, run, root) {
+		return state, run, false
+	}
 	return state, run, true
+}
+
+func (s *Service) classifyCIHandback(ctx context.Context, state *State, run *db.Run, root string) bool {
+	if run.Status != types.RunRunning {
+		return false
+	}
+	receipt, err := s.DB.LatestCIHandback(run.ID)
+	if err != nil {
+		state.Safety = "blocked_ci_handback_unreadable"
+		state.Error = "CI handback history cannot be read; inspect no-mistakes axi status"
+		state.NextAction = nil
+		return true
+	}
+	if receipt != nil && receipt.Source != nil && receipt.AcceptedHead == nil {
+		state.Safety = "blocked_ci_handback_binding"
+		state.NextAction = &NextAction{Code: "inspect_ci_handback", Command: "no-mistakes axi status"}
+		if !samePath(root, receipt.CallerDir) || run.HeadSHA != receipt.ReleasedHead || value(run.PushGeneration) != receipt.PushGeneration || ptr(run.LastPushedSHA) != receipt.ReleasedHead || ptr(run.PushRef) != receipt.PushRef || ptr(run.PushTargetFingerprint) != receipt.TargetFingerprint {
+			return true
+		}
+		anchor := fmt.Sprintf("refs/no-mistakes/ci-handback/%s/%d", run.ID, receipt.PushGeneration)
+		for _, source := range []struct{ ref, head string }{{anchor + "/published", receipt.ReleasedHead}, {anchor + "/author", receipt.Source.CallerHead}} {
+			observed, err := git.Run(ctx, root, "for-each-ref", "--format=%(objectname) %(objecttype) %(symref)", source.ref)
+			if err != nil || observed != source.head+" commit" {
+				return true
+			}
+		}
+		state.Pipeline.Phase = "author_followup"
+		state.Error = ""
+		state.Safety = "ci_handback_released"
+		state.NextAction = &NextAction{Code: "resume_ci_handback", Command: "no-mistakes axi handback --resume --receipt " + receipt.ID}
+		if !isAncestor(ctx, root, receipt.ReleasedHead, state.Local.Head) {
+			state.NextAction = &NextAction{Code: "integrate_ci_handback", Command: "git merge --no-ff --no-edit " + anchor + "/published"}
+		}
+		return true
+	}
+	if (receipt != nil && receipt.AcceptedHead == nil) || run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != run.HeadSHA || (state.State != StateSynchronized && state.State != StateDiverged) {
+		return false
+	}
+	results, err := s.DB.GetStepsByRun(run.ID)
+	if err != nil {
+		return false
+	}
+	for _, result := range results {
+		if result.StepName != types.StepCI {
+			continue
+		}
+		if result.Status != types.StepStatusAwaitingApproval || result.AutoFixLimit != nil || result.FindingsJSON == nil {
+			return false
+		}
+		findings, err := types.ParseFindingsJSON(*result.FindingsJSON)
+		if err != nil || len(findings.Items) == 0 {
+			return false
+		}
+		for _, finding := range findings.Items {
+			if finding.Category != types.FindingCategoryCICheck || finding.Severity != types.FindingSeverityError || finding.ActionOrDefault() != types.ActionAutoFix || finding.Check == "" {
+				return false
+			}
+		}
+		state.NextAction = &NextAction{Code: "handback_ci", Command: "no-mistakes axi handback"}
+	}
+	return false
 }
 
 func (s *Service) classifyRelation(ctx context.Context, state *State, pushed, base string, live bool) {
