@@ -1275,7 +1275,8 @@ The file is private local evidence, restricted to owner-only permissions on POSI
 ### intent
 
 Transcript-based user-intent extraction settings.
-When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, and pass that summary to rebase, review, test, document, lint, CI auto-fix, repository gate repair, and PR prompts. For publication of the generated Intent section, see [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
+When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, and pass that summary to rebase, review, test, document, lint, CI auto-fix, and repository gate repair prompts.
+PR-drafting prompts receive intent only when the trusted repository explicitly opts in through [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent) and no caller-side omission applies.
 
 |      |          |
 | ---- | -------- |
@@ -1287,7 +1288,7 @@ When enabled and no intent was supplied directly for the run, no-mistakes can re
 | `intent.threshold`        | `float`    | `0.2`   | Minimum raw match score for selecting a transcript session |
 | `intent.slack_days`       | `int`      | `3`     | Extra days to look back before the change window           |
 | `intent.disabled_readers` | `string[]` | Empty   | Transcript readers to disable                              |
-| `intent.publish_intent`   | `bool`     | `true`  | Publish the generated Intent section on PR bodies by default |
+| `intent.publish_intent`   | `bool`     | `true`  | Permit intent publication when the trusted repository opts in |
 
 Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `pi`, and `copilot`.
 

@@ -885,7 +885,7 @@ type AzureDevOpsProvider struct {
 type PR struct {
 	BaseBranch string
 	Template   string
-	// Nil preserves the historical default: publish the extracted intent.
+	// Nil keeps validation intent private; publication requires explicit true.
 	PublishIntent *bool
 	// Appendix is full, collapsed, or minimal. Empty preserves full.
 	Appendix    string

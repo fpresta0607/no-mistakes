@@ -278,19 +278,27 @@ Provider contract tests use fake CLI/API responses and local HTTP fixtures, not 
 
 ### pr.publish_intent
 
-Control publication of the **generated `Intent` section**, independently of intent extraction and review input.
+Opt in to publishing validation intent in the **generated `Intent` section** and PR-drafting context, independently of intent extraction and validation input.
 
 | | |
 | --- | --- |
 | Type | `bool` |
-| Default | `true` (missing or `null` also preserves the default) |
+| Default | `false` (missing or `null` keeps validation intent private) |
 | Trust | Trusted default branch only, regardless of `allow_repo_commands`; the caller-side counterpart is the global [`intent.publish_intent`](/no-mistakes/reference/global-config/#intent) default and the per-run `axi run --no-publish-intent` flag |
 
-`false` suppresses that section in ordinary drafting, fallback output, and template appendices. It works without `pr.template` and does not otherwise enable template mode. It never removes full intent from review or PR-drafting context, changes evidence/attestation policy, or erases author-written sections named `Intent`. Unconfigured defaults remain unchanged.
+Only an explicit trusted `true` permits the full intent to appear in ordinary drafting, fallback output, and template appendices.
+By default, and with explicit `false`, the generated section is omitted and PR-drafting turns (ordinary narrative, title-only fallback, and repository-template narrative) receive no intent text, so they cannot paraphrase the private validation brief into public prose.
+They draft from the final diff and commit messages instead.
+This works without `pr.template` and does not enable template mode.
+Full intent and its source binding remain available for validation; evidence, attestation, and author-written sections named `Intent` are unchanged.
 
-A contributor can keep the section off for their own runs without touching this repository policy: `axi run --no-publish-intent` records a tighten-only omission on the run, and an operator can set the global `intent.publish_intent: false` default. Both compose with this field and can only reduce publication: the trusted repository policy is the ceiling, and a caller can never publish intent on a repository whose trusted config disabled it. Neither signal changes what review, test, document, lint, or CI auto-fix prompts receive. The caller-side omission goes one step further than this repository policy: the PR-drafting turns (ordinary narrative, title-only fallback, and repository-template narrative) receive no intent text at all and draft from the diff and commit messages only, so no paraphrase of the withheld intent can reach the public PR. The intent is withheld, never scanned for: there is no output filter.
+A contributor can withhold intent even when the repository opts in: `axi run --no-publish-intent` records a tighten-only omission on the run, and an operator can set the global `intent.publish_intent: false` default.
+Both compose with this field and can only reduce publication: a caller can never publish intent without the trusted repository's explicit opt-in.
+Neither signal changes what review, test, document, lint, or CI auto-fix prompts receive.
+Intent is withheld from public drafting, never scanned out of its output.
 
-This is not a privacy filter: generated narrative and other evidence can still contain sensitive information, and LLM drafting is not a confidentiality guarantee. No caller-written public-body override is introduced by this setting.
+Generated narrative and other evidence can still contain sensitive information from the diff or recorded results; this setting does not filter those sources.
+No caller-written public-body override is introduced by this setting.
 
 ### pr.appendix
 
