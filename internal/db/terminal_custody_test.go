@@ -195,3 +195,49 @@ func TestTerminalAdoptionCancelledAndCrashReplay(t *testing.T) {
 		t.Fatal("explicit cancellation was silently restarted")
 	}
 }
+
+func TestTerminalAdoptionReplayClearsExecutionErrorAndPreservesAudit(t *testing.T) {
+	for _, status := range []types.RunStatus{types.RunRunning, types.RunFailed} {
+		t.Run(string(status), func(t *testing.T) {
+			database, event := newTerminalAdoptionFixture(t)
+			accepted, _, err := database.AdoptTerminalCandidate(context.Background(), event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runID := event.Snapshot.Run.ID
+			if err := database.UpdateRunErrorStatus(runID, "daemon crashed during execution", status); err != nil {
+				t.Fatal(err)
+			}
+			before, err := database.ReadTerminalSnapshot(runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err := database.RestartAcceptedTerminal(context.Background(), before); err != nil {
+				t.Fatal(err)
+			}
+
+			after, err := database.ReadTerminalSnapshot(runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Run.Status != types.RunRunning || after.Run.Error != nil {
+				t.Fatalf("replayed run retained a stale execution error: %+v", after.Run)
+			}
+			if !reflect.DeepEqual(after.Steps, before.Steps) || !reflect.DeepEqual(after.Rounds, before.Rounds) {
+				t.Fatal("replay changed original validation history")
+			}
+			persisted, err := database.GetTerminalAdoption(runID)
+			if err != nil || !reflect.DeepEqual(persisted, accepted) || persisted.Snapshot.Run.Error == nil || *persisted.Snapshot.Run.Error != "interrupted" {
+				t.Fatalf("replay changed the original terminal audit: %+v, %v", persisted, err)
+			}
+			if err := database.UpdateRunStatus(runID, types.RunCompleted); err != nil {
+				t.Fatal(err)
+			}
+			completed, err := database.GetRun(runID)
+			if err != nil || completed.Error != nil {
+				t.Fatalf("completed replay retained a stale execution error: %+v, %v", completed, err)
+			}
+		})
+	}
+}

@@ -63,7 +63,7 @@ func TestCleanupOrphanWorktreesSweepsEveryRemovableDirectoryInOneSnapshot(t *tes
 	// Force every eligible default-tree directory past the retention window
 	// regardless of its actual mtime, mirroring recoverOnStartup's order.
 	future := time.Now().Add(365 * 24 * time.Hour)
-	reapWorktrees(d, p, worktreeReapPolicy{Retention: time.Nanosecond}, future)
+	NewRunManager(d, p, nil).reapWorktrees(worktreeReapPolicy{Retention: time.Nanosecond}, future)
 	cleanupOrphanWorktrees(d, p, leftoverRecordedRunWorktrees(d, p))
 
 	if len(sweeps) != 2 {

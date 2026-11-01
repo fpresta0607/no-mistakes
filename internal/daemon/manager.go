@@ -657,7 +657,7 @@ func (m *RunManager) cleanupRunEvidence(cfg *config.Config, runID string) {
 	}
 	now := time.Now()
 	reapEvidence(m.db, root, policy, now)
-	reapWorktrees(m.db, m.paths, wtPolicy, now)
+	m.reapWorktrees(wtPolicy, now)
 	reapRunLogs(m.db, m.paths.LogsDir(), policy, now)
 }
 
@@ -1365,10 +1365,14 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 	})
 }
 
-func (m *RunManager) withBranchLock(repoID, branch string, action func() (string, error)) (string, error) {
+func (m *RunManager) branchMutex(repoID, branch string) *sync.Mutex {
 	lockKey := repoID + "/" + branch
 	lockVal, _ := m.branchLocks.LoadOrStore(lockKey, &sync.Mutex{})
-	branchMu := lockVal.(*sync.Mutex)
+	return lockVal.(*sync.Mutex)
+}
+
+func (m *RunManager) withBranchLock(repoID, branch string, action func() (string, error)) (string, error) {
+	branchMu := m.branchMutex(repoID, branch)
 	branchMu.Lock()
 	defer branchMu.Unlock()
 	return action()

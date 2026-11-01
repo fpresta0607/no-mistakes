@@ -500,7 +500,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	// disabled or wide retention window is honored on the default tree
 	// instead of being bypassed by startup cleanup.
 	worktreeStarted := time.Now()
-	reapWorktrees(d, p, wtPolicy, now)
+	mgr.reapWorktrees(wtPolicy, now)
 	cleanupOrphanWorktrees(d, p, leftover)
 	logStartupPhase("worktree_cleanup", worktreeStarted)
 

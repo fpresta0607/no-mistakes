@@ -252,7 +252,7 @@ func (d *DB) RestartAcceptedTerminal(ctx context.Context, expected *TerminalSnap
 			return fmt.Errorf("accepted recovery already started a validation turn")
 		}
 	}
-	if _, err := tx.Exec(`UPDATE runs SET status = ?, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ?`, types.RunRunning, now(), expected.Run.ID); err != nil {
+	if _, err := tx.Exec(`UPDATE runs SET status = ?, error = NULL, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ?`, types.RunRunning, now(), expected.Run.ID); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -18,8 +18,131 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/procreap"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestTerminalContinuationExcludesConcurrentWorktreeReaping(t *testing.T) {
+	for _, isReplay := range []bool{false, true} {
+		name := "initial adoption"
+		if isReplay {
+			name = "pending replay"
+		}
+		t.Run(name, func(t *testing.T) {
+			manager, p, database, repo, head, _, _ := launchAssertionFixture(t, nil)
+			assertion := launchExpectation(head)
+			proof, err := assertion.Verify(head, assertion.Profiles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := database.InsertRunWithLaunchAssertion(repo.ID, "feature", head, head, nil, "nonce", "policy", "intent", "", false, nil, assertion, proof)
+			if err != nil {
+				t.Fatal(err)
+			}
+			managed := p.WorktreeDir(repo.ID, run.ID)
+			if err := git.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), managed, head); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range types.AllSteps() {
+				step, err := database.InsertStepResult(run.ID, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := database.CompleteStepWithStatus(step.ID, types.StepStatusCompleted, 0, 1, "original.log"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := database.UpdateRunErrorStatusWithVerifiedHead(run.ID, "interrupted", types.RunFailed, head); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := database.ReadTerminalSnapshot(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidateRef := "refs/no-mistakes/terminal-candidate/" + run.ID
+			gitCmd(t, managed, "update-ref", candidateRef, head)
+			event := db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: head, CandidateTree: gitOutput(t, managed, "rev-parse", "HEAD^{tree}"), SourceRef: candidateRef, GateHead: head, ManagedDir: managed, Reason: "validate preserved source", Operator: "fixture", Assertion: assertion, Proof: proof}
+			if isReplay {
+				if _, _, err := database.AdoptTerminalCandidate(context.Background(), event); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := database.RecoverStaleRuns("daemon crashed during execution"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			originalSweep := sweepRunWorktrees
+			t.Cleanup(func() { sweepRunWorktrees = originalSweep })
+			hasSwept := false
+			sweepRunWorktrees = func(_ string, worktrees []procreap.Worktree, _ string) {
+				for _, worktree := range worktrees {
+					if worktree.RunID == run.ID {
+						hasSwept = true
+					}
+				}
+			}
+			cfg := config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{})
+			cfg.Worktree.Retention = time.Nanosecond
+			cleanupDone := make(chan struct{})
+
+			_, err = manager.withBranchLock(repo.ID, run.Branch, func() (string, error) {
+				go func() {
+					manager.cleanupRunEvidence(cfg, "another-finished-run")
+					close(cleanupDone)
+				}()
+				select {
+				case <-cleanupDone:
+				case <-time.After(5 * time.Second):
+					return "", fmt.Errorf("cleanup waited on the continuation's branch lock")
+				}
+				if _, err := os.Stat(managed); err != nil {
+					return "", fmt.Errorf("cleanup removed source during continuation: %w", err)
+				}
+				current, err := database.ReadTerminalSnapshot(run.ID)
+				if err != nil {
+					return "", err
+				}
+				if isReplay {
+					if err := database.RestartAcceptedTerminal(context.Background(), current); err != nil {
+						return "", err
+					}
+				} else {
+					event.Snapshot = *current
+					if _, _, err := database.AdoptTerminalCandidate(context.Background(), event); err != nil {
+						return "", err
+					}
+				}
+				for _, file := range []string{"test.txt", "staged.txt", ".untracked.txt"} {
+					if err := os.WriteFile(filepath.Join(managed, file), []byte("fresh correction\n"), 0o600); err != nil {
+						return "", err
+					}
+				}
+				gitCmd(t, managed, "add", "staged.txt")
+				return run.ID, nil
+			})
+			select {
+			case <-cleanupDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("cleanup did not finish after the branch lock was released")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			manager.cleanupRunEvidence(cfg, "another-finished-run")
+			if hasSwept {
+				t.Fatal("cleanup swept the checkout during terminal continuation")
+			}
+			for _, file := range []string{"test.txt", "staged.txt", ".untracked.txt"} {
+				if content, err := os.ReadFile(filepath.Join(managed, file)); err != nil || string(content) != "fresh correction\n" {
+					t.Fatalf("continuation source %s was lost: %q, %v", file, content, err)
+				}
+			}
+			if staged := gitOutput(t, managed, "diff", "--cached", "--name-only"); staged != "staged.txt" {
+				t.Fatalf("continuation index changed: %q", staged)
+			}
+		})
+	}
+}
 
 func TestTerminalAgentsRequireActualInactivity(t *testing.T) {
 	missing := 1 << 30

@@ -5,11 +5,10 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
-	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/procreap"
 )
 
@@ -68,12 +67,43 @@ func worktreeReapPolicyFor(global *config.GlobalConfig) worktreeReapPolicy {
 // worktree_roots placement is the operator's own directory, and startup
 // cleanup already reclaims it exactly once per crash, which is this
 // function's counterpart for the tree no-mistakes owns outright.
-func reapWorktrees(d *db.DB, p *paths.Paths, policy worktreeReapPolicy, now time.Time) {
+func (m *RunManager) reapWorktrees(policy worktreeReapPolicy, now time.Time) {
+	d, p := m.db, m.paths
 	removable, _ := defaultTreeOrphanWorktrees(d, p)
 	if len(removable) == 0 {
 		return
 	}
 	toRemove := worktreeReapCandidates(removable, policy, now)
+	if len(toRemove) == 0 {
+		return
+	}
+	branchLocks := make(map[*sync.Mutex]bool)
+	revalidated := toRemove[:0]
+	for _, wt := range toRemove {
+		run, err := d.GetRun(wt.runID)
+		if err != nil {
+			slog.Warn("preserving run worktree: cannot read run", "run_id", wt.runID, "error", err)
+			continue
+		}
+		if run != nil {
+			branchMutex := m.branchMutex(run.RepoID, run.Branch)
+			isLocked, hasAttempt := branchLocks[branchMutex]
+			if !hasAttempt {
+				isLocked = branchMutex.TryLock()
+				branchLocks[branchMutex] = isLocked
+				if isLocked {
+					defer branchMutex.Unlock()
+				}
+			}
+			if !isLocked {
+				continue
+			}
+		}
+		if removableOrphanWorktree(d, wt) {
+			revalidated = append(revalidated, wt)
+		}
+	}
+	toRemove = revalidated
 	if len(toRemove) == 0 {
 		return
 	}
