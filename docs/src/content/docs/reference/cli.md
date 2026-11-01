@@ -439,7 +439,7 @@ Cached home and status rendering performs no network read and labels the remote 
 
 ## no-mistakes axi sync
 
-Freshly check or apply the guarded synchronization offered by a `branch_sync.next_action`.
+Freshly check or apply guarded synchronization, return branch custody, or explicitly continue terminal validation.
 
 ```sh
 no-mistakes axi sync --check
@@ -467,11 +467,12 @@ Exit code `0` means an eligible check, applied synchronization or recovery, alre
 The ordinary worktree mutation is either a strict fast-forward of the invoking clean checked-out branch to the freshly verified pipeline-owned pushed SHA, or an equivalent-diverged advance.
 When a clean local branch and the pipeline-pushed head are diverged but the local unique work is content-equivalent to work already represented in the live pipeline head, `sync` reports `safety: safe_equivalent_advance`, anchors the pre-sync head under `refs/no-mistakes/sync-anchor/<run>`, and moves to the pipeline head with reset semantics.
 Genuine divergence still reports `safety: blocked_diverged` and changes nothing during ordinary synchronization.
-Under `--recover`, the possible worktree mutation is a strict fast-forward to the preserved pipeline head, or an adoption of a preserved head proven to carry every local change, both after relation-specific preservation checks. The bound-archive exception described below never changes the worktree at all.
+Without `--continue`, `--recover` can fast-forward to the preserved pipeline head or adopt a preserved head proven to carry every local change, both after relation-specific preservation checks.
+The bound-archive exception described below never changes the worktree at all.
 When the local gate branch is exactly at a newer same-branch pushed binding and Git proves that an older terminal run's unpublished preserved head is its ancestor, branch synchronization selects the newer binding; missing gate evidence, non-ancestor heads, or different or ambiguous target provenance remain blocked.
 Fork configurations verify the configured fork URL and exact feature ref rather than assuming `origin`.
 Dirty, in-progress, ahead, genuinely diverged, detached, wrong-branch, offline, changed-target, rewritten, deleted, legacy, or retired states fail closed without destructive recovery.
-Run `axi sync` only when structured output offers `next_action.code: sync`; process any blocked state instead of substituting reset, stash, merge, rebase, force, or branch replacement.
+For ordinary synchronization, run `axi sync` only when structured output offers `next_action.code: sync`; process any blocked state instead of substituting reset, stash, merge, rebase, force, or branch replacement.
 
 ### Rewritten push target recovery
 
@@ -517,9 +518,11 @@ On a `user_owned` branch, `--recover` is an idempotent no-op success: nothing pi
 ### Continue validation of preserved terminal source
 
 `axi sync --recover --continue --reason "validate preserved source"` explicitly accepts committed source for fresh validation in the current branch's original terminal run.
+Initial acceptance requires the latest run on the current repository and branch to be terminal, neither completed nor custody-returned.
 It requires the complete recorded pipeline with completed Intent and Rebase, no deliberately skipped required step, and the original bound launch selection and frozen policy.
 Active parked CI adoption and conflict handback use their own operations.
 This command accepts no caller-selected run or candidate SHA.
+Use it without `--check`, `--keep-local`, `--adopt-published`, or `--bind-archive-ref`.
 
 The source must be the run's clean managed checkout at the recorded head or a descendant, or the exact verified recovery anchor when the managed checkout is missing.
 A missing checkout also requires a previously recorded clean-source observation bound to that commit.

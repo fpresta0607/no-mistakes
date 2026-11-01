@@ -983,16 +983,12 @@ func removeOrphanWorktree(ctx context.Context, d *db.DB, wt orphanWorktree) bool
 // "no matching run" directory is never one whose insert simply hasn't landed
 // yet - it is safe to remove immediately.
 //
-// A run marked RunCIMonitorInterrupted (the daemon restarted while monitoring
-// CI for an already-open PR, issue #361) is terminal and would otherwise leak
-// its checkout on every future restart. Such a worktree is reclaimed like any
-// other terminal-run leftover EXCEPT when it may hold unpushed work: a CI
-// auto-fix commits locally before pushing (see steps/ci_fix.go), so a crash in
-// that window leaves the only copy of the fix commit in this checkout. We
-// reclaim only when the worktree HEAD equals the head the run already pushed -
-// run.HeadSHA advances solely after a verified push, so a match proves nothing
-// local is unpushed - and fail safe to preservation on any mismatch or
-// unreadable HEAD so recoverable commits are never discarded.
+// An interrupted CI monitor also keeps a checkout whose head differs from the
+// recorded run head: it may hold the only copy of a CI repair committed before
+// publication. That equality is only a continuity guard. Terminal source
+// adoption can set run.HeadSHA to an unvalidated candidate, so it is not proof
+// of publication. terminalWorktreeSourceReason owns the separate source
+// preservation check.
 func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (bool, string) {
 	run, err := d.GetRun(runID)
 	if err != nil {

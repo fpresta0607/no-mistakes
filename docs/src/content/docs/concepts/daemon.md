@@ -89,6 +89,14 @@ When a push arrives via the post-receive hook:
 
 An unresolved [`protected_paths`](/no-mistakes/reference/repo-config/#protected_paths) refusal preserves the index and working files across daemon shutdown, cancellation by a newer push, and crash recovery, including when trusted-config loading fails and the run cannot resume. This retention does not weaken recovery validation or keep a terminal run active: orphan-process cleanup and test-evidence expiry still apply. Successful completion of the refused step releases this protection; deliberate operator skip and abort retain their existing cleanup behavior.
 
+For a recorded run, terminal cleanup preserves staged or unstaged tracked changes, untracked files, and unreadable nonempty checkouts.
+The untracked check includes hidden files even when Git's status display settings hide them.
+Clean committed corrections are also retained unless an exact durable preservation anchor or a recorded successful push binding protects the checked-out head.
+This includes corrections committed after terminalization and before the first terminal continuation.
+Cleanup rechecks source after terminating escaped workers and immediately before removal, preserving files flushed during shutdown.
+Retention reaping holds the same branch lock as terminal continuation through revalidation, the process sweep, and removal.
+Source retention supplies no review or terminal validation authority; [terminal continuation](/no-mistakes/reference/cli/#continue-validation-of-preserved-terminal-source) submits eligible source for fresh validation.
+
 Step 4's cleanup is best effort: a `git worktree remove` failure (for example a vendored `.git` nested somewhere under a large `node_modules` tree) leaves the directory behind rather than retrying immediately. The [`worktree` retention setting](/no-mistakes/reference/global-config/#worktree) is the safety net for that leftover - it reaps eligible directories under the default tree after every finished run and again at startup, so a long-lived daemon converges on the retention budget instead of waiting for the crash-recovery sweep below, which only ever runs once per restart.
 
 Event delivery is bounded, so a slow or wedged client can never stall a run. Under pressure the daemon may drop ordinary log output, but it never silently loses a state change: it coalesces those into a single gap signal, and the TUI and `axi` respond by re-reading authoritative run state. A live view can therefore skip log lines while it is behind, but it converges on the run's real state. After a dropped connection, the TUI retries with a bounded delay and reconciles when it reattaches; if the daemon remains unavailable, it surfaces the connection error instead of retrying forever.
@@ -136,7 +144,7 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
 - Terminates processes a crashed daemon left running in worktrees no run owns any more, using the same working-directory scoping as run cleanup plus a ten-minute age floor so a run starting concurrently with startup is never mistaken for a leak
-- Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `pending` or `running`, whose source is dirty or unreadable, or whose unresolved refusal requires [retention](#what-it-does).
+- Removes eligible orphaned worktree directories via `git worktree remove --force`, subject to [source and refusal retention](#what-it-does) and never while their run is `pending` or `running`.
   Under `~/.no-mistakes/worktrees/` that means eligible leftovers from terminal runs plus directories with no matching run record, while in a [configured worktree root](/no-mistakes/reference/global-config/#worktree_roots) only the directories run records name are ever swept or removed.
   A `ci_monitor_interrupted` worktree is also kept when its checked-out commit differs from the run's recorded commit, since it may still hold an unpushed CI auto-fix commit.
 - Migrates gates named by authoritative repository records, plus legacy directories with the strict `<repoID>.git` shape. Before changing an unstamped candidate, it validates that the directory is a bare repository without relying on the current directory or ancestor Git discovery; unrelated and malformed directories are rejected without hook or Git mutation
