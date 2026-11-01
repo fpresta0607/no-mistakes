@@ -20,6 +20,14 @@ import (
 
 func TestAxiTerminalCustodyContinuation(t *testing.T) {
 	scenario := branchSyncScenario(t)
+	scenarioData, err := os.ReadFile(scenario)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarioData = []byte(strings.ReplaceAll(string(scenarioData), "severity: warning", "severity: warning\n          review_scope: source"))
+	if err := os.WriteFile(scenario, scenarioData, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	h := NewHarness(t, SetupOpts{Agent: "codex", Scenario: scenario, GlobalConfigExtra: "agent_config:\n  codex: {model: fixture, effort: xhigh}\nagent_args_override:\n  codex: ['-c', 'service_tier=\"default\"']\n"})
 	for name, directory := range map[string]string{"USERPROFILE": h.HomeDir, "APPDATA": filepath.Join(h.HomeDir, "AppData", "Roaming"), "LOCALAPPDATA": filepath.Join(h.HomeDir, "AppData", "Local")} {
 		if err := os.MkdirAll(directory, 0o755); err != nil {

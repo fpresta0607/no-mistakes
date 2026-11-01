@@ -193,6 +193,11 @@ func TestTerminalRestart(t *testing.T) {
 	if accepted.RunID != run.ID || accepted.CandidateSHA != candidate || !accepted.Started {
 		t.Fatalf("acceptance = %+v", accepted)
 	}
+	for _, key := range []string{"user.name", "user.email"} {
+		if actual, expected := gitOutput(t, managed, "config", "--worktree", "--get", key), gitOutput(t, repo.WorkingPath, "config", "--local", "--get", key); actual != expected {
+			t.Fatalf("reconstructed %s = %q, want %q", key, actual, expected)
+		}
+	}
 	deadline := time.Now().Add(15 * time.Second)
 	var current *db.Run
 	for time.Now().Before(deadline) {

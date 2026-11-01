@@ -114,6 +114,9 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 				return "", fmt.Errorf("reconstruct exact preserved source: %w", err)
 			}
 		}
+		if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, source.ManagedDir); err != nil {
+			return "", fmt.Errorf("configure terminal source identity: %w", err)
+		}
 		cfg, err := m.loadRecoveredConfig(ctx, &original.Run, repo, source.ManagedDir)
 		if err != nil {
 			return "", err
