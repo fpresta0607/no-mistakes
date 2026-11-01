@@ -134,16 +134,14 @@ const (
 	// of age, so a burst of parallel runs that all land inside the retention
 	// window still cannot grow the directory without bound.
 	DefaultEvidenceMaxRuns = 200
-	// DefaultWorktreeRetention bounds how long a terminal run's leftover
-	// worktree directory survives under the default <NM_HOME>/worktrees tree.
-	// A run's worktree is already removed the moment its pipeline finishes
-	// (see daemon.RunManager.removeRunWorktree); this budget only ever governs
-	// the leftover a failed removal - or a protected-path refusal that later
-	// became removable - left behind, so it is deliberately short: these
-	// directories are often full toolchain checkouts (node_modules and the
-	// like), not the small text artifacts test.evidence.retention bounds.
+	// DefaultWorktreeRetention bounds how long an eligible terminal run's
+	// leftover worktree survives under the default <NM_HOME>/worktrees tree.
+	// Cleanup eligibility follows the source and refusal retention rules in
+	// docs/src/content/docs/concepts/daemon.md. The budget is deliberately
+	// short: these directories are often full toolchain checkouts (node_modules
+	// and the like), not the small text artifacts test.evidence.retention bounds.
 	DefaultWorktreeRetention = 24 * time.Hour
-	// DefaultWorktreeMaxRuns caps how many leftover worktree directories
+	// DefaultWorktreeMaxRuns caps how many eligible leftover worktree directories
 	// survive regardless of age, for the same reason DefaultEvidenceMaxRuns
 	// does: a burst of failures inside the retention window must still not
 	// grow the directory without bound.
@@ -1105,14 +1103,11 @@ type WorktreeRaw struct {
 	MaxRuns   *int    `yaml:"max_runs"`
 }
 
-// Worktree is the resolved local run-worktree retention config. A run's own
-// worktree is already removed the instant its pipeline finishes (see
-// daemon.RunManager.removeRunWorktree); this bounds what a failed removal -
-// or a protected-path refusal that later became removable - leaves behind, on
-// a long-lived daemon that may not restart for weeks (see
-// daemon.cleanupOrphanWorktrees for the crash-recovery counterpart, which
-// runs only at startup). Zero Retention disables age-based reaping and zero
-// MaxRuns disables the count ceiling, matching Evidence.
+// Worktree is the resolved local run-worktree retention config, applied to
+// eligible leftovers after run cleanup and at daemon startup. Cleanup
+// eligibility is documented in docs/src/content/docs/concepts/daemon.md.
+// Zero Retention disables age-based reaping and zero MaxRuns disables the
+// count ceiling, matching Evidence.
 type Worktree struct {
 	Retention time.Duration
 	MaxRuns   int
@@ -1437,10 +1432,10 @@ log_level: info
 # worktree_roots:
 #   /Users/you/src/my-repo: /Users/you/work/my-repo-runs
 
-# A run's own worktree is already removed the instant its pipeline finishes.
-# This bounds what a rare failed removal - or a protected-path refusal that
-# later became removable - leaves behind, the same way test.evidence.retention
-# bounds evidence: retention ages leftover directories out (default 24 hours)
+# Bounds eligible leftover run worktrees after run cleanup and at startup.
+# Source and refusal retention rules determine cleanup eligibility:
+# https://kunchenguid.github.io/no-mistakes/concepts/daemon/#what-it-does
+# Retention ages eligible leftover directories out (default 24 hours)
 # and max_runs caps how many survive regardless of age (default 20). Set
 # retention to "unlimited", or either to 0, to disable that bound. Global-only,
 # like test.evidence's retention settings.

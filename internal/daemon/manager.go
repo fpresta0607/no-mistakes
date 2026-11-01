@@ -662,13 +662,12 @@ func (m *RunManager) cleanupRunEvidence(cfg *config.Config, runID string) {
 }
 
 // removeRunWorktree sweeps processes before deciding whether to remove the
-// directory, so refusal retention cannot keep escaped workers alive.
+// directory, so source or refusal retention cannot keep escaped workers alive.
 //
-// Every removal of a run worktree this package performs goes through here, and
-// none calls git.WorktreeRemove directly, because the ordering is easy to forget
-// at one site and invisible when forgotten - a run whose setup failed, whose
-// execution returned, or which was resumed after a crash all reach this point by
-// different routes. reason distinguishes the routes in the log.
+// Run setup failure, completion, and recovered-run cleanup all go through here
+// so each route sweeps before checking source and refusals. Orphan cleanup uses
+// removeOrphanWorktree after its own sweep. reason distinguishes the routes in
+// the log.
 func (m *RunManager) removeRunWorktree(repoID, runID, gateDir, wtDir, reason string) {
 	m.sweepRunWorktreeProcesses(repoID, runID, wtDir)
 	run, err := m.db.GetRun(runID)

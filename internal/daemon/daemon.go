@@ -817,8 +817,8 @@ func reportUnusableWorktreeRoots(d *db.DB, layout *worktrees.Layout) {
 // cleanupOrphanWorktrees removes worktree directories left behind by runs
 // that are no longer active, for the operator-placed leftovers named by
 // recordedOrphanWorktrees (see worktree_roots in the global config) - that
-// directory is the operator's own, so every eligible leftover there is
-// removed unconditionally, once, at startup. It is DB-aware: a worktree is
+// directory is the operator's own, so only eligible recorded leftovers are
+// considered, once, at startup. It is DB-aware: a worktree is
 // only removed when its run row is terminal, or when there is no matching
 // run row at all. This is what keeps cleanup from deleting the checkout out
 // from under a pipeline that is still actually running (see
@@ -930,10 +930,7 @@ func recordedOrphanWorktrees(d *db.DB, p *paths.Paths, leftover []db.RunWorktree
 	return removable
 }
 
-// removableOrphanWorktree combines the active-run guard with refusal retention.
-// This removal decision does not exempt retained terminal runs from evidence
-// expiry (a separate, unrelated budget); the startup process sweep now applies
-// the same worktree retention policy through retainedDefaultTreeRunIDs.
+// removableOrphanWorktree combines active-run, source, and refusal retention.
 func removableOrphanWorktree(d *db.DB, wt orphanWorktree) bool {
 	if skip, reason := skipWorktreeCleanup(context.Background(), d, wt.runID, wt.dir); skip {
 		slog.Info("skipping worktree cleanup", "path", wt.dir, "reason", reason)
@@ -951,10 +948,11 @@ func removableOrphanWorktree(d *db.DB, wt orphanWorktree) bool {
 	return true
 }
 
-// removeOrphanWorktree removes one run worktree directory its caller has
-// already decided on and swept (see cleanupOrphanWorktrees). It reports
-// whether the directory was actually removed, since git worktree remove and
-// its os.RemoveAll fallback can both fail and merely log a warning.
+// removeOrphanWorktree rechecks cleanup eligibility after its caller's process
+// sweep, so workers' shutdown writes cannot be discarded using a stale clean
+// observation. It reports whether the directory was actually removed, since
+// git worktree remove and its os.RemoveAll fallback can both fail and merely
+// log a warning.
 func removeOrphanWorktree(ctx context.Context, d *db.DB, wt orphanWorktree) bool {
 	if !removableOrphanWorktree(d, wt) {
 		return false
