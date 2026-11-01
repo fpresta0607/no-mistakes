@@ -1276,7 +1276,7 @@ The file is private local evidence, restricted to owner-only permissions on POSI
 
 Transcript-based user-intent extraction settings.
 When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, and pass that summary to rebase, review, test, document, lint, CI auto-fix, and repository gate repair prompts.
-PR-drafting prompts receive intent only when the trusted repository explicitly opts in through [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent) and no caller-side omission applies.
+For PR-drafting context and publication, see [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
 
 |      |          |
 | ---- | -------- |
@@ -1292,7 +1292,10 @@ PR-drafting prompts receive intent only when the trusted repository explicitly o
 
 Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `pi`, and `copilot`.
 
-`intent.publish_intent: false` is a global, operator-side default that keeps the generated `## Intent` section out of the PR body for runs started without an explicit override. It is the caller-side counterpart of the repository's trusted [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent): both are tighten-only, the repository's trusted policy remains the ceiling a caller can never exceed, and review, test, document, lint, and CI auto-fix prompts keep the full intent. Under the caller-side omission the PR-drafting turns receive no intent text at all and draft from the diff and commit messages only; the intent is withheld from them, never scanned out of their output. A run records the folded decision (the `axi run --no-publish-intent` flag OR this global default) at start; reruns inherit it, and a mid-run config change never re-publishes. This field is global-only: a pushed branch's `.no-mistakes.yaml` cannot express it.
+`intent.publish_intent: false` records a caller-side omission of intent from the generated `## Intent` section and PR-drafting context.
+The default `true` leaves publication to the repository's trusted [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
+A run records the folded decision (the `axi run --no-publish-intent` flag OR this global default) at start; reruns inherit it, and a mid-run config change never re-publishes.
+This field is global-only: a pushed branch's `.no-mistakes.yaml` cannot express it.
 
 The match score is the share of matching files mentioned in a transcript session; deleted files are ignored when the diff also contains non-deleted changes.
 All-deletion diffs still match against the deleted changed files.

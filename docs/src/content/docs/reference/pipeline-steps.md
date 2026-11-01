@@ -48,7 +48,8 @@ This context is advisory and fails open. It tells agents not to implement or re-
 ## Intent
 
 Uses explicit intent when a run provides it, including exact explicit intent inherited by a rerun, otherwise infers the author's intent from recent local Claude Code, Codex, OpenCode, Rovo Dev, Pi, or GitHub Copilot CLI transcripts.
-This is best-effort context, and when available it is included in rebase fixes, review checks and fixes, test detection, evidence validation, and fixes, documentation checks and fixes, lint detection and fixes, CI auto-fixes, and PR drafting.
+This is best-effort context, and when available it is included in rebase fixes, review checks and fixes, test detection, evidence validation, and fixes, documentation checks and fixes, lint detection and fixes, and CI auto-fixes.
+PR-drafting context follows [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
 
 **Behavior:**
 
@@ -296,14 +297,15 @@ Creates or updates a pull request.
 - Uses `gh` for GitHub, `glab` for GitLab, `forgejo-axi` for Forgejo, `tea` for Gitea, the Bitbucket API for Bitbucket Cloud, and `az` for Azure DevOps
 - For GitHub fork routing, keeps `gh --repo` pointed at the parent repository from `origin`, checks existing PRs with the bare branch name, filters matching PRs by head owner, and creates PRs with `--head <fork-owner>:<branch>`
 - Honors the configured draft setting. The [global](/no-mistakes/reference/global-config/#providersgithubdraft_pull_requests) and [per-repo](/no-mistakes/reference/repo-config/#providersgithubdraft_pull_requests) config references own provider support and create-versus-update behavior.
-- PR title: agent-generated from the final branch delta with user intent when available. With no `pr.title_format`, it uses conventional commit format (`type(scope): description` or `type: description`); user-facing product impact should use `feat` or `fix` so release automation can pick it up; when a scope is used, it should be the primary affected real module/package from the changed paths and kept broad rather than file-level. A configured `pr.title_format` replaces that default and can use `{{.Branch}}` and `{{.Title}}` to apply repository-specific conventions after the agent returns only the bare title text. If drafting fails, the ordinary fallback is `chore: update pull request`; with a configured format, the formatter receives `update pull request` as its `{{.Title}}` value.
+- PR title: agent-generated from the final branch delta.
+  With no `pr.title_format`, it uses conventional commit format (`type(scope): description` or `type: description`); user-facing product impact should use `feat` or `fix` so release automation can pick it up; when a scope is used, it should be the primary affected real module/package from the changed paths and kept broad rather than file-level.
+  A configured `pr.title_format` replaces that default and can use `{{.Branch}}` and `{{.Title}}` to apply repository-specific conventions after the agent returns only the bare title text.
+  If drafting fails, the ordinary fallback is `chore: update pull request`; with a configured format, the formatter receives `update pull request` as its `{{.Title}}` value.
 - Bounds the PR-drafting agent with [`agent_timeout`](/no-mistakes/reference/global-config/#agent_timeout): a silent turn is cancelled at that stall budget and a still-working one continues past that budget only when its still-working cap is set; ordinary drafting uses that same fallback, while template drafting fails as described below. A late successful title after cancellation is not used
 - For repository-owned headings and author-preserving regeneration, see [`pr.template`](/no-mistakes/reference/repo-config/#prtemplate). That mode replaces the default narrative and fails on drafting or body-budget errors rather than applying the ordinary fallback/truncation below.
 - The PR stage exclusively owns the complete branch-scope description. It drafts `## What Changed` from the actual final diff after local mutating stages finish, and its fallback lists the final changed paths and statuses.
 - By default, the PR body includes the final-diff `## What Changed` and regenerated `## Risk Assessment`, `## Testing`, and `## Pipeline` sections from recorded step results and rounds.
-  Validation intent stays private and is withheld from PR-drafting prompts unless trusted [`pr.publish_intent: true`](/no-mistakes/reference/repo-config/#prpublish_intent) explicitly permits publication and the run recorded no caller-side omission (`axi run --no-publish-intent` or the global [`intent.publish_intent`](/no-mistakes/reference/global-config/#intent) default).
-  That opt-in also enables the generated `## Intent` section when intent is available.
-  Full validation intent and its source binding remain intact.
+  The optional generated `## Intent` section and PR-drafting context follow [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
   [`pr.appendix`](/no-mistakes/reference/repo-config/#prappendix) controls the presentation of the recorded tail.
   Only `## What Changed` describes the complete final branch scope; when published, the deterministic sections remain evidence for the commit each step inspected.
   In the full appendix, auto-fix results in `## Pipeline` render as an issue -> fix -> verification narrative using recorded outcomes: applied changes, a confirmed no-change attempt, or an attempt whose result was not recorded.

@@ -238,7 +238,6 @@ Use a repository Markdown template for the public narrative, followed by no-mist
 ```yaml
 pr:
   template: .github/pull_request_template.md
-  publish_intent: false # Optional; otherwise original Intent is still published.
   appendix: collapsed # Optional; full (the default), collapsed, or minimal.
 ```
 
@@ -262,7 +261,12 @@ The path is read as a literal Git tree entry, never through the pushed worktree 
 
 #### Author-preserving regeneration
 
-A templated PR contains one delimited, integrity-checked generated appendix. Later runs preserve live author text before and after it, including human checkbox choices and explicit issue-closing lines, and refresh only that appendix. They do not re-fill the narrative. An author's title is also preserved unless `pr.title_format` is configured; that explicit repository convention redrafts the bare title and applies the format on every managed update. Changing or removing `pr.template` does not regenerate an already owned narrative; edit it on the PR when it needs updating. The full intent remains available to reviewers. Removing the generated Intent section is controlled separately below.
+A templated PR contains one delimited, integrity-checked generated appendix.
+Later runs preserve live author text before and after it, including human checkbox choices and explicit issue-closing lines, and refresh only that appendix.
+They do not re-fill the narrative.
+An author's title is also preserved unless `pr.title_format` is configured; that explicit repository convention redrafts the bare title and applies the format on every managed update.
+Changing or removing `pr.template` does not regenerate an already owned narrative; edit it on the PR when it needs updating.
+Intent publication and drafting context follow [`pr.publish_intent`](#prpublish_intent).
 
 Ownership is never inferred from a heading's name. An existing author-only body can be adopted without model rewriting. **Legacy descriptions containing an unowned attestation require explicit author reconciliation** before template mode can adopt them: separate/remove their obsolete generated evidence while retaining the desired author text and closing references, then retry. Do not manufacture ownership markers by hand. An edited appendix, missing/duplicate/malformed markers, or a competing attestation fails rather than risking discarded author content. Put author additions outside the generated appendix. The integrity guard detects accidental edits; it is not authentication or a cryptographic signature by no-mistakes.
 
