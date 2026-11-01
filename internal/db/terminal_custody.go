@@ -46,6 +46,8 @@ type TerminalAdoption struct {
 	SuccessorID   string
 	WorktreeRoot  string
 	Plan          *verificationplan.Snapshot
+	Gates         string
+	StepNames     []types.StepName
 	Snapshot      TerminalSnapshot
 	CandidateSHA  string
 	RetainedSHA   string
@@ -258,11 +260,11 @@ func (d *DB) AdoptTerminalCandidate(ctx context.Context, event TerminalAdoption)
 		closing_issue_refs, closing_issue_refs_locked_at, created_at, updated_at)
 		SELECT ?, repo_id, branch, ?, base_sha, ?, ?, ?, ?, 'pending',
 		intent, intent_source, intent_session_id, intent_score, ?, launch_validation_generation, launch_intent_digest,
-		?, ?, pr_base_branch, omit_intent, pi_profile, ?, gates_json,
+		?, ?, pr_base_branch, omit_intent, pi_profile, ?, ?,
 		pr_url, pr_state, pr_state_observed_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation,
 		closing_issue_refs, closing_issue_refs_locked_at, ?, ? FROM runs WHERE id = ?`,
 		childID, event.CandidateSHA, event.CandidateSHA, workDir, buildinfo.CurrentVersion(), buildinfo.Commit, nonce,
-		event.Assertion, event.Proof, event.Plan, ts, ts, run.ID); err != nil {
+		event.Assertion, event.Proof, event.Plan, event.Gates, ts, ts, run.ID); err != nil {
 		return nil, false, err
 	}
 	event.ID, event.CreatedAt, event.SuccessorID = newID(), now(), childID
@@ -288,7 +290,7 @@ func validateTerminalSuccessor(tx *sql.Tx, event *TerminalAdoption) error {
 		return fmt.Errorf("terminal predecessor changed after acceptance")
 	}
 	child, err := readTerminalSnapshot(tx, event.Successor.ID)
-	if err != nil || !reflect.DeepEqual(child.Run, event.Successor) || !reflect.DeepEqual(child.Repo, event.Snapshot.Repo) || child.Gates != event.Snapshot.Gates || len(child.Steps) != 0 {
+	if err != nil || !reflect.DeepEqual(child.Run, event.Successor) || !reflect.DeepEqual(child.Repo, event.Snapshot.Repo) || child.Gates != event.Gates || len(child.Steps) != 0 {
 		return fmt.Errorf("terminal successor changed, progressed or was cancelled")
 	}
 	var competing bool
@@ -351,10 +353,12 @@ func (d *DB) TerminalPhaseRemaining(runID string, name types.StepName, configure
 	}
 	spent := 0
 	for _, snapshot := range snapshots {
+		hasPhase := false
 		for index, step := range snapshot.Steps {
 			if step.StepName != name {
 				continue
 			}
+			hasPhase = true
 			if snapshot.Run.ID != runID {
 				limit := 0
 				if step.AutoFixLimit != nil {
@@ -375,6 +379,9 @@ func (d *DB) TerminalPhaseRemaining(runID string, name types.StepName, configure
 			if pending {
 				spent++
 			}
+		}
+		if !hasPhase && snapshot.Run.ID != runID {
+			remaining = 0
 		}
 	}
 	return TerminalPhaseBudget{Limit: remaining, Spent: spent, Remaining: max(0, remaining-spent)}, true, nil

@@ -543,8 +543,10 @@ Acceptance atomically appends the source binding and creates a pending successor
 The same model, effort and agent chain are freshly proved against the current trusted default-branch source under the frozen policy.
 No Review, Test, CI-ready or terminal-verification authority is copied.
 Intent, Rebase, full Review, Test and the remaining required gates execute afresh through the normal pipeline.
+The successor pins the current trusted repository gates at acceptance; the predecessor keeps its original pin.
 The predecessor-linked phase ledger includes actual manual and automatic fixes and dispatched attempts interrupted before a round was recorded.
 Automatic repair capacity cannot exceed the original remaining allowance; an exhausted phase receives no renewed capacity.
+A newly required phase without a recorded predecessor allowance receives zero automatic repairs.
 Further manual repairs require explicit gate decisions and remain recorded as additional spending.
 
 The result reports `adopted_unvalidated`, the successor `run`, `predecessor`, exact `candidate` and `candidate_tree`, adoption ID, cumulative `phase_budgets` and whether validation started.

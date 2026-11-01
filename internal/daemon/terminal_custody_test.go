@@ -539,7 +539,10 @@ func TestTerminalRestart(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(managed, "fix.txt"), []byte("preserved fix\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	gitCmd(t, managed, "add", "fix.txt")
+	if err := os.WriteFile(filepath.Join(managed, ".no-mistakes.yaml"), []byte("gates:\n  - name: fresh-required\n    after: rebase\n    command: 'exit 0'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, managed, "add", "fix.txt", ".no-mistakes.yaml")
 	gitCmd(t, managed, "commit", "-m", "preserved correction")
 	candidate := gitOutput(t, managed, "rev-parse", "HEAD")
 	for _, name := range types.AllSteps() {
@@ -688,6 +691,23 @@ func TestTerminalRestart(t *testing.T) {
 	}
 	if current.AwaitingAgentSince == nil || current.ReviewApprovedHeadSHA != nil || current.TerminalHeadVerifiedAt != nil {
 		t.Fatalf("candidate bypassed fresh Review: %+v", current)
+	}
+	childSnapshot, err := database.ReadTerminalSnapshot(current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateName := types.CustomGateStepName(types.StepRebase, "fresh-required")
+	hasFreshGate := false
+	for index, step := range childSnapshot.Steps {
+		if step.StepName == gateName {
+			hasFreshGate = step.Status == types.StepStatusCompleted && len(childSnapshot.Rounds[index]) == 1
+			if !hasFreshGate && step.FindingsJSON != nil {
+				t.Fatalf("fresh gate status=%s findings=%s", step.Status, *step.FindingsJSON)
+			}
+		}
+	}
+	if !hasFreshGate || childSnapshot.Gates == before.Gates || accepted.PhaseBudgets[string(gateName)].Remaining != 0 {
+		t.Fatalf("fresh required gate was not independently validated: %+v", childSnapshot)
 	}
 	event, err := database.GetTerminalAdoption(run.ID)
 	if err != nil || event == nil || event.Assertion.TrustedSHA != candidate || !reflect.DeepEqual(event.Snapshot.Run, before.Run) || current.LaunchAssertion.TrustedSHA != candidate || current.LaunchAssertionProof.Check(current.LaunchAssertion) != nil {
@@ -953,5 +973,35 @@ func TestTerminalPendingSuccessorSurvivesStartupWithoutAnExecutor(t *testing.T) 
 	}
 	if err := database.ValidateTerminalSuccessor(event); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestTerminalSuccessorUsesFreshTrustedGatesWithoutChangingPredecessorPin(t *testing.T) {
+	originalGates := []config.Gate{{Name: "arch-fitness", After: types.StepReview, Command: "true"}}
+	manager, parent, _ := gatePinFixture(t, oneGateYAML, originalGates)
+	repo, err := manager.db.GetRepo(parent.RepoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := commitDefaultBranchConfig(t, repo.WorkingPath, twoGatesYAML)
+	originalPin, err := manager.db.GetRunGates(parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := manager.paths.WorktreeDir(repo.ID, parent.ID)
+	candidateConfig, err := config.LoadRepo(managed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := manager.loadRecoveredConfigWithRepo(context.Background(), parent, repo, managed, candidateConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TrustedConfigSHA != trusted || len(cfg.Gates) != 2 {
+		t.Fatalf("new successor omitted fresh trusted gates: %+v", cfg.Gates)
+	}
+	after, err := manager.db.GetRunGates(parent.ID)
+	if err != nil || after != originalPin {
+		t.Fatal("fresh gate resolution rewrote predecessor pin")
 	}
 }

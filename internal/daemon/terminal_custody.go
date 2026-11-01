@@ -168,8 +168,20 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 			return "", err
 		}
 		execSteps := steps.WithCustomGates(m.steps(), cfg.Gates)
-		if err := validateTerminalSteps(original, execSteps); err != nil {
+		originalGates, err := m.pinnedRunGates(original.Run.ID)
+		if err != nil {
 			return "", err
+		}
+		if err := validateTerminalSteps(original, steps.WithCustomGates(m.steps(), originalGates)); err != nil {
+			return "", err
+		}
+		gates, err := config.MarshalGates(cfg.Gates)
+		if err != nil {
+			return "", err
+		}
+		stepNames := make([]types.StepName, 0, len(execSteps))
+		for _, step := range execSteps {
+			stepNames = append(stepNames, step.Name())
 		}
 		freezeTerminalLimits(cfg, original)
 		assertion, proof, roleConfigs, err := prepareTerminalLaunch(ctx, &original.Run, cfg, exec.LookPath)
@@ -212,12 +224,12 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 			}
 		}
 		if event == nil {
-			event, _, err = m.db.AdoptTerminalCandidate(ctx, db.TerminalAdoption{Snapshot: *original, SuccessorID: successorID, WorktreeRoot: filepath.Dir(workDir), Plan: plan, CandidateSHA: source.Head, RetainedSHA: source.RetainedHead, CandidateTree: source.Tree, SourceRef: candidateRef, GateHead: source.GateHead, RecoveryHead: source.RecoveryHead, CallerDir: request.CallerDir, CallerHead: callerHead, ManagedDir: source.ManagedDir, Reason: request.Reason, Operator: strconv.Itoa(operator), Assertion: assertion, Proof: proof})
+			event, _, err = m.db.AdoptTerminalCandidate(ctx, db.TerminalAdoption{Snapshot: *original, SuccessorID: successorID, WorktreeRoot: filepath.Dir(workDir), Plan: plan, Gates: gates, StepNames: stepNames, CandidateSHA: source.Head, RetainedSHA: source.RetainedHead, CandidateTree: source.Tree, SourceRef: candidateRef, GateHead: source.GateHead, RecoveryHead: source.RecoveryHead, CallerDir: request.CallerDir, CallerHead: callerHead, ManagedDir: source.ManagedDir, Reason: request.Reason, Operator: strconv.Itoa(operator), Assertion: assertion, Proof: proof})
 			if err != nil {
 				return "", err
 			}
 		} else {
-			if request.Reason != event.Reason || request.CallerDir != event.CallerDir || callerHead != event.CallerHead || !assertion.Matches(event.Assertion) || proof.Check(event.Assertion) != nil {
+			if request.Reason != event.Reason || request.CallerDir != event.CallerDir || callerHead != event.CallerHead || gates != event.Gates || !assertion.Matches(event.Assertion) || proof.Check(event.Assertion) != nil {
 				return "", fmt.Errorf("accepted source, reason or trusted launch provenance changed")
 			}
 			if err := m.db.ValidateTerminalSuccessor(event); err != nil {

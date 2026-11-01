@@ -12,11 +12,11 @@ func ValidateTerminalSuccessor(database *db.DB, run *db.Run, steps []Step, event
 	if event == nil || run.ID != event.Successor.ID || run.HeadSHA != event.CandidateSHA {
 		return fmt.Errorf("terminal successor identity changed")
 	}
-	if len(steps) != len(event.Snapshot.Steps) {
+	if len(steps) != len(event.StepNames) {
 		return fmt.Errorf("terminal step sequence changed")
 	}
 	for index, step := range steps {
-		if step.Name() != event.Snapshot.Steps[index].StepName {
+		if step.Name() != event.StepNames[index] {
 			return fmt.Errorf("terminal step sequence changed")
 		}
 	}

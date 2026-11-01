@@ -99,6 +99,7 @@ func TestTerminalContinuationKeepsCancelledPredecessorImmutable(t *testing.T) {
 
 func TestTerminalAdoptionKeepsHistoryAndOriginalLaunchReceipt(t *testing.T) {
 	database, event := newTerminalAdoptionFixture(t)
+	event.Gates = `[{"name":"fresh-required","after":"test","command":"exit 0"}]`
 	before := &event.Snapshot
 	run := &before.Run
 	accepted, created, err := database.AdoptTerminalCandidate(context.Background(), event)
@@ -118,6 +119,9 @@ func TestTerminalAdoptionKeepsHistoryAndOriginalLaunchReceipt(t *testing.T) {
 	}
 	if child.Run.ID == run.ID || child.Run.Status != types.RunPending || child.Run.HeadSHA != event.CandidateSHA || child.Run.ReviewApprovedHeadSHA != nil || child.Run.TerminalHeadVerifiedAt != nil || child.Run.CIReadyAt != nil || child.Run.LaunchReceiptClaimedAt != nil || len(child.Steps) != 0 {
 		t.Fatalf("successor reused validation authority: %+v", child)
+	}
+	if child.Gates != event.Gates || child.Gates == before.Gates {
+		t.Fatal("successor did not pin its own required gates")
 	}
 	if !reflect.DeepEqual(child.Run.LaunchAssertion, event.Assertion) || !reflect.DeepEqual(child.Run.LaunchAssertionProof, event.Proof) || !reflect.DeepEqual(child.Run.LaunchValidationGeneration, run.LaunchValidationGeneration) || child.Run.LaunchNonce == nil || *child.Run.LaunchNonce == *run.LaunchNonce {
 		t.Fatal("successor lacks fresh proof and nonce under frozen policy")
@@ -195,7 +199,7 @@ func TestTerminalAdoptionRefusalIsAtomic(t *testing.T) {
 }
 
 func TestTerminalAdoptionRefusesChangedOrProgressedSuccessor(t *testing.T) {
-	for _, state := range []string{"untouched", "running", "failed", "cancelled", "completed", "step", "head", "generation", "receipt", "newer run"} {
+	for _, state := range []string{"untouched", "running", "failed", "cancelled", "completed", "step", "head", "generation", "receipt", "gates", "newer run"} {
 		t.Run(state, func(t *testing.T) {
 			database, event := newTerminalAdoptionFixture(t)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -235,6 +239,10 @@ func TestTerminalAdoptionRefusesChangedOrProgressedSuccessor(t *testing.T) {
 				}
 			case "receipt":
 				if _, err := database.sql.Exec(`UPDATE runs SET launch_receipt_claimed_at = 123 WHERE id = ?`, childID); err != nil {
+					t.Fatal(err)
+				}
+			case "gates":
+				if err := database.SetRunGates(childID, `[{"name":"changed","after":"test","command":"exit 0"}]`); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -449,5 +457,18 @@ func TestTerminalSuccessorInheritsPublicBindingWithoutValidationStamps(t *testin
 	}
 	if _, err := database.sql.Exec(`DELETE FROM terminal_adoptions WHERE run_id=?`, parentID); err == nil {
 		t.Fatal("durable successor binding deleted")
+	}
+}
+
+func TestTerminalSuccessorGivesAnUnrecordedPhaseNoAutomaticAllowance(t *testing.T) {
+	database, event := newTerminalAdoptionFixture(t)
+	adopted, _, err := database.AdoptTerminalCandidate(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	phase := types.CustomGateStepName(types.StepTest, "new-required-gate")
+	budget, family, err := database.TerminalPhaseRemaining(adopted.Successor.ID, phase, 5)
+	if err != nil || !family || budget.Limit != 0 || budget.Remaining != 0 {
+		t.Fatalf("new phase renewed repair capacity: %+v err=%v", budget, err)
 	}
 }

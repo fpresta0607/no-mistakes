@@ -224,7 +224,16 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	if err != nil {
 		return nil, fmt.Errorf("load repo config: %w", err)
 	}
-	return m.loadRecoveredConfigWithRepo(ctx, run, repo, workDir, repoCfg)
+	cfg, err := m.loadRecoveredConfigWithRepo(ctx, run, repo, workDir, repoCfg)
+	if err != nil {
+		return nil, err
+	}
+	// A parked run keeps its original sequence; a new successor pins fresh gates.
+	cfg.Gates, err = m.pinnedRunGates(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func (m *RunManager) loadRecoveredConfigWithRepo(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, repoCfg *config.RepoConfig) (*config.Config, error) {
@@ -253,17 +262,6 @@ func (m *RunManager) loadRecoveredConfigWithRepo(ctx context.Context, run *db.Ru
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
 	cfg := config.MergeForRemote(globalCfg, effectiveRepoCfg, repo.UpstreamURL)
-	// Gates are read back from the run, never re-resolved. Everything else here
-	// is deliberately re-read from the live default branch, but a gate decides
-	// which steps the run HAS: the default branch may have gained or lost one
-	// since this run parked, and rebuilding the sequence from the current list
-	// would leave recovery matching the run's recorded steps against a sequence
-	// it never executed - failing a healthy parked run as a crash.
-	gates, err := m.pinnedRunGates(run.ID)
-	if err != nil {
-		return nil, err
-	}
-	cfg.Gates = gates
 	if err := cfg.ApplyPiProfile(run.PiProfile); err != nil {
 		return nil, err
 	}
