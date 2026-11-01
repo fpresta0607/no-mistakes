@@ -259,6 +259,7 @@ func TestHasUncommittedChangesUntrackedFile(t *testing.T) {
 	ctx := context.Background()
 
 	writeFile(t, filepath.Join(dir, "new.txt"), "new\n")
+	run(t, dir, "git", "config", "status.showUntrackedFiles", "no")
 
 	dirty, err := HasUncommittedChanges(ctx, dir)
 	if err != nil {

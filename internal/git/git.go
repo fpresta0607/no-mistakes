@@ -654,9 +654,9 @@ func LsRemote(ctx context.Context, dir, remote, ref string) (string, error) {
 
 // HasUncommittedChanges reports whether the working tree or index differs from HEAD.
 // Returns true if any tracked file is modified, staged, or deleted, or if there are
-// untracked files. Equivalent to a non-empty `git status --porcelain`.
+// untracked files, regardless of the user's status display configuration.
 func HasUncommittedChanges(ctx context.Context, dir string) (bool, error) {
-	out, err := Run(ctx, dir, "status", "--porcelain")
+	out, err := Run(ctx, dir, "status", "--porcelain", "--untracked-files=all")
 	if err != nil {
 		return false, err
 	}

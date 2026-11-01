@@ -63,11 +63,42 @@ func (m *RunManager) newRunPipelineAgent(ctx context.Context, run *db.Run, cfg *
 	if run.LaunchAssertion == nil {
 		return newPipelineAgent(ctx, cfg, evidenceRoot, lookPath, environment)
 	}
-	roleConfigs, _, err := prepareLaunchAssertion(ctx, run.LaunchAssertion, cfg, lookPath)
+	expected := run.LaunchAssertion
+	event, err := m.db.GetTerminalAdoption(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if event != nil {
+		if !event.Snapshot.Run.LaunchAssertion.Matches(run.LaunchAssertion) || event.Snapshot.Run.LaunchValidationGeneration == nil || run.LaunchValidationGeneration == nil || *event.Snapshot.Run.LaunchValidationGeneration != *run.LaunchValidationGeneration {
+			return nil, fmt.Errorf("terminal recovery launch provenance conflicts with the original receipt")
+		}
+		if err := event.Proof.Check(event.Assertion); err != nil {
+			return nil, err
+		}
+		expected = event.Assertion
+		freezeTerminalLimits(cfg, &event.Snapshot)
+	}
+	roleConfigs, _, err := prepareLaunchAssertion(ctx, expected, cfg, lookPath)
 	if err != nil {
 		return nil, err
 	}
 	return newResolvedPipelineAgent(cfg, roleConfigs, evidenceRoot, environment)
+}
+
+func prepareTerminalLaunch(ctx context.Context, run *db.Run, cfg *config.Config, lookPath func(string) (string, error)) (*launchassert.Expectation, *launchassert.Proof, map[string]*config.Config, error) {
+	if run.LaunchAssertion == nil || run.LaunchValidationGeneration == nil || *run.LaunchValidationGeneration == "" {
+		return nil, nil, nil, fmt.Errorf("terminal recovery needs the original bound launch selection and frozen policy")
+	}
+	if err := run.LaunchAssertionProof.Check(run.LaunchAssertion); err != nil {
+		return nil, nil, nil, err
+	}
+	fresh := *run.LaunchAssertion
+	fresh.TrustedSHA = cfg.TrustedConfigSHA
+	roles, proof, err := prepareLaunchAssertion(ctx, &fresh, cfg, lookPath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return &fresh, proof, roles, nil
 }
 
 // applyLaunchSelection gives a run the agents its launch selection names,

@@ -81,6 +81,8 @@ func newSyncCmd() *cobra.Command {
 func newAxiSyncCmd() *cobra.Command {
 	var check, recover, keepLocal, adoptPublished bool
 	var bindArchiveRef string
+	var continueRecovery bool
+	var reason string
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Check or apply guarded current-branch synchronization",
@@ -93,6 +95,8 @@ func newAxiSyncCmd() *cobra.Command {
 			"--check performs the same fresh read-only plan. Blocked states change nothing.\n" +
 			"--recover performs the guarded custody return offered by\n" +
 			"next_action.code: recover_custody; --keep-local keeps the current local head.\n" +
+			"--recover --continue --reason explicitly adopts a terminal run's bound source\n" +
+			"as unvalidated work in that same run, requiring fresh Review and checks.\n" +
 			"It also performs next_action.code: recover_remote_rewritten, which anchors the\n" +
 			"superseded pipeline head and rebinds the push binding to the re-verified live head.\n" +
 			"--bind-archive-ref binds one exact existing refs/heads/archive/* commit to\n" +
@@ -103,6 +107,15 @@ func newAxiSyncCmd() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if continueRecovery {
+				if !recover || check || keepLocal || adoptPublished || bindArchiveRef != "" || strings.TrimSpace(reason) == "" {
+					return emitError(cmd, 2, "--continue requires --recover and --reason, without other recovery modes")
+				}
+				return runTerminalContinuation(cmd, reason)
+			}
+			if reason != "" {
+				return emitError(cmd, 2, "--reason requires --recover --continue")
+			}
 			if (check && recover) || (check && adoptPublished) || (recover && adoptPublished) {
 				return emitError(cmd, 2, "choose only one of --check, --recover, and --adopt-published")
 			}
@@ -120,6 +133,8 @@ func newAxiSyncCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&keepLocal, "keep-local", false, "with --recover: keep the current local head; anchor available preserved commits, discard genuinely missing ones, and make the gate follow the kept head")
 	cmd.Flags().BoolVar(&adoptPublished, "adopt-published", false, "adopt a clean diverged local head into its stale gate lane only when the configured push target already has that exact head")
 	cmd.Flags().StringVar(&bindArchiveRef, "bind-archive-ref", "", "bind one existing refs/heads/archive/* commit as exact keep-local recovery evidence without changing Git refs")
+	cmd.Flags().BoolVar(&continueRecovery, "continue", false, "with --recover and --reason: explicitly adopt this terminal run's bound source as unvalidated work in the same run")
+	cmd.Flags().StringVar(&reason, "reason", "", "operator reason for terminal source adoption")
 	return cmd
 }
 

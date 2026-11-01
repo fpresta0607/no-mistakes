@@ -1,6 +1,15 @@
 package db
 
 const schemaSQL = `
+CREATE TABLE IF NOT EXISTS terminal_adoptions (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    id TEXT NOT NULL UNIQUE,
+    event_json TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS terminal_adoptions_immutable
+BEFORE UPDATE ON terminal_adoptions
+BEGIN SELECT RAISE(ABORT, 'terminal source adoption is immutable'); END;
+
 CREATE TABLE IF NOT EXISTS repos (
     id             TEXT PRIMARY KEY,
     working_path   TEXT NOT NULL UNIQUE,
@@ -247,6 +256,7 @@ CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
 // were created before the referenced columns existed. Each statement must be
 // idempotent via its error being tolerated when the column already exists.
 var migrationStatements = []string{
+	`ALTER TABLE runs ADD COLUMN terminal_source_state TEXT`,
 	`ALTER TABLE runs ADD COLUMN verification_plan TEXT`,
 	`CREATE TRIGGER IF NOT EXISTS runs_verification_plan_immutable BEFORE UPDATE OF verification_plan ON runs WHEN NEW.verification_plan IS NOT OLD.verification_plan BEGIN SELECT RAISE(ABORT, 'run verification plan is immutable'); END`,
 	`ALTER TABLE runs ADD COLUMN pi_profile TEXT`,

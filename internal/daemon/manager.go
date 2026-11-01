@@ -101,14 +101,15 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 }
 
 type recoveredRunPlan struct {
-	run     *db.Run
-	repo    *db.Repo
-	workDir string
-	gateDir string
-	cfg     *config.Config
-	agent   agent.Agent
-	steps   []pipeline.Step
-	forge   *forgecontext.Context
+	run      *db.Run
+	repo     *db.Repo
+	workDir  string
+	gateDir  string
+	cfg      *config.Config
+	agent    agent.Agent
+	steps    []pipeline.Step
+	forge    *forgecontext.Context
+	terminal *db.TerminalAdoption
 }
 
 func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPlan {
@@ -466,7 +467,13 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			m.mu.Unlock()
 		}()
 
-		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
+		var resumeErr error
+		if plan.terminal != nil {
+			resumeErr = executor.ResumeTerminalValidation(runCtx, plan.run, plan.repo, plan.workDir, plan.terminal)
+		} else {
+			resumeErr = executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
+		}
+		if err := resumeErr; err != nil {
 			if plan.run.Status == types.RunRunning {
 				errMsg := err.Error()
 				plan.run.Status = types.RunFailed
@@ -672,6 +679,12 @@ func (m *RunManager) removeRunWorktree(repoID, runID, gateDir, wtDir, reason str
 	if refusal := protectedPathCleanupReason(m.db, run); refusal != "" {
 		slog.Warn("preserving run worktree", "run_id", runID, "path", wtDir, "reason", refusal)
 		return
+	}
+	if run != nil {
+		if reason := terminalWorktreeSourceReason(context.Background(), m.db, runID, wtDir); reason != "" {
+			slog.Warn("preserving run worktree", "run_id", runID, "path", wtDir, "reason", reason)
+			return
+		}
 	}
 	if err := git.WorktreeRemove(context.Background(), gateDir, wtDir); err != nil {
 		slog.Warn("failed to remove run worktree", "reason", reason, "run_id", runID, "path", wtDir, "error", err)

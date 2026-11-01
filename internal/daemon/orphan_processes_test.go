@@ -167,6 +167,9 @@ func TestSweepOrphanRunProcessesReapsFinishedRunAndSparesActiveOne(t *testing.T)
 
 	activePID := startOrphanInWorktree(t, p.WorktreeDir(repo.ID, activeRun.ID))
 	leakedPID := startOrphanInWorktree(t, p.WorktreeDir(repo.ID, finishedRun.ID))
+	if err := os.WriteFile(filepath.Join(p.WorktreeDir(repo.ID, finishedRun.ID), "untracked.txt"), []byte("preserved source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	sweepOrphanRunProcesses(d, p, sweepableWorktrees(leftoverRecordedRunWorktrees(d, p), activeRecordedRunWorktrees(d, p)), nil)
 

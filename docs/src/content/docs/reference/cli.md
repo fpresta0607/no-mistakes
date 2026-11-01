@@ -446,6 +446,7 @@ no-mistakes axi sync --check
 no-mistakes axi sync
 no-mistakes axi sync --recover
 no-mistakes axi sync --recover --keep-local
+no-mistakes axi sync --recover --continue --reason "validate preserved source"
 no-mistakes axi sync --bind-archive-ref refs/heads/archive/<name>
 no-mistakes axi sync --adopt-published
 ```
@@ -455,11 +456,13 @@ no-mistakes axi sync --adopt-published
 | `--check`            | `bool`   | `false` | Verify the live target and exact plan without changing `HEAD`                |
 | `--recover`          | `bool`   | `false` | Return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation already released the branch), or perform `recover_remote_rewritten` |
 | `--keep-local`       | `bool`   | `false` | With `--recover`: keep the current local head; never touches the worktree   |
+| `--continue`         | `bool`   | `false` | With `--recover --reason`: adopt bound terminal source as unvalidated work in the same run |
+| `--reason`           | `string` | (none)  | Explicit operator reason required by terminal continuation |
 | `--bind-archive-ref` | `string` | (none)  | Bind one existing `refs/heads/archive/*` commit as exact evidence for a keep-local recovery; never creates or moves a Git ref |
 | `--adopt-published`  | `bool`   | `false` | Adopt a clean diverged local head into its stale gate lane only when the configured push target has that exact head |
 
 The default command is an explicit non-interactive apply request and never prompts.
-All modes return the complete `branch_sync` object as TOON.
+Ordinary synchronization modes return the complete `branch_sync` object as TOON.
 Exit code `0` means an eligible check, applied synchronization or recovery, already-synchronized, a live-verified custody-returned no-op, a user-owned no-op, or an expected merged-and-removed no-op; blocked operational states return `1`.
 The ordinary worktree mutation is either a strict fast-forward of the invoking clean checked-out branch to the freshly verified pipeline-owned pushed SHA, or an equivalent-diverged advance.
 When a clean local branch and the pipeline-pushed head are diverged but the local unique work is content-equivalent to work already represented in the live pipeline head, `sync` reports `safety: safe_equivalent_advance`, anchors the pre-sync head under `refs/no-mistakes/sync-anchor/<run>`, and moves to the pipeline head with reset semantics.
@@ -510,6 +513,36 @@ A verified archive plan reports its evidence in `branch_sync.recovery`, keeps `n
 For the alternative validation path and its refusal conditions, see [`no-mistakes rerun`](#no-mistakes-rerun); it is not offered for the archive-backed keep-local plan.
 A recovered never-pushed run reports `state: custody_returned`; a recovered pushed run reports its ordinary classification against the last push binding, typically `local_ahead`.
 On a `user_owned` branch, `--recover` is an idempotent no-op success: nothing pipeline-created exists to recover, and no file, ref, or database row changes.
+
+### Continue validation of preserved terminal source
+
+`axi sync --recover --continue --reason "validate preserved source"` explicitly accepts committed source for fresh validation in the current branch's original terminal run.
+It requires the complete recorded pipeline with completed Intent and Rebase, no deliberately skipped required step, and the original bound launch selection and frozen policy.
+Active parked CI adoption and conflict handback use their own operations.
+This command accepts no caller-selected run or candidate SHA.
+
+The source must be the run's clean managed checkout at the recorded head or a descendant, or the exact verified recovery anchor when the managed checkout is missing.
+A missing checkout also requires a previously recorded clean-source observation bound to that commit.
+Dirty, unreadable, contradictory, symbolic, or unbound source refuses; unavailable uncommitted files are never reconstructed from a commit.
+The caller must remain at one of the run's recorded heads, and its tracked and untracked edits remain untouched.
+The candidate and the independent gate-lane history are anchored before acceptance.
+
+For a published run, the current target/ref, publication generation, open PR identity, branch and public head must still match the original binding.
+Published terminal continuation currently requires GitHub PR identity verification.
+Its live base must equal the freshly resolved validation base; a mismatch refuses rather than reviewing a different change range.
+The operation performs no push, attestation update or check approval.
+
+Acceptance appends an immutable audit snapshot and clears current validation authority in one database transaction.
+Run and PR identity, original launch receipt, submitted and published heads, publication generation, findings, round selections and spent repair counts remain recorded.
+The same model, effort and agent chain are freshly proved against the current trusted default-branch source, with new provenance appended separately from the original receipt.
+Recovery cannot increase recorded repair allowances; a step with no recorded allowance receives no automatic repairs.
+Fresh Review, Test and the remaining required checks precede any publication.
+
+The result reports `adopted_unvalidated`, the run, candidate, adoption ID and whether validation started.
+Use `axi status` and the ordinary gate responses to drive that run.
+A repeated invocation acknowledges the same acceptance without resetting history or repeating a turn.
+If execution stops after acceptance but before the first fresh turn, an explicit repeat can restart that exact pending validation after rechecking its binding.
+Progressed or explicitly cancelled validation is never silently restarted, and a later trusted-source change refuses reuse of the appended proof.
 
 ## no-mistakes axi logs
 

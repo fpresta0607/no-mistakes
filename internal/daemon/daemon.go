@@ -546,6 +546,7 @@ func preserveRunHead(d *db.DB, workDir string, run *db.Run) (string, bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	_ = terminalWorktreeSourceReason(ctx, d, run.ID, workDir)
 	head, err := git.HeadSHA(ctx, workDir)
 	if err != nil {
 		slog.Warn("failed to read managed worktree head before terminalization", "run", run.ID, "error", err)
@@ -599,12 +600,7 @@ func isGitAncestor(ctx context.Context, dir, ancestor, descendant string) bool {
 // orphaned once retention exists, so a run in this set is left alone here too,
 // exactly like the removal-scoped sweep reapWorktrees runs for itself later.
 func sweepOrphanRunProcesses(d *db.DB, p *paths.Paths, worktrees []procreap.Worktree, retained map[string]bool) {
-	ctx := context.Background()
 	wtRoot := p.WorktreesDir()
-	pathByRun := make(map[string]string, len(worktrees))
-	for _, wt := range worktrees {
-		pathByRun[wt.RunID] = wt.Dir
-	}
 	procreap.SweepAndLog(procreap.Options{
 		WorktreesRoot: wtRoot,
 		Worktrees:     worktrees,
@@ -613,12 +609,8 @@ func sweepOrphanRunProcesses(d *db.DB, p *paths.Paths, worktrees []procreap.Work
 			if retained[runID] {
 				return true
 			}
-			wtPath := pathByRun[runID]
-			if wtPath == "" {
-				wtPath = filepath.Join(wtRoot, repoID, runID)
-			}
-			skip, _ := skipWorktreeCleanup(ctx, d, runID, wtPath)
-			return skip
+			run, err := d.GetRun(runID)
+			return err != nil || run != nil && (run.Status == types.RunPending || run.Status == types.RunRunning)
 		},
 	}, "daemon_startup")
 }
@@ -1006,6 +998,11 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 	if run != nil && (run.Status == types.RunPending || run.Status == types.RunRunning) {
 		return true, fmt.Sprintf("run %s is %s", runID, run.Status)
 	}
+	if run != nil {
+		if reason := terminalWorktreeSourceReason(ctx, d, runID, wtPath); reason != "" {
+			return true, reason
+		}
+	}
 	if run != nil && run.Status == types.RunCIMonitorInterrupted {
 		if _, statErr := os.Stat(wtPath); errors.Is(statErr, os.ErrNotExist) {
 			// The worktree directory is already gone (e.g. reaped by
@@ -1024,6 +1021,54 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 		}
 	}
 	return false, ""
+}
+
+func terminalWorktreeSourceReason(ctx context.Context, database *db.DB, runID, workDir string) string {
+	if _, err := os.Stat(workDir); errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	if entries, err := os.ReadDir(workDir); err == nil && len(entries) == 0 {
+		return ""
+	}
+	head, headErr := git.HeadSHA(ctx, workDir)
+	dirty, statusErr := git.HasUncommittedChanges(ctx, workDir)
+	state := "clean:" + head
+	if headErr != nil || statusErr != nil {
+		state = "unreadable"
+	} else if dirty {
+		state = "dirty:" + head
+	}
+	if err := database.RecordTerminalSourceState(runID, state); err != nil {
+		return fmt.Sprintf("run %s source observation cannot be recorded; preserving", runID)
+	}
+	if headErr != nil || statusErr != nil || dirty {
+		return fmt.Sprintf("run %s has dirty or unreadable source; preserving", runID)
+	}
+	adoption, err := database.GetTerminalAdoption(runID)
+	if err != nil {
+		return fmt.Sprintf("run %s source provenance cannot be read; preserving", runID)
+	}
+	if adoption != nil {
+		run, err := database.GetRun(runID)
+		if err != nil || run == nil {
+			return fmt.Sprintf("run %s publication provenance cannot be read; preserving", runID)
+		}
+		if run.LastPushedSHA != nil && *run.LastPushedSHA == head && run.LastPushedAt != nil && run.PushGeneration != nil && *run.PushGeneration > 0 {
+			return ""
+		}
+		ref := adoption.SourceRef
+		if head != adoption.CandidateSHA {
+			ref = custody.RecoveryRef(runID)
+		}
+		if symbolic, err := git.Run(ctx, workDir, "symbolic-ref", "-q", ref); err == nil && symbolic != "" {
+			return fmt.Sprintf("run %s preservation anchor is symbolic; preserving", runID)
+		}
+		anchor, exists, err := git.ExactRefTarget(ctx, workDir, ref)
+		if err != nil || !exists || anchor != head {
+			return fmt.Sprintf("run %s has a later correction without an exact preservation anchor; preserving", runID)
+		}
+	}
+	return ""
 }
 
 // protectedPathCleanupReason protects only the index and working files. It must
@@ -1182,6 +1227,16 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 
 	srv.Handle(ipc.MethodHealth, func(_ context.Context, _ json.RawMessage) (interface{}, error) {
 		return &ipc.HealthResult{Status: "ok"}, nil
+	})
+	srv.Handle(ipc.MethodRecoverTerminal, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var request ipc.RecoverTerminalParams
+		if err := json.Unmarshal(params, &request); err != nil {
+			return nil, err
+		}
+		return mgr.recoverTerminal(ctx, request, ipc.PeerPID(ctx))
 	})
 
 	srv.Handle(ipc.MethodShutdown, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
