@@ -587,6 +587,15 @@ func activeRunInfo(ctx context.Context, env *axiEnv, branch, headSHA string) (*i
 	if err := source.callWithSlowReplyRetry(ctx, ipc.MethodGetActiveRun, activeRunLookupParams(env.repo.ID, branch), &active); err != nil {
 		return nil, err
 	}
+	if active.Run != nil && !terminalStatus(string(active.Run.Status)) {
+		handback, err := env.d.LatestCIHandback(active.Run.ID)
+		if err != nil {
+			return nil, err
+		}
+		if handback != nil && handback.AcceptedHead != nil && *handback.AcceptedHead == headSHA {
+			return active.Run, nil
+		}
+	}
 	return activeRunInfoForHead(active.Run, headSHA), nil
 }
 
@@ -715,6 +724,19 @@ func inspectAxiBranchSync(ctx context.Context, env *axiEnv) branchsync.State {
 
 func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.State {
 	state := inspectAxiBranchSync(ctx, env)
+	if state.Pipeline.Status == "pending" || state.Pipeline.Status == "running" {
+		handback, err := env.d.LatestCIHandback(state.Pipeline.RunID)
+		if err != nil || handback != nil {
+			state.State = branchsync.StatePipelineOwned
+			state.Safety = "blocked_ci_handback"
+			state.Error = "this run retains its CI handback and budget history; submit the caller follow-up with no-mistakes axi handback --resume"
+			if err != nil {
+				state.Error = err.Error()
+			}
+			state.NextAction = &branchsync.NextAction{Code: "resume_ci_handback", Command: "no-mistakes axi handback --resume"}
+			return &state
+		}
+	}
 	switch state.State {
 	case branchsync.StatePipelineOwned:
 		// The ownership block exists to keep a fresh push from discarding

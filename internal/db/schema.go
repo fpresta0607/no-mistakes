@@ -1,6 +1,25 @@
 package db
 
 const schemaSQL = `
+CREATE TABLE IF NOT EXISTS ci_handbacks (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    round_id TEXT NOT NULL REFERENCES step_rounds(id),
+    caller_dir TEXT NOT NULL,
+    released_head TEXT NOT NULL,
+    pr_url TEXT NOT NULL,
+    base_branch TEXT NOT NULL,
+    base_head TEXT NOT NULL,
+    push_generation INTEGER NOT NULL,
+    target_fingerprint TEXT NOT NULL,
+    push_ref TEXT NOT NULL,
+    released_at INTEGER NOT NULL,
+    accepted_head TEXT,
+    accepted_at INTEGER,
+    candidate_json TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ci_handbacks_open ON ci_handbacks(run_id) WHERE accepted_head IS NULL;
+
 CREATE TABLE IF NOT EXISTS repos (
     id             TEXT PRIMARY KEY,
     working_path   TEXT NOT NULL UNIQUE,
@@ -247,6 +266,7 @@ CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
 // were created before the referenced columns existed. Each statement must be
 // idempotent via its error being tolerated when the column already exists.
 var migrationStatements = []string{
+	`ALTER TABLE ci_handbacks ADD COLUMN candidate_json TEXT`,
 	`ALTER TABLE runs ADD COLUMN verification_plan TEXT`,
 	`CREATE TRIGGER IF NOT EXISTS runs_verification_plan_immutable BEFORE UPDATE OF verification_plan ON runs WHEN NEW.verification_plan IS NOT OLD.verification_plan BEGIN SELECT RAISE(ABORT, 'run verification plan is immutable'); END`,
 	`ALTER TABLE runs ADD COLUMN pi_profile TEXT`,
