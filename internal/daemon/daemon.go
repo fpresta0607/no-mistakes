@@ -1048,25 +1048,26 @@ func terminalWorktreeSourceReason(ctx context.Context, database *db.DB, runID, w
 	if err != nil {
 		return fmt.Sprintf("run %s source provenance cannot be read; preserving", runID)
 	}
-	if adoption != nil {
-		run, err := database.GetRun(runID)
-		if err != nil || run == nil {
-			return fmt.Sprintf("run %s publication provenance cannot be read; preserving", runID)
-		}
-		if run.LastPushedSHA != nil && *run.LastPushedSHA == head && run.LastPushedAt != nil && run.PushGeneration != nil && *run.PushGeneration > 0 {
-			return ""
-		}
-		ref := adoption.SourceRef
-		if head != adoption.CandidateSHA {
-			ref = custody.RecoveryRef(runID)
-		}
-		if symbolic, err := git.Run(ctx, workDir, "symbolic-ref", "-q", ref); err == nil && symbolic != "" {
-			return fmt.Sprintf("run %s preservation anchor is symbolic; preserving", runID)
-		}
-		anchor, exists, err := git.ExactRefTarget(ctx, workDir, ref)
-		if err != nil || !exists || anchor != head {
-			return fmt.Sprintf("run %s has a later correction without an exact preservation anchor; preserving", runID)
-		}
+	run, err := database.GetRun(runID)
+	if err != nil || run == nil {
+		return fmt.Sprintf("run %s publication provenance cannot be read; preserving", runID)
+	}
+	if run.LastPushedSHA != nil && *run.LastPushedSHA == head && run.LastPushedAt != nil && run.PushGeneration != nil && *run.PushGeneration > 0 {
+		return ""
+	}
+	if adoption == nil && run.SubmittedHeadSHA != nil && *run.SubmittedHeadSHA == head {
+		return ""
+	}
+	ref := custody.RecoveryRef(runID)
+	if adoption != nil && head == adoption.CandidateSHA {
+		ref = adoption.SourceRef
+	}
+	if symbolic, err := git.Run(ctx, workDir, "symbolic-ref", "-q", ref); err == nil && symbolic != "" {
+		return fmt.Sprintf("run %s preservation anchor is symbolic; preserving", runID)
+	}
+	anchor, exists, err := git.ExactRefTarget(ctx, workDir, ref)
+	if err != nil || !exists || anchor != head {
+		return fmt.Sprintf("run %s has an unpushed correction without an exact preservation anchor; preserving", runID)
 	}
 	return ""
 }

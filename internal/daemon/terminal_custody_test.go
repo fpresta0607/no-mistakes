@@ -161,6 +161,223 @@ func TestTerminalAgentsRequireActualInactivity(t *testing.T) {
 	}
 }
 
+func TestTerminalCleanupPreservesCommittedCorrectionsBeforeAdoption(t *testing.T) {
+	for _, status := range []types.RunStatus{types.RunFailed, types.RunCancelled} {
+		for _, cleanupPath := range []string{"completion", "recorded startup", "default reap"} {
+			t.Run(string(status)+"/"+cleanupPath, func(t *testing.T) {
+				factory := func() []pipeline.Step {
+					var sequence []pipeline.Step
+					for _, name := range types.AllSteps() {
+						if name == types.StepReview {
+							sequence = append(sequence, &mockApprovalStep{name: name})
+						} else {
+							sequence = append(sequence, &mockPassStep{name: name})
+						}
+					}
+					return sequence
+				}
+				manager, p, database, repo, head, _, _ := launchAssertionFixture(t, factory)
+				gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature")
+				assertion := launchExpectation(head)
+				proof, err := assertion.Verify(head, assertion.Profiles)
+				if err != nil {
+					t.Fatal(err)
+				}
+				run, err := database.InsertRunWithLaunchAssertion(repo.ID, "feature", head, head, nil, "nonce", "frozen-policy", "intent", "", false, nil, assertion, proof)
+				if err != nil {
+					t.Fatal(err)
+				}
+				managed := p.WorktreeDir(repo.ID, run.ID)
+				if cleanupPath == "recorded startup" {
+					managed = filepath.Join(t.TempDir(), "recorded", run.ID)
+					if err := database.SetRunWorktreeDir(run.ID, managed); err != nil {
+						t.Fatal(err)
+					}
+				}
+				gateDir := p.RepoDir(repo.ID)
+				if err := git.WorktreeAdd(context.Background(), gateDir, managed, head); err != nil {
+					t.Fatal(err)
+				}
+				if err := git.CopyLocalUserIdentity(context.Background(), repo.WorkingPath, managed); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range types.AllSteps() {
+					step, err := database.InsertStepResult(run.ID, name)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if name.Order() > types.StepTest.Order() {
+						continue
+					}
+					if err := database.StartStepWithAutoFixLimit(step.ID, 1); err != nil {
+						t.Fatal(err)
+					}
+					findings := `{"findings":[{"id":"original","severity":"error","description":"original condition"}]}`
+					round, err := database.InsertStepRound(step.ID, 1, "auto_fix", &findings, nil, 1)
+					if err != nil {
+						t.Fatal(err)
+					}
+					selection := `["original"]`
+					if err := database.SetStepRoundSelection(round.ID, &selection, db.RoundSelectionSourceAutoFix); err != nil {
+						t.Fatal(err)
+					}
+					stepStatus := types.StepStatusCompleted
+					if name == types.StepTest {
+						stepStatus = types.StepStatusFailed
+					}
+					if err := database.CompleteStepWithStatus(step.ID, stepStatus, 1, 1, "original.log"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := database.UpdateRunErrorStatusWithVerifiedHead(run.ID, "original interruption", status, head); err != nil {
+					t.Fatal(err)
+				}
+				before, err := database.ReadTerminalSnapshot(run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cleanup := func() {
+					switch cleanupPath {
+					case "completion":
+						manager.removeRunWorktree(repo.ID, run.ID, gateDir, managed, "terminal correction regression")
+					case "recorded startup":
+						cleanupOrphanWorktrees(database, p, leftoverRecordedRunWorktrees(database, p))
+					case "default reap":
+						manager.reapWorktrees(worktreeReapPolicy{Retention: time.Nanosecond}, time.Now().Add(time.Hour))
+					}
+				}
+				for _, file := range []string{"test.txt", "staged.txt", ".untracked.txt"} {
+					if err := os.WriteFile(filepath.Join(managed, file), []byte("retained correction\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				gitCmd(t, managed, "add", "staged.txt")
+				cleanup()
+				for _, file := range []string{"test.txt", "staged.txt", ".untracked.txt"} {
+					if content, err := os.ReadFile(filepath.Join(managed, file)); err != nil || string(content) != "retained correction\n" {
+						t.Fatalf("dirty terminal source %s was lost: %q, %v", file, content, err)
+					}
+				}
+				gitCmd(t, managed, "add", "-A")
+				gitCmd(t, managed, "commit", "-m", "commit retained terminal corrections")
+				candidate := gitOutput(t, managed, "rev-parse", "HEAD")
+
+				cleanup()
+
+				if actual := gitOutput(t, managed, "rev-parse", "HEAD"); actual != candidate {
+					t.Fatalf("cleanup lost the committed correction: %s, want %s", actual, candidate)
+				}
+				observed, err := database.ReadTerminalSnapshot(run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if observed.Run.TerminalSourceState == nil || *observed.Run.TerminalSourceState != "clean:"+candidate {
+					t.Fatalf("committed correction has no exact clean observation: %+v", observed.Run.TerminalSourceState)
+				}
+				before.Run.TerminalSourceState = observed.Run.TerminalSourceState
+				if !reflect.DeepEqual(before, observed) {
+					t.Fatal("cleanup rewrote original authority or validation history")
+				}
+				if adoption, err := database.GetTerminalAdoption(run.ID); err != nil || adoption != nil {
+					t.Fatalf("cleanup created an acceptance: %+v, %v", adoption, err)
+				}
+				if _, exists, err := git.ExactRefTarget(context.Background(), gateDir, custody.RecoveryRef(run.ID)); err != nil || exists {
+					t.Fatalf("cleanup manufactured a recovery anchor: exists=%v, %v", exists, err)
+				}
+				request := ipc.RecoverTerminalParams{RepoID: repo.ID, RunID: run.ID, Branch: run.Branch, CallerDir: repo.WorkingPath, SnapshotDigest: observed.Digest(), Reason: "validate committed terminal corrections"}
+				accepted, err := manager.recoverTerminal(context.Background(), request, os.Getpid())
+				if err != nil || accepted.RunID != run.ID || accepted.CandidateSHA != candidate || !accepted.Started {
+					t.Fatalf("bound terminal recovery = %+v, %v", accepted, err)
+				}
+				deadline := time.Now().Add(15 * time.Second)
+				var current *db.Run
+				for time.Now().Before(deadline) {
+					current, err = database.GetRun(run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if current.AwaitingAgentSince != nil {
+						break
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+				if current.AwaitingAgentSince == nil || current.HeadSHA != candidate || current.TerminalHeadVerifiedAt != nil || current.ReviewApprovedHeadSHA != nil {
+					t.Fatalf("correction did not reach fresh Review without prior authority: %+v", current)
+				}
+				event, err := database.GetTerminalAdoption(run.ID)
+				if err != nil || event == nil || !reflect.DeepEqual(event.Snapshot, *observed) {
+					t.Fatalf("recovery changed the original audit: %+v, %v", event, err)
+				}
+				if anchor := gitOutput(t, gateDir, "rev-parse", event.SourceRef); anchor != candidate {
+					t.Fatalf("accepted source anchor = %s, want %s", anchor, candidate)
+				}
+			})
+		}
+	}
+}
+
+func TestTerminalCleanupRequiresExactPreservationOrPushBeforeAdoption(t *testing.T) {
+	for _, evidence := range []string{"missing anchor", "older anchor", "symbolic anchor", "exact anchor", "older push", "exact push"} {
+		t.Run(evidence, func(t *testing.T) {
+			manager, p, database, repo, head, _, _ := launchAssertionFixture(t, nil)
+			run, err := database.InsertRun(repo.ID, "feature", head, head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			managed := p.WorktreeDir(repo.ID, run.ID)
+			gateDir := p.RepoDir(repo.ID)
+			if err := git.WorktreeAdd(context.Background(), gateDir, managed, head); err != nil {
+				t.Fatal(err)
+			}
+			if err := git.CopyLocalUserIdentity(context.Background(), repo.WorkingPath, managed); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunErrorStatus(run.ID, "original interruption", types.RunFailed); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(managed, "correction.txt"), []byte("retained correction\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, managed, "add", "correction.txt")
+			gitCmd(t, managed, "commit", "-m", "commit terminal correction")
+			candidate := gitOutput(t, managed, "rev-parse", "HEAD")
+			switch evidence {
+			case "older anchor":
+				if err := custody.PreserveRecoveryHead(context.Background(), managed, run.ID, head); err != nil {
+					t.Fatal(err)
+				}
+			case "symbolic anchor":
+				gitCmd(t, managed, "update-ref", "refs/heads/correction", candidate)
+				gitCmd(t, managed, "symbolic-ref", custody.RecoveryRef(run.ID), "refs/heads/correction")
+			case "exact anchor":
+				if err := custody.PreserveRecoveryHead(context.Background(), managed, run.ID, candidate); err != nil {
+					t.Fatal(err)
+				}
+			case "older push", "exact push":
+				published := head
+				if evidence == "exact push" {
+					published = candidate
+				}
+				if err := database.UpdateRunPushBinding(run.ID, db.PushBinding{HeadSHA: published, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(repo.UpstreamURL), Ref: "refs/heads/feature"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			manager.removeRunWorktree(repo.ID, run.ID, gateDir, managed, "terminal preservation evidence regression")
+
+			_, statErr := os.Stat(managed)
+			shouldRemove := evidence == "exact anchor" || evidence == "exact push"
+			if os.IsNotExist(statErr) != shouldRemove || statErr != nil && !os.IsNotExist(statErr) {
+				t.Fatalf("cleanup removed=%v, want %v: %v", os.IsNotExist(statErr), shouldRemove, statErr)
+			}
+			current, err := database.GetRun(run.ID)
+			if err != nil || current.HeadSHA != head || current.TerminalHeadVerifiedAt != nil || current.ReviewApprovedHeadSHA != nil {
+				t.Fatalf("cleanup promoted preservation into verification authority: %+v, %v", current, err)
+			}
+		})
+	}
+}
+
 func TestTerminalRestart(t *testing.T) {
 	root, err := os.MkdirTemp("", "terminal-")
 	if err != nil {
