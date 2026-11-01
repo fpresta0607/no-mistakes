@@ -1,16 +1,125 @@
 package daemon
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/procreap"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestOrphanCleanupRechecksSourceFlushedDuringSweep(t *testing.T) {
+	for _, cleanupPath := range []string{"default reap", "recorded startup"} {
+		for _, sourceState := range []string{"tracked", "staged", "untracked", "unreadable", "clean"} {
+			t.Run(cleanupPath+"/"+sourceState, func(t *testing.T) {
+				p := paths.WithRoot(t.TempDir())
+				if err := p.EnsureDirs(); err != nil {
+					t.Fatal(err)
+				}
+				database, err := db.Open(p.DB())
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { database.Close() })
+				repo, head := setupTestGitRepo(t, p, database, "sweep-flush")
+				run, err := database.InsertRun(repo.ID, "feature", head, head)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := database.UpdateRunStatus(run.ID, types.RunFailed); err != nil {
+					t.Fatal(err)
+				}
+				managed := p.WorktreeDir(repo.ID, run.ID)
+				if cleanupPath == "recorded startup" {
+					managed = filepath.Join(t.TempDir(), "recorded", run.ID)
+					if err := database.SetRunWorktreeDir(run.ID, managed); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := git.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), managed, head); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, managed, "config", "status.showUntrackedFiles", "no")
+				if isDirty, err := git.HasUncommittedChanges(context.Background(), managed); err != nil || isDirty {
+					t.Fatalf("initial source is not clean: dirty=%v, %v", isDirty, err)
+				}
+				manager := NewRunManager(database, p, nil)
+				originalSweep := sweepRunWorktrees
+				t.Cleanup(func() { sweepRunWorktrees = originalSweep })
+				sweepCount := 0
+				flushedFile, flushedContent := "test.txt", "shutdown-flushed source\n"
+				if sourceState == "untracked" {
+					flushedFile = ".shutdown-flush"
+				} else if sourceState == "unreadable" {
+					flushedFile, flushedContent = ".git", "unreadable managed checkout\n"
+				}
+				sweepRunWorktrees = func(_ string, worktrees []procreap.Worktree, _ string) {
+					sweepCount++
+					if len(worktrees) != 1 || worktrees[0].RunID != run.ID || !samePath(worktrees[0].Dir, managed) {
+						t.Fatalf("sweep did not target the terminal checkout: %+v", worktrees)
+					}
+					observed, err := database.GetRun(run.ID)
+					if err != nil || observed.TerminalSourceState == nil || *observed.TerminalSourceState != "clean:"+head {
+						t.Fatalf("source was not observed clean before the sweep: %+v, %v", observed, err)
+					}
+					if cleanupPath == "default reap" {
+						branchMutex := manager.branchMutex(repo.ID, run.Branch)
+						if branchMutex.TryLock() {
+							branchMutex.Unlock()
+							t.Fatal("sweep did not retain the continuation branch lock")
+						}
+					}
+					if sourceState != "clean" {
+						if err := os.WriteFile(filepath.Join(managed, flushedFile), []byte(flushedContent), 0o600); err != nil {
+							t.Fatal(err)
+						}
+						if sourceState == "staged" {
+							gitCmd(t, managed, "add", flushedFile)
+						}
+					}
+				}
+
+				if cleanupPath == "default reap" {
+					manager.reapWorktrees(worktreeReapPolicy{Retention: time.Nanosecond}, time.Now().Add(time.Hour))
+				} else {
+					cleanupOrphanWorktrees(database, p, leftoverRecordedRunWorktrees(database, p))
+				}
+
+				if sweepCount != 1 {
+					t.Fatalf("scoped sweeps = %d, want 1", sweepCount)
+				}
+				expectedObservation := "clean:" + head
+				if sourceState == "clean" {
+					if _, err := os.Stat(managed); !os.IsNotExist(err) {
+						t.Fatalf("clean control was not removed: %v", err)
+					}
+				} else {
+					if content, err := os.ReadFile(filepath.Join(managed, flushedFile)); err != nil || string(content) != flushedContent {
+						t.Fatalf("shutdown-flushed source was lost: %q, %v", content, err)
+					}
+					expectedObservation = "dirty:" + head
+					if sourceState == "unreadable" {
+						expectedObservation = "unreadable"
+					} else if sourceState == "staged" {
+						if staged := gitOutput(t, managed, "diff", "--cached", "--name-only"); staged != flushedFile {
+							t.Fatalf("shutdown-flushed index was lost: %q", staged)
+						}
+					}
+				}
+				current, err := database.GetRun(run.ID)
+				if err != nil || current.TerminalSourceState == nil || *current.TerminalSourceState != expectedObservation {
+					t.Fatalf("post-sweep observation = %+v, want %q: %v", current, expectedObservation, err)
+				}
+			})
+		}
+	}
+}
 
 // TestCleanupOrphanWorktreesSweepsEveryRemovableDirectoryInOneSnapshot bounds
 // what startup cleanup pays for the sweep that has to precede every removal.

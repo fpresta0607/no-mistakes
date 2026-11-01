@@ -851,7 +851,7 @@ func cleanupOrphanWorktrees(d *db.DB, p *paths.Paths, leftover []db.RunWorktree)
 	sweepRunWorktrees(p.WorktreesDir(), sweepable, "worktree_cleanup")
 
 	for _, wt := range removable {
-		removeOrphanWorktree(ctx, wt)
+		removeOrphanWorktree(ctx, d, wt)
 	}
 	for _, dir := range repoDirs {
 		os.Remove(dir)
@@ -955,7 +955,10 @@ func removableOrphanWorktree(d *db.DB, wt orphanWorktree) bool {
 // already decided on and swept (see cleanupOrphanWorktrees). It reports
 // whether the directory was actually removed, since git worktree remove and
 // its os.RemoveAll fallback can both fail and merely log a warning.
-func removeOrphanWorktree(ctx context.Context, wt orphanWorktree) bool {
+func removeOrphanWorktree(ctx context.Context, d *db.DB, wt orphanWorktree) bool {
+	if !removableOrphanWorktree(d, wt) {
+		return false
+	}
 	gateDir, wtPath := wt.gateDir, wt.dir
 	if err := git.WorktreeRemove(ctx, gateDir, wtPath); err != nil {
 		slog.Warn("git worktree remove failed, falling back to os.RemoveAll", "path", wtPath, "error", err)

@@ -119,7 +119,7 @@ func (m *RunManager) reapWorktrees(policy worktreeReapPolicy, now time.Time) {
 
 	removed := 0
 	for _, wt := range toRemove {
-		if removeOrphanWorktree(context.Background(), wt) {
+		if removeOrphanWorktree(context.Background(), d, wt) {
 			removed++
 		}
 	}
