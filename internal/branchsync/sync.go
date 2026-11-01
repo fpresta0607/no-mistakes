@@ -19,6 +19,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -1890,6 +1891,9 @@ func (s *Service) classifyCIHandback(ctx context.Context, state *State, run *db.
 		return true
 	}
 	if (receipt != nil && receipt.AcceptedHead == nil) || run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != run.HeadSHA || (state.State != StateSynchronized && state.State != StateDiverged) {
+		return false
+	}
+	if scm.DetectProviderContext(ctx, s.Repo.UpstreamURL) != scm.ProviderGitHub {
 		return false
 	}
 	results, err := s.DB.GetStepsByRun(run.ID)
