@@ -637,12 +637,16 @@ func isDocumentationPath(sctx *pipeline.StepContext, path string) bool {
 // commit is the one the review started on, and the documentation pass, the
 // lint step and the formatter may all have added commits since.
 //
-// It always says which commits those are. When they touch more than
-// documentation, and a baseline is configured and passed on the tested
-// commit, it runs the baseline again on head. A baseline that does not pass
-// there stops the push: the run goes back to the Test step once, which owns
-// failing tests and their fix rounds, and a second failure fails the run with
-// nothing pushed.
+// A configured baseline requires Test's recorded comparison from this daemon
+// lifetime. Missing or malformed proof refuses the push rather than resolving
+// a new comparison.
+//
+// It names those commits when the comparison is proven or no baseline is
+// configured. When they touch more than documentation, and a baseline is
+// configured and passed on the tested commit, it runs the baseline again on
+// head. A baseline that does not pass there stops the push: the run goes back
+// to the Test step once, which owns failing tests and their fix rounds, and a
+// second failure fails the run with nothing pushed.
 //
 // It returns the note to record on the step, and whether to go back to Test.
 func baselineBeforePush(sctx *pipeline.StepContext, head string) (note string, restart bool, err error) {
