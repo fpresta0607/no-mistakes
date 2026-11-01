@@ -451,7 +451,28 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	for _, plan := range plans {
 		preserved[plan.run.ID] = struct{}{}
 	}
-	logStartupPhase("parked_runs", parkedStarted, "preserved", len(plans))
+	active, err := d.GetActiveRuns()
+	if err != nil {
+		slog.Error("failed to inspect pending terminal successors", "error", err)
+	}
+	for _, run := range active {
+		if run.Status != types.RunPending {
+			continue
+		}
+		event, err := d.GetTerminalPredecessor(run.ID)
+		if err != nil {
+			slog.Warn("pending terminal successor provenance cannot be read", "run_id", run.ID, "error", err)
+			continue
+		}
+		if event != nil {
+			if err := d.ValidateTerminalSuccessor(event); err != nil {
+				slog.Warn("pending terminal successor binding changed", "run_id", run.ID, "error", err)
+				continue
+			}
+			preserved[run.ID] = struct{}{}
+		}
+	}
+	logStartupPhase("parked_runs", parkedStarted, "preserved", len(preserved))
 
 	// Read while the runs that were executing when this daemon started still say
 	// so: recovery below turns them terminal, and they are the ones whose
@@ -1057,6 +1078,12 @@ func terminalWorktreeSourceReason(ctx context.Context, database *db.DB, runID, w
 	}
 	// An original protected-path refusal can explicitly discard its working
 	// files. That permission never extends to adopted or later committed source.
+	if adoption == nil {
+		adoption, err = database.GetTerminalPredecessor(runID)
+		if err != nil {
+			return fmt.Sprintf("run %s successor provenance cannot be read; preserving", runID)
+		}
+	}
 	if adoption == nil && headErr == nil && statusErr == nil && run.SubmittedHeadSHA != nil && head == *run.SubmittedHeadSHA && head == run.HeadSHA {
 		steps, err := database.GetStepsByRun(runID)
 		if err != nil {

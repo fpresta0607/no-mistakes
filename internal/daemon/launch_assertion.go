@@ -64,12 +64,12 @@ func (m *RunManager) newRunPipelineAgent(ctx context.Context, run *db.Run, cfg *
 		return newPipelineAgent(ctx, cfg, evidenceRoot, lookPath, environment)
 	}
 	expected := run.LaunchAssertion
-	event, err := m.db.GetTerminalAdoption(run.ID)
+	event, err := m.db.GetTerminalPredecessor(run.ID)
 	if err != nil {
 		return nil, err
 	}
 	if event != nil {
-		if !event.Snapshot.Run.LaunchAssertion.Matches(run.LaunchAssertion) || event.Snapshot.Run.LaunchValidationGeneration == nil || run.LaunchValidationGeneration == nil || *event.Snapshot.Run.LaunchValidationGeneration != *run.LaunchValidationGeneration {
+		if !event.Assertion.Matches(run.LaunchAssertion) || event.Snapshot.Run.LaunchValidationGeneration == nil || run.LaunchValidationGeneration == nil || *event.Snapshot.Run.LaunchValidationGeneration != *run.LaunchValidationGeneration {
 			return nil, fmt.Errorf("terminal recovery launch provenance conflicts with the original receipt")
 		}
 		if err := event.Proof.Check(event.Assertion); err != nil {

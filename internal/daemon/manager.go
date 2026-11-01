@@ -220,13 +220,17 @@ func validateRecoveredSessionProviders(database *db.DB, runID string, ag agent.A
 }
 
 func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) (*config.Config, error) {
-	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
-	if err != nil {
-		return nil, fmt.Errorf("load global config: %w", err)
-	}
 	repoCfg, err := config.LoadRepo(workDir)
 	if err != nil {
 		return nil, fmt.Errorf("load repo config: %w", err)
+	}
+	return m.loadRecoveredConfigWithRepo(ctx, run, repo, workDir, repoCfg)
+}
+
+func (m *RunManager) loadRecoveredConfigWithRepo(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, repoCfg *config.RepoConfig) (*config.Config, error) {
+	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
+	if err != nil {
+		return nil, fmt.Errorf("load global config: %w", err)
 	}
 	var trustedSHA string
 	if repo.DefaultBranch != "" {
@@ -469,7 +473,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 
 		var resumeErr error
 		if plan.terminal != nil {
-			resumeErr = executor.ResumeTerminalValidation(runCtx, plan.run, plan.repo, plan.workDir, plan.terminal)
+			resumeErr = executor.ExecuteTerminalSuccessor(runCtx, plan.run, plan.repo, plan.workDir, plan.terminal)
 		} else {
 			resumeErr = executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
 		}

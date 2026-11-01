@@ -15,6 +15,7 @@ import (
 
 type TerminalSource struct {
 	Head         string
+	RetainedHead string
 	Tree         string
 	GateHead     string
 	RecoveryHead string
@@ -29,7 +30,7 @@ func (s *Service) TerminalSource(ctx context.Context, run *db.Run) (*TerminalSou
 }
 
 func (s *Service) AcceptedTerminalSource(ctx context.Context, event *db.TerminalAdoption, current *db.Run) (*TerminalSource, error) {
-	if event == nil || current == nil || current.ID != event.Snapshot.Run.ID || current.HeadSHA != event.CandidateSHA || event.SourceRef != "refs/no-mistakes/terminal-candidate/"+current.ID {
+	if event == nil || current == nil || current.ID != event.Successor.ID || current.HeadSHA != event.CandidateSHA || event.SourceRef != "refs/no-mistakes/terminal-candidate/"+event.Successor.ID {
 		return nil, fmt.Errorf("accepted terminal source identity changed")
 	}
 	if symbolic, err := git.Run(ctx, s.GateDir, "symbolic-ref", "-q", event.SourceRef); err == nil && symbolic != "" {
@@ -51,8 +52,21 @@ func (s *Service) terminalSource(ctx context.Context, run *db.Run, event *db.Ter
 		return nil, fmt.Errorf("terminal source belongs to another branch")
 	}
 	callerHead, err := git.HeadSHA(ctx, s.workDir())
-	if err != nil || callerHead != run.HeadSHA && callerHead != ptr(run.SubmittedHeadSHA) && callerHead != ptr(run.ReviewApprovedHeadSHA) && callerHead != ptr(run.LastPushedSHA) {
-		return nil, fmt.Errorf("caller head is not bound to the original run")
+	if err != nil {
+		return nil, fmt.Errorf("caller head cannot be read")
+	}
+	isOriginalCaller := callerHead == run.HeadSHA || callerHead == ptr(run.SubmittedHeadSHA) || callerHead == ptr(run.ReviewApprovedHeadSHA) || callerHead == ptr(run.LastPushedSHA)
+	if !isOriginalCaller {
+		base := ptr(run.ReviewApprovedHeadSHA)
+		if run.LastPushedSHA != nil {
+			base = *run.LastPushedSHA
+		}
+		if base == "" || !isAncestor(ctx, s.workDir(), base, callerHead) {
+			return nil, fmt.Errorf("caller head is not descended from retained reviewed or published source")
+		}
+		if clean, _ := worktreeClean(ctx, s.workDir()); !clean {
+			return nil, fmt.Errorf("caller candidate is dirty or unreadable; preserve and commit its complete content before adoption")
+		}
 	}
 	gateRef := "refs/heads/" + run.Branch
 	if symbolic, err := git.Run(ctx, s.GateDir, "symbolic-ref", "-q", gateRef); err == nil && symbolic != "" {
@@ -81,8 +95,14 @@ func (s *Service) terminalSource(ctx context.Context, run *db.Run, event *db.Ter
 	if _, err := os.Stat(managed); os.IsNotExist(err) {
 		observed, expectedHead := run.TerminalSourceState, run.HeadSHA
 		if event != nil {
-			observed, expectedHead = current.TerminalSourceState, event.CandidateSHA
+			if event.RetainedSHA == "" {
+				return nil, fmt.Errorf("accepted clean retained-source observation is missing")
+			}
+			expectedHead = event.RetainedSHA
+			cleanObservation := "clean:" + event.RetainedSHA
+			observed = &cleanObservation
 		}
+
 		if observed == nil || *observed != "clean:"+expectedHead {
 			return nil, fmt.Errorf("missing managed source has no bound clean-source observation; missing dirty content cannot be reconstructed")
 		}
@@ -116,12 +136,28 @@ func (s *Service) terminalSource(ctx context.Context, run *db.Run, event *db.Ter
 		}
 		source.Head = head
 	}
-	tree, err := git.Run(ctx, s.GateDir, "rev-parse", source.Head+"^{tree}")
+	source.RetainedHead = source.Head
+	objectDir := s.GateDir
+	if !isOriginalCaller {
+		if !isAncestor(ctx, s.workDir(), source.Head, callerHead) {
+			return nil, fmt.Errorf("caller candidate omits retained terminal source")
+		}
+		source.Head = callerHead
+		objectDir = s.workDir()
+	}
+	retainedHead := ptr(run.ReviewApprovedHeadSHA)
+	if run.LastPushedSHA != nil {
+		retainedHead = *run.LastPushedSHA
+	}
+	if retainedHead != "" && !isAncestor(ctx, objectDir, retainedHead, source.Head) {
+		return nil, fmt.Errorf("candidate omits retained reviewed or published output")
+	}
+	tree, err := git.Run(ctx, objectDir, "rev-parse", source.Head+"^{tree}")
 	if err != nil {
 		return nil, fmt.Errorf("candidate content cannot be read")
 	}
 	source.Tree = tree
-	if event != nil && (source.Head != event.CandidateSHA || source.Tree != event.CandidateTree || source.GateHead != event.GateHead || source.ManagedDir != event.ManagedDir) {
+	if event != nil && (source.Head != event.CandidateSHA || source.Tree != event.CandidateTree || source.GateHead != event.GateHead || source.ManagedDir != event.ManagedDir || source.RetainedHead != event.RetainedSHA) {
 		return nil, fmt.Errorf("accepted terminal source content or lane changed")
 	}
 	return source, nil

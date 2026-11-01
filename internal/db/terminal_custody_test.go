@@ -2,8 +2,10 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
@@ -66,6 +68,35 @@ func newTerminalAdoptionFixture(t *testing.T) (*DB, TerminalAdoption) {
 	return database, event
 }
 
+func TestTerminalContinuationKeepsCancelledPredecessorImmutable(t *testing.T) {
+	database, event := newTerminalAdoptionFixture(t)
+	if err := database.UpdateRunErrorStatusWithVerifiedHead(event.Snapshot.Run.ID, types.RunCancelReasonAbortedByUser, types.RunCancelled, event.CandidateSHA); err != nil {
+		t.Fatal(err)
+	}
+	before, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.Snapshot = *before
+	if _, _, err := database.AdoptTerminalCandidate(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	after, err := database.ReadTerminalSnapshot(before.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Errorf("cancelled predecessor was rewritten: status %s -> %s; source continuation must create a bound successor", before.Run.Status, after.Run.Status)
+	}
+	runs, err := database.GetRunsByRepo(before.Repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 {
+		t.Errorf("source continuation has %d run rows, want immutable predecessor plus fresh-validation successor", len(runs))
+	}
+}
+
 func TestTerminalAdoptionKeepsHistoryAndOriginalLaunchReceipt(t *testing.T) {
 	database, event := newTerminalAdoptionFixture(t)
 	before := &event.Snapshot
@@ -78,19 +109,18 @@ func TestTerminalAdoptionKeepsHistoryAndOriginalLaunchReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Run.ID != before.Run.ID || after.Run.Status != types.RunRunning || after.Run.ReviewApprovedHeadSHA != nil || after.Run.TerminalHeadVerifiedAt != nil || after.Run.CIReadyAt != nil {
-		t.Fatalf("adopted source must need fresh validation: %+v", after.Run)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatal("adoption mutated predecessor source, history or receipt")
 	}
-	if !reflect.DeepEqual(after.Run.LaunchAssertion, before.Run.LaunchAssertion) || !reflect.DeepEqual(after.Run.LaunchAssertionProof, before.Run.LaunchAssertionProof) || !reflect.DeepEqual(after.Run.LaunchReceiptClaimedAt, before.Run.LaunchReceiptClaimedAt) || !reflect.DeepEqual(after.Run.LaunchValidationGeneration, before.Run.LaunchValidationGeneration) {
-		t.Fatal("original launch receipt changed")
+	child, err := database.ReadTerminalSnapshot(accepted.Successor.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for index, step := range after.Steps {
-		if !reflect.DeepEqual(after.Rounds[index], before.Rounds[index]) || !reflect.DeepEqual(step.AutoFixLimit, before.Steps[index].AutoFixLimit) {
-			t.Fatal("history or limits changed")
-		}
-		if step.StepOrder >= types.StepReview.Order() && step.Status != types.StepStatusPending {
-			t.Fatalf("%s did not require validation", step.StepName)
-		}
+	if child.Run.ID == run.ID || child.Run.Status != types.RunPending || child.Run.HeadSHA != event.CandidateSHA || child.Run.ReviewApprovedHeadSHA != nil || child.Run.TerminalHeadVerifiedAt != nil || child.Run.CIReadyAt != nil || child.Run.LaunchReceiptClaimedAt != nil || len(child.Steps) != 0 {
+		t.Fatalf("successor reused validation authority: %+v", child)
+	}
+	if !reflect.DeepEqual(child.Run.LaunchAssertion, event.Assertion) || !reflect.DeepEqual(child.Run.LaunchAssertionProof, event.Proof) || !reflect.DeepEqual(child.Run.LaunchValidationGeneration, run.LaunchValidationGeneration) || child.Run.LaunchNonce == nil || *child.Run.LaunchNonce == *run.LaunchNonce {
+		t.Fatal("successor lacks fresh proof and nonce under frozen policy")
 	}
 	replayed, isNew, err := database.AdoptTerminalCandidate(context.Background(), event)
 	if err != nil || isNew || !reflect.DeepEqual(replayed, accepted) {
@@ -137,7 +167,7 @@ func TestTerminalAdoptionRefusalIsAtomic(t *testing.T) {
 			}
 		}},
 		{"rollback", func(t *testing.T, database *DB, _ *TerminalAdoption) {
-			if _, err := database.sql.Exec(`CREATE TEMP TRIGGER refuse_terminal_reset BEFORE UPDATE OF status ON step_results BEGIN SELECT RAISE(ABORT, 'fixture refusal'); END`); err != nil {
+			if _, err := database.sql.Exec(`CREATE TEMP TRIGGER refuse_terminal_child BEFORE INSERT ON terminal_adoptions BEGIN SELECT RAISE(ABORT, 'fixture refusal'); END`); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -164,80 +194,260 @@ func TestTerminalAdoptionRefusalIsAtomic(t *testing.T) {
 	}
 }
 
-func TestTerminalAdoptionCancelledAndCrashReplay(t *testing.T) {
-	database, event := newTerminalAdoptionFixture(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, _, err := database.AdoptTerminalCandidate(ctx, event); err == nil {
-		t.Fatal("cancelled adoption was accepted")
-	}
-	if _, _, err := database.AdoptTerminalCandidate(context.Background(), event); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := database.RecoverStaleRuns("interrupted after acceptance"); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.RestartAcceptedTerminal(context.Background(), snapshot); err != nil {
-		t.Fatal(err)
-	}
-	if err := database.UpdateRunStatus(event.Snapshot.Run.ID, types.RunCancelled); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err = database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.RestartAcceptedTerminal(context.Background(), snapshot); err == nil {
-		t.Fatal("explicit cancellation was silently restarted")
-	}
-}
-
-func TestTerminalAdoptionReplayClearsExecutionErrorAndPreservesAudit(t *testing.T) {
-	for _, status := range []types.RunStatus{types.RunRunning, types.RunFailed} {
-		t.Run(string(status), func(t *testing.T) {
+func TestTerminalAdoptionRefusesChangedOrProgressedSuccessor(t *testing.T) {
+	for _, state := range []string{"untouched", "running", "failed", "cancelled", "completed", "step", "head", "generation", "receipt", "newer run"} {
+		t.Run(state, func(t *testing.T) {
 			database, event := newTerminalAdoptionFixture(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if _, _, err := database.AdoptTerminalCandidate(ctx, event); err == nil {
+				t.Fatal("cancelled transaction accepted")
+			}
 			accepted, _, err := database.AdoptTerminalCandidate(context.Background(), event)
 			if err != nil {
 				t.Fatal(err)
 			}
-			runID := event.Snapshot.Run.ID
-			if err := database.UpdateRunErrorStatus(runID, "daemon crashed during execution", status); err != nil {
-				t.Fatal(err)
+			childID := accepted.Successor.ID
+			switch state {
+			case "running", "failed", "cancelled", "completed":
+				if err := database.UpdateRunStatus(childID, types.RunStatus(state)); err != nil {
+					t.Fatal(err)
+				}
+			case "step":
+				if _, err := database.InsertStepResult(childID, types.StepIntent); err != nil {
+					t.Fatal(err)
+				}
+			case "head":
+				if _, err := database.sql.Exec(`UPDATE runs SET head_sha = 'changed' WHERE id = ?`, childID); err != nil {
+					t.Fatal(err)
+				}
+			case "generation":
+				if _, err := database.sql.Exec(`UPDATE runs SET push_generation = 2 WHERE id = ?`, childID); err != nil {
+					t.Fatal(err)
+				}
+			case "newer run":
+				other, err := database.InsertRun(event.Snapshot.Repo.ID, event.Snapshot.Run.Branch, "other", "base")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := database.UpdateRunStatus(other.ID, types.RunCompleted); err != nil {
+					t.Fatal(err)
+				}
+			case "receipt":
+				if _, err := database.sql.Exec(`UPDATE runs SET launch_receipt_claimed_at = 123 WHERE id = ?`, childID); err != nil {
+					t.Fatal(err)
+				}
 			}
-			before, err := database.ReadTerminalSnapshot(runID)
+			before, err := database.ReadTerminalSnapshot(childID)
 			if err != nil {
 				t.Fatal(err)
 			}
-
-			if err := database.RestartAcceptedTerminal(context.Background(), before); err != nil {
-				t.Fatal(err)
+			repeated, isNew, err := database.AdoptTerminalCandidate(context.Background(), event)
+			if state == "untouched" {
+				if err != nil || isNew || !reflect.DeepEqual(repeated, accepted) {
+					t.Fatalf("repeat: %+v %v %v", repeated, isNew, err)
+				}
+			} else if err == nil {
+				t.Fatal("changed successor accepted")
 			}
-
-			after, err := database.ReadTerminalSnapshot(runID)
-			if err != nil {
-				t.Fatal(err)
+			after, readErr := database.ReadTerminalSnapshot(childID)
+			if readErr != nil || !reflect.DeepEqual(before, after) {
+				t.Fatal("replay changed successor")
 			}
-			if after.Run.Status != types.RunRunning || after.Run.Error != nil {
-				t.Fatalf("replayed run retained a stale execution error: %+v", after.Run)
+			parent, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
+			if err != nil || !reflect.DeepEqual(parent, &event.Snapshot) {
+				t.Fatal("replay changed predecessor")
 			}
-			if !reflect.DeepEqual(after.Steps, before.Steps) || !reflect.DeepEqual(after.Rounds, before.Rounds) {
-				t.Fatal("replay changed original validation history")
+			runs, err := database.GetRunsByRepo(event.Snapshot.Repo.ID)
+			expectedRuns := 2
+			if state == "newer run" {
+				expectedRuns = 3
 			}
-			persisted, err := database.GetTerminalAdoption(runID)
-			if err != nil || !reflect.DeepEqual(persisted, accepted) || persisted.Snapshot.Run.Error == nil || *persisted.Snapshot.Run.Error != "interrupted" {
-				t.Fatalf("replay changed the original terminal audit: %+v, %v", persisted, err)
-			}
-			if err := database.UpdateRunStatus(runID, types.RunCompleted); err != nil {
-				t.Fatal(err)
-			}
-			completed, err := database.GetRun(runID)
-			if err != nil || completed.Error != nil {
-				t.Fatalf("completed replay retained a stale execution error: %+v, %v", completed, err)
+			if err != nil || len(runs) != expectedRuns {
+				t.Fatal("repeat created another child")
 			}
 		})
+	}
+}
+
+func TestTerminalSuccessorSerializesIndependentAcceptances(t *testing.T) {
+	database, event := newTerminalAdoptionFixture(t)
+	var sequence int
+	var name, path string
+	if err := database.sql.QueryRow(`PRAGMA database_list`).Scan(&sequence, &name, &path); err != nil {
+		t.Fatal(err)
+	}
+	independent, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer independent.Close()
+	start := make(chan struct{})
+	type result struct {
+		event   *TerminalAdoption
+		created bool
+		err     error
+	}
+	results := make(chan result, 2)
+	var workers sync.WaitGroup
+	for _, handle := range []*DB{database, independent} {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			accepted, created, err := handle.AdoptTerminalCandidate(context.Background(), event)
+			results <- result{accepted, created, err}
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	childID, createdCount := "", 0
+	for result := range results {
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if childID != "" && childID != result.event.Successor.ID {
+			t.Fatal("race created distinct successors")
+		}
+		childID = result.event.Successor.ID
+		if result.created {
+			createdCount++
+		}
+	}
+	if createdCount != 1 {
+		t.Fatalf("created=%d", createdCount)
+	}
+	runs, err := database.GetRunsByRepo(event.Snapshot.Repo.ID)
+	if err != nil || len(runs) != 2 {
+		t.Fatal("race changed run count")
+	}
+	original, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
+	if err != nil || !reflect.DeepEqual(original, &event.Snapshot) {
+		t.Fatal("race changed predecessor")
+	}
+}
+
+func TestTerminalSuccessorCountsManualAndAutomaticFamilySpending(t *testing.T) {
+	for _, manual := range []int{0, 1, 3} {
+		t.Run(fmt.Sprint(manual), func(t *testing.T) {
+			database, event := newTerminalAdoptionFixture(t)
+			var review StepResult
+			for _, step := range event.Snapshot.Steps {
+				if step.StepName == types.StepReview {
+					review = step
+				}
+			}
+			if _, err := database.sql.Exec(`UPDATE step_results SET auto_fix_limit=3 WHERE id=?`, review.ID); err != nil {
+				t.Fatal(err)
+			}
+			// The selected original round is one dispatched automatic attempt.
+			for index := 0; index < manual; index++ {
+				_, err := database.InsertStepRound(review.ID, index+2, "user_fix", nil, nil, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+			}
+			snapshot, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			event.Snapshot = *snapshot
+			accepted, _, err := database.AdoptTerminalCandidate(context.Background(), event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			remaining, family, err := database.TerminalPhaseRemaining(accepted.Successor.ID, types.StepReview, 3)
+			expected := max(0, 3-max(1, manual))
+			if err != nil || !family || remaining.Remaining != expected || remaining.Spent != max(1, manual) {
+				t.Fatalf("remaining=%+v family=%v err=%v want=%d", remaining, family, err, expected)
+			}
+			step, err := database.InsertStepResult(accepted.Successor.ID, types.StepReview)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.InsertStepRound(step.ID, 1, "user_fix", nil, nil, 1); err != nil {
+				t.Fatal(err)
+			}
+			remaining, _, err = database.TerminalPhaseRemaining(accepted.Successor.ID, types.StepReview, 3)
+			if err != nil || remaining.Remaining != max(0, expected-1) {
+				t.Fatalf("child manual spending=%+v err=%v", remaining, err)
+			}
+			untouched, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
+			if err != nil || !reflect.DeepEqual(untouched, &event.Snapshot) {
+				t.Fatal("budget query changed predecessor")
+			}
+		})
+	}
+}
+
+func TestTerminalPredecessorRejectsHistoryMutation(t *testing.T) {
+	database, event := newTerminalAdoptionFixture(t)
+	if _, _, err := database.AdoptTerminalCandidate(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(event.Snapshot.Run.ID, types.RunRunning); err == nil {
+		t.Fatal("predecessor reopened")
+	}
+	if _, err := database.InsertStepResult(event.Snapshot.Run.ID, types.StepReview); err == nil {
+		t.Fatal("step appended to predecessor")
+	}
+	if err := database.FailStep(event.Snapshot.Steps[0].ID, "rewritten", 0); err == nil {
+		t.Fatal("predecessor step changed")
+	}
+	if _, err := database.InsertStepRound(event.Snapshot.Steps[0].ID, 2, "auto_fix", nil, nil, 1); err == nil {
+		t.Fatal("round appended to predecessor")
+	}
+	if err := database.SetStepRoundSelection(event.Snapshot.Rounds[0][0].ID, nil, RoundSelectionSourceUser); err == nil {
+		t.Fatal("predecessor selection changed")
+	}
+	if err := database.RecordTerminalSourceState(event.Snapshot.Run.ID, "dirty:changed"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
+	if err != nil || !reflect.DeepEqual(snapshot, &event.Snapshot) {
+		t.Fatal("immutable history changed")
+	}
+}
+
+func TestTerminalSuccessorInheritsPublicBindingWithoutValidationStamps(t *testing.T) {
+	database, event := newTerminalAdoptionFixture(t)
+	parentID := event.Snapshot.Run.ID
+	if err := database.UpdateRunPushBinding(parentID, PushBinding{HeadSHA: event.Snapshot.Run.HeadSHA, TargetKind: "fork", TargetFingerprint: "fixture-target", Ref: "refs/heads/feature"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunPRURL(parentID, "https://github.com/example/fixture/pull/1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunPRState(parentID, "open"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := database.ReadTerminalSnapshot(parentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.Snapshot = *snapshot
+	accepted, _, err := database.AdoptTerminalCandidate(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := accepted.Successor
+	if !reflect.DeepEqual(child.PushGeneration, snapshot.Run.PushGeneration) || !reflect.DeepEqual(child.LastPushedSHA, snapshot.Run.LastPushedSHA) || !reflect.DeepEqual(child.LastPushedAt, snapshot.Run.LastPushedAt) || !reflect.DeepEqual(child.PRURL, snapshot.Run.PRURL) || child.ReviewApprovedHeadSHA != nil || child.CIReadyAt != nil || child.TerminalHeadVerifiedAt != nil {
+		t.Fatalf("inherited binding invented authority: %+v", child)
+	}
+	if err := database.UpdateRunPublication(child.ID, PushBinding{HeadSHA: strings.Repeat("f", 40), TargetKind: "fork", TargetFingerprint: "fixture-target", Ref: "refs/heads/feature"}); err != nil {
+		t.Fatal(err)
+	}
+	published, err := database.GetRun(child.ID)
+	if err != nil || published.PushGeneration == nil || *published.PushGeneration != 2 {
+		t.Fatalf("generation=%+v err=%v", published, err)
+	}
+	unchanged, err := database.ReadTerminalSnapshot(parentID)
+	if err != nil || !reflect.DeepEqual(unchanged, snapshot) {
+		t.Fatal("successor publication changed predecessor")
+	}
+	if _, err := database.sql.Exec(`DELETE FROM terminal_adoptions WHERE run_id=?`, parentID); err == nil {
+		t.Fatal("durable successor binding deleted")
 	}
 }

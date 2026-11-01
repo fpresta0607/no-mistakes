@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/oklog/ulid/v2"
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -23,6 +26,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/scm/github"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
@@ -48,10 +52,14 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 				break
 			}
 		}
-		if selected == nil || selected.ID != request.RunID {
+		event, err := m.db.GetTerminalAdoption(request.RunID)
+		if err != nil {
+			return "", err
+		}
+		if selected == nil || selected.ID != request.RunID && (event == nil || selected.ID != event.Successor.ID) {
 			return "", fmt.Errorf("terminal request no longer identifies this branch's run")
 		}
-		snapshot, err := m.db.ReadTerminalSnapshot(selected.ID)
+		snapshot, err := m.db.ReadTerminalSnapshot(request.RunID)
 		if err != nil {
 			return "", err
 		}
@@ -68,10 +76,6 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if err != nil || !samePath(resolveGitPath(request.CallerDir, callerCommon), resolveGitPath(repo.WorkingPath, repoCommon)) {
 			return "", fmt.Errorf("caller repository does not match the run")
 		}
-		event, err := m.db.GetTerminalAdoption(selected.ID)
-		if err != nil {
-			return "", err
-		}
 		original := snapshot
 		if event != nil {
 			original = &event.Snapshot
@@ -80,18 +84,20 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 			return "", fmt.Errorf("terminal run, generation, receipt or findings changed since observation")
 		}
 		m.mu.Lock()
-		executor := m.executors[selected.ID]
-		m.mu.Unlock()
+		executor := m.executors[original.Run.ID]
+		var childExecutor *pipeline.Executor
 		if event != nil {
-			result = &ipc.RecoverTerminalResult{RunID: selected.ID, CandidateSHA: event.CandidateSHA, AdoptionID: event.ID}
-			if executor != nil {
-				return selected.ID, nil
-			}
-			if selected.HeadSHA != event.CandidateSHA || len(snapshot.Rounds) != len(original.Rounds) || !reflect.DeepEqual(snapshot.Rounds, original.Rounds) {
-				return selected.ID, nil
-			}
-		} else if executor != nil || !selected.Status.Terminal() || selected.Status == types.RunCompleted {
+			childExecutor = m.executors[event.Successor.ID]
+		}
+		m.mu.Unlock()
+		if executor != nil || !original.Run.Status.Terminal() || original.Run.Status == types.RunCompleted {
 			return "", fmt.Errorf("only a terminal run without an executor can adopt source")
+		}
+		if event != nil {
+			if err := m.db.ValidateTerminalSuccessor(event); err != nil {
+				return "", err
+			}
+
 		}
 		if err := validateTerminalAgentInactivity(snapshot); err != nil {
 			return "", err
@@ -101,7 +107,7 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if event == nil {
 			source, err = service.TerminalSource(ctx, &original.Run)
 		} else {
-			source, err = service.AcceptedTerminalSource(ctx, event, selected)
+			source, err = service.AcceptedTerminalSource(ctx, event, &event.Successor)
 		}
 		if err != nil {
 			return "", err
@@ -109,15 +115,55 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if event != nil && (source.Head != event.CandidateSHA || source.Tree != event.CandidateTree || source.GateHead != event.GateHead) {
 			return "", fmt.Errorf("accepted source or gate lane changed")
 		}
-		if source.Missing {
-			if err := git.WorktreeAdd(ctx, service.GateDir, source.ManagedDir, source.Head); err != nil {
-				return "", fmt.Errorf("reconstruct exact preserved source: %w", err)
+		successorID := ulid.Make().String()
+		var plan *verificationplan.Snapshot
+		if event != nil {
+			successorID, plan = event.Successor.ID, event.Plan
+		} else if original.Run.VerificationPlan != nil {
+			if _, err := original.Run.VerificationPlan.Read(); err != nil {
+				return "", err
+			}
+			plan, err = verificationplan.Capture(m.paths.RunInputsDir(), original.Run.VerificationPlan.Path, repo.ID, original.Run.Branch, source.Head)
+			if err != nil {
+				return "", err
+			}
+			successorID = plan.ID
+		}
+		globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
+		if err != nil {
+			return "", err
+		}
+		layout, err := validatedWorktreeLayout(m.db, m.paths, globalCfg)
+		if err != nil {
+			return "", err
+		}
+		workDir := layout.Dir(repo.ID, repo.WorkingPath, successorID)
+		if event != nil && (event.Successor.WorktreeDir == nil || !samePath(workDir, *event.Successor.WorktreeDir)) {
+			return "", fmt.Errorf("successor worktree placement changed")
+		}
+		candidateRef := "refs/no-mistakes/terminal-candidate/" + successorID
+		if _, err := git.Run(ctx, service.GateDir, "cat-file", "-e", source.Head+"^{commit}"); err != nil {
+			if _, err := git.Run(ctx, service.GateDir, "fetch", "--no-tags", request.CallerDir, source.Head); err != nil {
+				return "", fmt.Errorf("preserve exact caller candidate: %w", err)
 			}
 		}
-		if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, source.ManagedDir); err != nil {
-			return "", fmt.Errorf("configure terminal source identity: %w", err)
+
+		candidateConfig := &config.RepoConfig{}
+		entry, err := git.Run(ctx, service.GateDir, "ls-tree", source.Head, "--", ".no-mistakes.yaml")
+		if err != nil {
+			return "", fmt.Errorf("read candidate config tree: %w", err)
 		}
-		cfg, err := m.loadRecoveredConfig(ctx, &original.Run, repo, source.ManagedDir)
+		if entry != "" {
+			content, err := git.ShowFile(ctx, service.GateDir, source.Head, ".no-mistakes.yaml")
+			if err != nil {
+				return "", fmt.Errorf("read candidate config: %w", err)
+			}
+			candidateConfig, err = config.LoadRepoFromBytes([]byte(content))
+			if err != nil {
+				return "", err
+			}
+		}
+		cfg, err := m.loadRecoveredConfigWithRepo(ctx, &original.Run, repo, service.GateDir, candidateConfig)
 		if err != nil {
 			return "", err
 		}
@@ -134,7 +180,7 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if err != nil {
 			return "", err
 		}
-		if err := proveTerminalPublication(ctx, &original.Run, repo, source.ManagedDir, forge, cfg); err != nil {
+		if err := proveTerminalPublication(ctx, &original.Run, repo, request.CallerDir, forge, cfg); err != nil {
 			return "", err
 		}
 		ag, err := newResolvedPipelineAgent(cfg, roleConfigs, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), forgeEnvironment(forge))
@@ -151,52 +197,66 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if err != nil {
 			return "", err
 		}
-		if source.Missing {
-			source.Missing = false
-		}
 		var rechecked *branchsync.TerminalSource
 		if event == nil {
 			rechecked, err = service.TerminalSource(ctx, &original.Run)
 		} else {
-			rechecked, err = service.AcceptedTerminalSource(ctx, event, selected)
+			rechecked, err = service.AcceptedTerminalSource(ctx, event, &event.Successor)
 		}
 		if err != nil || !reflect.DeepEqual(source, rechecked) {
 			return "", fmt.Errorf("candidate source changed during verification")
 		}
-		if event == nil {
-			candidateRef := "refs/no-mistakes/terminal-candidate/" + selected.ID
-			for _, anchor := range []struct{ ref, head string }{{candidateRef, source.Head}, {"refs/no-mistakes/terminal-lane/" + selected.ID, source.GateHead}} {
-				if err := custody.PreserveRecoveryAnchor(ctx, service.GateDir, anchor.ref, anchor.head); err != nil {
-					return "", err
-				}
+		for _, anchor := range []struct{ ref, head string }{{candidateRef, source.Head}, {"refs/no-mistakes/terminal-lane/" + successorID, source.GateHead}, {custody.RecoveryRef(successorID), source.Head}} {
+			if err := custody.PreserveRecoveryAnchor(ctx, service.GateDir, anchor.ref, anchor.head); err != nil {
+				return "", err
 			}
-			event, _, err = m.db.AdoptTerminalCandidate(ctx, db.TerminalAdoption{Snapshot: *original, CandidateSHA: source.Head, CandidateTree: source.Tree, SourceRef: candidateRef, GateHead: source.GateHead, RecoveryHead: source.RecoveryHead, CallerDir: request.CallerDir, CallerHead: callerHead, ManagedDir: source.ManagedDir, Reason: request.Reason, Operator: strconv.Itoa(operator), Assertion: assertion, Proof: proof})
+		}
+		if event == nil {
+			event, _, err = m.db.AdoptTerminalCandidate(ctx, db.TerminalAdoption{Snapshot: *original, SuccessorID: successorID, WorktreeRoot: filepath.Dir(workDir), Plan: plan, CandidateSHA: source.Head, RetainedSHA: source.RetainedHead, CandidateTree: source.Tree, SourceRef: candidateRef, GateHead: source.GateHead, RecoveryHead: source.RecoveryHead, CallerDir: request.CallerDir, CallerHead: callerHead, ManagedDir: source.ManagedDir, Reason: request.Reason, Operator: strconv.Itoa(operator), Assertion: assertion, Proof: proof})
 			if err != nil {
 				return "", err
 			}
 		} else {
-			if !assertion.Matches(event.Assertion) || proof.Check(event.Assertion) != nil {
-				return "", fmt.Errorf("trusted source changed after acceptance; existing provenance cannot be rewritten")
+			if request.Reason != event.Reason || request.CallerDir != event.CallerDir || callerHead != event.CallerHead || !assertion.Matches(event.Assertion) || proof.Check(event.Assertion) != nil {
+				return "", fmt.Errorf("accepted source, reason or trusted launch provenance changed")
 			}
-			if err := m.db.RestartAcceptedTerminal(ctx, snapshot); err != nil {
+			if err := m.db.ValidateTerminalSuccessor(event); err != nil {
 				return "", err
 			}
 		}
-		fresh, err := m.db.GetRun(selected.ID)
+		fresh, err := m.db.GetRun(event.Successor.ID)
 		if err != nil {
 			return "", err
 		}
-		if err := pipeline.ValidateTerminalRestart(m.db, fresh, execSteps, event); err != nil {
+		if err := pipeline.ValidateTerminalSuccessor(m.db, fresh, execSteps, event); err != nil {
 			return "", err
 		}
-		result = &ipc.RecoverTerminalResult{RunID: fresh.ID, CandidateSHA: event.CandidateSHA, AdoptionID: event.ID}
-		if ctx.Err() != nil {
+		if _, err := os.Stat(workDir); os.IsNotExist(err) {
+			if err := git.WorktreeAdd(ctx, service.GateDir, workDir, source.Head); err != nil {
+				return "", fmt.Errorf("create registered successor checkout: %w", err)
+			}
+		} else if err != nil {
+			return "", err
+		}
+		if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, workDir); err != nil {
+			return "", fmt.Errorf("configure successor identity: %w", err)
+		}
+		result = &ipc.RecoverTerminalResult{RunID: fresh.ID, PredecessorID: original.Run.ID, CandidateSHA: event.CandidateSHA, CandidateTree: event.CandidateTree, AdoptionID: event.ID}
+		result.PhaseBudgets = make(map[string]db.TerminalPhaseBudget)
+		for _, step := range execSteps {
+			budget, _, err := m.db.TerminalPhaseRemaining(fresh.ID, step.Name(), cfg.AutoFixLimit(step.Name()))
+			if err != nil {
+				return "", err
+			}
+			result.PhaseBudgets[string(step.Name())] = budget
+		}
+		if ctx.Err() != nil || childExecutor != nil {
 			return fresh.ID, nil
 		}
 		m.subMu.Lock()
 		delete(m.completedRuns, fresh.ID)
 		m.subMu.Unlock()
-		m.resumeRecoveredRun(recoveredRunPlan{run: fresh, repo: repo, workDir: source.ManagedDir, gateDir: service.GateDir, cfg: cfg, agent: ag, steps: execSteps, forge: forge, terminal: event})
+		m.resumeRecoveredRun(recoveredRunPlan{run: fresh, repo: repo, workDir: workDir, gateDir: service.GateDir, cfg: cfg, agent: ag, steps: execSteps, forge: forge, terminal: event})
 		isScheduled, result.Started = true, true
 		return fresh.ID, nil
 	})

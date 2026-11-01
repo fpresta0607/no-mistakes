@@ -26,13 +26,15 @@ func TestAcceptedTerminalSourceReconstructsExactCandidateAfterCrash(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref := "refs/no-mistakes/terminal-candidate/" + f.run.ID
+	ref := "refs/no-mistakes/terminal-candidate/successor"
 	mustRun(t, f.gate, "update-ref", ref, candidate)
-	event := &db.TerminalAdoption{Snapshot: db.TerminalSnapshot{Run: *f.run}, CandidateSHA: candidate, CandidateTree: source.Tree, SourceRef: ref, GateHead: source.GateHead, RecoveryHead: source.RecoveryHead, ManagedDir: managed}
+	event := &db.TerminalAdoption{Snapshot: db.TerminalSnapshot{Run: *f.run}, CandidateSHA: candidate, RetainedSHA: candidate, CandidateTree: source.Tree, SourceRef: ref, GateHead: source.GateHead, RecoveryHead: source.RecoveryHead, ManagedDir: managed}
 	current := *f.run
+	current.ID = "successor"
 	current.HeadSHA = candidate
+	event.Successor = current
 	state := "clean:" + candidate
-	current.TerminalSourceState = &state
+	event.Snapshot.Run.TerminalSourceState = nil
 	mustRun(t, f.gate, "worktree", "remove", managed)
 	// Startup may append an ordinary preservation anchor when none existed.
 	mustRun(t, f.gate, "update-ref", custody.RecoveryRef(f.run.ID), candidate)
@@ -41,8 +43,9 @@ func TestAcceptedTerminalSourceReconstructsExactCandidateAfterCrash(t *testing.T
 		t.Fatalf("replay = %+v %v", replayed, err)
 	}
 	state = "dirty:" + candidate
-	if _, err := f.service.AcceptedTerminalSource(f.ctx, event, &current); err == nil {
-		t.Fatal("missing dirty source was accepted")
+	event.Snapshot.Run.TerminalSourceState = &state
+	if _, err := f.service.TerminalSource(f.ctx, &event.Snapshot.Run); err == nil {
+		t.Fatal("missing dirty source was accepted before adoption")
 	}
 }
 
@@ -90,5 +93,72 @@ func TestTerminalSourceRefusesDirtyOrUnboundManagedSource(t *testing.T) {
 	}
 	if content := mustRun(t, managed, "status", "--porcelain", "--untracked-files=all"); content == "" {
 		t.Fatal("dirty source was removed")
+	}
+}
+
+func TestTerminalSourceSelectsOnlyCleanCallerDescendantsOfRetainedReviewedOutput(t *testing.T) {
+	for _, kind := range []string{"clean", "dirty", "unreviewed", "sibling", "missing dirty"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newRecoverFixture(t, types.RunCancelled)
+			f.service.Paths = paths.WithRoot(t.TempDir())
+			mustRun(t, f.local, "fetch", f.gate, f.preserved)
+			base := f.preserved
+			if kind == "sibling" {
+				base = f.submitted
+			}
+			mustRun(t, f.local, "merge", "--ff-only", base)
+			mustWrite(t, filepath.Join(f.local, "correction.txt"), "authored correction\n")
+			mustRun(t, f.local, "add", "correction.txt")
+			mustRun(t, f.local, "commit", "-m", "authored correction")
+			candidate := mustRun(t, f.local, "rev-parse", "HEAD")
+			f.run.ReviewApprovedHeadSHA = &f.preserved
+			state := "clean:" + f.preserved
+			if kind == "unreviewed" {
+				f.run.ReviewApprovedHeadSHA = nil
+			}
+			if kind == "missing dirty" {
+				state = "dirty:" + f.preserved
+			}
+			f.run.TerminalSourceState = &state
+			mustRun(t, f.gate, "update-ref", custody.RecoveryRef(f.run.ID), f.preserved)
+			if kind == "dirty" {
+				mustWrite(t, filepath.Join(f.local, "untracked.txt"), "only copy\n")
+			}
+			before := mustRun(t, f.gate, "show-ref")
+			source, err := f.service.TerminalSource(f.ctx, f.run)
+			if kind == "clean" {
+				if err != nil || source.Head != candidate || source.RetainedHead != f.preserved || source.Tree != mustRun(t, f.local, "rev-parse", "HEAD^{tree}") {
+					t.Fatalf("candidate=%+v err=%v", source, err)
+				}
+			} else if err == nil {
+				t.Fatal("unbound or dirty candidate accepted")
+			}
+			if mustRun(t, f.gate, "show-ref") != before {
+				t.Fatal("inspection mutated refs")
+			}
+		})
+	}
+}
+
+func TestTerminalManagedCandidateMustContainRetainedPublicOutput(t *testing.T) {
+	f := newRecoverFixture(t, types.RunCancelled)
+	f.service.Paths = paths.WithRoot(t.TempDir())
+	managed := f.service.Paths.WorktreeDir(f.repo.ID, f.run.ID)
+	mustRun(t, f.gate, "worktree", "add", "--detach", managed, f.preserved)
+	mustWrite(t, filepath.Join(f.local, "public-only.txt"), "published sibling\n")
+	mustRun(t, f.local, "add", "public-only.txt")
+	mustRun(t, f.local, "commit", "-m", "published sibling")
+	public := mustRun(t, f.local, "rev-parse", "HEAD")
+	mustRun(t, f.gate, "fetch", f.local, public)
+	f.run.LastPushedSHA = &public
+	f.run.ReviewApprovedHeadSHA = &public
+	mustRun(t, f.local, "checkout", "--detach", f.submitted)
+	mustRun(t, f.local, "checkout", "-B", f.run.Branch, f.submitted)
+	before := mustRun(t, f.gate, "show-ref")
+	if _, err := f.service.TerminalSource(f.ctx, f.run); err == nil {
+		t.Fatal("managed candidate omitted retained published output")
+	}
+	if mustRun(t, f.gate, "show-ref") != before {
+		t.Fatal("refusal mutated gate refs")
 	}
 }

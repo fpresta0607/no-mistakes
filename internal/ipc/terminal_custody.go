@@ -1,5 +1,7 @@
 package ipc
 
+import "github.com/kunchenguid/no-mistakes/internal/db"
+
 const MethodRecoverTerminal = "recover_terminal"
 
 type RecoverTerminalParams struct {
@@ -12,8 +14,11 @@ type RecoverTerminalParams struct {
 }
 
 type RecoverTerminalResult struct {
-	RunID        string `json:"run_id"`
-	CandidateSHA string `json:"candidate_sha"`
-	AdoptionID   string `json:"adoption_id"`
-	Started      bool   `json:"started"`
+	RunID         string                            `json:"run_id"`
+	PredecessorID string                            `json:"predecessor_id"`
+	CandidateTree string                            `json:"candidate_tree"`
+	CandidateSHA  string                            `json:"candidate_sha"`
+	AdoptionID    string                            `json:"adoption_id"`
+	PhaseBudgets  map[string]db.TerminalPhaseBudget `json:"phase_budgets"`
+	Started       bool                              `json:"started"`
 }

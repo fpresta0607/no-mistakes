@@ -1330,7 +1330,11 @@ rounds:
 		// Only auto-fix findings whose action is "auto-fix".
 		// This runs before the NeedsApproval check so that all severity
 		// levels (including "info") get a chance at automatic fixing.
-		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit {
+		familyRemaining, terminalFamily, budgetErr := e.db.TerminalPhaseRemaining(run.ID, stepName, autoFixLimit)
+		if budgetErr != nil {
+			return false, "", fmt.Errorf("terminal repair ledger: %w", budgetErr)
+		}
+		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit && (!terminalFamily || familyRemaining.Remaining > 0) {
 			fixableFindings := autoFixableFindingsJSON(roundFindings)
 			if carryFindings {
 				fixableFindings = remapFindingIDsJSON(effectiveFindings, fixableFindings)

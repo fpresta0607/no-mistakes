@@ -456,7 +456,7 @@ no-mistakes axi sync --adopt-published
 | `--check`            | `bool`   | `false` | Verify the live target and exact plan without changing `HEAD`                |
 | `--recover`          | `bool`   | `false` | Return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation already released the branch), or perform `recover_remote_rewritten` |
 | `--keep-local`       | `bool`   | `false` | With `--recover`: keep the current local head; never touches the worktree   |
-| `--continue`         | `bool`   | `false` | With `--recover --reason`: adopt bound terminal source as unvalidated work in the same run |
+| `--continue`         | `bool`   | `false` | With `--recover --reason`: adopt bound terminal source as an unvalidated successor |
 | `--reason`           | `string` | (none)  | Explicit operator reason required by terminal continuation |
 | `--bind-archive-ref` | `string` | (none)  | Bind one existing `refs/heads/archive/*` commit as exact evidence for a keep-local recovery; never creates or moves a Git ref |
 | `--adopt-published`  | `bool`   | `false` | Adopt a clean diverged local head into its stale gate lane only when the configured push target has that exact head |
@@ -517,7 +517,8 @@ On a `user_owned` branch, `--recover` is an idempotent no-op success: nothing pi
 
 ### Continue validation of preserved terminal source
 
-`axi sync --recover --continue --reason "validate preserved source"` explicitly accepts committed source for fresh validation in the current branch's original terminal run.
+`axi sync --recover --continue --reason "validate preserved source"` explicitly accepts committed source into one fresh-validation successor of the current branch's terminal run.
+The predecessor's status, source, steps, findings, rounds, decisions and launch receipt remain immutable.
 Initial acceptance requires the latest run on the current repository and branch to be terminal, neither completed nor custody-returned.
 It requires the complete recorded pipeline with completed Intent and Rebase, no deliberately skipped required step, and the original bound launch selection and frozen policy.
 Active parked CI adoption and conflict handback use their own operations.
@@ -525,27 +526,33 @@ This command accepts no caller-selected run or candidate SHA.
 Use it without `--check`, `--keep-local`, `--adopt-published`, or `--bind-archive-ref`.
 
 The source must be the run's clean managed checkout at the recorded head or a descendant, or the exact verified recovery anchor when the managed checkout is missing.
-A missing checkout also requires a previously recorded clean-source observation bound to that commit.
+Initial acceptance of a missing checkout also requires a recorded clean-source observation bound to that commit.
+A clean caller correction may be selected when it descends from the retained reviewed or published output and contains the complete retained terminal history.
 Dirty, unreadable, contradictory, symbolic, or unbound source refuses; unavailable uncommitted files are never reconstructed from a commit.
-The caller must remain at one of the run's recorded heads, and its tracked and untracked edits remain untouched.
-The candidate and the independent gate-lane history are anchored before acceptance.
+When the caller remains at an original recorded head, its tracked and untracked edits remain untouched and are not adopted.
+The exact candidate and tree, fresh clean retained-source observation, independent gate lane and source anchors are bound in the appended adoption record.
+An accepted clean observation is source provenance, not Review or terminal verification.
 
-For a published run, the current target/ref, publication generation, open PR identity, branch and public head must still match the original binding.
+For a published predecessor, the current target/ref, publication generation, open PR identity, branch and public head must still match its binding.
 Published terminal continuation currently requires GitHub PR identity verification.
 Its live base must equal the freshly resolved validation base; a mismatch refuses rather than reviewing a different change range.
-The operation performs no push, attestation update or check approval.
+The successor explicitly inherits the public binding and generation, and a future authorized push advances that generation normally.
+Acceptance performs no push, attestation update or check approval.
 
-Acceptance appends an immutable audit snapshot and clears current validation authority in one database transaction.
-Run and PR identity, original launch receipt, submitted and published heads, publication generation, findings, round selections and spent repair counts remain recorded.
-The same model, effort and agent chain are freshly proved against the current trusted default-branch source, with new provenance appended separately from the original receipt.
-Recovery cannot increase recorded repair allowances; a step with no recorded allowance receives no automatic repairs.
-Fresh Review, Test and the remaining required checks precede any publication.
+Acceptance atomically appends the source binding and creates a pending successor with its own fresh launch nonce and proof.
+The same model, effort and agent chain are freshly proved against the current trusted default-branch source under the frozen policy.
+No Review, Test, CI-ready or terminal-verification authority is copied.
+Intent, Rebase, full Review, Test and the remaining required gates execute afresh through the normal pipeline.
+The predecessor-linked phase ledger includes actual manual and automatic fixes and dispatched attempts interrupted before a round was recorded.
+Automatic repair capacity cannot exceed the original remaining allowance; an exhausted phase receives no renewed capacity.
+Further manual repairs require explicit gate decisions and remain recorded as additional spending.
 
-The result reports `adopted_unvalidated`, the run, candidate, adoption ID and whether validation started.
-Use `axi status` and the ordinary gate responses to drive that run.
-A repeated invocation acknowledges the same acceptance without resetting history or repeating a turn.
-If execution stops after acceptance but before the first fresh turn, an explicit repeat can restart that exact pending validation after rechecking its binding.
-Progressed or explicitly cancelled validation is never silently restarted, and a later trusted-source change refuses reuse of the appended proof.
+The result reports `adopted_unvalidated`, the successor `run`, `predecessor`, exact `candidate` and `candidate_tree`, adoption ID, cumulative `phase_budgets` and whether validation started.
+Use `axi status` and ordinary gate responses to inspect and drive the successor.
+An exact repeat returns the same durable child only while its identity and pending acceptance remain untouched.
+It may start that pending child's first execution after rechecking source and launch provenance.
+Changed, progressed, failed or cancelled successors refuse; the command never reopens the predecessor or silently reruns a terminal executor.
+A later trusted-source change refuses reuse of the appended proof.
 
 ## no-mistakes axi logs
 

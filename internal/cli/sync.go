@@ -96,7 +96,7 @@ func newAxiSyncCmd() *cobra.Command {
 			"--recover performs the guarded custody return offered by\n" +
 			"next_action.code: recover_custody; --keep-local keeps the current local head.\n" +
 			"--recover --continue --reason explicitly adopts a terminal run's bound source\n" +
-			"as unvalidated work in that same run, requiring fresh Review and checks.\n" +
+			"as an unvalidated successor with immutable history and fresh Review and checks.\n" +
 			"It also performs next_action.code: recover_remote_rewritten, which anchors the\n" +
 			"superseded pipeline head and rebinds the push binding to the re-verified live head.\n" +
 			"--bind-archive-ref binds one exact existing refs/heads/archive/* commit to\n" +
@@ -133,7 +133,7 @@ func newAxiSyncCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&keepLocal, "keep-local", false, "with --recover: keep the current local head; anchor available preserved commits, discard genuinely missing ones, and make the gate follow the kept head")
 	cmd.Flags().BoolVar(&adoptPublished, "adopt-published", false, "adopt a clean diverged local head into its stale gate lane only when the configured push target already has that exact head")
 	cmd.Flags().StringVar(&bindArchiveRef, "bind-archive-ref", "", "bind one existing refs/heads/archive/* commit as exact keep-local recovery evidence without changing Git refs")
-	cmd.Flags().BoolVar(&continueRecovery, "continue", false, "with --recover and --reason: explicitly adopt this terminal run's bound source as unvalidated work in the same run")
+	cmd.Flags().BoolVar(&continueRecovery, "continue", false, "with --recover and --reason: explicitly adopt this terminal run's bound source as an unvalidated successor preserving cumulative repair spending")
 	cmd.Flags().StringVar(&reason, "reason", "", "operator reason for terminal source adoption")
 	return cmd
 }

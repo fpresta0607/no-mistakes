@@ -52,7 +52,7 @@ func TestAxiTerminalCustodyContinuation(t *testing.T) {
 	if err := os.WriteFile(assertionPath, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out, err := h.RunInDir(caller, "axi", "run", "--intent", "validate preserved correction without replacing its run", "--launch-nonce", "terminal-fixture", "--validation-generation", "frozen-fixture-policy", "--launch-assertion", assertionPath)
+	out, err := h.RunInDir(caller, "axi", "run", "--intent", "validate preserved correction with immutable history", "--launch-nonce", "terminal-fixture", "--validation-generation", "frozen-fixture-policy", "--launch-assertion", assertionPath)
 	if err != nil || !strings.Contains(out, "sync-1") {
 		t.Fatalf("initial gate: %v\n%s", err, out)
 	}
@@ -94,10 +94,15 @@ func TestAxiTerminalCustodyContinuation(t *testing.T) {
 	if err != nil || !strings.Contains(out, "adopted_unvalidated: true") || !strings.Contains(out, run.ID) {
 		t.Fatalf("public continuation: %v\n%s", err, out)
 	}
+	adoption, err := database.GetTerminalAdoption(run.ID)
+	if err != nil || adoption == nil || adoption.Successor.ID == run.ID {
+		t.Fatalf("successor binding=%+v err=%v", adoption, err)
+	}
+	childID := adoption.Successor.ID
 	deadline := time.Now().Add(30 * time.Second)
 	var current *db.TerminalSnapshot
 	for time.Now().Before(deadline) {
-		current, err = database.ReadTerminalSnapshot(run.ID)
+		current, err = database.ReadTerminalSnapshot(childID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -109,27 +114,34 @@ func TestAxiTerminalCustodyContinuation(t *testing.T) {
 	if current.Run.AwaitingAgentSince == nil || current.Run.HeadSHA != before.Run.HeadSHA || current.Run.ReviewApprovedHeadSHA != nil || current.Run.TerminalHeadVerifiedAt != nil {
 		t.Fatalf("fresh Review was bypassed: %+v", current.Run)
 	}
-	if !reflect.DeepEqual(current.Run.LaunchAssertionProof, before.Run.LaunchAssertionProof) || !reflect.DeepEqual(current.Run.LaunchValidationGeneration, before.Run.LaunchValidationGeneration) {
-		t.Fatal("original native launch receipt changed")
+	original, err := database.ReadTerminalSnapshot(run.ID)
+	if err != nil || !reflect.DeepEqual(original, before) {
+		t.Fatal("original native history or launch receipt changed")
 	}
-	for index, original := range before.Steps {
-		if original.StepName == types.StepReview {
-			if len(current.Rounds[index]) != len(before.Rounds[index])+1 {
-				t.Fatal("fresh Review did not append exactly one turn")
+	if current.Run.LaunchAssertionProof.Check(current.Run.LaunchAssertion) != nil || !reflect.DeepEqual(current.Run.LaunchValidationGeneration, before.Run.LaunchValidationGeneration) {
+		t.Fatal("child lacks fresh authorized launch proof under frozen policy")
+	}
+	for index, step := range current.Steps {
+		switch step.StepName {
+		case types.StepIntent, types.StepRebase, types.StepReview:
+			if len(current.Rounds[index]) != 1 {
+				t.Fatalf("%s did not execute a full fresh turn", step.StepName)
 			}
-		} else if !reflect.DeepEqual(current.Rounds[index], before.Rounds[index]) {
-			t.Fatalf("%s history changed before Review approval", original.StepName)
+		default:
+			if len(current.Rounds[index]) != 0 {
+				t.Fatalf("%s ran before fresh Review decision", step.StepName)
+			}
 		}
 	}
 	if data, err := os.ReadFile(filepath.Join(caller, "local-only.txt")); err != nil || string(data) != "retained local source\n" {
 		t.Fatal("caller untracked source changed")
 	}
 	out, err = h.RunInDir(caller, "axi", "sync", "--recover", "--continue", "--reason", "validate preserved correction")
-	if err != nil || !strings.Contains(out, "started: false") {
-		t.Fatalf("independent repeat: %v\n%s", err, out)
+	if err == nil || !strings.Contains(out, "progressed") {
+		t.Fatalf("progressed successor repeated: %v\n%s", err, out)
 	}
-	if len(h.Runs()) != 1 {
-		t.Fatal("continuation created a replacement run")
+	if len(h.Runs()) != 2 {
+		t.Fatal("repeat changed durable family size")
 	}
 	content, err := os.ReadFile(scenario)
 	if err != nil {
@@ -142,7 +154,7 @@ func TestAxiTerminalCustodyContinuation(t *testing.T) {
 	if out, err := h.RunInDir(caller, "axi", "respond", "--action", "fix", "--findings", "sync-1"); err != nil {
 		t.Fatalf("repair continued source: %v\n%s", err, out)
 	}
-	managed := paths.WithRoot(h.NMHome).WorktreeDir(run.RepoID, run.ID)
+	managed := paths.WithRoot(h.NMHome).WorktreeDir(run.RepoID, childID)
 	repaired := gitIn(t, h, managed, "rev-parse", "HEAD")
 	if repaired == before.Run.HeadSHA {
 		t.Fatal("continuation fixture did not create a later correction")
