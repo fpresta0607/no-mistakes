@@ -110,9 +110,10 @@ func TestOpenReadOnlyWhileAnotherProcessWrites(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer readonly.Close()
+		expectedWorkingPath := os.Getenv("NM_DB_LIVE_READER_EXPECTED_PATH")
 		repos, err := readonly.GetRepos()
-		if err != nil || len(repos) != 1 || repos[0].ID != "committed" || repos[0].WorkingPath != "committed" {
-			t.Fatalf("committed registry while writer holds a transaction: %v, %v", repos, err)
+		if err != nil || len(repos) != 1 || repos[0].ID != "committed" || repos[0].WorkingPath != expectedWorkingPath {
+			t.Fatalf("registry with expected working path %q: %v, %v", expectedWorkingPath, repos, err)
 		}
 		if _, err := readonly.sql.Exec("DELETE FROM repos"); err == nil {
 			t.Fatal("read-only registry accepted a write")
@@ -140,7 +141,7 @@ func TestOpenReadOnlyWhileAnotherProcessWrites(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	reader := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestOpenReadOnlyWhileAnotherProcessWrites$")
-	reader.Env = append(os.Environ(), "NM_DB_LIVE_READER="+path)
+	reader.Env = append(os.Environ(), "NM_DB_LIVE_READER="+path, "NM_DB_LIVE_READER_EXPECTED_PATH=committed")
 	winproc.Harden(reader)
 	if output, err := reader.CombinedOutput(); err != nil {
 		t.Fatalf("concurrent reader: %v\n%s", err, output)
@@ -148,13 +149,10 @@ func TestOpenReadOnlyWhileAnotherProcessWrites(t *testing.T) {
 	if err := transaction.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	readonly, err := OpenReadOnly(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer readonly.Close()
-	repos, err := readonly.GetRepos()
-	if err != nil || len(repos) != 1 || repos[0].WorkingPath != "updated" {
-		t.Fatalf("registry after writer commits: %v, %v", repos, err)
+	reader = exec.CommandContext(ctx, os.Args[0], "-test.run=^TestOpenReadOnlyWhileAnotherProcessWrites$")
+	reader.Env = append(os.Environ(), "NM_DB_LIVE_READER="+path, "NM_DB_LIVE_READER_EXPECTED_PATH=updated")
+	winproc.Harden(reader)
+	if output, err := reader.CombinedOutput(); err != nil {
+		t.Fatalf("reader after writer commits: %v\n%s", err, output)
 	}
 }
