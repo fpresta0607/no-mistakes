@@ -229,7 +229,11 @@ func TestTerminalCleanupPreservesCommittedCorrectionsBeforeAdoption(t *testing.T
 						t.Fatal(err)
 					}
 				}
-				if err := database.UpdateRunErrorStatusWithVerifiedHead(run.ID, "original interruption", status, head); err != nil {
+				terminalError := "original interruption"
+				if status == types.RunCancelled {
+					terminalError = types.RunCancelReasonAbortedByUser
+				}
+				if err := database.UpdateRunErrorStatusWithVerifiedHead(run.ID, terminalError, status, head); err != nil {
 					t.Fatal(err)
 				}
 				before, err := database.ReadTerminalSnapshot(run.ID)
@@ -373,6 +377,99 @@ func TestTerminalCleanupRequiresExactPreservationOrPushBeforeAdoption(t *testing
 			current, err := database.GetRun(run.ID)
 			if err != nil || current.HeadSHA != head || current.TerminalHeadVerifiedAt != nil || current.ReviewApprovedHeadSHA != nil {
 				t.Fatalf("cleanup promoted preservation into verification authority: %+v, %v", current, err)
+			}
+		})
+	}
+}
+
+func TestTerminalAbortDoesNotExtendProtectedPathDisposal(t *testing.T) {
+	for _, test := range []struct {
+		name                 string
+		isAdopted            bool
+		hasLaterHead         bool
+		hasRecordedLaterHead bool
+	}{
+		{name: "ordinary abort"},
+		{name: "adopted protected abort", isAdopted: true},
+		{name: "later protected abort", hasLaterHead: true},
+		{name: "recorded later protected abort", hasLaterHead: true, hasRecordedLaterHead: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newEvidenceFixture(t)
+			repo, head := setupTestGitRepo(t, f.p, f.db, "abort-source")
+			assertion := launchExpectation(head)
+			proof, err := assertion.Verify(head, assertion.Profiles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := f.db.InsertRunWithLaunchAssertion(repo.ID, "feature", head, head, nil, "nonce", "frozen-policy", "intent", "", false, nil, assertion, proof)
+			if err != nil {
+				t.Fatal(err)
+			}
+			workDir := f.p.WorktreeDir(repo.ID, run.ID)
+			if err := f.db.SetRunWorktreeDir(run.ID, workDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := git.WorktreeAdd(context.Background(), f.p.RepoDir(repo.ID), workDir, head); err != nil {
+				t.Fatal(err)
+			}
+			if test.isAdopted {
+				if err := f.db.UpdateRunStatus(run.ID, types.RunFailed); err != nil {
+					t.Fatal(err)
+				}
+				snapshot, err := f.db.ReadTerminalSnapshot(run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, _, err = f.db.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: head, CandidateTree: gitOutput(t, workDir, "rev-parse", "HEAD^{tree}"), SourceRef: custody.RecoveryRef(run.ID), Reason: "fixture source adoption", Operator: "fixture", Assertion: assertion, Proof: proof})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.isAdopted || test.hasLaterHead {
+				step, err := f.db.InsertStepResult(run.ID, types.StepPush)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := f.db.SetStepFindings(step.ID, `{"findings":[{"id":"protected-path-refusal","severity":"error","description":"retained refusal"}]}`); err != nil {
+					t.Fatal(err)
+				}
+				if err := f.db.CompleteStepWithStatus(step.ID, types.StepStatusFailed, 1, 1, "fixture.log"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.hasLaterHead {
+				if err := git.CopyLocalUserIdentity(context.Background(), repo.WorkingPath, workDir); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, workDir, "commit", "--allow-empty", "-m", "later correction")
+				if test.hasRecordedLaterHead {
+					head = gitOutput(t, workDir, "rev-parse", "HEAD")
+					if err := f.db.UpdateRunHeadSHA(run.ID, head); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			for _, name := range []string{"test.txt", "staged.txt", ".untracked.txt"} {
+				if err := os.WriteFile(filepath.Join(workDir, name), []byte("retained abort source"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gitCmd(t, workDir, "add", "staged.txt")
+			if err := f.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, types.RunCancelReasonAbortedByUser, types.RunCancelled, head); err != nil {
+				t.Fatal(err)
+			}
+			manager := NewRunManager(f.db, f.p, nil)
+			manager.removeRunWorktree(repo.ID, run.ID, f.p.RepoDir(repo.ID), workDir, "abort preservation regression")
+			manager.reapWorktrees(worktreeReapPolicy{Retention: time.Nanosecond}, time.Now().Add(time.Hour))
+			cleanupOrphanWorktrees(f.db, f.p, nil)
+			for _, name := range []string{"test.txt", "staged.txt", ".untracked.txt"} {
+				if content, err := os.ReadFile(filepath.Join(workDir, name)); err != nil || string(content) != "retained abort source" {
+					t.Fatalf("abort lost %s: %q, %v", name, content, err)
+				}
+			}
+			if staged := gitOutput(t, workDir, "diff", "--cached", "--name-only"); staged != "staged.txt" {
+				t.Fatalf("abort changed staged source: %q", staged)
 			}
 		})
 	}

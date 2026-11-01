@@ -1000,6 +1000,15 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 			return true, reason
 		}
 	}
+	return skipRunArtifactCleanup(ctx, run, wtPath)
+}
+
+// Diagnostic retention keeps the active-run and interrupted-CI guards without
+// inspecting dirty source or recording a worktree preservation observation.
+func skipRunArtifactCleanup(ctx context.Context, run *db.Run, wtPath string) (bool, string) {
+	if run != nil && (run.Status == types.RunPending || run.Status == types.RunRunning) {
+		return true, fmt.Sprintf("run %s is %s", run.ID, run.Status)
+	}
 	if run != nil && run.Status == types.RunCIMonitorInterrupted {
 		if _, statErr := os.Stat(wtPath); errors.Is(statErr, os.ErrNotExist) {
 			// The worktree directory is already gone (e.g. reaped by
@@ -1011,10 +1020,10 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 		}
 		head, err := git.HeadSHA(ctx, wtPath)
 		if err != nil {
-			return true, fmt.Sprintf("run %s ci monitor interrupted; worktree head unreadable (%v); preserving", runID, err)
+			return true, fmt.Sprintf("run %s ci monitor interrupted; worktree head unreadable (%v); preserving", run.ID, err)
 		}
 		if strings.TrimSpace(head) != run.HeadSHA {
-			return true, fmt.Sprintf("run %s ci monitor interrupted; worktree may hold unpushed commits; preserving", runID)
+			return true, fmt.Sprintf("run %s ci monitor interrupted; worktree may hold unpushed commits; preserving", run.ID)
 		}
 	}
 	return false, ""
@@ -1038,9 +1047,6 @@ func terminalWorktreeSourceReason(ctx context.Context, database *db.DB, runID, w
 	if err := database.RecordTerminalSourceState(runID, state); err != nil {
 		return fmt.Sprintf("run %s source observation cannot be recorded; preserving", runID)
 	}
-	if headErr != nil || statusErr != nil || dirty {
-		return fmt.Sprintf("run %s has dirty or unreadable source; preserving", runID)
-	}
 	adoption, err := database.GetTerminalAdoption(runID)
 	if err != nil {
 		return fmt.Sprintf("run %s source provenance cannot be read; preserving", runID)
@@ -1048,6 +1054,28 @@ func terminalWorktreeSourceReason(ctx context.Context, database *db.DB, runID, w
 	run, err := database.GetRun(runID)
 	if err != nil || run == nil {
 		return fmt.Sprintf("run %s publication provenance cannot be read; preserving", runID)
+	}
+	// An original protected-path refusal can explicitly discard its working
+	// files. That permission never extends to adopted or later committed source.
+	if adoption == nil && headErr == nil && statusErr == nil && run.SubmittedHeadSHA != nil && head == *run.SubmittedHeadSHA && head == run.HeadSHA {
+		steps, err := database.GetStepsByRun(runID)
+		if err != nil {
+			return fmt.Sprintf("run %s protected-path disposal authority cannot be read; preserving", runID)
+		}
+		for _, step := range steps {
+			if step.FindingsJSON == nil || !pipeline.HasProtectedPathRefusal(*step.FindingsJSON) || step.Status == types.StepStatusCompleted {
+				continue
+			}
+			if step.Status == types.StepStatusSkipped && (step.Error == nil || *step.Error != types.RunCIMonitorInterruptedReason) {
+				continue
+			}
+			if run.Status == types.RunCancelled && run.Error != nil && *run.Error == types.RunCancelReasonAbortedByUser || step.Error != nil && *step.Error == "aborted by user" {
+				return ""
+			}
+		}
+	}
+	if headErr != nil || statusErr != nil || dirty {
+		return fmt.Sprintf("run %s has dirty or unreadable source; preserving", runID)
 	}
 	if run.LastPushedSHA != nil && *run.LastPushedSHA == head && run.LastPushedAt != nil && run.PushGeneration != nil && *run.PushGeneration > 0 {
 		return ""
