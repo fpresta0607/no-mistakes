@@ -9,9 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -22,23 +20,19 @@ import (
 
 const windowsTerminateGrace = 3 * time.Second
 
-// taskkillExitNoSuchProcess is the nonzero exit code taskkill returns when no
-// process matches the given PID (the child had already exited before we could
-// kill it). All other nonzero codes are genuine kill failures that must not
-// be collapsed into os.ErrProcessDone.
-const taskkillExitNoSuchProcess = 128
-
 // defaultWaitDelay bounds Wait when failed cleanup leaves inherited handles
 // open for commands that do not opt into cooperative cancellation.
 const defaultWaitDelay = 5 * time.Second
 
 type shellCommandJobState struct {
+	mu                  sync.Mutex
 	handle              windows.Handle
 	cancelEvent         windows.Handle
 	cancelEventName     string
 	cooperative         bool
-	assigned            atomic.Bool
-	cooperativeDeadline atomic.Pointer[time.Time]
+	isAssigned          bool
+	isClosed            bool
+	cooperativeDeadline time.Time
 }
 
 type jobObjectBasicAccountingInformation struct {
@@ -59,6 +53,10 @@ var newShellCommandJobFunc = newShellCommandJob
 var assignShellCommandJobFunc = assignShellCommandJob
 var resumeProcessThreadsFunc = resumeProcessThreads
 var windowsCooperativeHelperCommandFunc = windowsCooperativeHelperCommand
+var setShellCommandCancelEventFunc = windows.SetEvent
+var terminateShellCommandJobFunc = windows.TerminateJobObject
+var closeShellCommandHandleFunc = windows.CloseHandle
+var queryShellCommandJobFunc = queryShellCommandJob
 
 // ConfigureShellCommand prepares a Windows command for whole-tree cleanup on
 // cancellation and normal exit. StartShellCommand assigns a kill-on-close job
@@ -95,13 +93,14 @@ func configureWindowsShellCommand(cmd *exec.Cmd, cooperative bool) {
 	} else {
 		cmd.SysProcAttr.CreationFlags |= windows.CREATE_NEW_PROCESS_GROUP
 	}
+	var state *shellCommandJobState
 	if job, err := newShellCommandJobFunc(); err == nil {
-		state := &shellCommandJobState{handle: job, cooperative: cooperative}
+		state = &shellCommandJobState{handle: job, cooperative: cooperative}
 		if cooperative {
 			cancelEvent, cancelEventName, eventErr := newWindowsCooperativeCancelEvent()
 			if eventErr != nil {
-				_ = windows.CloseHandle(job)
-				shellCommandJobSetupErrors.Store(cmd, eventErr)
+				state.isClosed = true
+				shellCommandJobSetupErrors.Store(cmd, errors.Join(eventErr, closeShellCommandHandleFunc(job)))
 			} else {
 				state.cancelEvent = cancelEvent
 				state.cancelEventName = cancelEventName
@@ -130,19 +129,29 @@ func configureWindowsShellCommand(cmd *exec.Cmd, cooperative bool) {
 		if cmd.Process == nil {
 			return os.ErrProcessDone
 		}
-		if job, ok := shellCommandJob(cmd); ok && job.assigned.Load() {
-			if job.cooperative && job.cancelEvent != 0 {
-				if err := windows.SetEvent(job.cancelEvent); err == nil {
-					deadline := time.Now().Add(windowsTerminateGrace)
-					job.cooperativeDeadline.Store(&deadline)
-					return nil
-				}
-			}
-			terminateShellCommandJob(cmd, false)
+		if state == nil {
+			return cmd.Process.Kill()
+		}
+		return state.cancel(cmd.Process)
+	}
+}
+
+func (job *shellCommandJobState) cancel(process *os.Process) error {
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	if job.isClosed {
+		return os.ErrProcessDone
+	}
+	if !job.isAssigned {
+		return process.Kill()
+	}
+	if job.cooperative && job.cancelEvent != 0 {
+		if err := setShellCommandCancelEventFunc(job.cancelEvent); err == nil {
+			job.cooperativeDeadline = time.Now().Add(windowsTerminateGrace)
 			return nil
 		}
-		return forceKillShellCommand(cmd)
 	}
+	return terminateShellCommandJobFunc(job.handle, 1)
 }
 
 // StartShellCommand starts cmd and assigns it to the job object created by its
@@ -152,27 +161,37 @@ func StartShellCommand(cmd *exec.Cmd) error {
 	if err, ok := takeShellCommandJobSetupError(cmd); ok {
 		return fmt.Errorf("windows job object setup: %w", err)
 	}
-	if job, ok := shellCommandJob(cmd); ok && job.cooperative {
+	job, isConfigured := shellCommandJob(cmd)
+	if isConfigured && job.cooperative {
 		if err := wrapWindowsCooperativeCommand(cmd, job.cancelEventName); err != nil {
-			closeShellCommandJob(cmd)
-			return err
+			return errors.Join(err, closeShellCommandJob(cmd))
 		}
 	}
 	if err := cmd.Start(); err != nil {
-		closeShellCommandJob(cmd)
-		return err
+		return errors.Join(err, closeShellCommandJob(cmd))
 	}
-	job, ok := shellCommandJob(cmd)
-	if !ok {
+	if !isConfigured {
 		return nil
 	}
-	if err := assignShellCommandJobFunc(job.handle, uint32(cmd.Process.Pid)); err != nil {
+	if err := job.assign(uint32(cmd.Process.Pid)); err != nil {
 		return failStartedShellCommand(cmd, fmt.Errorf("assign process to job object: %w", err))
 	}
-	job.assigned.Store(true)
-	if err := resumeProcessThreadsFunc(uint32(cmd.Process.Pid)); err != nil {
+	if err := resumeProcessThreadsFunc(cmd.Process); err != nil {
 		return failStartedShellCommand(cmd, err)
 	}
+	return nil
+}
+
+func (job *shellCommandJobState) assign(pid uint32) error {
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	if job.isClosed {
+		return os.ErrProcessDone
+	}
+	if err := assignShellCommandJobFunc(job.handle, pid); err != nil {
+		return err
+	}
+	job.isAssigned = true
 	return nil
 }
 
@@ -181,65 +200,52 @@ func StartShellCommand(cmd *exec.Cmd) error {
 // errors get the same process-tree cleanup as context cancellation. After a
 // cooperative cancellation it preserves the remaining grace window before
 // forcing the job down, including when the console leader exits before a child
-// finishes cleanup. A nil or never-started command is a no-op.
+// finishes cleanup. A nil, never-started or unconfigured command is a no-op.
 func TerminateShellCommandGroup(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
-	if job, ok := shellCommandJob(cmd); ok && job.assigned.Load() {
-		if deadline := job.cooperativeDeadline.Load(); deadline != nil {
-			waitForWindowsJobExit(job.handle, time.Until(*deadline))
-		}
-		terminateShellCommandJob(cmd, true)
+	job, ok := shellCommandJob(cmd)
+	if !ok {
 		return
 	}
-	_ = forceKillShellCommand(cmd)
+	job.mu.Lock()
+	deadline := job.cooperativeDeadline
+	job.mu.Unlock()
+	if !deadline.IsZero() {
+		waitForWindowsJobExit(job, time.Until(deadline))
+	}
+	_ = terminateShellCommandJob(cmd, true)
 }
 
-func forceKillShellCommand(cmd *exec.Cmd) error {
-	pid := strconv.Itoa(cmd.Process.Pid)
-	kill := exec.Command("taskkill", "/T", "/F", "/PID", pid)
-	winproc.Harden(kill)
-	err := kill.Run()
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, exec.ErrNotFound):
-	case isTaskkillAlreadyGone(err):
-		return os.ErrProcessDone
-	default:
-	}
-	if killErr := cmd.Process.Kill(); killErr != nil {
-		if errors.Is(killErr, os.ErrProcessDone) {
-			return os.ErrProcessDone
-		}
-		return fmt.Errorf("taskkill /PID %s: %w; process kill: %v", pid, err, killErr)
-	}
-	if err != nil {
-		return fmt.Errorf("taskkill /PID %s: %w", pid, err)
-	}
-	return nil
-}
-
-func waitForWindowsJobExit(job windows.Handle, window time.Duration) {
+func waitForWindowsJobExit(job *shellCommandJobState, window time.Duration) {
 	if window <= 0 {
 		return
 	}
 	deadline := time.Now().Add(window)
 	for {
-		var info jobObjectBasicAccountingInformation
-		err := windows.QueryInformationJobObject(
-			job,
-			windows.JobObjectBasicAccountingInformation,
-			uintptr(unsafe.Pointer(&info)),
-			uint32(unsafe.Sizeof(info)),
-			nil,
-		)
-		if err != nil || info.ActiveProcesses == 0 || !time.Now().Before(deadline) {
+		isActive, err := job.hasActiveProcesses()
+		if err != nil || !isActive || !time.Now().Before(deadline) {
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+}
+
+func (job *shellCommandJobState) hasActiveProcesses() (bool, error) {
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	if job.isClosed {
+		return false, nil
+	}
+	return queryShellCommandJobFunc(job.handle)
+}
+
+func queryShellCommandJob(job windows.Handle) (bool, error) {
+	var info jobObjectBasicAccountingInformation
+	err := windows.QueryInformationJobObject(job, windows.JobObjectBasicAccountingInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), nil)
+	return info.ActiveProcesses != 0, err
 }
 
 func newShellCommandJob() (windows.Handle, error) {
@@ -329,114 +335,77 @@ func takeShellCommandJobSetupError(cmd *exec.Cmd) (error, bool) {
 	return err, ok
 }
 
-func closeShellCommandJob(cmd *exec.Cmd) bool {
+func closeShellCommandJob(cmd *exec.Cmd) error {
 	if cmd == nil {
-		return false
+		return nil
 	}
 	value, ok := shellCommandJobs.LoadAndDelete(cmd)
 	if !ok {
-		return false
+		return nil
 	}
 	job, ok := value.(*shellCommandJobState)
 	if !ok {
-		return false
+		return nil
 	}
-	if job.cancelEvent != 0 {
-		_ = windows.CloseHandle(job.cancelEvent)
-	}
-	_ = windows.CloseHandle(job.handle)
-	return true
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	return job.closeLocked()
 }
 
-func terminateShellCommandJob(cmd *exec.Cmd, closeJob bool) bool {
+func (job *shellCommandJobState) closeLocked() error {
+	if job.isClosed {
+		return nil
+	}
+	job.isClosed = true
+	var eventErr error
+	if job.cancelEvent != 0 {
+		eventErr = closeShellCommandHandleFunc(job.cancelEvent)
+	}
+	return errors.Join(eventErr, closeShellCommandHandleFunc(job.handle))
+}
+
+func terminateShellCommandJob(cmd *exec.Cmd, closeJob bool) error {
 	job, ok := shellCommandJob(cmd)
 	if !ok {
-		return false
+		return nil
 	}
-	assigned := job.assigned.Load()
-	if assigned {
-		_ = windows.TerminateJobObject(job.handle, 1)
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	if job.isClosed {
+		return nil
+	}
+	var err error
+	if job.isAssigned {
+		err = terminateShellCommandJobFunc(job.handle, 1)
 	}
 	if closeJob {
-		closeShellCommandJob(cmd)
+		shellCommandJobs.CompareAndDelete(cmd, job)
+		err = errors.Join(err, job.closeLocked())
 	}
-	return assigned
+	return err
 }
 
-func assignShellCommandJob(job windows.Handle, pid uint32) error {
+func assignShellCommandJob(job windows.Handle, pid uint32) (result error) {
 	process, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, pid)
 	if err != nil {
 		return err
 	}
-	defer windows.CloseHandle(process)
+	defer func() { result = errors.Join(result, windows.CloseHandle(process)) }()
 	return windows.AssignProcessToJobObject(job, process)
 }
 
-func resumeProcessThreads(pid uint32) error {
-	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
-	if err != nil {
-		return err
-	}
-	defer windows.CloseHandle(snapshot)
-
-	var entry windows.ThreadEntry32
-	entry.Size = uint32(unsafe.Sizeof(entry))
-	if err := windows.Thread32First(snapshot, &entry); err != nil {
-		if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
-			return nil
-		}
-		return err
-	}
-
-	resumed := false
-	for {
-		if entry.OwnerProcessID == pid {
-			thread, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID)
-			if err == nil {
-				_, err = windows.ResumeThread(thread)
-				_ = windows.CloseHandle(thread)
-				if err != nil {
-					return err
-				}
-				resumed = true
-			} else if !errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
-				return err
-			}
-		}
-		if err := windows.Thread32Next(snapshot, &entry); err != nil {
-			if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
-				break
-			}
-			return err
-		}
-	}
-	if !resumed {
-		return fmt.Errorf("no suspended threads found for pid %d", pid)
-	}
-	return nil
-}
-
 func failStartedShellCommand(cmd *exec.Cmd, cause error) error {
-	terminateShellCommandJob(cmd, true)
+	cause = errors.Join(cause, terminateShellCommandJob(cmd, true))
 	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			cause = errors.Join(cause, err)
+		}
+		var exitErr *exec.ExitError
+		if err := cmd.Wait(); err != nil && !errors.As(err, &exitErr) {
+			cause = errors.Join(cause, err)
+		}
 	}
 	return cause
-}
-
-// isTaskkillAlreadyGone reports whether a taskkill error means the target PID
-// no longer exists (the child had already exited). taskkill emits exit code
-// taskkillExitNoSuchProcess for that case; matching on the numeric exit code
-// keeps the detection locale-independent, since the accompanying stderr text
-// ("...not found.") is locale-translated. All other nonzero codes are treated
-// as genuine failures by the caller, which then falls back to a direct kill.
-func isTaskkillAlreadyGone(err error) bool {
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
-		return false
-	}
-	return exitErr.ExitCode() == taskkillExitNoSuchProcess
 }
 
 // detachFromTerminal is a no-op where there is no POSIX session or controlling
