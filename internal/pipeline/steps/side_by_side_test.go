@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -261,7 +262,7 @@ func TestSideBySide_TestWorkStartsBesideTheReviewAndIsTakenAtItsTurn(t *testing.
 	if findings.Verdict != types.TestVerdictGo || findings.TestedHeadSHA != f.headSHA {
 		t.Fatalf("verdict = %q tested head = %q, want go on %s", findings.Verdict, findings.TestedHeadSHA, f.headSHA)
 	}
-	if head, passed, recorded := f.review.Shared.Baseline(); !recorded || !passed || head != f.headSHA {
+	if head, comparison, passed, recorded := f.review.Shared.Baseline(); !recorded || !passed || head != f.headSHA || comparison != f.baseSHA {
 		t.Fatalf("recorded baseline = %q, %v, %v, want the tested head as passed", head, passed, recorded)
 	}
 	if !strings.Contains(f.logText(), "took the test result") {
@@ -334,7 +335,7 @@ func TestSideBySide_TestWorkIsDiscardedWhenTheHeadMoved(t *testing.T) {
 	if findings.TestedHeadSHA != newHead {
 		t.Fatalf("tested head = %q, want the new head %q", findings.TestedHeadSHA, newHead)
 	}
-	if head, _, _ := f.review.Shared.Baseline(); head != newHead {
+	if head, _, _, _ := f.review.Shared.Baseline(); head != newHead {
 		t.Fatalf("recorded baseline head = %q, want the new head %q", head, newHead)
 	}
 	if !strings.Contains(f.logText(), "is not used: the run's head has moved") {
@@ -777,7 +778,7 @@ func newPushGuardFixture(t *testing.T, cmds config.Commands) *sideBySideFixture 
 			t.Fatal(err)
 		}
 	}
-	f.review.Shared.RecordBaseline(f.headSHA, true)
+	f.review.Shared.RecordBaseline(f.headSHA, f.baseSHA, true)
 	return f
 }
 
@@ -789,6 +790,58 @@ func TestBaselineBeforePush_TheTestedHeadIsPushedAsIs(t *testing.T) {
 	}
 	if f.baselineRuns() != 0 {
 		t.Fatalf("baseline runs = %d, want 0: the head is the tested commit", f.baselineRuns())
+	}
+}
+
+func TestSideBySide_WrapperComparisonSurvivesLaneAdoptionAndDefaultMovement(t *testing.T) {
+	f := newSideBySideFixture(t, config.Commands{Test: "echo configured"})
+	binDir := fakeCLIBinDir(t)
+	linkTestBinary(t, binDir, "turnline")
+	program := filepath.Join(binDir, "turnline")
+	if runtime.GOOS == "windows" {
+		program += ".exe"
+	}
+	logFile := filepath.Join(t.TempDir(), "wrapper.ndjson")
+	f.review.Env = fakeCLIEnv(binDir, map[string]string{"FAKE_CLI_MODE": "wrapper", "FAKE_CLI_WRAPPER_LOG": logFile})
+	f.review.Config.TestCommandWrapper = config.CommandWrapper{Command: []string{program, "--base", "{test_comparison_sha}", "--"}}
+	f.review.Run.BaseSHA = strings.Repeat("0", 40)
+	startSideLanes(f.review, f.baseSHA)
+	f.lanesDone()
+	gitCmd(t, f.dir, "branch", "-f", "main", f.headSHA)
+
+	outcome, err := (&TestStep{}).Execute(f.turn())
+
+	if err != nil || outcome == nil || outcome.NeedsApproval || !strings.Contains(f.logText(), "took the test result") {
+		t.Fatalf("Execute() = %#v, %v; log = %s", outcome, err, f.logText())
+	}
+	_, comparison, passed, recorded := f.review.Shared.Baseline()
+	if comparison != f.baseSHA || !passed || !recorded {
+		t.Fatalf("adopted comparison = %q, passed = %v, recorded = %v", comparison, passed, recorded)
+	}
+	steps, err := f.review.DB.GetStepsByRun(f.review.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range steps {
+		if err := f.review.DB.CompleteStepWithStatus(step.ID, types.StepStatusCompleted, 0, 0, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	head := f.commitInRun("later.go", "package later\n", "later code")
+	_, restart, err := baselineBeforePush(f.turn(), head)
+	if err != nil || restart {
+		t.Fatalf("baselineBeforePush() = %v, %v", restart, err)
+	}
+	wrapped := &wrapperFixture{logFile: logFile}
+	calls := wrapped.calls(t)
+	if len(calls) != 2 {
+		t.Fatalf("wrapper calls = %q, want the side lane and the pre-push baseline", calls)
+	}
+	for _, call := range calls {
+		if call[1] != f.baseSHA {
+			t.Fatalf("wrapper call = %q, want the lane's original comparison %s", call, f.baseSHA)
+		}
+		assertShellCall(t, call[3:], "echo configured")
 	}
 }
 
@@ -832,7 +885,7 @@ func TestBaselineBeforePush_CodeCommitsRunTheBaselineAgain(t *testing.T) {
 			t.Fatalf("note = %q, want it to contain %q", note, want)
 		}
 	}
-	if tested, passed, _ := f.review.Shared.Baseline(); tested != head || !passed {
+	if tested, _, passed, _ := f.review.Shared.Baseline(); tested != head || !passed {
 		t.Fatalf("recorded baseline = %q, %v, want the pushed head as passed", tested, passed)
 	}
 }
@@ -847,12 +900,12 @@ func TestBaselineBeforePush_AFailingBaselineStopsThePush(t *testing.T) {
 	if err != nil || !restart {
 		t.Fatalf("baselineBeforePush() restart = %v, err = %v, want the run sent back to the Test step", restart, err)
 	}
-	if _, passed, _ := f.review.Shared.Baseline(); passed {
+	if _, _, passed, _ := f.review.Shared.Baseline(); passed {
 		t.Fatal("a failed baseline was recorded as passed")
 	}
 	// Back at the push with the same failure: the Test step recorded a pass
 	// on an earlier head and another code commit followed it.
-	f.review.Shared.RecordBaseline(f.headSHA, true)
+	f.review.Shared.RecordBaseline(f.headSHA, f.baseSHA, true)
 	_, restart, err = baselineBeforePush(f.turn(), head)
 	if err == nil || restart || !strings.Contains(err.Error(), "nothing was pushed") {
 		t.Fatalf("second baselineBeforePush() restart = %v, err = %v, want the run failed with nothing pushed", restart, err)
@@ -893,7 +946,7 @@ func TestBaselineBeforePush_WhenItDoesNotRun(t *testing.T) {
 	})
 	t.Run("the Test step was completed over a failing baseline", func(t *testing.T) {
 		f := newPushGuardFixture(t, config.Commands{Test: "count"})
-		f.review.Shared.RecordBaseline(f.headSHA, false)
+		f.review.Shared.RecordBaseline(f.headSHA, f.baseSHA, false)
 		head := f.commitInRun("lint_fixed.go", "package fixed\n", "no-mistakes(lint): apply formatter")
 		note, restart, err := baselineBeforePush(f.turn(), head)
 		if err != nil || restart || f.baselineRuns() != 0 || !strings.Contains(note, "completed over it") {
@@ -903,16 +956,13 @@ func TestBaselineBeforePush_WhenItDoesNotRun(t *testing.T) {
 }
 
 // With no record of the tested commit, as after a daemon restart, the head is
-// treated as untested and the baseline runs.
+// treated as untested and normal Test must resolve its comparison again.
 func TestBaselineBeforePush_AnUnknownTestedHeadIsUntested(t *testing.T) {
 	f := newPushGuardFixture(t, config.Commands{Test: "count"})
 	f.review.Shared = &pipeline.RunShared{}
 	note, restart, err := baselineBeforePush(f.turn(), f.headSHA)
-	if err != nil || restart {
-		t.Fatalf("baselineBeforePush() = %q, %v, %v", note, restart, err)
-	}
-	if f.baselineRuns() != 1 || !strings.Contains(note, "is treated as untested") {
-		t.Fatalf("baseline runs = %d note = %q, want the baseline run on a head nothing vouches for", f.baselineRuns(), note)
+	if err == nil || restart || !strings.Contains(err.Error(), "run Test again") || f.baselineRuns() != 0 {
+		t.Fatalf("baselineBeforePush() = %q, %v, %v after %d baseline runs, want a visible refusal without a guessed comparison", note, restart, err, f.baselineRuns())
 	}
 }
 

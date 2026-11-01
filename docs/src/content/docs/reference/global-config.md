@@ -743,7 +743,12 @@ test_command_wrapper:
 The words are started with no shell in front of them, followed by exactly the program and arguments the command would have been started with: `sh -c <command>`, or `cmd.exe /c <command>` on Windows, with the shell as its resolved path.
 The command string therefore stays one argument, so `a && b` stands behind the wrapper whole.
 The working directory and the environment are those the command has without a wrapper.
-A word may name a run fact, filled in once: `{repo}` (the last element of the upstream URL), `{branch}`, `{run}` (the run id), and `{run_short}` (its first 8 characters).
+A word may name a run fact, filled in once: `{repo}` (the last element of the upstream URL), `{branch}`, `{run}` (the run id), `{run_short}` (its first 8 characters), and `{test_comparison_sha}` (the exact comparison already resolved by Test).
+`{test_comparison_sha}` is the full nonzero Git object ID used for Test's comparison, usually the merge-base with the fetched effective PR base branch, rather than the previous published ref stored in `runs.base_sha`.
+Head baseline commands, additional checks, and the base attribution invocation receive the same value, even though the attribution command runs in the base checkout.
+Under `side_by_side`, taking a Test lane also takes its comparison, and a pre-push baseline re-run keeps it even if the default branch tip has moved.
+If that in-memory proof is absent after restart or malformed, the pre-push check refuses visibly and requires normal Test again.
+A wrapper requesting this value never starts with an empty, zero, abbreviated, or unresolved comparison.
 Use the full path of the wrapper program unless it is on the daemon's own `PATH`.
 
 The wrapper is trusted to start what follows its words and to pass that program's output and exit code through.
@@ -817,7 +822,8 @@ So before anything is pushed, the Push step compares the head to push with the c
 - Otherwise every commit after the tested one is named in an informational note on the Push step.
 - When those commits change only paths the repository counts as documentation, by [`test.documentation_paths`](/no-mistakes/reference/repo-config/#testdocumentation_paths), the head is pushed without the baseline running again.
 - When they change anything else, the baseline runs again on the head to push. A pass pushes. A failure pushes nothing and sends the run back to the Test step, which owns failing tests and their fix rounds. A second such failure in one run fails the run with nothing pushed.
-- A tested commit the daemon no longer knows, as after a restart, counts as untested, so the baseline runs again.
+- A tested commit or resolved Test comparison the daemon no longer knows, as after a restart, counts as untested.
+  With a baseline configured, push refuses visibly until normal Test runs again and resolves the comparison.
 - With no baseline configured, or a failing baseline a person approved the Test step over, the commits are named and nothing runs again.
 
 This holds whether or not early work was taken.

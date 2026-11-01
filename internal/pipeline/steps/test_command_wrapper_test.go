@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -219,6 +220,7 @@ func TestTestStep_NoWrapperStartsTheBaselineAsBefore(t *testing.T) {
 
 func TestLintStep_WrapperLeavesLintAlone(t *testing.T) {
 	f := newWrapperFixture(t, config.Commands{Lint: "echo lint-ran"}, nil)
+	f.sctx.Config.TestCommandWrapper.Command[2] = "{test_comparison_sha}"
 
 	if _, err := (&LintStep{}).Execute(f.sctx); err != nil {
 		t.Fatalf("Execute() error = %v", err)
@@ -402,4 +404,163 @@ func TestTestStep_WrapperAlsoStartsTheBaseAttributionRun(t *testing.T) {
 		t.Fatalf("wrapper starts = %d, want 2: the run on the head and the run on the base", len(calls))
 	}
 	assertShellCall(t, calls[1][3:], "exit 3")
+}
+
+func TestTestStep_WrapperUsesResolvedComparisonForEveryCheck(t *testing.T) {
+	for _, previousPush := range []string{strings.Repeat("0", 40), "head"} {
+		t.Run(previousPush, func(t *testing.T) {
+			receipt := filepath.Join(t.TempDir(), "checked-heads.txt")
+			command := "git rev-parse HEAD>> " + receipt + "&& echo FAILED suite::existing&& exit 3"
+			f := newWrapperFixture(t, config.Commands{Test: command}, nil)
+			comparison := gitCmd(t, f.sctx.WorkDir, "rev-parse", "main")
+			if previousPush == "head" {
+				f.sctx.Run.BaseSHA = f.sctx.Run.HeadSHA
+			} else {
+				f.sctx.Run.BaseSHA = previousPush
+			}
+			// Move the default tip without changing this branch's merge-base.
+			gitCmd(t, f.sctx.WorkDir, "checkout", "main")
+			if err := os.WriteFile(filepath.Join(f.sctx.WorkDir, "upstream.txt"), []byte("later default tip"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, f.sctx.WorkDir, "add", "upstream.txt")
+			gitCmd(t, f.sctx.WorkDir, "commit", "-m", "advance default")
+			gitCmd(t, f.sctx.WorkDir, "checkout", "feature")
+			f.sctx.Config.TestCommandWrapper.Command[2] = "{repo} {branch}, run {run_short}, base={test_comparison_sha}"
+			f.sctx.Config.CommandOverrides = map[string]config.CommandOverride{"test": {Additional: []string{"echo local-check"}}}
+			f.sctx.Config.Test.BaseAttribution = true
+
+			outcome, err := (&TestStep{}).Execute(f.sctx)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := f.calls(t)
+			if len(calls) != 3 {
+				t.Fatalf("wrapper calls = %q, want head, additional check, and base", calls)
+			}
+			for index, call := range calls {
+				if !strings.HasSuffix(call[1], ", base="+comparison) {
+					t.Fatalf("call %d = %q, want resolved comparison %s", index, call, comparison)
+				}
+				want := command
+				if index == 1 {
+					want = "echo local-check"
+				}
+				assertShellCall(t, call[3:], want)
+			}
+			checked, err := os.ReadFile(receipt)
+			if err != nil || strings.Join(strings.Fields(string(checked)), ",") != f.sctx.Run.HeadSHA+","+comparison {
+				t.Fatalf("checked heads = %q, %v, want the feature head followed by the resolved comparison", checked, err)
+			}
+			findings := liveCheckFindings(t, outcome)
+			if !outcome.NeedsApproval || outcome.ExitCode != 3 || !strings.Contains(findings.Summary, "suite::existing") {
+				t.Fatalf("outcome = %#v, findings = %#v, want unchanged failure and attribution", outcome, findings)
+			}
+		})
+	}
+}
+
+func TestTestStep_WrapperRefusesMalformedComparisonBeforeAnySubprocess(t *testing.T) {
+	for _, comparison := range []string{"HEAD", "abc1234", strings.Repeat("0", 40)} {
+		t.Run(comparison, func(t *testing.T) {
+			f := newWrapperFixture(t, config.Commands{Test: wrapperRanMarkerCommand}, nil)
+			f.sctx.SideLane, f.sctx.SideLaneBaseSHA = true, comparison
+			f.sctx.Config.TestCommandWrapper.Command[2] = "{test_comparison_sha}"
+
+			outcome, err := (&TestStep{}).Execute(f.sctx)
+
+			if err != nil || outcome == nil || !outcome.NeedsApproval || outcome.AutoFixable {
+				t.Fatalf("Execute() = %#v, %v, want a visible no-turn park", outcome, err)
+			}
+			if len(f.calls(t)) != 0 || len(f.agent.calls) != 0 || f.sctx.TestComparisonSHA != "" {
+				t.Fatal("invalid proof started a wrapper or agent, or leaked into the caller")
+			}
+			if !strings.Contains(outcome.Findings, "test_comparison_sha") {
+				t.Fatalf("findings = %s, want the missing comparison named", outcome.Findings)
+			}
+			if _, err := os.Stat(filepath.Join(f.sctx.WorkDir, wrapperRanMarker)); !os.IsNotExist(err) {
+				t.Fatalf("the refused command left a marker: %v", err)
+			}
+		})
+	}
+}
+
+func TestTestStep_CancellationDoesNotLeakComparisonIntoAnotherTurn(t *testing.T) {
+	f := newWrapperFixture(t, config.Commands{Test: "echo baseline"}, nil)
+	f.sctx.Config.TestCommandWrapper.Command[2] = "{test_comparison_sha}"
+	ctx, cancel := context.WithCancel(f.sctx.Ctx)
+	defer cancel()
+	f.sctx.Ctx = ctx
+	f.agent.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		cancel()
+		return nil, context.Canceled
+	}
+
+	_, err := (&TestStep{}).Execute(f.sctx)
+
+	if !errors.Is(err, context.Canceled) || f.sctx.TestComparisonSHA != "" || len(f.calls(t)) != 1 {
+		t.Fatalf("Execute() error = %v, comparison = %q, calls = %q", err, f.sctx.TestComparisonSHA, f.calls(t))
+	}
+	_, _, err = executeRepositoryCommand(f.sctx, "test", wrapperRanMarkerCommand)
+	if err == nil || len(f.calls(t)) != 1 {
+		t.Fatalf("a later turn without proof started the wrapper: %v, %q", err, f.calls(t))
+	}
+}
+
+func TestBaselineBeforePush_WrapperReusesTestComparisonAndRefusesLostProof(t *testing.T) {
+	f := newWrapperFixture(t, config.Commands{Test: "echo configured"}, nil)
+	f.sctx.Shared = &pipeline.RunShared{}
+	f.sctx.Config.SideBySide = true
+	f.sctx.Config.TestCommandWrapper.Command[2] = "{test_comparison_sha}"
+	f.sctx.Config.CommandOverrides = map[string]config.CommandOverride{"test": {Additional: []string{"echo additional"}}}
+	step, err := f.sctx.DB.InsertStepResult(f.sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&TestStep{}).Execute(f.sctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sctx.DB.CompleteStepWithStatus(step.ID, types.StepStatusCompleted, 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	comparison := gitCmd(t, f.sctx.WorkDir, "rev-parse", "main")
+	// A changed file makes the pre-push guard rerun the configured checks.
+	if err := os.WriteFile(filepath.Join(f.sctx.WorkDir, "later.go"), []byte("package later\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, f.sctx.WorkDir, "add", "later.go")
+	gitCmd(t, f.sctx.WorkDir, "commit", "-m", "add code")
+	head := gitCmd(t, f.sctx.WorkDir, "rev-parse", "HEAD")
+	f.sctx.Run.HeadSHA = head
+	// The default tip can move after Test. Push must keep Test's comparison.
+	gitCmd(t, f.sctx.WorkDir, "branch", "-f", "main", head)
+
+	_, restart, err := baselineBeforePush(f.sctx, head)
+
+	if err != nil || restart {
+		t.Fatalf("baselineBeforePush() = %v, %v", restart, err)
+	}
+	calls := f.calls(t)
+	if len(calls) != 4 {
+		t.Fatalf("wrapper calls = %q, want configured and additional on both heads", calls)
+	}
+	for _, call := range calls {
+		if call[1] != comparison {
+			t.Fatalf("wrapper call = %q, want Test's original comparison %s", call, comparison)
+		}
+	}
+	if f.sctx.TestComparisonSHA != "" {
+		t.Fatal("Push leaked its comparison into another step")
+	}
+	for _, proof := range []string{"", "bad-proof"} {
+		f.sctx.Shared = &pipeline.RunShared{}
+		if proof != "" {
+			f.sctx.Shared.RecordBaseline(head, proof, true)
+		}
+		_, restart, err := baselineBeforePush(f.sctx, head)
+		if err == nil || restart || !strings.Contains(err.Error(), "run Test again") || len(f.calls(t)) != 4 {
+			t.Fatalf("lost/malformed proof allowed a push baseline: %v, %v, calls %q", restart, err, f.calls(t))
+		}
+	}
 }
