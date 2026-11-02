@@ -2313,6 +2313,13 @@ func (m *RunManager) HandleCancel(runID string) error {
 			cancel(fmt.Errorf(types.RunCancelReasonAbortedByUser))
 			return "", nil
 		}
+		run, err := m.db.GetRun(runID)
+		if err != nil {
+			return "", err
+		}
+		if run == nil || run.Status.Terminal() {
+			return "", fmt.Errorf("no active run %s", runID)
+		}
 		if m.executors[runID] != nil || m.dones[runID] != nil {
 			return "", fmt.Errorf("run %s still has an active executor", runID)
 		}

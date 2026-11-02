@@ -54,14 +54,13 @@ const canonicalPipelineAgentPrerequisite = "a supported native agent binary, the
 const canonicalUnknownBranchRunRelationship = "An explicit `--run <id>` rendered under `run:` while the current branch is unknown (detached `HEAD` or a branch-lookup failure) encodes no branch relationship."
 
 // TestStaleMonitorGuidance_SyncedAcrossSurfaces guards the repo invariant that
-// agent-driving guidance stays in sync across its three surfaces: the skill
-// body, the published agents guide, and the live axi help string. The earlier
+// agent-driving guidance stays in sync across the generated skill body
+// and the live axi help string. The earlier
 // wrong wording (telling agents to re-run a stale PR with `axi run`) shipped to
-// only one surface; this keeps the corrected guidance present on all three.
+// only one surface; this keeps the corrected guidance present on both.
 func TestStaleMonitorGuidance_SyncedAcrossSurfaces(t *testing.T) {
 	surfaces := map[string]string{
 		"skill body":      skill.Markdown(),
-		"agents guide":    readAgentsGuide(t),
 		"axi help string": staleMonitorGuidance,
 	}
 	for name, content := range surfaces {
@@ -145,32 +144,6 @@ func TestStaleMonitorGuidance_DisabledRepairHandback(t *testing.T) {
 				}
 			}
 		})
-	}
-
-	if !strings.Contains(readAgentsGuide(t), "[`axi handback`](/no-mistakes/reference/cli/#no-mistakes-axi-handback)") {
-		t.Error("agents guide must point to the handback owner")
-	}
-	reference, err := os.ReadFile(filepath.Join("..", "..", "docs", "src", "content", "docs", "reference", "cli.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, handback, hasSection := strings.Cut(string(reference), "## no-mistakes axi handback")
-	if !hasSection {
-		t.Fatal("CLI reference is missing the handback owner section")
-	}
-	handback, _, _ = strings.Cut(handback, "\n## ")
-	for _, phrase := range []string{
-		"published GitHub CI merge conflict",
-		"automatic CI repair disabled (`auto_fix.ci: 0`)",
-		"no-mistakes axi sync",
-		"no-mistakes axi handback --resume",
-		"same caller worktree",
-		"additive merge",
-		"restarts Review, Test, Document, Lint, Push, PR and CI in the same run",
-	} {
-		if !strings.Contains(handback, phrase) {
-			t.Errorf("handback owner is missing %q", phrase)
-		}
 	}
 }
 

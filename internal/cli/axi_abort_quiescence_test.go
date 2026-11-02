@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -371,6 +372,151 @@ func TestAxiAbortByRunIDResolvesDurableTerminalTruth(t *testing.T) {
 		}
 		if strings.Contains(out, "run_status") {
 			t.Errorf("unknown-id no-op fabricated terminal state:\n%s", out)
+		}
+	})
+}
+
+func TestAxiAbortTerminalRunsThroughDaemon(t *testing.T) {
+	p := paths.WithRoot(makeSocketSafeTempDir(t))
+	t.Setenv("NM_HOME", p.Root())
+	chdir(t, t.TempDir())
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	startTestDaemon(t, p, database)
+	repo, err := database.InsertRepo(t.TempDir(), "https://github.com/example/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const head = "1111111111111111111111111111111111111111"
+	const base = "2222222222222222222222222222222222222222"
+	for _, status := range []types.RunStatus{types.RunCompleted, types.RunFailed, types.RunCancelled, types.RunCIMonitorInterrupted} {
+		t.Run(string(status), func(t *testing.T) {
+			run, err := database.InsertRun(repo.ID, "terminal/"+string(status), head, base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunStatus(run.ID, status); err != nil {
+				t.Fatal(err)
+			}
+			before, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for attempt := 0; attempt < 2; attempt++ {
+				output, err := executeCmd("axi", "abort", "--run", run.ID)
+				if err != nil {
+					t.Fatalf("terminal abort attempt %d failed: %v\n%s", attempt, err, output)
+				}
+				for _, required := range []string{"aborted: false", "run_status: " + string(status), run.ID, "idempotent no-op"} {
+					if !strings.Contains(output, required) {
+						t.Fatalf("terminal abort omitted %q:\n%s", required, output)
+					}
+				}
+			}
+
+			after, err := database.GetRun(run.ID)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("terminal abort changed the run: %#v %v", after, err)
+			}
+		})
+	}
+	t.Run("repeated released-reservation abort", func(t *testing.T) {
+		run, err := database.InsertRun(repo.ID, "feature/released", head, base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, err := range []error{
+			database.UpdateRunStatus(run.ID, types.RunRunning),
+			database.UpdateRunPRURL(run.ID, "https://github.com/example/repo/pull/1"),
+			database.UpdateRunPRState(run.ID, "open"),
+			database.UpdateRunReviewApprovedHeadSHA(run.ID, head),
+			database.UpdateRunPublication(run.ID, db.PushBinding{HeadSHA: head, TargetKind: "upstream", TargetFingerprint: "published-target", Ref: "refs/heads/feature/released"}),
+		} {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		const findings = `{"findings":[{"id":"ci-1","category":"ci-check","severity":"error","action":"auto-fix","check":"tests","description":"tests failed"}]}`
+		receipt := &db.CIHandback{RunID: run.ID, CallerDir: repo.WorkingPath, ReleasedHead: head, PRURL: "https://github.com/example/repo/pull/1", BaseBranch: "main", BaseHead: base, PushGeneration: 1, TargetFingerprint: "published-target", PushRef: "refs/heads/feature/released"}
+		history := make(map[string][]*db.StepRound)
+		limits := make(map[types.StepName]int)
+		for _, name := range types.AllSteps() {
+			limits[name] = 0
+			step, err := database.InsertStepResult(run.ID, name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			output := `{"findings":[]}`
+			if name == types.StepCI {
+				output = findings
+			}
+			round, err := database.InsertStepRound(step.ID, 1, "initial", &output, nil, 20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if name == types.StepCI {
+				receipt.RoundID = round.ID
+				err = database.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 0, 20, &output)
+			} else {
+				err = database.CompleteStep(step.ID, 0, 20, "")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			history[step.ID], err = database.GetRoundsByStep(step.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		run, err = database.GetRun(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		receipt.Source = &db.CIHandbackSource{CallerHead: head, SubmittedHead: head, ReviewHead: head, PushKind: "upstream", PushedAt: *run.LastPushedAt, Findings: findings, AutoFixLimits: limits}
+		if err := database.ReleaseCIHandback(receipt, run, repo, findings); err != nil {
+			t.Fatal(err)
+		}
+
+		output, err := executeCmd("axi", "abort", "--run", run.ID)
+		if err != nil || !strings.Contains(output, "aborted: true") || !strings.Contains(output, "run_status: cancelled") {
+			t.Fatalf("released reservation abort failed: %v\n%s", err, output)
+		}
+		before, err := database.GetRun(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		beforeSteps, err := database.GetStepsByRun(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for attempt := 0; attempt < 2; attempt++ {
+			output, err := executeCmd("axi", "abort", "--run", run.ID)
+			if err != nil || !strings.Contains(output, "aborted: false") || !strings.Contains(output, "run_status: cancelled") || !strings.Contains(output, "idempotent no-op") {
+				t.Fatalf("repeated released reservation abort failed: %v\n%s", err, output)
+			}
+		}
+
+		after, err := database.GetRun(run.ID)
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatalf("repeated abort changed the run: %#v %v", after, err)
+		}
+		afterSteps, err := database.GetStepsByRun(run.ID)
+		if err != nil || !reflect.DeepEqual(beforeSteps, afterSteps) {
+			t.Fatalf("repeated abort changed findings or execution spend: %#v %v", afterSteps, err)
+		}
+		stored, err := database.LatestCIHandback(run.ID)
+		if err != nil || !reflect.DeepEqual(receipt, stored) {
+			t.Fatalf("abort changed the receipt or repair limits: %#v %v", stored, err)
+		}
+		for stepID, original := range history {
+			rounds, err := database.GetRoundsByStep(stepID)
+			if err != nil || !reflect.DeepEqual(original, rounds) {
+				t.Fatalf("abort changed validation history: %#v %v", rounds, err)
+			}
 		}
 	})
 }
