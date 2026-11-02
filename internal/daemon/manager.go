@@ -103,14 +103,15 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 }
 
 type recoveredRunPlan struct {
-	run     *db.Run
-	repo    *db.Repo
-	workDir string
-	gateDir string
-	cfg     *config.Config
-	agent   agent.Agent
-	steps   []pipeline.Step
-	forge   *forgecontext.Context
+	admission *db.ValidationAdmission
+	run       *db.Run
+	repo      *db.Repo
+	workDir   string
+	gateDir   string
+	cfg       *config.Config
+	agent     agent.Agent
+	steps     []pipeline.Step
+	forge     *forgecontext.Context
 }
 
 func (m *RunManager) recoverableParkedRuns(ctx context.Context) ([]recoveredRunPlan, map[string]struct{}) {
@@ -538,20 +539,29 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			m.mu.Unlock()
 		}()
 
-		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
-			if errors.Is(err, pipeline.ErrCIHandbackSuspended) {
+		var executionError error
+		if plan.admission != nil {
+			executionError = pipeline.ValidateAuthoredCandidate(runCtx, m.db, plan.run, plan.workDir, plan.steps, plan.admission)
+			if executionError == nil {
+				executionError = executor.Execute(runCtx, plan.run, plan.repo, plan.workDir)
+			}
+		} else {
+			executionError = executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
+		}
+		if executionError != nil {
+			if errors.Is(executionError, pipeline.ErrCIHandbackSuspended) {
 				isSuspended = true
 				return
 			}
-			if plan.run.Status == types.RunRunning {
-				errMsg := err.Error()
+			if plan.run.Status == types.RunRunning || plan.run.Status == types.RunPending {
+				errMsg := executionError.Error()
 				plan.run.Status = types.RunFailed
 				plan.run.Error = &errMsg
 				if dbErr := m.db.UpdateRunErrorStatus(plan.run.ID, errMsg, types.RunFailed); dbErr != nil {
 					slog.Error("failed to mark recovered run failed", "run_id", plan.run.ID, "error", dbErr)
 				}
 			}
-			slog.Error("recovered pipeline failed", "run_id", plan.run.ID, "error", err)
+			slog.Error("recovered pipeline failed", "run_id", plan.run.ID, "error", executionError)
 		}
 		fields := telemetry.Fields{
 			"action":      "finished",
@@ -1160,6 +1170,9 @@ func receiptForRun(run *db.Run, created bool) (ipc.LaunchReceipt, error) {
 // A supplied clean caller head must match the selected head before any run
 // starts or is superseded. It never changes head selection.
 func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prBaseBranch string, omitIntent bool, callerHeadSHA, planID string, closingIssues []string, profiles ...*agentcfg.PiProfile) (string, error) {
+	if err := m.db.RefuseUnlinkedValidation(repoID, branch); err != nil {
+		return "", err
+	}
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -1440,6 +1453,9 @@ func (m *RunManager) withBranchLock(repoID, branch string, action func() (string
 // startRunWithIntentSourceLocked performs run creation while the caller owns
 // the repository/branch lock. Proof fields are empty for ordinary launches.
 func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, inheritedPRURL, planID string, closingIssues []string, expected *launchassert.Expectation, profiles ...*agentcfg.PiProfile) (string, error) {
+	if err := m.db.RefuseUnlinkedValidation(repo.ID, branch); err != nil {
+		return "", err
+	}
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -2322,6 +2338,9 @@ func (m *RunManager) HandleCancel(runID string) error {
 		}
 		if m.executors[runID] != nil || m.dones[runID] != nil {
 			return "", fmt.Errorf("run %s still has an active executor", runID)
+		}
+		if run.Status == types.RunPending {
+			return "", m.db.CancelPendingValidationAdmission(runID)
 		}
 		if err := m.db.CancelReleasedCIHandback(runID); err != nil {
 			return "", err

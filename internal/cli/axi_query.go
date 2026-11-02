@@ -74,6 +74,11 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 		return emitError(cmd, 1, fmt.Sprintf("load steps: %v", err))
 	}
 	rv := runViewFromDB(run, steps, env.d)
+	family, err := env.d.ValidationFamily(run.ID)
+	if err != nil {
+		return emitError(cmd, 1, fmt.Sprintf("read validation family: %v", err))
+	}
+	rv.AuthoredValidation = family
 	annotateRunView(env, &rv)
 	var fields []toon.Field
 	// A run reached by an explicit --run may belong to another branch. Say so
@@ -88,6 +93,13 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 		fields = append(fields, toon.Field{Key: "current_branch", Value: branch})
 	}
 	fields = append(fields, runObjectFieldWithKey(runKey, rv))
+	if run.Status.Terminal() {
+		snapshot, err := env.d.ReadTerminalSnapshot(run.ID)
+		if err != nil {
+			return emitError(cmd, 1, fmt.Sprintf("read terminal snapshot: %v", err))
+		}
+		fields = append(fields, toon.Field{Key: "terminal_snapshot_digest", Value: snapshot.Digest()}, toon.Field{Key: "repository_id", Value: run.RepoID})
+	}
 	handback, err := env.d.LatestCIHandback(run.ID)
 	if err != nil {
 		return emitError(cmd, 1, err.Error())

@@ -372,6 +372,9 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		return emitError(cmd, 2, "--verification-plan is accepted only when starting a new run; omit it to reattach")
 	}
 	if runID == "" {
+		if err := env.d.RefuseUnlinkedValidation(env.repo.ID, branch); err != nil {
+			return emitError(cmd, 1, err.Error())
+		}
 		if err := configErrorForFreshAxiRun(env, runID); err != nil {
 			return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
 		}
@@ -1143,6 +1146,9 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 		if run == nil {
 			return nil, false, fmt.Errorf("run %s not found", runID)
 		}
+		if run.AuthoredValidationError != "" {
+			return nil, false, fmt.Errorf("validation family provenance is unreadable: %s", run.AuthoredValidationError)
+		}
 		pp.update(run)
 
 		rv := runViewFromIPC(run)
@@ -1150,7 +1156,7 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			return run, false, nil
 		}
 		if gate, ok := rv.awaitingStep(); ok {
-			if !autoApprove {
+			if !autoApprove || rv.AuthoredValidation != nil {
 				return run, false, nil
 			}
 			if pipeline.HasProtectedPathRefusal(gate.FindingsJSON) {
@@ -1329,6 +1335,9 @@ func sendRespond(client *ipc.Client, runID string, step types.StepName, action t
 // fields, when given, open the document ahead of the run object, so a command
 // that did something before driving (axi answer) reports it in the same return.
 func renderDriveResult(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool, lead ...toon.Field) error {
+	if run.AuthoredValidationError != "" {
+		return emitError(cmd, 1, "validation family provenance is unreadable: "+run.AuthoredValidationError)
+	}
 	rv := runViewFromIPC(run)
 	fields := append(append([]toon.Field{}, lead...), runObjectField(rv))
 	hasBranchSync := false

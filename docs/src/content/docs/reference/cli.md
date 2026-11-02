@@ -344,6 +344,44 @@ The selection is stored with the run as the assertion is, replays of the nonce m
 A selection cannot be combined with `--model` or `--effort`, the per-run Pi profile.
 A daemon that proves assertions but cannot apply them refuses the unknown `apply` field, so a selection is never proved without being applied.
 
+## no-mistakes axi validate-authored
+
+Validate one explicitly declared, clean authored commit and tree linked to an immutable failed or cancelled predecessor.
+This is a new validation-only child: the predecessor stays terminal, and every core stage and current trusted custom gate starts fresh without an inherited pass, review approval, CI-ready state, exception or agent session.
+All automatic and manual repair authority is zero, including stages the predecessor never reached.
+Fix selections, skips, ordinary fresh launches that would drop the lineage, and repair dispatch after restart are refused.
+
+```sh
+no-mistakes axi validate-authored --admission-file admission.json --wait 8m
+```
+
+The input is one operator-owned UTF-8 JSON object, at most 64 KiB, with these fields:
+
+| Fields | Required binding |
+| --- | --- |
+| `predecessor_id`, `snapshot_digest`, `repo_id`, `branch` | The terminal predecessor and its complete native snapshot; `axi status` reports `terminal_snapshot_digest` and `repository_id` |
+| `caller_dir`, `candidate_sha`, `candidate_tree` | The invoking canonical repository root and full lowercase commit/tree identities; staged, tracked, untracked and submodule changes must all be absent |
+| `launch_nonce`, `validation_generation`, `intent_digest` | The predecessor's preserved launch receipt; the child receives its own fresh nonce and proof |
+| `published_head_sha`, `push_generation`, `push_target_fingerprint` | The predecessor's exact publication binding, verified against the live target and open PR; use `""`, `0`, `""` for an unpublished predecessor |
+| `launch_assertion` | A complete [launch assertion](#launch-assertions) naming the current trusted source and exactly the predecessor's original role selections |
+| `controller_policy` | `{ "sha256": "<64 lowercase hex characters>", "class": "<original class>", "review_cycles": 2 }`, recorded only as the controller's historical assertion, never as a native historical policy fact or a grant of repair authority |
+| `historical_source_completeness` | Exactly `"unknown"`; declaring the authored candidate complete for validation does not certify recovery of missing historical dirty, untracked or later source |
+| `reason` | A nonempty explicit reason, at most 4096 bytes |
+
+The daemon checks the authenticated caller, registered Git identity, exact clean source, immutable predecessor history, launch selection and publication facts before accepting the child.
+The declared candidate must differ from the predecessor's submitted, terminal and published heads; this operation does not replace ordinary validation of those historical targets.
+It imports the exact candidate object without overwriting an author branch or the gate branch.
+Historical findings, failed checks, automatic and manual spending, and the unknown historical source completeness stay attached to the lineage.
+The output and subsequent status include `authored_validation`, cumulative per-stage spending, zero remaining repair authority and `policy_origin: controller_assertion`.
+This command grants no authority to install the candidate or operate another run.
+
+An exact repeated request returns the same admission and child.
+After a crash, an untouched pending acceptance remains idle until the exact request is explicitly replayed and revalidated.
+A progressed child is observed or recovered through its existing execution; a cancelled child is never restarted by replay.
+Later authored descendants must preserve the same controller policy assertion, historical uncertainty and zero repair authority.
+An accepted pending child can be cancelled with `axi abort`.
+Ordinary explicit gate acknowledgements and review-question answers retain their existing meaning; they do not create repair capacity or turn an approved failure into a clean pass.
+
 ## no-mistakes axi respond
 
 Answer the current approval gate and continue until the next gate, CI-ready decision point, or final outcome.

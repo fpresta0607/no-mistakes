@@ -9,6 +9,7 @@ import (
 	toon "github.com/toon-format/toon-go"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/authoredvalidation"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -91,6 +92,7 @@ type fixRow struct {
 // stepView is a render-ready view of a single pipeline step, decoupled from
 // whether it came from the daemon (ipc) or the local database.
 type stepView struct {
+	ValidationOnly   bool
 	ID               string
 	Name             string
 	Status           string
@@ -113,15 +115,16 @@ type stepView struct {
 
 // runView is a render-ready view of a pipeline run.
 type runView struct {
-	PiProfile        *agentcfg.PiProfile
-	VerificationPlan *verificationplan.Snapshot
-	ID               string
-	Branch           string
-	Status           string
-	HeadSHA          string
-	PRURL            string
-	CIReady          bool
-	CIReadyNoCI      bool
+	AuthoredValidation *authoredvalidation.Family
+	PiProfile          *agentcfg.PiProfile
+	VerificationPlan   *verificationplan.Snapshot
+	ID                 string
+	Branch             string
+	Status             string
+	HeadSHA            string
+	PRURL              string
+	CIReady            bool
+	CIReadyNoCI        bool
 	// AwaitingAgentSince is the unix-seconds time the run parked at a gate
 	// awaiting the driving agent, or nil when the run is not parked. It powers
 	// the top-level parked signal in the run object.
@@ -137,6 +140,7 @@ type runView struct {
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
 	rv := runView{
+		AuthoredValidation: r.AuthoredValidation,
 		ID:                 r.ID,
 		Branch:             r.Branch,
 		Status:             string(r.Status),
@@ -245,6 +249,7 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 func (rv runView) awaitingStep() (stepView, bool) {
 	for _, s := range rv.Steps {
 		if s.Status == string(types.StepStatusAwaitingApproval) || s.Status == string(types.StepStatusFixReview) {
+			s.ValidationOnly = rv.AuthoredValidation != nil
 			return s, true
 		}
 	}
@@ -476,6 +481,9 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 		{Key: "branch", Value: rv.Branch},
 		{Key: "status", Value: rv.Status},
 	}
+	if rv.AuthoredValidation != nil {
+		fields = append(fields, validationFamilyField(rv.AuthoredValidation))
+	}
 	// Surface the parked-awaiting-agent signal right after status so one read
 	// distinguishes a run waiting for the agent to drive a gate from one that
 	// is actively running/fixing/ci. The value reports how long it has been
@@ -545,6 +553,13 @@ func (rv runView) automaticSkips() []automaticSkipRow {
 // gateFields renders the active approval gate: the awaiting step, its findings
 // table, and the next-step commands an agent can run to clear it.
 func gateFields(gate stepView) []toon.Field {
+	if gate.ValidationOnly {
+		help := []string{"This authored validation has zero automatic/manual repair authority. Required stages cannot be skipped.", "Run `no-mistakes axi respond --action approve` only to explicitly accept the reported condition, or `no-mistakes axi abort` to stop this child; a later authored candidate must retain its predecessor lineage.", fmt.Sprintf("Run `%s` to inspect the complete findings", axiLogsFullCommand(gate.Name, ""))}
+		if pipeline.HasUnansweredReviewQuestion(gate.FindingsJSON) {
+			help = append([]string{"Answer each open review question with `no-mistakes axi answer --question <id> --answer \"...\"`; an answer grants no repair authority."}, help...)
+		}
+		return gateFieldsWithHelp(gate, help)
+	}
 	help := []string{
 		"Run `no-mistakes axi respond --action approve` to accept this step and continue",
 		"Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)",
@@ -606,7 +621,7 @@ func gateFieldsWithHelp(gate stepView, help []string) []toon.Field {
 	// Point-of-use reminder at the review gate: review auto-fix defaults to
 	// disabled, so agents should expect blocking and ask-user findings to park
 	// unless config explicitly opts back in.
-	if gate.Name == string(types.StepReview) {
+	if gate.Name == string(types.StepReview) && !gate.ValidationOnly {
 		gfields = append(gfields, toon.Field{Key: "note", Value: "Review auto-fix is disabled by default (`auto_fix.review: 0`; a repo or global `auto_fix.review > 0` override re-enables it), so blocking and ask-user review findings park for your decision rather than being silently self-fixed."})
 	}
 	gfields = append(gfields, toon.Field{Key: "findings", Value: findingRows(parsed.Items)})

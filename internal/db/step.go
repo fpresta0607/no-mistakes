@@ -219,7 +219,7 @@ func (d *DB) StartStep(id string) error {
 // auto-fix limit that status surfaces use while the step is active.
 func (d *DB) StartStepWithAutoFixLimit(id string, autoFixLimit int) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, started_at = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, auto_fix_limit = ? WHERE id = ?`, types.StepStatusRunning, ts, ts, ts, "step started", autoFixLimitDBValue(autoFixLimit), id)
+	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, started_at = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, auto_fix_limit = CASE WHEN EXISTS(SELECT 1 FROM validation_admissions WHERE child_id = step_results.run_id) THEN 0 ELSE ? END WHERE id = ?`, types.StepStatusRunning, ts, ts, ts, "step started", autoFixLimitDBValue(autoFixLimit), id)
 	if err != nil {
 		return fmt.Errorf("start step: %w", err)
 	}
@@ -240,7 +240,7 @@ func (d *DB) StartStepFixRound(id string, autoFixLimit int) error {
 }
 
 func (d *DB) SetStepAutoFixLimit(id string, autoFixLimit int) error {
-	if _, err := d.sql.Exec(`UPDATE step_results SET auto_fix_limit = ? WHERE id = ?`, autoFixLimitDBValue(autoFixLimit), id); err != nil {
+	if _, err := d.sql.Exec(`UPDATE step_results SET auto_fix_limit = CASE WHEN EXISTS(SELECT 1 FROM validation_admissions WHERE child_id = step_results.run_id) THEN 0 ELSE ? END WHERE id = ?`, autoFixLimitDBValue(autoFixLimit), id); err != nil {
 		return fmt.Errorf("set step auto-fix limit: %w", err)
 	}
 	return nil
