@@ -154,9 +154,11 @@ func (job *shellCommandJobState) cancel(process *os.Process) error {
 	return terminateShellCommandJobFunc(job.handle, 1)
 }
 
-// StartShellCommand starts cmd and assigns it to the job object created by its
-// shell-command configurator. If the job cannot be created or assigned, the
-// command fails instead of running without clean-exit descendant cleanup.
+// StartShellCommand starts cmd and, when configured, assigns its suspended
+// process to the job before resuming threads from a process-local PSS snapshot.
+// Job setup, assignment, or thread discovery failure aborts startup.
+// If cmd.Start succeeded, failure kills and waits for the original child.
+// The returned error preserves the startup cause alongside cleanup errors.
 func StartShellCommand(cmd *exec.Cmd) error {
 	if err, ok := takeShellCommandJobSetupError(cmd); ok {
 		return fmt.Errorf("windows job object setup: %w", err)
@@ -200,7 +202,9 @@ func (job *shellCommandJobState) assign(pid uint32) error {
 // errors get the same process-tree cleanup as context cancellation. After a
 // cooperative cancellation it preserves the remaining grace window before
 // forcing the job down, including when the console leader exits before a child
-// finishes cleanup. A nil, never-started or unconfigured command is a no-op.
+// finishes cleanup. Repeated calls after Wait or job removal are safe and never
+// fall back to a PID-based kill. A nil, never-started, unconfigured, or already
+// closed command is a no-op.
 func TerminateShellCommandGroup(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return
