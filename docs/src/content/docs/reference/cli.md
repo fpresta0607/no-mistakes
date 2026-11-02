@@ -346,7 +346,7 @@ A daemon that proves assertions but cannot apply them refuses the unknown `apply
 
 ## no-mistakes axi validate-authored
 
-Validate one explicitly declared, clean authored commit and tree linked to an immutable failed or cancelled predecessor.
+Validate one explicitly declared, clean authored commit and tree linked to an immutable terminal predecessor that did not complete: failed, cancelled, or `ci_monitor_interrupted` (which is never resumed).
 This is a new validation-only child: the predecessor stays terminal, and every core stage and current trusted custom gate starts fresh without an inherited pass, review approval, CI-ready state, exception or agent session.
 All automatic and manual repair authority is zero, including stages the predecessor never reached.
 Fix selections, skips, CI handbacks, ordinary fresh launches that would drop the lineage, and repair dispatch after restart are refused.

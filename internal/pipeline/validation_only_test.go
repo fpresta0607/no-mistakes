@@ -210,8 +210,8 @@ func TestValidationOnlyRejectsPendingRepairSelectionsBeforeAnyDispatch(t *testin
 	}
 	var calls atomic.Int32
 	executor := NewExecutor(database, root, nil, nil, []Step{&adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) { calls.Add(1); return &StepOutcome{}, nil }}}, nil)
-	err = executor.Execute(context.Background(), child, repo, "")
-	if err == nil || calls.Load() != 0 {
+	err = executor.Execute(context.Background(), child, repo, repo.WorkingPath)
+	if err == nil || !strings.Contains(err.Error(), "forbidden repair selection") || calls.Load() != 0 {
 		t.Fatalf("pending repair reached dispatch: calls=%d error=%v", calls.Load(), err)
 	}
 }

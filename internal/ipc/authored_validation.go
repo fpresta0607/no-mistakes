@@ -16,3 +16,10 @@ type ValidateAuthoredResult struct {
 	Family  *authoredvalidation.Family `json:"family"`
 	Started bool                       `json:"started"`
 }
+
+// HasAuthoredValidation reports whether the run belongs to an authored
+// validation family, including one whose provenance could not be read; no
+// automatic gate resolver has standing consent for such a run.
+func (r *RunInfo) HasAuthoredValidation() bool {
+	return r.AuthoredValidation != nil || r.AuthoredValidationError != ""
+}

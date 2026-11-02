@@ -1156,7 +1156,7 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			return run, false, nil
 		}
 		if gate, ok := rv.awaitingStep(); ok {
-			if !autoApprove || rv.AuthoredValidation != nil {
+			if !autoApprove || run.HasAuthoredValidation() {
 				return run, false, nil
 			}
 			if pipeline.HasProtectedPathRefusal(gate.FindingsJSON) {

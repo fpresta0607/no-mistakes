@@ -162,8 +162,23 @@ func TestAuthoredPendingAdmissionStaysIdleAcrossStartupAndCanBeCancelled(t *test
 	if err != nil || child.Status != types.RunPending || calls.Load() != 0 {
 		t.Fatalf("startup ran or terminalized untouched acceptance: %+v calls=%d error=%v", child, calls.Load(), err)
 	}
+	subscription, err := manager.Subscribe(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	eventContext, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	subscription.Next(eventContext)
 	if err := manager.HandleCancel(child.ID); err != nil {
 		t.Fatalf("cancel pending authored acceptance: %v", err)
+	}
+	cancelEvent, ok := subscription.Next(eventContext)
+	if !ok || cancelEvent.Type != ipc.EventRunCompleted || cancelEvent.Status == nil || *cancelEvent.Status != string(types.RunCancelled) || cancelEvent.Error == nil || *cancelEvent.Error != types.RunCancelReasonAbortedByUser {
+		t.Fatalf("pending cancel event = %#v, open = %v", cancelEvent, ok)
+	}
+	if _, ok := subscription.Next(eventContext); ok {
+		t.Fatal("cancelled pending acceptance left its subscription open")
 	}
 	repeated, err := manager.validateAuthored(context.Background(), request, os.Getpid())
 	if err != nil || repeated.Started || repeated.Receipt.RunID != child.ID || calls.Load() != 0 {

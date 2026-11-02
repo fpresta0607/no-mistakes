@@ -222,7 +222,7 @@ func runAxiHome(cmd *cobra.Command) error {
 		if gate, ok := rv.awaitingStep(); ok {
 			gated = true
 			gatedOnAnswers = pipeline.HasUnansweredReviewQuestion(gate.FindingsJSON)
-			isApprovalRefused = pipeline.HasProtectedPathRefusal(gate.FindingsJSON) || pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON)
+			isApprovalRefused = rv.AuthoredValidation != nil && (pipeline.HasProtectedPathRefusal(gate.FindingsJSON) || pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON))
 			fields = append(fields, gateFields(gate)...)
 		}
 	} else if otherActive != nil {

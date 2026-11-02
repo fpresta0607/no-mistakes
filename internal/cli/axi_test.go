@@ -1395,6 +1395,20 @@ func TestAxiHomeLeadsWithAnsweringWhenTheGateHasAnOpenQuestion(t *testing.T) {
 				Description: "not actually a review question",
 			},
 		},
+		{
+			name: "ordinary protected-path refusal",
+			finding: types.Finding{
+				ID: "protected-path-refusal", Severity: types.FindingSeverityError, Action: types.ActionAskUser,
+				Description: "protected path edited",
+			},
+		},
+		{
+			name: "ordinary unvalidated-work refusal",
+			finding: types.Finding{
+				ID: types.FindingIDTestAgentUnvalidatedWork, Severity: types.FindingSeverityError, Action: types.ActionAskUser,
+				Description: "unvalidated work in the worktree",
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repoDir := t.TempDir()

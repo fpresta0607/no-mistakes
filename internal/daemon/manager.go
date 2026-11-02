@@ -2340,9 +2340,10 @@ func (m *RunManager) HandleCancel(runID string) error {
 			return "", fmt.Errorf("run %s still has an active executor", runID)
 		}
 		if run.Status == types.RunPending {
-			return "", m.db.CancelPendingValidationAdmission(runID)
-		}
-		if err := m.db.CancelReleasedCIHandback(runID); err != nil {
+			if err := m.db.CancelPendingValidationAdmission(runID); err != nil {
+				return "", err
+			}
+		} else if err := m.db.CancelReleasedCIHandback(runID); err != nil {
 			return "", err
 		}
 		status, reason := string(types.RunCancelled), types.RunCancelReasonAbortedByUser
