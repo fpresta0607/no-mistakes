@@ -129,10 +129,10 @@ reason about in one long-lived process than inside independent hook invocations.
 ## Crash recovery
 
 An ordinary failed-CI handback parked without an active writer retains its gate, worktree, evidence and frozen repair limits during orderly daemon shutdown.
-Restart restores that source-bound reservation instead of failing or approving its CI findings.
-An explicit user abort remains terminal and is never resumed by handback.
+Restart restores that source-bound reservation only when recovery checks pass; otherwise it stays active without an executor instead of failing or approving its CI findings.
+The [`axi abort` reference](/no-mistakes/reference/cli/#no-mistakes-axi-abort) owns explicit cancellation of a retained reservation when recovery cannot restore its executor.
 
-On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon crashed while they were active):
+On startup, the daemon checks for runs that were left in `pending` or `running` status:
 
 - Completes legacy active rows whose persisted PR state is already `merged` or `closed`, including their CI step, before active-run recovery and parked-run planning
 - Resumes fully recorded parked approval gates and interrupted CI handbacks only when their worktree and step history can be validated; incomplete or ambiguous active runs fail closed
@@ -177,6 +177,6 @@ The [starting and stopping](#starting-and-stopping) section owns the active-run
 guard, the top-level `--force` override, and the separate validation-step
 containment rule.
 
-1. Cancels all active runs
+1. Stops all active run goroutines, retaining eligible CI handback reservations as described in [Crash recovery](#crash-recovery)
 2. Waits up to 30 seconds for goroutines to finish
 3. Removes the PID file and socket

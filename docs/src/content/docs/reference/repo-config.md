@@ -698,7 +698,7 @@ Reruns are skipped when:
 ### ci.revalidate_repairs
 
 Whether every repair by the CI fix agent must re-pass the pipeline before it is published, or only the ones whose continuity with the reviewed head cannot be proven.
-Caller conflict resolutions use the separate [`axi handback` contract](/no-mistakes/reference/cli/#no-mistakes-axi-handback).
+Author corrections use the separate [`axi handback` contract](/no-mistakes/reference/cli/#no-mistakes-axi-handback).
 
 | | |
 |---|---|
