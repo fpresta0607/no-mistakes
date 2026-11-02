@@ -68,7 +68,7 @@ disable_project_settings: true
 pr:
   base_branch: develop
   # template: .github/pull_request_template.md
-  # publish_intent: false
+  # publish_intent: true # opt-in; defaults to false (intent stays private)
   # appendix: collapsed # full | collapsed | minimal
   # title_format: "{{.Branch}}: {{.Title}}"
 
@@ -238,7 +238,6 @@ Use a repository Markdown template for the public narrative, followed by no-mist
 ```yaml
 pr:
   template: .github/pull_request_template.md
-  publish_intent: false # Optional; otherwise original Intent is still published.
   appendix: collapsed # Optional; full (the default), collapsed, or minimal.
 ```
 
@@ -262,7 +261,12 @@ The path is read as a literal Git tree entry, never through the pushed worktree 
 
 #### Author-preserving regeneration
 
-A templated PR contains one delimited, integrity-checked generated appendix. Later runs preserve live author text before and after it, including human checkbox choices and explicit issue-closing lines, and refresh only that appendix. They do not re-fill the narrative. An author's title is also preserved unless `pr.title_format` is configured; that explicit repository convention redrafts the bare title and applies the format on every managed update. Changing or removing `pr.template` does not regenerate an already owned narrative; edit it on the PR when it needs updating. The full intent remains available to reviewers. Removing the generated Intent section is controlled separately below.
+A templated PR contains one delimited, integrity-checked generated appendix.
+Later runs preserve live author text before and after it, including human checkbox choices and explicit issue-closing lines, and refresh only that appendix.
+They do not re-fill the narrative.
+An author's title is also preserved unless `pr.title_format` is configured; that explicit repository convention redrafts the bare title and applies the format on every managed update.
+Changing or removing `pr.template` does not regenerate an already owned narrative; edit it on the PR when it needs updating.
+Intent publication and drafting context follow [`pr.publish_intent`](#prpublish_intent).
 
 Ownership is never inferred from a heading's name. An existing author-only body can be adopted without model rewriting. **Legacy descriptions containing an unowned attestation require explicit author reconciliation** before template mode can adopt them: separate/remove their obsolete generated evidence while retaining the desired author text and closing references, then retry. Do not manufacture ownership markers by hand. An edited appendix, missing/duplicate/malformed markers, or a competing attestation fails rather than risking discarded author content. Put author additions outside the generated appendix. The integrity guard detects accidental edits; it is not authentication or a cryptographic signature by no-mistakes.
 
@@ -278,19 +282,29 @@ Provider contract tests use fake CLI/API responses and local HTTP fixtures, not 
 
 ### pr.publish_intent
 
-Control publication of the **generated `Intent` section**, independently of intent extraction and review input.
+Opt in to publishing validation intent in the **generated `Intent` section** and PR-drafting context, independently of intent extraction and validation input.
 
 | | |
 | --- | --- |
 | Type | `bool` |
-| Default | `true` (missing or `null` also preserves the default) |
+| Default | `false` (missing or `null` keeps validation intent private) |
 | Trust | Trusted default branch only, regardless of `allow_repo_commands`; the caller-side counterpart is the global [`intent.publish_intent`](/no-mistakes/reference/global-config/#intent) default and the per-run `axi run --no-publish-intent` flag |
 
-`false` suppresses that section in ordinary drafting, fallback output, and template appendices. It works without `pr.template` and does not otherwise enable template mode. It never removes full intent from review or PR-drafting context, changes evidence/attestation policy, or erases author-written sections named `Intent`. Unconfigured defaults remain unchanged.
+Only an explicit trusted `true` permits the full intent to appear in ordinary drafting, fallback output, and template appendices.
+By default, and with explicit `false`, the generated section is omitted and PR-drafting turns (ordinary narrative, title-only fallback, and repository-template narrative) receive no intent text, so they cannot paraphrase the private validation brief into public prose.
+They draft from the final diff and commit messages instead.
+This works without `pr.template` and does not enable template mode.
+Full intent and its source binding remain available for validation; evidence, attestation, and author-written sections named `Intent` are unchanged.
 
-A contributor can keep the section off for their own runs without touching this repository policy: `axi run --no-publish-intent` records a tighten-only omission on the run, and an operator can set the global `intent.publish_intent: false` default. Both compose with this field and can only reduce publication: the trusted repository policy is the ceiling, and a caller can never publish intent on a repository whose trusted config disabled it. Neither signal changes what review, test, document, lint, or CI auto-fix prompts receive. The caller-side omission goes one step further than this repository policy: the PR-drafting turns (ordinary narrative, title-only fallback, and repository-template narrative) receive no intent text at all and draft from the diff and commit messages only, so no paraphrase of the withheld intent can reach the public PR. The intent is withheld, never scanned for: there is no output filter.
+A contributor can withhold intent even when the repository opts in: `axi run --no-publish-intent` records a tighten-only omission on the run, and an operator can set the global `intent.publish_intent: false` default.
+Both compose with this field and can only reduce publication: a caller can never publish intent without the trusted repository's explicit opt-in.
+Neither signal changes what review, test, document, lint, or CI auto-fix prompts receive.
+Intent is withheld from public drafting, never scanned out of its output.
 
-This is not a privacy filter: generated narrative and other evidence can still contain sensitive information, and LLM drafting is not a confidentiality guarantee. No caller-written public-body override is introduced by this setting.
+Recorded review and test output (finding descriptions, risk rationale, testing summary, and scenario names) comes from validation turns that receive the full intent, so it can quote or paraphrase the intent.
+That output is published in the generated Risk, Testing, and Pipeline sections, as [`pr.appendix`](#prappendix) shapes them, whatever `pr.publish_intent` says.
+This setting is not a privacy filter: generated narrative and other evidence can still contain sensitive information from the intent, the diff, or recorded results, and this setting does not filter those sources.
+No caller-written public-body override is introduced by this setting.
 
 ### pr.appendix
 
@@ -697,7 +711,8 @@ Reruns are skipped when:
 
 ### ci.revalidate_repairs
 
-Whether every CI repair must re-pass the pipeline before it is published, or only the ones whose continuity with the reviewed head cannot be proven.
+Whether every repair by the CI fix agent must re-pass the pipeline before it is published, or only the ones whose continuity with the reviewed head cannot be proven.
+Author corrections use the separate [`axi handback` contract](/no-mistakes/reference/cli/#no-mistakes-axi-handback).
 
 | | |
 |---|---|
@@ -710,7 +725,7 @@ ci:
   revalidate_repairs: true
 ```
 
-One rule decides how every CI repair is delivered, on every CI-fix path - automatic and manual, CI failure and merge conflict alike:
+One rule decides how repairs by the CI fix agent are delivered, whether automatic or requested with `axi respond --action fix`, for CI failures and merge conflicts alike:
 
 > A repair is published without revalidating only when its continuity with the reviewed, published head can be **proven**. When that continuity cannot be proven, the repair revalidates from Review.
 
@@ -723,7 +738,10 @@ Continuity is proven when the repaired head is the run's durably review-approved
 
 CI repair publication uses the same settlement order as Push. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns the publication and retry behavior.
 
-**Merge-conflict repairs always revalidate, under either setting.** They are not carved out - they simply always land in the cannot-be-proven half. A conflict repair rebases, so the repaired head is never a descendant of the reviewed head; resolving a conflict changes the commit's patch-id; and no content-based guard can separate "rebased and resolved" from "dropped the work". Revalidating is what keeps that safe: the rewritten head is not published until Review has approved it, so the reviewed commits stay on the remote in the meantime.
+**Merge-conflict repairs always revalidate, under either setting.**
+These agent repairs are not carved out - they simply always land in the cannot-be-proven half.
+The CI fix agent rebases a conflict repair, so the repaired head is never a descendant of the reviewed head; resolving a conflict changes the commit's patch-id; and no content-based guard can separate "rebased and resolved" from "dropped the work".
+Revalidating is what keeps that safe: the rewritten head is not published until Review has approved it, so the reviewed commits stay on the remote in the meantime.
 
 Provenance is deliberately not accepted as a substitute for that proof. In the reproduction this rule exists for, the repair that deleted a reviewed commit was authored by no-mistakes' own CI repair agent: it reset to the rebase base, left a clean tree, and the pipeline reported success while the remote lost the work. Who wrote a repair says nothing about what it did to the reviewed commits.
 
@@ -777,7 +795,8 @@ The two differ in what survives the integration, which matters in three places:
 | Evidence of what a conflict resolution did | none; the result is just commits | the merge commit's two parents and their merge base |
 | Cost | none | one merge commit per integration |
 
-Integration publishes as a fast-forward under `merge`. A CI merge-conflict repair is the exception: it rebases onto the base branch whichever strategy is set, so that repair still force-pushes and still revalidates in full.
+Integration publishes as a fast-forward under `merge`.
+A merge-conflict repair by the CI fix agent is the exception: it rebases onto the base branch whichever strategy is set, so that repair still force-pushes and still revalidates in full.
 
 **Continuity.** The CI step publishes a repair without a full revalidation cycle only when it can prove the repaired head continues the reviewed head (see [`ci.revalidate_repairs`](#cirevalidate_repairs)). Under `merge` that proof is plain ancestry, because the reviewed head is a parent. Under `rebase` there is nothing to prove it with.
 

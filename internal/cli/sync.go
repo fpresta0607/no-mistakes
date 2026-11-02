@@ -685,6 +685,9 @@ func cachedBranchSyncField(ctxCmd *cobra.Command, runID string) *toON.Field {
 }
 
 func relevantCachedSyncState(state branchsync.State) bool {
+	if state.State == branchsync.StateSynchronized {
+		return state.NextAction != nil || state.Error != ""
+	}
 	switch state.State {
 	case branchsync.StatePipelineOwned, branchsync.StatePushInProgress, branchsync.StateBehind,
 		branchsync.StateLocalAhead, branchsync.StateDiverged, branchsync.StateDirty,

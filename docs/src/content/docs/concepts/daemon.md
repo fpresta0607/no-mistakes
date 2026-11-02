@@ -67,7 +67,11 @@ any lifecycle mutation, with no `--force` or `--yes` bypass.
 Every invocation of `daemon stop`, `daemon restart`, or `update` - forced or not - logs the caller's PID, parent PID, and parent command line to `~/.no-mistakes/logs/cli.log` so a later incident can identify which agent or process triggered it.
 
 The daemon writes an identity record to `~/.no-mistakes/daemon.pid` and listens on a Unix socket at `~/.no-mistakes/socket`. On Windows, it uses a localhost TCP listener and a protected endpoint file at the same path. CLI clients bound how long they wait for that socket to accept a connection with `daemon_connect_timeout` (default `3s`, override with `NM_DAEMON_CONNECT_TIMEOUT`), so a daemon process that is alive but stuck fails the connection instead of hanging the caller; see [Troubleshooting](/no-mistakes/guides/troubleshooting/#check-for-stale-artifacts).
-Commands that ensure the daemon is running (`no-mistakes`, `init`, `attach`, `rerun`, `axi run`, `axi respond`) also fail fast rather than silently starting a replacement daemon when the socket file exists but nothing answers at all, such as a dead socket left behind by an unclean exit; `no-mistakes daemon start` self-heals past that case.
+On Windows, clients check the endpoint file's recorded PID before connecting.
+An exited process is recognized even while its process object remains openable; invalid or nonexistent Windows PIDs are also classified as dead.
+The resulting `daemon process <pid> is no longer running` error lets commands that ensure the daemon is running (`no-mistakes`, `init`, `attach`, `rerun`, `axi run`, `axi respond`) start a replacement.
+Access failures and wait failures leave ownership unknown and continue to the normal connection attempt; a failed probe never proves that recovery is safe.
+When the endpoint exists but nothing answers and its owner has not been proven dead, those commands fail fast instead of silently starting a replacement daemon; `no-mistakes daemon start` self-heals past a stale endpoint.
 After accepting a shutdown request, `daemon stop` waits for the daemon process itself to exit before returning success. Losing IPC health is not enough because the listener closes near the start of shutdown, while the singleton lock and other process-owned resources are released only at process exit. `daemon restart` uses the same complete-stop handoff before starting the replacement, so the old and new processes do not contend for the root.
 
 Process launch and daemon readiness are separate states. After taking the singleton lock, the daemon publishes its PID before exclusive crash recovery begins, but startup is not successful until the IPC server returns a real health response. `daemon start` allows up to 45 seconds for cold environment setup and recovery, reports a child that exits before readiness promptly, and never treats the PID file or a bound socket as proof that the daemon is ready. If detached startup times out, the command kills and reaps that child before returning; if managed startup fails, it cleans up the managed attempt before trying the detached fallback and preserves both errors when both paths fail.
@@ -117,11 +121,13 @@ An existing unit picks up the policy when `no-mistakes daemon start` or `restart
 
 ## Concurrent push handling
 
-If you push to the same branch while a run is already active, the daemon:
+If you push to the same branch while a run is already active and has no retained [CI handback receipt](/no-mistakes/reference/cli/#no-mistakes-axi-handback), the daemon:
 
 1. Cancels the in-progress run (reason: "cancelled: superseded by new push")
 2. Waits for it to finish
 3. Starts a new run with the latest push
+
+An active run retaining a CI handback receipt refuses replacement runs.
 
 Pushes to different branches run concurrently.
 
@@ -130,13 +136,23 @@ reason about in one long-lived process than inside independent hook invocations.
 
 ## Crash recovery
 
-On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon crashed while they were active):
+An ordinary failed-CI handback parked without an active writer retains its gate, worktree, evidence and frozen repair limits during orderly daemon shutdown.
+Restart restores that source-bound reservation only when recovery checks pass; otherwise it stays active without an executor instead of failing or approving its CI findings.
+The [`axi abort` reference](/no-mistakes/reference/cli/#no-mistakes-axi-abort) owns explicit cancellation of a retained reservation when recovery cannot restore its executor.
+
+On startup, the daemon checks for runs that were left in `pending` or `running` status:
 
 - Completes legacy active rows whose persisted PR state is already `merged` or `closed`, including their CI step, before active-run recovery and parked-run planning
-- Resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
+- Resumes fully recorded parked approval gates and interrupted CI handbacks only when their worktree and step history can be validated; incomplete or ambiguous active runs fail closed
 - Rebuilds a parked run with the repository gate list pinned in `runs.gates_json` when that run started, never the current default-branch list. An absent pin on an older run means the core pipeline, while an invalid pin refuses recovery
 - Re-resolves and validates any configured repository forge profile before rebuilding the recovered run, so resumed provider checks and agents use the same repository-scoped identity model rather than persisted credentials or ambient active accounts
-- Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked. The [`protected_paths` refusal exception](/no-mistakes/reference/repo-config/#protected_paths) prevents automatic reconciliation
+- Reconciles interrupted [CI handback](/no-mistakes/reference/cli/#no-mistakes-axi-handback) candidates before the generic managed-head mismatch and stale-run handling, using the exact candidate and checkpoint recorded before managed movement.
+  Recovery rechecks the caller, managed checkout, gate lane, run and conflict round, publication generation, configured targets, live PR and published head.
+  An unaccepted candidate restores the managed checkout to the released head and retains the open reservation without changing caller commits or the published head.
+  An accepted candidate resumes fresh Review, including when acceptance committed before the validation steps were reset; it never recovers the old conflict gate as approval for that head.
+  An open reservation or accepted follow-up still awaiting its fresh Review is kept active when its evidence is unreadable, dirty, changed or ambiguous, without guessed recovery or stale-run cleanup.
+- Before resuming a parked CI gate without an open handback reservation, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked.
+  The [`protected_paths` refusal exception](/no-mistakes/reference/repo-config/#protected_paths) also prevents automatic reconciliation.
 - Preserves a run that was actively monitoring CI for an already-created PR as `ci_monitor_interrupted` rather than failing it: the PR is still open, so a restart mid-monitor is not a pipeline failure.
   That run is terminal and never automatically resumed; its stale publisher marker is cleared.
   [Explicit terminal continuation](/no-mistakes/reference/cli/#continue-validation-of-preserved-terminal-source) accepts proven source into a fresh-validation successor with cumulative repair spending, leaving the terminal predecessor immutable.
@@ -173,6 +189,6 @@ The [starting and stopping](#starting-and-stopping) section owns the active-run
 guard, the top-level `--force` override, and the separate validation-step
 containment rule.
 
-1. Cancels all active runs
+1. Stops all active run goroutines, retaining eligible CI handback reservations as described in [Crash recovery](#crash-recovery)
 2. Waits up to 30 seconds for goroutines to finish
 3. Removes the PID file and socket

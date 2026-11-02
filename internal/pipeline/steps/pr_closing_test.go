@@ -25,6 +25,8 @@ func TestPRStep_NeverInfersClosingReferenceFromIntent(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.UserIntent = "Implement issue #95"
+	shouldPublishIntent := true
+	sctx.Config.PR.PublishIntent = &shouldPublishIntent
 
 	if _, err := (&PRStep{}).Execute(sctx); err != nil {
 		t.Fatal(err)
@@ -45,6 +47,8 @@ func TestPRStep_NeutralizesClosingReferenceInPublishedIntent(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.UserIntent = "Refactor X\nFixes #12"
+	shouldPublishIntent := true
+	sctx.Config.PR.PublishIntent = &shouldPublishIntent
 
 	if _, err := (&PRStep{}).Execute(sctx); err != nil {
 		t.Fatal(err)

@@ -178,15 +178,15 @@ func TestExecutor_ClosesTheRunsSharedStateHoweverTheRunEnds(t *testing.T) {
 
 func TestRunShared_BaselineAndClose(t *testing.T) {
 	shared := &RunShared{}
-	if _, _, recorded := shared.Baseline(); recorded {
+	if _, _, _, recorded := shared.Baseline(); recorded {
 		t.Fatal("a new run reports a recorded baseline")
 	}
-	shared.RecordBaseline("abc", true)
-	if head, passed, recorded := shared.Baseline(); head != "abc" || !passed || !recorded {
+	shared.RecordBaseline("abc", "comparison", true)
+	if head, comparison, passed, recorded := shared.Baseline(); head != "abc" || comparison != "comparison" || !passed || !recorded {
 		t.Fatalf("Baseline() = %q, %v, %v", head, passed, recorded)
 	}
-	shared.RecordBaseline("def", false)
-	if head, passed, _ := shared.Baseline(); head != "def" || passed {
+	shared.RecordBaseline("def", "next-comparison", false)
+	if head, comparison, passed, _ := shared.Baseline(); head != "def" || comparison != "next-comparison" || passed {
 		t.Fatalf("Baseline() = %q, %v, want the latest record", head, passed)
 	}
 	if first, second := shared.CountPushGuardRestart(), shared.CountPushGuardRestart(); first != 1 || second != 2 {
@@ -211,8 +211,8 @@ func TestRunShared_BaselineAndClose(t *testing.T) {
 	var none *RunShared
 	none.OnClose(func() { t.Error("a nil shared state kept a closer") })
 	none.Close()
-	none.RecordBaseline("x", true)
-	if _, _, recorded := none.Baseline(); recorded {
+	none.RecordBaseline("x", "comparison", true)
+	if _, _, _, recorded := none.Baseline(); recorded {
 		t.Fatal("a nil shared state recorded a baseline")
 	}
 }

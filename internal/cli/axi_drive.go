@@ -75,12 +75,17 @@ func isAxiWaitElapsed(parent, drive context.Context, err error) bool {
 	return deadlinePassed(drive)
 }
 
-func emitAxiWaitElapsed(cmd *cobra.Command, wait time.Duration, reattach string) error {
-	return emitError(cmd, 1, fmt.Sprintf("wait of %s elapsed while driving the run", wait),
-		"This bounded hold ended; it is not a pipeline failure and does not mean the daemon is dead.",
-		"Run `no-mistakes axi status` to inspect progress",
-		fmt.Sprintf("Re-run `%s` to reattach for another %s", reattach, wait),
+func emitAxiWaitElapsed(cmd *cobra.Command, wait time.Duration, reattach string, lead ...toon.Field) error {
+	fields := append(lead,
+		toon.Field{Key: "error", Value: fmt.Sprintf("wait of %s elapsed while driving the run", wait)},
+		toon.Field{Key: "help", Value: []string{
+			"This bounded hold ended; it is not a pipeline failure and does not mean the daemon is dead.",
+			"Run `no-mistakes axi status` to inspect progress",
+			fmt.Sprintf("Re-run `%s` to reattach for another %s", reattach, wait),
+		}},
 	)
+	emitDoc(cmd, fields...)
+	return &exitError{code: 1}
 }
 
 // terminalStatus reports whether a run has reached a final state.
@@ -587,6 +592,15 @@ func activeRunInfo(ctx context.Context, env *axiEnv, branch, headSHA string) (*i
 	if err := source.callWithSlowReplyRetry(ctx, ipc.MethodGetActiveRun, activeRunLookupParams(env.repo.ID, branch), &active); err != nil {
 		return nil, err
 	}
+	if active.Run != nil && !terminalStatus(string(active.Run.Status)) {
+		handback, err := env.d.LatestCIHandback(active.Run.ID)
+		if err != nil {
+			return nil, err
+		}
+		if handback != nil && handback.AcceptedHead != nil && *handback.AcceptedHead == headSHA {
+			return active.Run, nil
+		}
+	}
 	return activeRunInfoForHead(active.Run, headSHA), nil
 }
 
@@ -715,6 +729,22 @@ func inspectAxiBranchSync(ctx context.Context, env *axiEnv) branchsync.State {
 
 func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.State {
 	state := inspectAxiBranchSync(ctx, env)
+	if state.Pipeline.Status == "pending" || state.Pipeline.Status == "running" {
+		handback, err := env.d.LatestCIHandback(state.Pipeline.RunID)
+		if err != nil || handback != nil {
+			state.State = branchsync.StatePipelineOwned
+			state.Safety = "blocked_ci_handback"
+			state.Error = "this run retains its CI handback and budget history; inspect no-mistakes axi status for its exact receipt-bound continuation"
+			if err != nil {
+				state.Error = err.Error()
+			}
+			state.NextAction = &branchsync.NextAction{Code: "inspect_ci_handback", Command: "no-mistakes axi status"}
+			if err == nil {
+				state.NextAction = &branchsync.NextAction{Code: "resume_ci_handback", Command: "no-mistakes axi handback --resume --receipt " + handback.ID}
+			}
+			return &state
+		}
+	}
 	switch state.State {
 	case branchsync.StatePipelineOwned:
 		// The ownership block exists to keep a fresh push from discarding

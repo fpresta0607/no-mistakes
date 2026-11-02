@@ -95,6 +95,12 @@ func handleFakeCLI(mode string) {
 		} else {
 			fakeCIGHHandler(args)
 		}
+	case "ci-handback":
+		if strings.TrimSuffix(filepath.Base(os.Args[0]), filepath.Ext(os.Args[0])) == "git" {
+			fakeCIHandbackGit(args)
+		} else {
+			fakeCIGHHandler(args)
+		}
 	default:
 		os.Exit(1)
 	}

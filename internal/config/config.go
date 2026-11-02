@@ -883,7 +883,7 @@ type AzureDevOpsProvider struct {
 type PR struct {
 	BaseBranch string
 	Template   string
-	// Nil preserves the historical default: publish the extracted intent.
+	// Nil keeps validation intent private; publication requires explicit true.
 	PublishIntent *bool
 	// Appendix is full, collapsed, or minimal. Empty preserves full.
 	Appendix    string
@@ -1330,10 +1330,11 @@ test_agent_timeout: "30m"
 # (commands.test, machine-local additional test checks, and a base attribution
 # re-run), so one program can make test runs on this machine take turns. The
 # words are started with no shell, followed by exactly the shell call the
-# command would have been started with. A word may name {repo}, {branch},
-# {run} or {run_short}. With refusal_prefix set, an exit code of 125 or 126
-# whose last output line starts with it means the wrapper never produced a
-# test result: the step parks for a decision instead of reading a failed test.
+# command would have been started with. Available run facts are documented at:
+# https://kunchenguid.github.io/no-mistakes/reference/global-config/#test_command_wrapper
+# With refusal_prefix set, an exit code of 125 or 126 whose last output line
+# starts with it means the wrapper never produced a test result: the step
+# parks for a decision instead of reading a failed test.
 # test_command_wrapper:
 #   command: ["cfo", "gate", "turn", "--as", "{repo} {branch}, run {run_short}", "--"]
 #   refusal_prefix: "cfo gate turn: "

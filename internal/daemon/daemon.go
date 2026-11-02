@@ -446,11 +446,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	}
 
 	parkedStarted := time.Now()
-	plans := mgr.recoverableParkedRuns(context.Background())
-	preserved := make(map[string]struct{}, len(plans))
-	for _, plan := range plans {
-		preserved[plan.run.ID] = struct{}{}
-	}
+	plans, preserved := mgr.recoverableParkedRuns(context.Background())
 	active, err := d.GetActiveRuns()
 	if err != nil {
 		slog.Error("failed to inspect pending terminal successors", "error", err)
@@ -1612,6 +1608,17 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			return nil, err
 		}
 		return &ipc.PushReceivedResult{RunID: runID}, nil
+	})
+
+	srv.Handle(ipc.MethodCIHandback, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var request ipc.CIHandbackParams
+		if err := json.Unmarshal(params, &request); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		return mgr.HandleCIHandback(ctx, request)
 	})
 
 	srv.Handle(ipc.MethodRespond, func(ctx context.Context, params json.RawMessage) (interface{}, error) {

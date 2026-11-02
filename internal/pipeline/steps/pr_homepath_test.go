@@ -385,6 +385,8 @@ func buildHomePathLeakPRContentWithLimit(t *testing.T, tc homePathLeakCase, body
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = tc.userIntent
+	yes := true
+	sctx.Config.PR.PublishIntent = &yes
 	if tc.evidenceDir != "" {
 		sctx.EvidenceDir = tc.evidenceDir
 	}
