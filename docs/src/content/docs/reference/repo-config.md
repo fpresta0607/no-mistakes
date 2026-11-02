@@ -68,7 +68,7 @@ disable_project_settings: true
 pr:
   base_branch: develop
   # template: .github/pull_request_template.md
-  # publish_intent: false
+  # publish_intent: true # opt-in; defaults to false (intent stays private)
   # appendix: collapsed # full | collapsed | minimal
   # title_format: "{{.Branch}}: {{.Title}}"
 
