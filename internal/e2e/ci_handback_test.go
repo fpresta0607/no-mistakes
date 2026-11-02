@@ -353,7 +353,11 @@ func TestAxiOrdinaryCIHandbackRevalidatesAuthoredCorrection(t *testing.T) {
 	}
 	writeState := func(conclusion string) {
 		t.Helper()
-		state["checks"] = []map[string]any{{"__typename": "CheckRun", "databaseId": 123, "name": "fixture tests", "status": "COMPLETED", "conclusion": conclusion, "detailsUrl": "https://github.com/example/ordinary-handback/actions/runs/10/job/123", "checkSuite": map[string]any{"app": map[string]string{"slug": "github-actions"}}}}
+		status := "COMPLETED"
+		if conclusion == "" {
+			status = "IN_PROGRESS"
+		}
+		state["checks"] = []map[string]any{{"__typename": "CheckRun", "databaseId": 123, "name": "fixture tests", "status": status, "conclusion": conclusion, "detailsUrl": "https://github.com/example/ordinary-handback/actions/runs/10/job/123", "checkSuite": map[string]any{"app": map[string]string{"slug": "github-actions"}}}}
 		data, err := json.Marshal(state)
 		if err != nil {
 			t.Fatal(err)
@@ -489,7 +493,7 @@ func TestAxiOrdinaryCIHandbackRevalidatesAuthoredCorrection(t *testing.T) {
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	writeState("SUCCESS")
+	writeState("")
 	if out, err := h.RunInDir(operator, "axi", "handback", "--resume", "--receipt", "wrong-receipt", "--expect", bindingPath); err == nil {
 		t.Fatalf("resume consumed a different receipt: %s", out)
 	}
@@ -497,6 +501,7 @@ func TestAxiOrdinaryCIHandbackRevalidatesAuthoredCorrection(t *testing.T) {
 		h.dumpDebugState()
 		t.Fatalf("bounded submission lost its accepted checkpoint: %v\n%s", err, out)
 	}
+	writeState("SUCCESS")
 	final := h.RunInfo(parked.ID)
 	deadline := time.Now().Add(3 * time.Minute)
 	for !final.CIReady && final.Status == types.RunRunning && time.Now().Before(deadline) {
