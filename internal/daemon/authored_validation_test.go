@@ -171,6 +171,144 @@ func TestAuthoredPendingAdmissionStaysIdleAcrossStartupAndCanBeCancelled(t *test
 	}
 }
 
+func TestAuthoredAdmissionContinuesAnUnpublishedCancelledChild(t *testing.T) {
+	var calls atomic.Int32
+	manager, database, repo, request, gate := authoredAdmissionFixture(t, func() []pipeline.Step {
+		return []pipeline.Step{&authoredFixtureStep{name: types.StepReview, calls: &calls}}
+	})
+	gateHead := gitOutput(t, gate, "rev-parse", "refs/heads/feature")
+	if err := database.UpdateRunHeadSHA(request.Request.PredecessorID, request.Request.CandidateSHA); err != nil {
+		t.Fatal(err)
+	}
+	step, err := database.InsertStepResult(request.Request.PredecessorID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, selected := `{"findings":[{"id":"r1","description":"repair"}]}`, `["r1"]`
+	for index, source := range []string{db.RoundSelectionSourceAutoFix, db.RoundSelectionSourceUser} {
+		round, err := database.InsertStepRound(step.ID, index*2+1, "initial", &findings, nil, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := database.SetStepRoundSelection(round.ID, &selected, source); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.InsertStepRound(step.ID, index*2+2, "auto_fix", nil, nil, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "authored.txt"), []byte("first new authored candidate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "commit", "-am", "author next candidate")
+	request.Request.CandidateSHA = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	request.Request.CandidateTree = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD^{tree}")
+	rootSnapshot, err := database.ReadTerminalSnapshot(request.Request.PredecessorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Request.SnapshotDigest = rootSnapshot.Digest()
+	proof, err := request.Request.LaunchAssertion.Verify(request.Request.LaunchAssertion.TrustedSHA, request.Request.LaunchAssertion.Profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, _, err := database.AcceptValidationAdmission(context.Background(), db.ValidationAdmission{Request: request.Request, Snapshot: *rootSnapshot, AssertionProof: proof, WorktreeRoot: filepath.Dir(manager.paths.WorktreeDir(repo.ID, "pending")), Gates: "[]", Steps: []types.StepName{types.StepReview}, Operator: "fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.HandleCancel(event.ChildID); err != nil {
+		t.Fatal(err)
+	}
+	childSnapshot, err := database.ReadTerminalSnapshot(event.ChildID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if childSnapshot.Run.Status != types.RunCancelled || childSnapshot.Run.LastPushedSHA != nil || childSnapshot.Run.HeadSHA == gateHead {
+		t.Fatal("fixture did not leave an unpublished cancelled child")
+	}
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "authored.txt"), []byte("second new authored candidate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "commit", "-am", "author descendant candidate")
+	request.Request.PredecessorID, request.Request.SnapshotDigest, request.Request.LaunchNonce = event.ChildID, childSnapshot.Digest(), *childSnapshot.Run.LaunchNonce
+	request.Request.CandidateSHA = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	request.Request.CandidateTree = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD^{tree}")
+
+	result, err := manager.validateAuthored(context.Background(), request, os.Getpid())
+
+	if err != nil || !result.Started {
+		t.Fatalf("unchanged historical gate rejected an unpublished predecessor: %+v %v", result, err)
+	}
+	child := waitForRunTerminalState(t, database, result.Receipt.RunID)
+	if child.Status != types.RunCompleted || calls.Load() != 1 {
+		t.Fatalf("descendant was not freshly validated: %+v calls=%d", child, calls.Load())
+	}
+	spending := result.Family.Spending[types.StepReview]
+	if spending.Automatic != 1 || spending.Manual != 1 || spending.Remaining != 0 || result.Family.HasChildRepairs || result.Family.PolicyOrigin != "controller_assertion" || result.Family.HistoricalSourceCompleteness != "unknown" {
+		t.Fatalf("descendant renewed spending or provenance: %+v", result.Family)
+	}
+	for _, before := range []*db.TerminalSnapshot{rootSnapshot, childSnapshot} {
+		after, err := database.ReadTerminalSnapshot(before.Run.ID)
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatalf("immutable predecessor changed: %v", err)
+		}
+	}
+	if gitOutput(t, gate, "rev-parse", "refs/heads/feature") != gateHead || gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD") != request.Request.CandidateSHA {
+		t.Fatal("continuation overwrote gate or author source")
+	}
+}
+
+func TestAuthoredAdmissionAcceptsTheSubmittedHeadAfterUnpublishedPredecessorChanges(t *testing.T) {
+	var calls atomic.Int32
+	manager, database, repo, request, gate := authoredAdmissionFixture(t, func() []pipeline.Step {
+		return []pipeline.Step{&authoredFixtureStep{name: types.StepReview, calls: &calls}}
+	})
+	gateHead := gitOutput(t, gate, "rev-parse", "refs/heads/feature")
+	if err := database.UpdateRunHeadSHA(request.Request.PredecessorID, request.Request.CandidateSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "authored.txt"), []byte("authored after unpublished repair\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "commit", "-am", "author fresh candidate")
+	request.Request.CandidateSHA = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	request.Request.CandidateTree = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD^{tree}")
+	snapshot, err := database.ReadTerminalSnapshot(request.Request.PredecessorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Request.SnapshotDigest = snapshot.Digest()
+
+	result, err := manager.validateAuthored(context.Background(), request, os.Getpid())
+
+	if err != nil || !result.Started {
+		t.Fatalf("ledger-bound submitted gate head was rejected: %+v %v", result, err)
+	}
+	child := waitForRunTerminalState(t, database, result.Receipt.RunID)
+	if child.Status != types.RunCompleted || gitOutput(t, gate, "rev-parse", "refs/heads/feature") != gateHead {
+		t.Fatal("validation failed or moved the unchanged gate")
+	}
+}
+
+func TestAuthoredAdmissionRefusesGateMovementDuringAdmission(t *testing.T) {
+	var gate, candidate string
+	manager, database, repo, request, gateDir := authoredAdmissionFixture(t, func() []pipeline.Step {
+		gitCmd(t, gate, "update-ref", "refs/heads/feature", candidate)
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+	})
+	gate, candidate = gateDir, request.Request.CandidateSHA
+
+	_, err := manager.validateAuthored(context.Background(), request, os.Getpid())
+
+	if err == nil || !strings.Contains(err.Error(), "gate branch changed during authored admission") {
+		t.Fatalf("gate race was accepted: %v", err)
+	}
+	runs, err := database.GetRunsByRepo(repo.ID)
+	if err != nil || len(runs) != 1 || gitOutput(t, gate, "rev-parse", "refs/heads/feature") != candidate {
+		t.Fatalf("gate race rewrote history or discarded its owner's head: %+v %v", runs, err)
+	}
+}
+
 func (step *authoredFixtureStep) Name() types.StepName { return step.name }
 func (step *authoredFixtureStep) Execute(*pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	step.calls.Add(1)
@@ -260,7 +398,7 @@ func TestAuthoredAdmissionSchedulesEveryStageFreshWithoutMovingSourceOrPredecess
 }
 
 func TestAuthoredAdmissionRefusesSourceAndLaunchMismatchesWithoutMutation(t *testing.T) {
-	for _, change := range []string{"dirty", "untracked hidden by config", "wrong tree", "wrong branch", "wrong repository", "wrong trusted repository", "stale snapshot", "wrong generation", "wrong launch", "unauthenticated"} {
+	for _, change := range []string{"dirty", "untracked hidden by config", "wrong tree", "wrong branch", "wrong repository", "wrong trusted repository", "unrelated gate head", "stale snapshot", "wrong generation", "wrong launch", "unauthenticated"} {
 		t.Run(change, func(t *testing.T) {
 			manager, database, repo, request, gate := authoredAdmissionFixture(t, nil)
 			operator := os.Getpid()
@@ -282,6 +420,9 @@ func TestAuthoredAdmissionRefusesSourceAndLaunchMismatchesWithoutMutation(t *tes
 				request.Request.RepoID = "other"
 			case "wrong trusted repository":
 				gitCmd(t, gate, "remote", "set-url", "origin", "https://example.invalid/wrong.git")
+			case "unrelated gate head":
+				gitCmd(t, gate, "fetch", "--no-tags", repo.WorkingPath, request.Request.CandidateSHA)
+				gitCmd(t, gate, "update-ref", "refs/heads/feature", request.Request.CandidateSHA)
 			case "stale snapshot":
 				request.Request.SnapshotDigest = strings.Repeat("b", 64)
 			case "wrong generation":

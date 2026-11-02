@@ -40,6 +40,17 @@ func readValidationFamily(tx *sql.Tx, runID string) (*authoredvalidation.Family,
 	snapshots := []TerminalSnapshot{*current}
 	seen := map[string]bool{runID: true}
 	for event != nil {
+		child := snapshots[len(snapshots)-1]
+		if child.Run.HeadSHA != event.Request.CandidateSHA {
+			family.HasChildRepairs = true
+		}
+		for _, rounds := range child.Rounds {
+			for _, round := range rounds {
+				if round.StartingHeadSHA != nil && *round.StartingHeadSHA != event.Request.CandidateSHA || round.ReviewedHeadSHA != nil && *round.ReviewedHeadSHA != event.Request.CandidateSHA {
+					family.HasChildRepairs = true
+				}
+			}
+		}
 		parentID := event.Snapshot.Run.ID
 		if seen[parentID] {
 			return nil, fmt.Errorf("validation predecessor cycle")

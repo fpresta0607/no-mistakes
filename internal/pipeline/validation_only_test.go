@@ -14,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/authoredvalidation"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -23,6 +24,20 @@ func validationOnlyFixture(t *testing.T) (*db.DB, *paths.Paths, *db.Run, *db.Rep
 	t.Helper()
 	database, root, existing, repo := setupTest(t)
 	if err := database.UpdateRunStatus(existing.ID, types.RunCancelled); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	initGitRepo(t, workDir)
+	head, err := git.HeadSHA(context.Background(), workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := git.Run(context.Background(), workDir, "rev-parse", "HEAD^{tree}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err = database.InsertRepo(workDir, "https://github.com/test/repo", "main")
+	if err != nil {
 		t.Fatal(err)
 	}
 	selection := agentcfg.Selection{Harness: types.AgentCodex, Model: "fixture", Effort: agentcfg.EffortXHigh, ServiceTier: "default"}
@@ -44,7 +59,7 @@ func validationOnlyFixture(t *testing.T) (*db.DB, *paths.Paths, *db.Run, *db.Rep
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := authoredvalidation.Request{PredecessorID: parent.ID, SnapshotDigest: snapshot.Digest(), RepoID: repo.ID, Branch: "feature", CallerDir: t.TempDir(), CandidateSHA: strings.Repeat("d", 40), CandidateTree: strings.Repeat("e", 40), LaunchNonce: "original", ValidationGeneration: "generation", IntentDigest: digest,
+	request := authoredvalidation.Request{PredecessorID: parent.ID, SnapshotDigest: snapshot.Digest(), RepoID: repo.ID, Branch: "feature", CallerDir: workDir, CandidateSHA: head, CandidateTree: tree, LaunchNonce: "original", ValidationGeneration: "generation", IntentDigest: digest,
 		ControllerPolicy: authoredvalidation.ControllerPolicy{SHA256: strings.Repeat("f", 64), Class: "ordinary", ReviewCycles: 2}, LaunchAssertion: assertion, HistoricalSourceCompleteness: "unknown", Reason: "Validate authored source"}
 	event, _, err := database.AcceptValidationAdmission(context.Background(), db.ValidationAdmission{Request: request, Snapshot: *snapshot, AssertionProof: proof, WorktreeRoot: filepath.Join(t.TempDir(), "worktrees"), Operator: "fixture"})
 	if err != nil {
@@ -74,7 +89,7 @@ func TestValidationOnlyNeverDispatchesAutomaticOrManualRepairs(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			done := make(chan error, 1)
-			go func() { done <- executor.Execute(ctx, child, repo, "") }()
+			go func() { done <- executor.Execute(ctx, child, repo, repo.WorkingPath) }()
 			isParked := false
 			for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
 				executor.mu.Lock()

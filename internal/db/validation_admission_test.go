@@ -118,6 +118,45 @@ func TestValidationAdmissionPreservesThePredecessorAndStartsWithNoCertification(
 	}
 }
 
+func TestValidationFamilyDetectsSourceChangesInNormalRounds(t *testing.T) {
+	for _, change := range []string{"recorded head", "starting head", "reviewed head"} {
+		t.Run(change, func(t *testing.T) {
+			database, proposal := admissionFixture(t)
+			event, _, err := database.AcceptValidationAdmission(context.Background(), proposal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changedHead := strings.Repeat("9", 40)
+			if change == "recorded head" {
+				err = database.UpdateRunHeadSHA(event.ChildID, changedHead)
+			} else {
+				step, stepErr := database.InsertStepResult(event.ChildID, types.StepDocument)
+				if stepErr != nil {
+					t.Fatal(stepErr)
+				}
+				round, roundErr := database.InsertStepRound(step.ID, 1, "initial", nil, nil, 1)
+				if roundErr != nil {
+					t.Fatal(roundErr)
+				}
+				column := "starting_head_sha"
+				if change == "reviewed head" {
+					column = "reviewed_head_sha"
+				}
+				_, err = database.sql.Exec(`UPDATE step_rounds SET `+column+` = ? WHERE id = ?`, changedHead, round.ID)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			family, err := database.ValidationFamily(event.ChildID)
+
+			if err != nil || !family.HasChildRepairs || family.Spending[types.StepReview].Remaining != 0 {
+				t.Fatalf("normal-round source change escaped zero-repair authority: %+v %v", family, err)
+			}
+		})
+	}
+}
+
 func TestValidationAdmissionRejectsChangedHistoryAndCompetingRunsAtomically(t *testing.T) {
 	for _, test := range []string{"history", "active", "newer", "historical candidate"} {
 		t.Run(test, func(t *testing.T) {

@@ -28,6 +28,10 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, err
 	}
 	ctx := sctx.Ctx
+	isValidationOnly, err := sctx.IsValidationOnly()
+	if err != nil {
+		return nil, err
+	}
 	newHeadSHA := ""
 	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
 		return nil, err
@@ -42,7 +46,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 
 	// Run format command if configured (before committing, so changes are formatted).
-	if fmtCmd := sctx.Config.Commands.Format; fmtCmd != "" {
+	if fmtCmd := sctx.Config.Commands.Format; fmtCmd != "" && !isValidationOnly {
 		if err := ensurePrepared(sctx, s.Name()); err != nil {
 			return nil, fmt.Errorf("prepare formatter dependencies: %w", err)
 		}
@@ -54,6 +58,9 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 			sctx.Log(fmt.Sprintf("warning: format command exited with code %d: %s", exitCode, output))
 		}
 	}
+	if isValidationOnly && sctx.Config.Commands.Format != "" {
+		sctx.Log("validation-only: formatter repairs are disabled; lint findings report formatting issues")
+	}
 
 	// Commit any uncommitted changes from pipeline agents or the formatter. Test
 	// evidence is deliberately not among them: it is collected outside the
@@ -64,6 +71,9 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, fmt.Errorf("check agent changes: %w", err)
 	}
 	if strings.TrimSpace(status) != "" {
+		if isValidationOnly {
+			return nil, fmt.Errorf("validation-only authored admission cannot commit leftover source changes")
+		}
 		sctx.Log("committing agent changes...")
 		if err := stagePipelineChanges(sctx, before); err != nil {
 			return nil, fmt.Errorf("stage agent changes: %w", err)
@@ -153,6 +163,16 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 // revalidation); pass this run's current steps (sctx.DB.GetStepsByRun) for
 // the ordinary Push step.
 func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate string, attestationSteps []*db.StepResult) error {
+	if err := sctx.AssertValidationSource(); err != nil {
+		return err
+	}
+	isValidationOnly, err := sctx.IsValidationOnly()
+	if err != nil {
+		return err
+	}
+	if isValidationOnly && headBeingPushed != sctx.Run.HeadSHA {
+		return fmt.Errorf("validation-only publication must use the exact authored candidate")
+	}
 	ctx := sctx.Ctx
 	handback, err := sctx.DB.LatestCIHandback(sctx.Run.ID)
 	if err != nil {
@@ -222,6 +242,9 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	// This protocol has single-publisher scope: the daemon's
 	// startRunWithIntentSourceLocked enforces one active run per repo branch, so
 	// coordination with independent authorized publishers is outside its scope.
+	if err := sctx.AssertValidationSource(); err != nil {
+		return err
+	}
 	if err := attestHeadBeforePush(sctx, headBeingPushed, attestationSteps); err != nil {
 		return err
 	}

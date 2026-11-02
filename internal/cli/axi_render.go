@@ -187,7 +187,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 	return rv
 }
 
-func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
+func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) (runView, error) {
 	rv := runView{
 		PiProfile:          r.PiProfile,
 		VerificationPlan:   r.VerificationPlan,
@@ -196,6 +196,13 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 		Status:             string(r.Status),
 		HeadSHA:            r.HeadSHA,
 		AwaitingAgentSince: r.AwaitingAgentSince,
+	}
+	if database != nil {
+		family, err := database.ValidationFamily(r.ID)
+		if err != nil {
+			return runView{}, fmt.Errorf("read validation family: %w", err)
+		}
+		rv.AuthoredValidation = family
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
@@ -241,7 +248,7 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 		}
 		rv.Steps = append(rv.Steps, sv)
 	}
-	return rv
+	return rv, nil
 }
 
 // awaitingStep returns the step currently blocking on a human decision, if any.
@@ -554,7 +561,16 @@ func (rv runView) automaticSkips() []automaticSkipRow {
 // table, and the next-step commands an agent can run to clear it.
 func gateFields(gate stepView) []toon.Field {
 	if gate.ValidationOnly {
-		help := []string{"This authored validation has zero automatic/manual repair authority. Required stages cannot be skipped.", "Run `no-mistakes axi respond --action approve` only to explicitly accept the reported condition, or `no-mistakes axi abort` to stop this child; a later authored candidate must retain its predecessor lineage.", fmt.Sprintf("Run `%s` to inspect the complete findings", axiLogsFullCommand(gate.Name, ""))}
+		help := []string{"This authored validation has zero automatic/manual repair authority. Required stages cannot be skipped."}
+		switch {
+		case pipeline.HasProtectedPathRefusal(gate.FindingsJSON):
+			help = append(help, "Approve is rejected: protected-path edits require the operator's authorized workflow. Run `no-mistakes axi abort` to stop this child.")
+		case pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON):
+			help = append(help, "Approve is rejected: the worktree holds unvalidated work. Run `no-mistakes axi abort` to stop this child.")
+		default:
+			help = append(help, "Run `no-mistakes axi respond --action approve` only to explicitly accept the reported condition, or `no-mistakes axi abort` to stop this child; a later authored candidate must retain its predecessor lineage.")
+		}
+		help = append(help, fmt.Sprintf("Run `%s` to inspect the complete findings", axiLogsFullCommand(gate.Name, "")))
 		if pipeline.HasUnansweredReviewQuestion(gate.FindingsJSON) {
 			help = append([]string{"Answer each open review question with `no-mistakes axi answer --question <id> --answer \"...\"`; an answer grants no repair authority."}, help...)
 		}

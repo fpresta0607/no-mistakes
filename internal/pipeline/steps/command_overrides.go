@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"path/filepath"
@@ -43,11 +44,22 @@ func declareStepCommandOverrides(sctx *pipeline.StepContext, name string) {
 }
 
 func executeRepositoryCommand(sctx *pipeline.StepContext, name, command string) (string, int, error) {
+	if err := sctx.AssertValidationSource(); err != nil {
+		return "", 0, err
+	}
+	isValidationOnly, err := sctx.IsValidationOnly()
+	if err != nil {
+		return "", 0, err
+	}
+	if isValidationOnly && name == "format" {
+		return "", 0, fmt.Errorf("validation-only authored admission cannot invoke a formatter repair")
+	}
 	words, err := commandWrapperWords(sctx, name)
 	if err != nil {
 		return "", 0, err
 	}
-	return runShellCommandBehind(sctx.Ctx, sctx.WorkDir, stepEnvironment(sctx), command, sctx.Config.CommandOverrides[name].Nice, words)
+	output, exitCode, err := runShellCommandBehind(sctx.Ctx, sctx.WorkDir, stepEnvironment(sctx), command, sctx.Config.CommandOverrides[name].Nice, words)
+	return output, exitCode, errors.Join(err, sctx.AssertValidationSource())
 }
 
 // commandWrapperWords returns the words of the machine-local wrapper that
@@ -211,6 +223,9 @@ func runConfiguredChecks(sctx *pipeline.StepContext, name, command string) (stri
 		}
 		out, code, err := executeRepositoryCommand(sctx, name, checks[i].Command)
 		output.WriteString(out)
+		if sourceErr := sctx.AssertValidationSource(); sourceErr != nil {
+			return output.String(), checks[:i], sourceErr
+		}
 		if reason := commandWrapperStartFailure(sctx, name, out, code, err); reason != "" {
 			// A wrapper that cannot be started gave this check no turn. That is
 			// the machine's state, not the run's, so it parks like a refusal

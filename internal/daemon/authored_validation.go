@@ -129,8 +129,33 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil {
 			return "", fmt.Errorf("read existing gate branch: %w", err)
 		}
-		if gateHead != snapshot.Run.HeadSHA && (snapshot.Run.LastPushedSHA == nil || gateHead != *snapshot.Run.LastPushedSHA) {
-			return "", fmt.Errorf("gate branch moved outside the terminal predecessor; reconcile its owner before admission")
+		if _, err := m.db.ValidationFamily(snapshot.Run.ID); err != nil {
+			return "", err
+		}
+		isBoundGateHead := false
+		for historical := snapshot; historical != nil; {
+			heads := []*string{&historical.Run.HeadSHA, historical.Run.SubmittedHeadSHA, historical.Run.LastPushedSHA}
+			for _, rounds := range historical.Rounds {
+				for _, round := range rounds {
+					heads = append(heads, round.StartingHeadSHA, round.ReviewedHeadSHA)
+				}
+			}
+			for _, head := range heads {
+				if head != nil && gateHead == *head {
+					isBoundGateHead = true
+				}
+			}
+			predecessor, err := m.db.GetValidationPredecessor(historical.Run.ID)
+			if err != nil {
+				return "", err
+			}
+			historical = nil
+			if predecessor != nil {
+				historical = &predecessor.Snapshot
+			}
+		}
+		if !isBoundGateHead {
+			return "", fmt.Errorf("gate branch moved outside the immutable predecessor lineage; reconcile its owner before admission")
 		}
 		// Import only the exact object, without changing a branch, tracking ref or FETCH_HEAD.
 		if _, err := git.Run(ctx, gateDir, "fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", request.CallerDir, request.CandidateSHA); err != nil {

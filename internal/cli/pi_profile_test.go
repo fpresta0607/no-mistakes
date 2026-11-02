@@ -83,7 +83,11 @@ func TestPiProfileHelpStatusAndUsageEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, view := range []runView{runViewFromDB(run, nil, d), runViewFromIPC(&ipc.RunInfo{ID: run.ID, PiProfile: pin})} {
+	databaseView, err := runViewFromDB(run, nil, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, view := range []runView{databaseView, runViewFromIPC(&ipc.RunInfo{ID: run.ID, PiProfile: pin})} {
 		var out bytes.Buffer
 		render := &cobra.Command{}
 		render.SetOut(&out)

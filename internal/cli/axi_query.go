@@ -73,12 +73,10 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 	if err != nil {
 		return emitError(cmd, 1, fmt.Sprintf("load steps: %v", err))
 	}
-	rv := runViewFromDB(run, steps, env.d)
-	family, err := env.d.ValidationFamily(run.ID)
+	rv, err := runViewFromDB(run, steps, env.d)
 	if err != nil {
-		return emitError(cmd, 1, fmt.Sprintf("read validation family: %v", err))
+		return emitError(cmd, 1, err.Error())
 	}
-	rv.AuthoredValidation = family
 	annotateRunView(env, &rv)
 	var fields []toon.Field
 	// A run reached by an explicit --run may belong to another branch. Say so

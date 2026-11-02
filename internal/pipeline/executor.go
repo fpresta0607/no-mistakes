@@ -1287,7 +1287,13 @@ rounds:
 		}
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
+		if err := sctx.AssertValidationSource(); err != nil {
+			return false, "", err
+		}
 		outcome, err := step.Execute(sctx)
+		if sourceErr := sctx.AssertValidationSource(); sourceErr != nil {
+			err = errors.Join(err, sourceErr)
+		}
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
