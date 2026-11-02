@@ -7,12 +7,14 @@ import (
 	"fmt"
 )
 
+// TerminalSnapshot owns what an immutable predecessor binding covers: the run's
+// validation record, gates, steps and rounds, with the repository by ID only.
 type TerminalSnapshot struct {
-	Run    Run
-	Repo   Repo
-	Gates  string
-	Steps  []StepResult
-	Rounds [][]StepRound
+	Run             Run
+	Gates           string
+	Steps           []StepResult
+	Rounds          [][]StepRound
+	IsAuthoredChild bool
 }
 
 func (snapshot TerminalSnapshot) Digest() string {
@@ -34,8 +36,8 @@ func readTerminalSnapshot(tx *sql.Tx, runID string) (*TerminalSnapshot, error) {
 	if err := scanRun(tx.QueryRow(`SELECT `+runColumns+` FROM runs WHERE id = ?`, runID), &snapshot.Run); err != nil {
 		return nil, err
 	}
-	repo := &snapshot.Repo
-	if err := tx.QueryRow(`SELECT id, working_path, upstream_url, COALESCE(fork_url, ''), default_branch, created_at FROM repos WHERE id = ?`, snapshot.Run.RepoID).Scan(&repo.ID, &repo.WorkingPath, &repo.UpstreamURL, &repo.ForkURL, &repo.DefaultBranch, &repo.CreatedAt); err != nil {
+	snapshot.Run.CustodyReturnedAt, snapshot.Run.UpdatedAt = nil, 0
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM validation_admissions WHERE child_id = ?)`, runID).Scan(&snapshot.IsAuthoredChild); err != nil {
 		return nil, err
 	}
 	var gates sql.NullString

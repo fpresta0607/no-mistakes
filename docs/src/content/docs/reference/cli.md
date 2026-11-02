@@ -346,7 +346,8 @@ A daemon that proves assertions but cannot apply them refuses the unknown `apply
 
 ## no-mistakes axi validate-authored
 
-Validate one explicitly declared, clean authored commit and tree linked to an immutable terminal predecessor that did not complete: failed, cancelled, or `ci_monitor_interrupted` (which is never resumed).
+Validate one explicitly declared, clean authored commit and tree linked to an immutable terminal predecessor: a failed, cancelled, or `ci_monitor_interrupted` run (which is never resumed), or a completed authored child.
+A branch with authored lineage can therefore validate a follow-up change after its child completes, while a completed run that was not itself admitted through `validate-authored` is refused as a predecessor.
 This is a new validation-only child: the predecessor stays terminal, and every core stage and current trusted custom gate starts fresh without an inherited pass, review approval, CI-ready state, exception or agent session.
 All automatic and manual repair authority is zero, including stages the predecessor never reached.
 Fix selections, skips, CI handbacks, ordinary fresh launches that would drop the lineage, and repair dispatch after restart are refused.
@@ -359,7 +360,7 @@ The input is one operator-owned UTF-8 JSON object, at most 64 KiB, with these fi
 
 | Fields | Required binding |
 | --- | --- |
-| `predecessor_id`, `snapshot_digest`, `repo_id`, `branch` | The terminal predecessor and its complete native snapshot; `axi status` reports `terminal_snapshot_digest` and `repository_id` |
+| `predecessor_id`, `snapshot_digest`, `repo_id`, `branch` | The terminal predecessor and its native validation history (run record, gates, steps and rounds, with the repository by ID only); `axi status` reports `terminal_snapshot_digest` and `repository_id` |
 | `caller_dir`, `candidate_sha`, `candidate_tree` | The invoking canonical repository root and full lowercase commit/tree identities; staged, tracked, untracked and submodule changes must all be absent |
 | `launch_nonce`, `validation_generation`, `intent_digest` | The predecessor's preserved launch receipt; the child receives its own fresh nonce and proof |
 | `published_head_sha`, `push_generation`, `push_target_fingerprint` | The predecessor's exact publication binding, verified against the live target and open PR; use `""`, `0`, `""` for an unpublished predecessor |
@@ -372,6 +373,9 @@ The daemon checks the authenticated caller, registered Git identity, exact clean
 The declared candidate must differ from the predecessor's submitted, terminal and published heads; this operation does not replace ordinary validation of those historical targets.
 It imports the exact candidate object without overwriting an author branch or the gate branch.
 Historical findings, failed checks, automatic and manual spending, and the unknown historical source completeness stay attached to the lineage.
+Cumulative spending counts the predecessor and its authored descendants from the native round ledger.
+Runs on the branch before the predecessor are outside that ledger; they appear only through the controller policy assertion and the unknown historical source completeness.
+Later changes to the repository's registered path, URLs or default branch, and custody-return bookkeeping on the predecessor, do not change its validation history; the live publication target is verified again at admission.
 The output and subsequent status include `authored_validation`, cumulative per-stage spending, zero remaining repair authority and `policy_origin: controller_assertion`.
 This command grants no authority to install the candidate or operate another run.
 
@@ -379,6 +383,8 @@ An exact repeated request returns the same admission and child.
 After a crash, an untouched pending acceptance remains idle until the exact request is explicitly replayed and revalidated.
 A progressed child is observed or recovered through its existing execution; a cancelled child is never restarted by replay.
 Later authored descendants must preserve the same controller policy assertion, historical uncertainty and zero repair authority.
+Continuing from a published predecessor requires a GitHub repository with the predecessor's PR open.
+A child that publishes but then cannot run its PR or CI stage fails and cannot itself be continued, so confirm forge access before admission.
 An accepted pending child can be cancelled with `axi abort`.
 Ordinary explicit gate acknowledgements and review-question answers retain their existing meaning; they do not create repair capacity or turn an approved failure into a clean pass.
 

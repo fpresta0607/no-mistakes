@@ -248,3 +248,131 @@ func TestValidationAdmissionReplayRefusesDriftWithoutCreatingAReplacement(t *tes
 		t.Fatalf("replay altered the original child: %+v %v", child, err)
 	}
 }
+
+func TestValidationBindingCoversValidationHistoryButNotRegistrationOrCustody(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		isCovered bool
+		mutate    func(database *DB, proposal ValidationAdmission, childID string) error
+	}{
+		{name: "repository URLs", mutate: func(database *DB, proposal ValidationAdmission, _ string) error {
+			_, err := database.ReplaceRepoURLs(proposal.Request.RepoID, "https://example.test/owner/renamed.git", "https://example.test/fork/renamed.git")
+			return err
+		}},
+		{name: "working path", mutate: func(database *DB, proposal ValidationAdmission, _ string) error {
+			_, err := database.UpdateRepoWorkingPath(proposal.Request.RepoID, filepath.Join(proposal.WorktreeRoot, "moved-checkout"))
+			return err
+		}},
+		{name: "default branch", mutate: func(database *DB, proposal ValidationAdmission, _ string) error {
+			_, err := database.UpdateRepoMetadata(proposal.Request.RepoID, "https://example.test/owner/repository.git", "trunk")
+			return err
+		}},
+		{name: "custody returned", mutate: func(database *DB, proposal ValidationAdmission, childID string) error {
+			return database.SetRunsCustodyReturned([]string{proposal.Request.PredecessorID, childID})
+		}},
+		{name: "step round", isCovered: true, mutate: func(database *DB, proposal ValidationAdmission, _ string) error {
+			_, err := database.sql.Exec(`UPDATE step_rounds SET fix_summary = 'rewritten' WHERE step_result_id IN (SELECT id FROM step_results WHERE run_id = ?)`, proposal.Request.PredecessorID)
+			return err
+		}},
+		{name: "run status", isCovered: true, mutate: func(database *DB, proposal ValidationAdmission, _ string) error {
+			return database.UpdateRunStatus(proposal.Request.PredecessorID, types.RunFailed)
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database, proposal := admissionFixture(t)
+			first, _, err := database.AcceptValidationAdmission(context.Background(), proposal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunStatus(first.ChildID, types.RunCancelled); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := database.ReadTerminalSnapshot(first.ChildID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			descendant := proposal
+			descendant.Snapshot = *snapshot
+			descendant.Request.PredecessorID, descendant.Request.SnapshotDigest = first.ChildID, snapshot.Digest()
+			descendant.Request.LaunchNonce = *snapshot.Run.LaunchNonce
+			descendant.Request.CandidateSHA = strings.Repeat("9", 40)
+			if err := test.mutate(database, proposal, first.ChildID); err != nil {
+				t.Fatal(err)
+			}
+
+			_, familyErr := database.ValidationFamily(first.ChildID)
+			second, _, admissionErr := database.AcceptValidationAdmission(context.Background(), descendant)
+
+			if test.isCovered {
+				if familyErr == nil || admissionErr == nil {
+					t.Fatalf("changed validation history was accepted: family=%v admission=%v", familyErr, admissionErr)
+				}
+				return
+			}
+			if familyErr != nil || admissionErr != nil {
+				t.Fatalf("registration or custody bookkeeping broke the lineage: family=%v admission=%v", familyErr, admissionErr)
+			}
+			if _, err := database.ValidationFamily(second.ChildID); err != nil {
+				t.Fatalf("descendant family unreadable: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidationAdmissionContinuesOnlyACompletedAuthoredChild(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		isAuthoredChild bool
+	}{
+		{name: "completed authored child", isAuthoredChild: true},
+		{name: "completed ordinary run"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database, proposal := admissionFixture(t)
+			predecessorID := proposal.Request.PredecessorID
+			if test.isAuthoredChild {
+				first, _, err := database.AcceptValidationAdmission(context.Background(), proposal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				predecessorID = first.ChildID
+			}
+			if err := database.UpdateRunStatus(predecessorID, types.RunCompleted); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := database.ReadTerminalSnapshot(predecessorID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			successor := proposal
+			successor.Snapshot = *snapshot
+			successor.Request.PredecessorID, successor.Request.SnapshotDigest = predecessorID, snapshot.Digest()
+			successor.Request.LaunchNonce = *snapshot.Run.LaunchNonce
+			successor.Request.CandidateSHA = strings.Repeat("9", 40)
+			before, err := database.GetRunsByRepo(proposal.Request.RepoID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			event, created, err := database.AcceptValidationAdmission(context.Background(), successor)
+
+			if !test.isAuthoredChild {
+				after, listErr := database.GetRunsByRepo(proposal.Request.RepoID)
+				if err == nil || !strings.Contains(err.Error(), "did not complete") || listErr != nil || len(after) != len(before) {
+					t.Fatalf("completed ordinary run became a predecessor: %v", err)
+				}
+				return
+			}
+			if err != nil || !created {
+				t.Fatalf("completed authored child refused a successor: created=%v error=%v", created, err)
+			}
+			family, err := database.ValidationFamily(event.ChildID)
+			if err != nil || family.PredecessorID != predecessorID || family.HasChildRepairs {
+				t.Fatalf("successor family = %+v %v", family, err)
+			}
+			if spending := family.Spending[types.StepReview]; spending.Automatic != 1 || spending.Manual != 2 || spending.Remaining != 0 {
+				t.Fatalf("successor renewed or lost spending: %+v", spending)
+			}
+		})
+	}
+}

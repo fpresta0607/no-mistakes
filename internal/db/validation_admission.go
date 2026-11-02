@@ -36,11 +36,11 @@ func (snapshot TerminalSnapshot) ValidateAuthoredRequest(request authoredvalidat
 	if err := request.Validate(); err != nil {
 		return err
 	}
-	if request.SnapshotDigest != snapshot.Digest() || request.PredecessorID != parent.ID || request.RepoID != parent.RepoID || request.Branch != parent.Branch || snapshot.Repo.ID != parent.RepoID {
+	if request.SnapshotDigest != snapshot.Digest() || request.PredecessorID != parent.ID || request.RepoID != parent.RepoID || request.Branch != parent.Branch {
 		return fmt.Errorf("authored admission predecessor snapshot or repository binding changed")
 	}
-	if !parent.Status.Terminal() || parent.Status == types.RunCompleted || parent.PushActive || parent.LaunchNonce == nil || parent.LaunchValidationGeneration == nil || parent.LaunchIntentDigest == nil || parent.LaunchAssertion == nil {
-		return fmt.Errorf("authored admission requires a terminal predecessor with its original launch receipt and no active publisher")
+	if !parent.Status.Terminal() || (parent.Status == types.RunCompleted && !snapshot.IsAuthoredChild) || parent.PushActive || parent.LaunchNonce == nil || parent.LaunchValidationGeneration == nil || parent.LaunchIntentDigest == nil || parent.LaunchAssertion == nil {
+		return fmt.Errorf("authored admission requires a terminal predecessor that did not complete, or a completed authored child, with its original launch receipt and no active publisher")
 	}
 	if request.CandidateSHA == parent.HeadSHA || parent.SubmittedHeadSHA != nil && request.CandidateSHA == *parent.SubmittedHeadSHA || parent.LastPushedSHA != nil && request.CandidateSHA == *parent.LastPushedSHA {
 		return fmt.Errorf("authored admission requires a newly authored candidate, not a submitted, terminal or published predecessor head")
@@ -196,9 +196,11 @@ func (d *DB) AcceptValidationAdmission(ctx context.Context, proposal ValidationA
 		return nil, false, err
 	}
 	proposal.ID, proposal.CreatedAt, proposal.ChildID = newID(), timestamp, childID
-	if err := scanRun(tx.QueryRow(`SELECT `+runColumns+` FROM runs WHERE id = ?`, childID), &proposal.InitialChild); err != nil {
+	child, err := readTerminalSnapshot(tx, childID)
+	if err != nil {
 		return nil, false, err
 	}
+	proposal.InitialChild = child.Run
 	payload, err := json.Marshal(proposal)
 	if err != nil {
 		return nil, false, err

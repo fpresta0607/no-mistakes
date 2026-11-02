@@ -92,7 +92,7 @@ func TestAxiAuthoredValidationHasFreshStagesAndNoRepairAuthorityAfterCrash(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := authoredvalidation.Request{PredecessorID: parent.ID, SnapshotDigest: before.Digest(), RepoID: before.Repo.ID, Branch: branch, CallerDir: canonical, CandidateSHA: strings.TrimSpace(string(head)), CandidateTree: strings.TrimSpace(string(tree)), LaunchNonce: *before.Run.LaunchNonce, ValidationGeneration: *before.Run.LaunchValidationGeneration, IntentDigest: *before.Run.LaunchIntentDigest,
+	request := authoredvalidation.Request{PredecessorID: parent.ID, SnapshotDigest: before.Digest(), RepoID: before.Run.RepoID, Branch: branch, CallerDir: canonical, CandidateSHA: strings.TrimSpace(string(head)), CandidateTree: strings.TrimSpace(string(tree)), LaunchNonce: *before.Run.LaunchNonce, ValidationGeneration: *before.Run.LaunchValidationGeneration, IntentDigest: *before.Run.LaunchIntentDigest,
 		ControllerPolicy: authoredvalidation.ControllerPolicy{SHA256: strings.Repeat("a", 64), Class: "ordinary", ReviewCycles: 2}, LaunchAssertion: &assertion, HistoricalSourceCompleteness: "unknown", Reason: "Validate the declared authored source without certifying missing historical files"}
 	admissionFile := filepath.Join(t.TempDir(), "admission.json")
 	payload, err = json.Marshal(request)

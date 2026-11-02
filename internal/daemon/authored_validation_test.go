@@ -186,90 +186,99 @@ func TestAuthoredPendingAdmissionStaysIdleAcrossStartupAndCanBeCancelled(t *test
 	}
 }
 
-func TestAuthoredAdmissionContinuesAnUnpublishedCancelledChild(t *testing.T) {
-	var calls atomic.Int32
-	manager, database, repo, request, gate := authoredAdmissionFixture(t, func() []pipeline.Step {
-		return []pipeline.Step{&authoredFixtureStep{name: types.StepReview, calls: &calls}}
-	})
-	gateHead := gitOutput(t, gate, "rev-parse", "refs/heads/feature")
-	if err := database.UpdateRunHeadSHA(request.Request.PredecessorID, request.Request.CandidateSHA); err != nil {
-		t.Fatal(err)
-	}
-	step, err := database.InsertStepResult(request.Request.PredecessorID, types.StepReview)
-	if err != nil {
-		t.Fatal(err)
-	}
-	findings, selected := `{"findings":[{"id":"r1","description":"repair"}]}`, `["r1"]`
-	for index, source := range []string{db.RoundSelectionSourceAutoFix, db.RoundSelectionSourceUser} {
-		round, err := database.InsertStepRound(step.ID, index*2+1, "initial", &findings, nil, 1)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := database.SetStepRoundSelection(round.ID, &selected, source); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := database.InsertStepRound(step.ID, index*2+2, "auto_fix", nil, nil, 1); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "authored.txt"), []byte("first new authored candidate\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, repo.WorkingPath, "commit", "-am", "author next candidate")
-	request.Request.CandidateSHA = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
-	request.Request.CandidateTree = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD^{tree}")
-	rootSnapshot, err := database.ReadTerminalSnapshot(request.Request.PredecessorID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Request.SnapshotDigest = rootSnapshot.Digest()
-	proof, err := request.Request.LaunchAssertion.Verify(request.Request.LaunchAssertion.TrustedSHA, request.Request.LaunchAssertion.Profiles)
-	if err != nil {
-		t.Fatal(err)
-	}
-	event, _, err := database.AcceptValidationAdmission(context.Background(), db.ValidationAdmission{Request: request.Request, Snapshot: *rootSnapshot, AssertionProof: proof, WorktreeRoot: filepath.Dir(manager.paths.WorktreeDir(repo.ID, "pending")), Gates: "[]", Steps: []types.StepName{types.StepReview}, Operator: "fixture"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.HandleCancel(event.ChildID); err != nil {
-		t.Fatal(err)
-	}
-	childSnapshot, err := database.ReadTerminalSnapshot(event.ChildID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if childSnapshot.Run.Status != types.RunCancelled || childSnapshot.Run.LastPushedSHA != nil || childSnapshot.Run.HeadSHA == gateHead {
-		t.Fatal("fixture did not leave an unpublished cancelled child")
-	}
-	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "authored.txt"), []byte("second new authored candidate\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, repo.WorkingPath, "commit", "-am", "author descendant candidate")
-	request.Request.PredecessorID, request.Request.SnapshotDigest, request.Request.LaunchNonce = event.ChildID, childSnapshot.Digest(), *childSnapshot.Run.LaunchNonce
-	request.Request.CandidateSHA = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
-	request.Request.CandidateTree = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD^{tree}")
+func TestAuthoredAdmissionContinuesAnUnpublishedTerminalChild(t *testing.T) {
+	for _, status := range []types.RunStatus{types.RunCancelled, types.RunCompleted} {
+		t.Run(string(status), func(t *testing.T) {
+			var calls atomic.Int32
+			manager, database, repo, request, gate := authoredAdmissionFixture(t, func() []pipeline.Step {
+				return []pipeline.Step{&authoredFixtureStep{name: types.StepReview, calls: &calls}}
+			})
+			gateHead := gitOutput(t, gate, "rev-parse", "refs/heads/feature")
+			if err := database.UpdateRunHeadSHA(request.Request.PredecessorID, request.Request.CandidateSHA); err != nil {
+				t.Fatal(err)
+			}
+			step, err := database.InsertStepResult(request.Request.PredecessorID, types.StepReview)
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings, selected := `{"findings":[{"id":"r1","description":"repair"}]}`, `["r1"]`
+			for index, source := range []string{db.RoundSelectionSourceAutoFix, db.RoundSelectionSourceUser} {
+				round, err := database.InsertStepRound(step.ID, index*2+1, "initial", &findings, nil, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := database.SetStepRoundSelection(round.ID, &selected, source); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := database.InsertStepRound(step.ID, index*2+2, "auto_fix", nil, nil, 1); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(repo.WorkingPath, "authored.txt"), []byte("first new authored candidate\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, repo.WorkingPath, "commit", "-am", "author next candidate")
+			request.Request.CandidateSHA = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+			request.Request.CandidateTree = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD^{tree}")
+			rootSnapshot, err := database.ReadTerminalSnapshot(request.Request.PredecessorID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Request.SnapshotDigest = rootSnapshot.Digest()
+			proof, err := request.Request.LaunchAssertion.Verify(request.Request.LaunchAssertion.TrustedSHA, request.Request.LaunchAssertion.Profiles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			event, _, err := database.AcceptValidationAdmission(context.Background(), db.ValidationAdmission{Request: request.Request, Snapshot: *rootSnapshot, AssertionProof: proof, WorktreeRoot: filepath.Dir(manager.paths.WorktreeDir(repo.ID, "pending")), Gates: "[]", Steps: []types.StepName{types.StepReview}, Operator: "fixture"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status == types.RunCancelled {
+				err = manager.HandleCancel(event.ChildID)
+			} else {
+				err = database.UpdateRunStatus(event.ChildID, status)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			childSnapshot, err := database.ReadTerminalSnapshot(event.ChildID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if childSnapshot.Run.Status != status || childSnapshot.Run.LastPushedSHA != nil || childSnapshot.Run.HeadSHA == gateHead {
+				t.Fatalf("fixture did not leave an unpublished %s child", status)
+			}
+			if err := os.WriteFile(filepath.Join(repo.WorkingPath, "authored.txt"), []byte("second new authored candidate\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, repo.WorkingPath, "commit", "-am", "author descendant candidate")
+			request.Request.PredecessorID, request.Request.SnapshotDigest, request.Request.LaunchNonce = event.ChildID, childSnapshot.Digest(), *childSnapshot.Run.LaunchNonce
+			request.Request.CandidateSHA = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+			request.Request.CandidateTree = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD^{tree}")
 
-	result, err := manager.validateAuthored(context.Background(), request, os.Getpid())
+			result, err := manager.validateAuthored(context.Background(), request, os.Getpid())
 
-	if err != nil || !result.Started {
-		t.Fatalf("unchanged historical gate rejected an unpublished predecessor: %+v %v", result, err)
-	}
-	child := waitForRunTerminalState(t, database, result.Receipt.RunID)
-	if child.Status != types.RunCompleted || calls.Load() != 1 {
-		t.Fatalf("descendant was not freshly validated: %+v calls=%d", child, calls.Load())
-	}
-	spending := result.Family.Spending[types.StepReview]
-	if spending.Automatic != 1 || spending.Manual != 1 || spending.Remaining != 0 || result.Family.HasChildRepairs || result.Family.PolicyOrigin != "controller_assertion" || result.Family.HistoricalSourceCompleteness != "unknown" {
-		t.Fatalf("descendant renewed spending or provenance: %+v", result.Family)
-	}
-	for _, before := range []*db.TerminalSnapshot{rootSnapshot, childSnapshot} {
-		after, err := database.ReadTerminalSnapshot(before.Run.ID)
-		if err != nil || !reflect.DeepEqual(before, after) {
-			t.Fatalf("immutable predecessor changed: %v", err)
-		}
-	}
-	if gitOutput(t, gate, "rev-parse", "refs/heads/feature") != gateHead || gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD") != request.Request.CandidateSHA {
-		t.Fatal("continuation overwrote gate or author source")
+			if err != nil || !result.Started {
+				t.Fatalf("unchanged historical gate rejected an unpublished predecessor: %+v %v", result, err)
+			}
+			child := waitForRunTerminalState(t, database, result.Receipt.RunID)
+			if child.Status != types.RunCompleted || calls.Load() != 1 {
+				t.Fatalf("descendant was not freshly validated: %+v calls=%d", child, calls.Load())
+			}
+			spending := result.Family.Spending[types.StepReview]
+			if spending.Automatic != 1 || spending.Manual != 1 || spending.Remaining != 0 || result.Family.HasChildRepairs || result.Family.PolicyOrigin != "controller_assertion" || result.Family.HistoricalSourceCompleteness != "unknown" {
+				t.Fatalf("descendant renewed spending or provenance: %+v", result.Family)
+			}
+			for _, before := range []*db.TerminalSnapshot{rootSnapshot, childSnapshot} {
+				after, err := database.ReadTerminalSnapshot(before.Run.ID)
+				if err != nil || !reflect.DeepEqual(before, after) {
+					t.Fatalf("immutable predecessor changed: %v", err)
+				}
+			}
+			if gitOutput(t, gate, "rev-parse", "refs/heads/feature") != gateHead || gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD") != request.Request.CandidateSHA {
+				t.Fatal("continuation overwrote gate or author source")
+			}
+		})
 	}
 }
 

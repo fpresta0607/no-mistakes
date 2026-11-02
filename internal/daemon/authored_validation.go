@@ -54,14 +54,20 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err := snapshot.ValidateAuthoredRequest(request); err != nil {
 			return "", err
 		}
-		repo := &snapshot.Repo
+		repo, err := m.db.GetRepo(snapshot.Run.RepoID)
+		if err != nil {
+			return "", err
+		}
+		if repo == nil {
+			return "", fmt.Errorf("predecessor repository is no longer registered")
+		}
 		if err := proveAuthoredCheckout(ctx, params.CallerDir, &request, repo); err != nil {
 			return "", err
 		}
 		m.mu.Lock()
 		predecessorExecutor := m.executors[snapshot.Run.ID]
 		m.mu.Unlock()
-		if predecessorExecutor != nil || !snapshot.Run.Status.Terminal() || snapshot.Run.Status == types.RunCompleted || snapshot.Run.PushActive {
+		if predecessorExecutor != nil || !snapshot.Run.Status.Terminal() || snapshot.Run.PushActive {
 			return "", fmt.Errorf("predecessor must be terminal with no executor or publisher; it will never be restarted")
 		}
 		for _, step := range snapshot.Steps {
@@ -178,7 +184,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		}
 		sourceURLs, err := git.GetConfiguredRemoteURLs(ctx, gateDir, "origin")
 		if err != nil || len(sourceURLs) != 1 || safeurl.Redact(sourceURLs[0]) != repo.UpstreamURL {
-			return "", fmt.Errorf("trusted source repository differs from the immutable predecessor registration")
+			return "", fmt.Errorf("trusted source repository differs from the registered repository")
 		}
 		trustedRef := fmt.Sprintf("refs/no-mistakes/authored-trusted/%d-%d", os.Getpid(), time.Now().UnixNano())
 		defer func() {
