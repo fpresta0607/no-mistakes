@@ -127,7 +127,7 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 - `axi validate-authored` is an explicit validation-only child, never a terminal executor restart or custody recovery.
   `internal/db/validation_snapshot.go` and `validation_family.go` own the one snapshot/family ledger; `validation_admissions` binds the immutable predecessor snapshot, exact declared source, fresh launch proof and controller-supplied policy assertion.
   The latter is labeled `controller_assertion`, never a native historical policy fact, and `historical_source_completeness` stays `unknown` throughout the lineage.
-- Native repair authority is zero for every child stage, including unseen phases, custom gates, pending selections, response, dispatch, restart and descendants.
+- Native repair authority is zero for every child stage, including unseen phases, custom gates, pending selections, response, CI handback, dispatch, restart and descendants.
   The executor and recovery re-read the family, ordinary fresh launches cannot shed it, and step limits persist explicit zero rather than inheriting defaults.
   Fresh children get every current trusted stage/gate with no copied certification; untouched pending acceptances stay idle across startup until exact explicit replay, and cancellation never restarts either row.
 - Public input/output and lifecycle semantics are owned by `docs/src/content/docs/reference/cli.md` (`axi validate-authored`).

@@ -69,7 +69,7 @@ func (e *Executor) initializeValidationAuthority(run *db.Run) error {
 }
 
 func (e *Executor) refuseValidationRepair(action types.ApprovalAction) error {
-	if action != types.ActionFix && action != types.ActionSkip {
+	if action != types.ActionFix && action != types.ActionSkip && action != actionCIFollowup {
 		return nil
 	}
 	isValidationOnly, err := validationOnlyAuthority(e.db, e.runID)

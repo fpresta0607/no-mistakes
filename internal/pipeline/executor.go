@@ -1956,6 +1956,12 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 				request.reply <- ciHandbackReply{err: fmt.Errorf("handback requires a published CI gate with automatic CI repair disabled")}
 				continue
 			}
+			// A validation-only run reports zero CI repairs as disabled repair,
+			// so the handback precondition alone would release its source.
+			if err := e.refuseValidationRepair(actionCIFollowup); err != nil {
+				request.reply <- ciHandbackReply{err: err}
+				continue
+			}
 			copyContext := *sctx
 			operationContext, cancel := context.WithCancel(request.ctx)
 			stop := context.AfterFunc(ctx, cancel)

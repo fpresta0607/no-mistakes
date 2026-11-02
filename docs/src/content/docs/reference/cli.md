@@ -349,7 +349,7 @@ A daemon that proves assertions but cannot apply them refuses the unknown `apply
 Validate one explicitly declared, clean authored commit and tree linked to an immutable failed or cancelled predecessor.
 This is a new validation-only child: the predecessor stays terminal, and every core stage and current trusted custom gate starts fresh without an inherited pass, review approval, CI-ready state, exception or agent session.
 All automatic and manual repair authority is zero, including stages the predecessor never reached.
-Fix selections, skips, ordinary fresh launches that would drop the lineage, and repair dispatch after restart are refused.
+Fix selections, skips, CI handbacks, ordinary fresh launches that would drop the lineage, and repair dispatch after restart are refused.
 
 ```sh
 no-mistakes axi validate-authored --admission-file admission.json --wait 8m

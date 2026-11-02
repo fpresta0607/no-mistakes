@@ -15,6 +15,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -116,6 +117,72 @@ func TestValidationOnlyNeverDispatchesAutomaticOrManualRepairs(t *testing.T) {
 			}
 			if calls.Load() != 1 {
 				t.Errorf("dispatched %d turns instead of one fresh validation", calls.Load())
+			}
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(6 * time.Second):
+				t.Fatal("executor did not stop")
+			}
+		})
+	}
+}
+
+type handbackCountingCIStep struct {
+	handbacks atomic.Int32
+}
+
+func (s *handbackCountingCIStep) Name() types.StepName { return types.StepCI }
+func (s *handbackCountingCIStep) Execute(*StepContext) (*StepOutcome, error) {
+	return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"ci-1","category":"ci-check","severity":"error","check":"tests","action":"auto-fix","description":"failed"}]}`}, nil
+}
+func (s *handbackCountingCIStep) ReconcileApprovalGate(*StepContext) (bool, error) {
+	return false, nil
+}
+func (s *handbackCountingCIStep) HandbackCI(*StepContext, ipc.CIHandbackParams) (*ipc.CIHandbackResult, error) {
+	s.handbacks.Add(1)
+	return &ipc.CIHandbackResult{}, nil
+}
+
+func TestValidationOnlyRefusesCIHandbackBeforeRelease(t *testing.T) {
+	for _, isResume := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resume=%t", isResume), func(t *testing.T) {
+			database, root, child, repo := validationOnlyFixture(t)
+			step := &handbackCountingCIStep{}
+			executor := NewExecutor(database, root, &config.Config{}, nil, []Step{step}, nil)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- executor.Execute(ctx, child, repo, repo.WorkingPath) }()
+			isParked := false
+			for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+				executor.mu.Lock()
+				isParked = executor.waiting && executor.waitingStep == types.StepCI
+				executor.mu.Unlock()
+				if isParked {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if !isParked {
+				cancel()
+				<-done
+				t.Fatal("fresh validation did not park at CI")
+			}
+
+			_, err := executor.HandbackCI(ctx, ipc.CIHandbackParams{RunID: child.ID, RepoID: repo.ID, Branch: child.Branch, Resume: isResume})
+
+			if err == nil || !strings.Contains(err.Error(), "zero automatic/manual repair authority") {
+				t.Errorf("CI handback error = %v, want the zero repair authority refusal", err)
+			}
+			if step.handbacks.Load() != 0 {
+				t.Error("validation-only CI gate released or accepted a handback")
+			}
+			executor.mu.Lock()
+			isStillParked, isReleased := executor.waiting && executor.waitingStep == types.StepCI, executor.ciHandbackReleased
+			executor.mu.Unlock()
+			if !isStillParked || isReleased {
+				t.Errorf("refused handback changed the CI gate: parked=%t released=%t", isStillParked, isReleased)
 			}
 			cancel()
 			select {
