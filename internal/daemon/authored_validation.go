@@ -182,8 +182,14 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 				return "", err
 			}
 		}
+		// Init records the gate's origin as the clone resolves it through
+		// url.*.insteadOf, while the registry keeps the clone's literal origin.
 		sourceURLs, err := git.GetConfiguredRemoteURLs(ctx, gateDir, "origin")
-		if err != nil || len(sourceURLs) != 1 || safeurl.Redact(sourceURLs[0]) != repo.UpstreamURL {
+		if err != nil || len(sourceURLs) != 1 {
+			return "", fmt.Errorf("trusted source repository differs from the registered repository")
+		}
+		registeredSource, err := git.Run(ctx, repo.WorkingPath, "ls-remote", "--get-url", repo.UpstreamURL)
+		if err != nil || safeurl.Redact(sourceURLs[0]) != repo.UpstreamURL && safeurl.Redact(sourceURLs[0]) != safeurl.Redact(registeredSource) {
 			return "", fmt.Errorf("trusted source repository differs from the registered repository")
 		}
 		trustedRef := fmt.Sprintf("refs/no-mistakes/authored-trusted/%d-%d", os.Getpid(), time.Now().UnixNano())

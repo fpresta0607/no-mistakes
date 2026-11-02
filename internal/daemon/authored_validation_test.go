@@ -476,3 +476,58 @@ func TestAuthoredAdmissionRefusesSourceAndLaunchMismatchesWithoutMutation(t *tes
 		})
 	}
 }
+
+// Init records the gate's origin as git resolves it through url.*.insteadOf,
+// while the registry keeps the clone's literal origin; both name one repository.
+func TestAuthoredAdmissionAcceptsAnOriginRewrittenAtInit(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		scope          string
+		isOtherOrigin  bool
+		shouldAdmitRun bool
+	}{
+		{name: "global rewrite", scope: "--global", shouldAdmitRun: true},
+		{name: "clone rewrite", scope: "--local", shouldAdmitRun: true},
+		{name: "rewrite with an unrelated gate origin", scope: "--global", isOtherOrigin: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+			var calls atomic.Int32
+			factory := func() []pipeline.Step {
+				var result []pipeline.Step
+				for _, step := range steps.AllSteps() {
+					result = append(result, &authoredFixtureStep{name: step.Name(), calls: &calls})
+				}
+				return result
+			}
+			manager, database, repo, request, gate := authoredAdmissionFixture(t, factory)
+			gitCmd(t, repo.WorkingPath, "remote", "add", "origin", repo.UpstreamURL)
+			gitCmd(t, repo.WorkingPath, "config", test.scope, "url."+filepath.ToSlash(gate)+".insteadOf", repo.UpstreamURL)
+			initOrigin := gitOutput(t, repo.WorkingPath, "remote", "get-url", "origin")
+			if initOrigin == repo.UpstreamURL {
+				t.Fatal("fixture rewrite did not apply")
+			}
+			if test.isOtherOrigin {
+				initOrigin = filepath.ToSlash(filepath.Join(t.TempDir(), "other.git"))
+				gitCmd(t, "", "init", "--bare", initOrigin)
+			}
+			gitCmd(t, gate, "remote", "set-url", "origin", initOrigin)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			result, err := manager.validateAuthored(ctx, request, os.Getpid())
+			if !test.shouldAdmitRun {
+				if err == nil || !strings.Contains(err.Error(), "trusted source repository differs from the registered repository") {
+					t.Fatalf("admitted an unrelated trusted source: %v", err)
+				}
+				return
+			}
+			if err != nil || !result.Started {
+				t.Fatalf("admission: %+v %v", result, err)
+			}
+			child := waitForRunTerminalState(t, database, result.Receipt.RunID)
+			if child.Status != types.RunCompleted || calls.Load() != int32(len(steps.AllSteps())) {
+				t.Fatalf("fresh stages: status=%s calls=%d", child.Status, calls.Load())
+			}
+		})
+	}
+}
