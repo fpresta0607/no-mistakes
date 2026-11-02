@@ -13,6 +13,7 @@ import (
 // reference, so the PR closes nothing on merge.
 func TestClosingIssueRefsPublishedIntentIsNeutralized(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude"})
+	commitTrustedRepoConfig(t, h, "pr:\n  publish_intent: true\n")
 	statePath := setupStatefulGitHub(t, h)
 	if out, err := h.Run("init"); err != nil {
 		t.Fatalf("init: %v\n%s", err, out)

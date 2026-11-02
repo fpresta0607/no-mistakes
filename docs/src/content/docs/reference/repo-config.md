@@ -68,7 +68,7 @@ disable_project_settings: true
 pr:
   base_branch: develop
   # template: .github/pull_request_template.md
-  # publish_intent: false
+  # publish_intent: true # opt-in; defaults to false (intent stays private)
   # appendix: collapsed # full | collapsed | minimal
   # title_format: "{{.Branch}}: {{.Title}}"
 
@@ -238,7 +238,6 @@ Use a repository Markdown template for the public narrative, followed by no-mist
 ```yaml
 pr:
   template: .github/pull_request_template.md
-  publish_intent: false # Optional; otherwise original Intent is still published.
   appendix: collapsed # Optional; full (the default), collapsed, or minimal.
 ```
 
@@ -262,7 +261,12 @@ The path is read as a literal Git tree entry, never through the pushed worktree 
 
 #### Author-preserving regeneration
 
-A templated PR contains one delimited, integrity-checked generated appendix. Later runs preserve live author text before and after it, including human checkbox choices and explicit issue-closing lines, and refresh only that appendix. They do not re-fill the narrative. An author's title is also preserved unless `pr.title_format` is configured; that explicit repository convention redrafts the bare title and applies the format on every managed update. Changing or removing `pr.template` does not regenerate an already owned narrative; edit it on the PR when it needs updating. The full intent remains available to reviewers. Removing the generated Intent section is controlled separately below.
+A templated PR contains one delimited, integrity-checked generated appendix.
+Later runs preserve live author text before and after it, including human checkbox choices and explicit issue-closing lines, and refresh only that appendix.
+They do not re-fill the narrative.
+An author's title is also preserved unless `pr.title_format` is configured; that explicit repository convention redrafts the bare title and applies the format on every managed update.
+Changing or removing `pr.template` does not regenerate an already owned narrative; edit it on the PR when it needs updating.
+Intent publication and drafting context follow [`pr.publish_intent`](#prpublish_intent).
 
 Ownership is never inferred from a heading's name. An existing author-only body can be adopted without model rewriting. **Legacy descriptions containing an unowned attestation require explicit author reconciliation** before template mode can adopt them: separate/remove their obsolete generated evidence while retaining the desired author text and closing references, then retry. Do not manufacture ownership markers by hand. An edited appendix, missing/duplicate/malformed markers, or a competing attestation fails rather than risking discarded author content. Put author additions outside the generated appendix. The integrity guard detects accidental edits; it is not authentication or a cryptographic signature by no-mistakes.
 
@@ -278,19 +282,29 @@ Provider contract tests use fake CLI/API responses and local HTTP fixtures, not 
 
 ### pr.publish_intent
 
-Control publication of the **generated `Intent` section**, independently of intent extraction and review input.
+Opt in to publishing validation intent in the **generated `Intent` section** and PR-drafting context, independently of intent extraction and validation input.
 
 | | |
 | --- | --- |
 | Type | `bool` |
-| Default | `true` (missing or `null` also preserves the default) |
+| Default | `false` (missing or `null` keeps validation intent private) |
 | Trust | Trusted default branch only, regardless of `allow_repo_commands`; the caller-side counterpart is the global [`intent.publish_intent`](/no-mistakes/reference/global-config/#intent) default and the per-run `axi run --no-publish-intent` flag |
 
-`false` suppresses that section in ordinary drafting, fallback output, and template appendices. It works without `pr.template` and does not otherwise enable template mode. It never removes full intent from review or PR-drafting context, changes evidence/attestation policy, or erases author-written sections named `Intent`. Unconfigured defaults remain unchanged.
+Only an explicit trusted `true` permits the full intent to appear in ordinary drafting, fallback output, and template appendices.
+By default, and with explicit `false`, the generated section is omitted and PR-drafting turns (ordinary narrative, title-only fallback, and repository-template narrative) receive no intent text, so they cannot paraphrase the private validation brief into public prose.
+They draft from the final diff and commit messages instead.
+This works without `pr.template` and does not enable template mode.
+Full intent and its source binding remain available for validation; evidence, attestation, and author-written sections named `Intent` are unchanged.
 
-A contributor can keep the section off for their own runs without touching this repository policy: `axi run --no-publish-intent` records a tighten-only omission on the run, and an operator can set the global `intent.publish_intent: false` default. Both compose with this field and can only reduce publication: the trusted repository policy is the ceiling, and a caller can never publish intent on a repository whose trusted config disabled it. Neither signal changes what review, test, document, lint, or CI auto-fix prompts receive. The caller-side omission goes one step further than this repository policy: the PR-drafting turns (ordinary narrative, title-only fallback, and repository-template narrative) receive no intent text at all and draft from the diff and commit messages only, so no paraphrase of the withheld intent can reach the public PR. The intent is withheld, never scanned for: there is no output filter.
+A contributor can withhold intent even when the repository opts in: `axi run --no-publish-intent` records a tighten-only omission on the run, and an operator can set the global `intent.publish_intent: false` default.
+Both compose with this field and can only reduce publication: a caller can never publish intent without the trusted repository's explicit opt-in.
+Neither signal changes what review, test, document, lint, or CI auto-fix prompts receive.
+Intent is withheld from public drafting, never scanned out of its output.
 
-This is not a privacy filter: generated narrative and other evidence can still contain sensitive information, and LLM drafting is not a confidentiality guarantee. No caller-written public-body override is introduced by this setting.
+Recorded review and test output (finding descriptions, risk rationale, testing summary, and scenario names) comes from validation turns that receive the full intent, so it can quote or paraphrase the intent.
+That output is published in the generated Risk, Testing, and Pipeline sections, as [`pr.appendix`](#prappendix) shapes them, whatever `pr.publish_intent` says.
+This setting is not a privacy filter: generated narrative and other evidence can still contain sensitive information from the intent, the diff, or recorded results, and this setting does not filter those sources.
+No caller-written public-body override is introduced by this setting.
 
 ### pr.appendix
 
