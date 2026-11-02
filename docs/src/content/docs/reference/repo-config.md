@@ -301,7 +301,9 @@ Both compose with this field and can only reduce publication: a caller can never
 Neither signal changes what review, test, document, lint, or CI auto-fix prompts receive.
 Intent is withheld from public drafting, never scanned out of its output.
 
-Generated narrative and other evidence can still contain sensitive information from the diff or recorded results; this setting does not filter those sources.
+Recorded review and test output (finding descriptions, risk rationale, testing summary, and scenario names) comes from validation turns that receive the full intent, so it can quote or paraphrase the intent.
+That output is published in the generated Risk, Testing, and Pipeline sections, as [`pr.appendix`](#prappendix) shapes them, whatever `pr.publish_intent` says.
+This setting is not a privacy filter: generated narrative and other evidence can still contain sensitive information from the intent, the diff, or recorded results, and this setting does not filter those sources.
 No caller-written public-body override is introduced by this setting.
 
 ### pr.appendix
