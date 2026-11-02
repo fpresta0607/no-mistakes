@@ -20,10 +20,12 @@ import (
 
 // canonicalStaleMonitorPhrases are the load-bearing claims of the corrected
 // "PR fell behind / conflicted after checks pass" guidance: the live CI monitor
-// auto-rebases and re-pushes such a PR, so the agent runs no command and never
-// hand-rebases, and `no-mistakes rerun` is only the dead-monitor recovery,
-// subject to its clean caller-head check.
+// auto-rebases and re-pushes when automatic repair is enabled; disabled repair
+// has a guarded handback, and `no-mistakes rerun` is only the dead-monitor
+// recovery, subject to its clean caller-head check.
 var canonicalStaleMonitorPhrases = []string{
+	"automatic CI repair enabled",
+	"automatic CI repair disabled",
 	"never hand-rebase",
 	"revalidates from Review",
 	"cannot prove continuity with the reviewed head",
@@ -52,14 +54,13 @@ const canonicalPipelineAgentPrerequisite = "a supported native agent binary, the
 const canonicalUnknownBranchRunRelationship = "An explicit `--run <id>` rendered under `run:` while the current branch is unknown (detached `HEAD` or a branch-lookup failure) encodes no branch relationship."
 
 // TestStaleMonitorGuidance_SyncedAcrossSurfaces guards the repo invariant that
-// agent-driving guidance stays in sync across its three surfaces: the skill
-// body, the published agents guide, and the live axi help string. The earlier
+// agent-driving guidance stays in sync across the generated skill body
+// and the live axi help string. The earlier
 // wrong wording (telling agents to re-run a stale PR with `axi run`) shipped to
-// only one surface; this keeps the corrected guidance present on all three.
+// only one surface; this keeps the corrected guidance present on both.
 func TestStaleMonitorGuidance_SyncedAcrossSurfaces(t *testing.T) {
 	surfaces := map[string]string{
 		"skill body":      skill.Markdown(),
-		"agents guide":    readAgentsGuide(t),
 		"axi help string": staleMonitorGuidance,
 	}
 	for name, content := range surfaces {
@@ -91,6 +92,58 @@ func TestStaleMonitorGuidance_SyncedAcrossSurfaces(t *testing.T) {
 				t.Errorf("%s is missing rerun recovery guidance %q", name, phrase)
 			}
 		}
+	}
+}
+
+func TestStaleMonitorGuidance_DisabledRepairHandback(t *testing.T) {
+	generated, err := os.ReadFile(filepath.Join("..", "..", "skills", "no-mistakes", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	surfaces := map[string]string{
+		"axi help string":      staleMonitorGuidance,
+		"checks-passed output": renderDriveResultForGuidanceTest(t, true, types.RunRunning),
+		"skill body":           skill.Markdown(),
+		"generated skill":      string(generated),
+	}
+	for name, content := range surfaces {
+		t.Run(name, func(t *testing.T) {
+			if strings.Contains(name, "skill") {
+				var hasSection bool
+				_, content, hasSection = strings.Cut(content, "The CI step deliberately keeps watching")
+				if !hasSection {
+					t.Fatal("skill is missing its stale-monitor section")
+				}
+				content, _, hasSection = strings.Cut(content, "On a successful outcome")
+				if !hasSection {
+					t.Fatal("skill is missing the end of its stale-monitor section")
+				}
+			}
+			content = strings.Join(strings.Fields(content), " ")
+			enabledIndex := strings.Index(content, "With automatic CI repair enabled,")
+			noCommandIndex := strings.Index(content, "no command")
+			if enabledIndex < 0 || noCommandIndex < enabledIndex {
+				t.Fatal("no-command guidance must be conditional on automatic CI repair being enabled")
+			}
+			for _, phrase := range []string{
+				"published GitHub CI merge conflict parked with automatic CI repair disabled",
+				"`no-mistakes axi sync`",
+				"`no-mistakes axi handback`",
+				"`handback: released`",
+				"same caller worktree",
+				"additive merge",
+				"every published and pipeline commit",
+				"`no-mistakes axi handback --resume --receipt <id>`",
+				"same run and PR",
+				"unresolved conflict findings",
+				"spent budgets",
+				"fresh validation from Review before publication",
+			} {
+				if !strings.Contains(content, phrase) {
+					t.Errorf("stale-monitor guidance is missing %q", phrase)
+				}
+			}
+		})
 	}
 }
 

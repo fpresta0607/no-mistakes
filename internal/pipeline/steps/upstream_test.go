@@ -73,6 +73,22 @@ func TestResolveUpstreamURL_PrefersRefreshedRegistration(t *testing.T) {
 	}
 }
 
+func TestResolveUpstreamURL_PreservesConfiguredIdentityAcrossTransportRewrite(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	gitCmd(t, directory, "init")
+	const configured = "https://github.com/example/source.git"
+	gitCmd(t, directory, "remote", "add", "origin", configured)
+	gitCmd(t, directory, "config", "url."+filepath.ToSlash(t.TempDir())+".insteadOf", configured)
+	for _, isVerified := range []bool{false, true} {
+		context := minimalStepContext(t, directory, configured)
+		context.Repo.URLsVerified = isVerified
+		if actual := resolvePushURL(context); actual != configured {
+			t.Fatalf("publication identity changed through transport rewrite (verified=%t): %s", isVerified, actual)
+		}
+	}
+}
+
 func TestRunUpstreamFetchUsesRefreshedRegistration(t *testing.T) {
 	t.Parallel()
 
