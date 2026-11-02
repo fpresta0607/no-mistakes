@@ -1090,7 +1090,7 @@ func conflictingLaunchPRBaseBranch(launchNonce string) error {
 }
 
 func conflictingLaunchOmitIntent(launchNonce string) error {
-	return fmt.Errorf("conflicting launch_nonce %q is already bound to a run that publishes the Intent section", launchNonce)
+	return fmt.Errorf("conflicting launch_nonce %q is already bound to a run without a caller-side intent omission", launchNonce)
 }
 
 func validateLaunchNonce(nonce string) error {
