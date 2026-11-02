@@ -363,7 +363,7 @@ Monitors PR health after creation and auto-fixes CI failures. Mergeability polli
 - Continues its normal monitoring loop until the PR is merged, closed, declined, or the configured `ci_timeout` idle window elapses, then parks at an approval gate instead of ending the run
 - With global [`ci_end_at_green`](/no-mistakes/reference/global-config/#ci_end_at_green) set, ends the run instead at the first poll where every check has passed, or no check is registered under `no_ci: true`, and both the forge's pull request head and the push target's branch are the head the run pushed. It records readiness first and completes the step. Nothing below that happens after green applies to such a run. The global reference lists what that gives up
 - If the provider check read keeps failing (6 consecutive polls while the PR is still open), parks at an ask-user approval gate instead of spinning invisibly to `ci_timeout`; the provider-neutral finding names the provider CLI or credentials and includes the underlying error (for GitHub, `gh` < 2.50 rejecting `gh pr checks --json`), and the streak resets as soon as one read succeeds
-- The [`ci_timeout` reference](/no-mistakes/reference/global-config/#ci_timeout) owns idle re-arming, unlimited monitoring, and fail-closed reconciliation while that gate is parked
+- The [`ci_timeout` reference](/no-mistakes/reference/global-config/#ci_timeout) owns idle re-arming and unlimited monitoring; [Daemon & Worktrees](/no-mistakes/concepts/daemon/#crash-recovery) owns reconciliation while that gate is parked
 - On GitHub, GitLab, Forgejo, and Azure DevOps, polls provider mergeability alongside CI checks while the PR remains open
 - On GitHub, combines the exact current PR head commit's check rollup with Actions workflow runs for that same commit, so a workflow rejected during validation before it creates a job or check-run still blocks readiness
 - On GitHub, collapses repeated same-name runs of one workflow to the newest run that provider timestamps or Actions run identity can order. Independent workflows and same-named commit status contexts remain separate requirements, and check runs whose order cannot be established remain visible so readiness fails closed
@@ -400,6 +400,8 @@ Monitors PR health after creation and auto-fixes CI failures. Mergeability polli
 - If CI failures or a GitHub, GitLab, Forgejo, or Azure DevOps merge conflict persist after the auto-fix limit: pauses for user approval with findings listing each failing check and/or the merge conflict
 
 **Default auto-fix limit:** `3` total CI auto-fix attempts.
+
+With automatic CI repair disabled, the [`axi handback` reference](/no-mistakes/reference/cli/#no-mistakes-axi-handback) owns guarded author corrections for ordinary failed published GitHub checks and merge conflicts in the same run.
 
 **Default transient rerun budget:** `0` reruns per provider-attributed check per run. GitHub pre-run failure detection is disabled at this value.
 

@@ -214,7 +214,7 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 
 	// pipeline/steps is one package whose test time exceeds one Windows budget, so
 	// its shard is three jobs, each running one part of its top-level tests.
-	wantWindowsShardCounts := map[string]int{"core": 1, "git": 1, "steps": 3}
+	wantWindowsShardCounts := map[string]int{"core": 1, "git": 2, "steps": 3}
 	matrixShards := map[string]int{}
 	for _, row := range job.Strategy.Matrix.Include {
 		if row["os"] != "windows-latest" {
@@ -363,6 +363,46 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	if !slices.Equal(union, all) {
 		t.Fatalf("Windows shards must cover every package exactly once: union %v, go list ./... %v", union, all)
 	}
+}
+
+func TestCIWorkflow_WindowsGitShardPartitionsTheTestList(t *testing.T) {
+	t.Parallel()
+
+	job := ciTestJob(t)
+	parts := make(map[string]int)
+	for _, row := range job.Strategy.Matrix.Include {
+		if row["os"] == "windows-latest" && row["shard"] == "git" {
+			parts[row["git_part"]]++
+		}
+	}
+	if len(parts) != 2 || parts["1"] != 1 || parts["2"] != 1 {
+		t.Fatalf("Windows git parts = %v, want parts 1 and 2 exactly once", parts)
+	}
+
+	for _, command := range windowsGoTestCommands(t) {
+		step := job.Steps[command.step]
+		if matrixShardCondition(step.If) != "git" {
+			continue
+		}
+		if step.Shell != "pwsh" || !command.hasArg("-run") || !command.hasArg("$run") || goTestTimeout(t, command) != 15*time.Minute {
+			t.Fatalf("git parts must use the computed pattern with the existing timeout: %#v", command)
+		}
+		packages := goTestPackagePatterns(command)
+		generator := strings.TrimSuffix(strings.TrimSpace(strings.Split(step.Run, "\n")[0]), ").Trim()")
+		arguments := strings.Fields(strings.TrimPrefix(generator, "$run = ("))
+		want := []string{"go", "run", "./tools/testshard", "-parts", "2", "-part", "${{", "matrix.git_part", "}}", "-packages", strings.Join(packages, ",")}
+		if !slices.Equal(arguments, want) {
+			t.Fatalf("git partition command = %v, want %v", arguments, want)
+		}
+		verification := append([]string{"go", "run", "./tools/testshard", "-parts", "2", "-packages", strings.Join(packages, ",")}, "-verify")
+		for _, check := range workflowCommandsMatching(loadCIWorkflowDoc(t).Jobs["check"].Steps, func(wfStep) bool { return true }) {
+			if check.name == verification[0] && slices.Equal(check.args, verification[1:]) {
+				return
+			}
+		}
+		t.Fatal("the check job must verify the git partition against Go's test selection")
+	}
+	t.Fatal("no Windows git test command")
 }
 
 func windowsGitExcludePattern(t *testing.T, step wfStep) *regexp.Regexp {

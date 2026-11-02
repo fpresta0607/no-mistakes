@@ -187,7 +187,7 @@ func normalizedBranchRef(ref string) string {
 // This separation lets the database and logs store a redacted URL while the
 // credential still reaches the git push/ls-remote argv that needs it.
 func resolveUpstreamURL(sctx *pipeline.StepContext) string {
-	if url, err := git.GetRemoteURL(sctx.Ctx, sctx.WorkDir, "origin"); err == nil && strings.TrimSpace(url) != "" {
+	if url, err := git.GetConfiguredRemoteURL(sctx.Ctx, sctx.WorkDir, "origin"); err == nil && strings.TrimSpace(url) != "" {
 		// A matching redacted value means origin may carry credentials that the
 		// database intentionally omits. A different registration was refreshed
 		// from the working clone at run start, so prefer it without rewriting

@@ -230,6 +230,93 @@ func TestInspectCachedBehindPerformsNoFetchOrMutation(t *testing.T) {
 	}
 }
 
+func TestCIHandbackGuidanceUsesUpstreamProvider(t *testing.T) {
+	t.Parallel()
+
+	for _, provider := range []struct {
+		name                  string
+		upstreamURL           string
+		shouldSuggestHandback bool
+	}{
+		{"github", "https://github.com/example/repo.git", true},
+		{"gitlab", "https://gitlab.com/example/repo.git", false},
+	} {
+		for _, relation := range []string{StateSynchronized, StateDiverged} {
+			t.Run(provider.name+"/"+relation, func(t *testing.T) {
+				t.Parallel()
+
+				f := newSyncFixture(t)
+				repo, err := f.db.ReplaceRepoURLs(f.repo.ID, provider.upstreamURL, f.remote)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.service.Repo = repo
+				for _, err := range []error{
+					f.db.UpdateRunStatus(f.run.ID, types.RunRunning),
+					f.db.UpdateRunReviewApprovedHeadSHA(f.run.ID, f.pushed),
+					f.db.UpdateRunPushBinding(f.run.ID, db.PushBinding{
+						HeadSHA: f.pushed, TargetKind: "fork", TargetFingerprint: TargetFingerprint(f.remote), Ref: "refs/heads/feature/sync",
+					}),
+				} {
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				ci, err := f.db.InsertStepResult(f.run.ID, types.StepCI)
+				if err != nil {
+					t.Fatal(err)
+				}
+				findings := `{"findings":[{"id":"ci-1","category":"ci-check","severity":"error","action":"auto-fix","check":"tests","description":"tests failed"}]}`
+				if err := f.db.SetStepAutoFixLimit(ci.ID, 0); err != nil {
+					t.Fatal(err)
+				}
+				if err := f.db.ParkStepForApproval(f.run.ID, ci.ID, types.StepStatusAwaitingApproval, 0, 10, &findings); err != nil {
+					t.Fatal(err)
+				}
+				mustRun(t, f.local, "fetch", f.remote, "refs/heads/feature/sync")
+				if relation == StateSynchronized {
+					mustRun(t, f.local, "merge", "--ff-only", f.pushed)
+				} else {
+					mustWrite(t, filepath.Join(f.local, "local.txt"), "local work\n")
+					mustRun(t, f.local, "add", "local.txt")
+					mustRun(t, f.local, "commit", "-m", "local work")
+				}
+				localHead := mustRun(t, f.local, "rev-parse", "HEAD")
+
+				for _, inspection := range []struct {
+					name    string
+					inspect func(context.Context) State
+				}{
+					{"cached", f.service.InspectCached},
+					{"refreshed", f.service.Refresh},
+				} {
+					t.Run(inspection.name, func(t *testing.T) {
+						state := inspection.inspect(f.ctx)
+
+						if state.State != relation || state.Changed || state.Local.Head != localHead || state.Pipeline.PushedHead != f.pushed {
+							t.Fatalf("state = %#v", state)
+						}
+						if inspection.name == "refreshed" && (state.Remote.Freshness != "live" || state.Remote.ObservedHead != f.pushed) {
+							t.Fatalf("refresh did not verify the published head: %#v", state.Remote)
+						}
+						if provider.shouldSuggestHandback {
+							if state.NextAction == nil || state.NextAction.Code != "handback_ci" || state.NextAction.Command != "no-mistakes axi handback" {
+								t.Fatalf("supported provider next action = %#v", state.NextAction)
+							}
+						} else if relation == StateSynchronized {
+							if state.NextAction != nil {
+								t.Fatalf("unsupported synchronized provider next action = %#v", state.NextAction)
+							}
+						} else if state.NextAction == nil || state.NextAction.Code != "inspect_and_reconcile_manually" || state.NextAction.Command != "git log --oneline --left-right HEAD..."+f.pushed {
+							t.Fatalf("unsupported diverged provider next action = %#v", state.NextAction)
+						}
+					})
+				}
+			})
+		}
+	}
+}
+
 func TestApplyCleanStrictBehindFastForwardsExactBoundHead(t *testing.T) {
 	t.Parallel()
 
