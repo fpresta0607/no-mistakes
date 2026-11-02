@@ -168,6 +168,54 @@ func (d *DB) ReleaseCIHandback(receipt *CIHandback, run *Run, repo *Repo, findin
 	return nil
 }
 
+func (d *DB) CancelReleasedCIHandback(runID string) error {
+	receipt, err := d.LatestCIHandback(runID)
+	if err != nil {
+		return err
+	}
+	if receipt == nil || receipt.Candidate != nil || receipt.AcceptedHead != nil {
+		return fmt.Errorf("run %s has no settled released CI handback", runID)
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	ts := now()
+	result, err := tx.Exec(`UPDATE runs SET status = ?, error = ?, awaiting_agent_since = NULL,
+		parked_ms = COALESCE(parked_ms, 0) + CASE WHEN ? > awaiting_agent_since THEN (? - awaiting_agent_since) * 1000 ELSE 0 END,
+		updated_at = ?
+		WHERE id = ? AND status = 'running' AND awaiting_agent_since IS NOT NULL AND COALESCE(push_active, 0) = 0
+		AND head_sha = ? AND last_pushed_sha = head_sha AND push_generation = ? AND push_target_fingerprint = ? AND push_ref = ?
+		AND custody_returned_at IS NULL
+		AND EXISTS (SELECT 1 FROM ci_handbacks h WHERE h.run_id = runs.id AND h.id = ? AND h.accepted_head IS NULL AND h.candidate_json IS NULL
+		AND h.id = (SELECT id FROM ci_handbacks WHERE run_id = runs.id ORDER BY id DESC LIMIT 1))
+		AND NOT EXISTS (SELECT 1 FROM step_results s WHERE s.run_id = runs.id AND (s.agent_pid IS NOT NULL
+		OR (s.step_name <> 'ci' AND s.status <> 'completed') OR (s.step_name = 'ci' AND s.status <> 'awaiting_approval')))
+		AND EXISTS (SELECT 1 FROM step_results s JOIN step_rounds round ON round.step_result_id = s.id
+		WHERE s.run_id = runs.id AND s.step_name = 'ci' AND s.status = 'awaiting_approval' AND s.auto_fix_limit IS NULL
+		AND round.id = ? AND round.findings_json = s.findings_json
+		AND round.id = (SELECT id FROM step_rounds WHERE step_result_id = s.id ORDER BY round DESC, id DESC LIMIT 1))
+		AND NOT EXISTS (SELECT 1 FROM runs other WHERE other.repo_id = runs.repo_id AND other.branch = runs.branch AND other.id <> runs.id AND other.status IN ('pending', 'running'))`,
+		types.RunCancelled, types.RunCancelReasonAbortedByUser, ts, ts, ts, runID,
+		receipt.ReleasedHead, receipt.PushGeneration, receipt.TargetFingerprint, receipt.PushRef, receipt.ID, receipt.RoundID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return fmt.Errorf("run %s is not a writer-free released CI handback", runID)
+	}
+	if _, err := tx.Exec(`UPDATE step_results SET status = ?, error = ?, completed_at = ?, last_activity_at = ?, last_activity = ?
+		WHERE run_id = ? AND step_name = 'ci'`, types.StepStatusFailed, types.RunCancelReasonAbortedByUser, ts, ts, "step failed: "+types.RunCancelReasonAbortedByUser, runID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (d *DB) AcceptCIHandback(receipt *CIHandback, head string, repo *Repo) error {
 	if receipt.Candidate == nil || receipt.Candidate.Head != head || receipt.Candidate.UpstreamURL != repo.UpstreamURL || receipt.Candidate.ForkURL != repo.ForkURL {
 		return fmt.Errorf("CI handback has no matching candidate checkpoint")

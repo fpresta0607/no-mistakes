@@ -13,6 +13,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -173,6 +174,221 @@ func newCIHandbackRecoveryFixture(t *testing.T, isOrdinary bool) *ciHandbackReco
 	t.Setenv("FAKE_CLI_PR_HEAD_SHA", published)
 	t.Setenv("FAKE_CLI_PR_LIST_JSON", `[{"number":1,"url":"https://github.com/test/repo/pull/1","baseRefName":"main"}]`)
 	return fixture
+}
+
+func TestManagerCancelReleasedCIHandbackAfterRecoveryFailure(t *testing.T) {
+	for _, release := range []struct {
+		name       string
+		isOrdinary bool
+	}{
+		{"ordinary", true},
+		{"conflict", false},
+	} {
+		t.Run(release.name, func(t *testing.T) {
+			fixture := newCIHandbackRecoveryFixture(t, release.isOrdinary)
+			manager := fixture.manager
+			if err := manager.db.ClearCIHandbackCandidate(fixture.receipt); err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			database, err := db.Open(manager.paths.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager = NewRunManager(database, manager.paths, manager.steps)
+			fixture.manager = manager
+			if err := os.Rename(fixture.remote, fixture.remote+".offline"); err != nil {
+				t.Fatal(err)
+			}
+			if plan, err := manager.prepareRecoveredRun(t.Context(), fixture.run); err == nil || !strings.Contains(err.Error(), "failed to fetch or resolve trusted default branch") {
+				if plan != nil {
+					plan.agent.Close()
+				}
+				t.Fatalf("recovery did not fail at the trusted-config boundary: %v", err)
+			}
+			plans, preserved := manager.recoverableParkedRuns(t.Context())
+			if len(plans) != 0 {
+				for _, plan := range plans {
+					plan.agent.Close()
+				}
+				t.Fatal("startup installed a plan without trusted config")
+			}
+			if _, ok := preserved[fixture.run.ID]; !ok {
+				t.Fatal("startup lost the released reservation")
+			}
+			if _, err := database.RecoverStaleRunsExcept("daemon restarted", preserved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(fixture.remote+".offline", fixture.remote); err != nil {
+				t.Fatal(err)
+			}
+			before, err := database.GetRun(fixture.run.ID)
+			if err != nil || !reflect.DeepEqual(before, fixture.run) {
+				t.Fatalf("failed recovery changed the reservation: %#v %v", before, err)
+			}
+			beforeSteps, err := database.GetStepsByRun(fixture.run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			refs := make(map[string]string)
+			for _, directory := range []string{fixture.repo.WorkingPath, fixture.managed, fixture.remote, manager.paths.RepoDir(fixture.repo.ID)} {
+				refs[directory] = gitOutput(t, directory, "for-each-ref", "--format=%(refname) %(objectname)")
+			}
+			callerHead := gitOutput(t, fixture.repo.WorkingPath, "rev-parse", "HEAD")
+			managedHead := gitOutput(t, fixture.managed, "rev-parse", "HEAD")
+			subscription, err := manager.Subscribe(fixture.run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer subscription.Close()
+			eventContext, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			subscription.Next(eventContext)
+
+			if err := manager.HandleCancel(fixture.run.ID); err != nil {
+				t.Fatalf("explicit abort cannot end the released reservation: %v", err)
+			}
+
+			after, err := database.GetRun(fixture.run.ID)
+			if err != nil || after.Status != types.RunCancelled || after.Error == nil || *after.Error != types.RunCancelReasonAbortedByUser || after.AwaitingAgentSince != nil || after.ParkedMS < before.ParkedMS {
+				t.Fatalf("aborted reservation = %#v %v", after, err)
+			}
+			expected := *before
+			expected.Status, expected.Error, expected.AwaitingAgentSince = types.RunCancelled, after.Error, nil
+			expected.ParkedMS, expected.UpdatedAt = after.ParkedMS, after.UpdatedAt
+			if !reflect.DeepEqual(&expected, after) {
+				t.Fatalf("abort changed source or validation identity: %#v", after)
+			}
+			stored, err := database.LatestCIHandback(fixture.run.ID)
+			if err != nil || !reflect.DeepEqual(stored, fixture.receipt) {
+				t.Fatalf("abort changed the receipt or its repair policy: %#v %v", stored, err)
+			}
+			afterSteps, err := database.GetStepsByRun(fixture.run.ID)
+			if err != nil || len(afterSteps) != len(beforeSteps) {
+				t.Fatalf("abort changed the step sequence: %#v %v", afterSteps, err)
+			}
+			for index, step := range afterSteps {
+				previous := *beforeSteps[index]
+				if step.StepName == types.StepCI {
+					if step.Status != types.StepStatusFailed || step.Error == nil || *step.Error != types.RunCancelReasonAbortedByUser || step.CompletedAt == nil {
+						t.Fatalf("aborted CI gate = %#v", step)
+					}
+					previous.Status, previous.Error, previous.CompletedAt = step.Status, step.Error, step.CompletedAt
+					previous.LastActivityAt, previous.LastActivity = step.LastActivityAt, step.LastActivity
+				}
+				if !reflect.DeepEqual(&previous, step) {
+					t.Fatalf("abort changed findings, actual execution spend or policy: %#v", step)
+				}
+				rounds, err := database.GetRoundsByStep(step.ID)
+				if err != nil || !reflect.DeepEqual(rounds, fixture.rounds[step.ID]) {
+					t.Fatalf("abort changed validation history: %#v %v", rounds, err)
+				}
+			}
+			event, ok := subscription.Next(eventContext)
+			if !ok || event.Type != ipc.EventRunCompleted || event.Status == nil || *event.Status != string(types.RunCancelled) || event.Error == nil || *event.Error != types.RunCancelReasonAbortedByUser {
+				t.Fatalf("abort event = %#v, open = %v", event, ok)
+			}
+			if _, ok := subscription.Next(eventContext); ok {
+				t.Fatal("aborted reservation left its subscription open")
+			}
+			if err := manager.HandleCancel(fixture.run.ID); err == nil {
+				t.Fatal("abort accepted an already terminal reservation")
+			}
+			if _, err := manager.prepareRecoveredRun(t.Context(), after); err == nil {
+				t.Fatal("recovery resurrected an explicitly aborted reservation")
+			}
+			plans, preserved = manager.recoverableParkedRuns(t.Context())
+			if len(plans) != 0 || len(preserved) != 0 {
+				t.Fatal("startup resurrected an explicitly aborted reservation")
+			}
+			if err := database.PrepareCIHandback(stored, fixture.followup, stored.BaseHead, "HEAD", fixture.repo); err == nil {
+				t.Fatal("follow-up resumed after explicit abort")
+			}
+			for directory, original := range refs {
+				if got := gitOutput(t, directory, "for-each-ref", "--format=%(refname) %(objectname)"); got != original {
+					t.Fatalf("abort changed preserved refs in %s: %s", directory, got)
+				}
+			}
+			if got := gitOutput(t, fixture.repo.WorkingPath, "rev-parse", "HEAD"); got != callerHead {
+				t.Fatalf("abort changed author source: %s", got)
+			}
+			if got := gitOutput(t, fixture.managed, "rev-parse", "HEAD"); got != managedHead {
+				t.Fatalf("abort changed managed source: %s", got)
+			}
+		})
+	}
+}
+
+func TestManagerCancelReleasedCIHandbackRefusesWritersAndTransitions(t *testing.T) {
+	for _, state := range []string{"push writer", "agent writer", "active validation", "candidate", "accepted", "tracked executor"} {
+		t.Run(state, func(t *testing.T) {
+			fixture := newCIHandbackRecoveryFixture(t, true)
+			manager, database := fixture.manager, fixture.manager.db
+			if state != "candidate" && state != "accepted" {
+				if err := database.ClearCIHandbackCandidate(fixture.receipt); err != nil {
+					t.Fatal(err)
+				}
+			}
+			results, err := database.GetStepsByRun(fixture.run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch state {
+			case "push writer":
+				err = database.SetRunPushActive(fixture.run.ID, true)
+			case "agent writer":
+				processID := os.Getpid()
+				err = database.SetStepAgentActivity(results[len(results)-1].ID, "active agent", &processID)
+			case "active validation":
+				err = database.UpdateStepStatus(results[1].ID, types.StepStatusRunning)
+			case "accepted":
+				err = database.AcceptCIHandback(fixture.receipt, fixture.followup, fixture.repo)
+			case "tracked executor":
+				manager.executors[fixture.run.ID] = &pipeline.Executor{}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, err := database.GetRun(fixture.run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeSteps, err := database.GetStepsByRun(fixture.run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err := manager.HandleCancel(fixture.run.ID); err == nil {
+				t.Fatal("cancel treated an unverified reservation as writer-free")
+			}
+
+			after, err := database.GetRun(fixture.run.ID)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("refused abort changed the run: %#v %v", after, err)
+			}
+			afterSteps, err := database.GetStepsByRun(fixture.run.ID)
+			if err != nil || !reflect.DeepEqual(beforeSteps, afterSteps) {
+				t.Fatalf("refused abort changed the steps: %#v %v", afterSteps, err)
+			}
+		})
+	}
+}
+
+func TestManagerCancelUsesLiveCancellation(t *testing.T) {
+	manager := NewRunManager(nil, nil, nil)
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	manager.cancels["live"] = cancel
+
+	if err := manager.HandleCancel("live"); err != nil {
+		t.Fatal(err)
+	}
+
+	if cause := context.Cause(ctx); cause == nil || cause.Error() != types.RunCancelReasonAbortedByUser {
+		t.Fatalf("live cancellation cause = %v", cause)
+	}
 }
 
 func TestManagerCIHandbackCrashRecovery(t *testing.T) {

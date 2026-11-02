@@ -2294,12 +2294,37 @@ func (m *RunManager) HandleCancel(runID string) error {
 	cancel, ok := m.cancels[runID]
 	m.mu.Unlock()
 
-	if !ok {
-		return fmt.Errorf("no active run %s", runID)
+	if ok {
+		cancel(fmt.Errorf(types.RunCancelReasonAbortedByUser))
+		return nil
 	}
 
-	cancel(fmt.Errorf(types.RunCancelReasonAbortedByUser))
-	return nil
+	run, err := m.db.GetRun(runID)
+	if err != nil {
+		return err
+	}
+	if run == nil {
+		return fmt.Errorf("no active run %s", runID)
+	}
+	_, err = m.withBranchLock(run.RepoID, run.Branch, func() (string, error) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if cancel, ok := m.cancels[runID]; ok {
+			cancel(fmt.Errorf(types.RunCancelReasonAbortedByUser))
+			return "", nil
+		}
+		if m.executors[runID] != nil || m.dones[runID] != nil {
+			return "", fmt.Errorf("run %s still has an active executor", runID)
+		}
+		if err := m.db.CancelReleasedCIHandback(runID); err != nil {
+			return "", err
+		}
+		status, reason := string(types.RunCancelled), types.RunCancelReasonAbortedByUser
+		m.broadcast(ipc.Event{Type: ipc.EventRunCompleted, RunID: runID, RepoID: run.RepoID, Branch: &run.Branch, Status: &status, Error: &reason, PRURL: run.PRURL})
+		m.closeSubscribers(runID)
+		return "", nil
+	})
+	return err
 }
 
 // cancelActiveRuns cancels any in-progress runs for the given repo+branch
