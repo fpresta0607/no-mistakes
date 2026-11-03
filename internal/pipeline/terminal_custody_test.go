@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -9,13 +11,14 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func terminalSuccessorFixture(t *testing.T, name types.StepName, limit, spent int) (*db.DB, *paths.Paths, *db.Repo, *db.TerminalAdoption) {
+func terminalSuccessorFixture(t *testing.T, name types.StepName, limit, spent int, head, tree string) (*db.DB, *paths.Paths, *db.Repo, *db.TerminalAdoption) {
 	t.Helper()
 	database, p, initial, repo := setupTest(t)
 	if err := database.UpdateRunStatus(initial.ID, types.RunCompleted); err != nil {
@@ -27,7 +30,7 @@ func terminalSuccessorFixture(t *testing.T, name types.StepName, limit, spent in
 	if err != nil {
 		t.Fatal(err)
 	}
-	parent, err := database.InsertRunWithLaunchAssertion(repo.ID, "feature", strings.Repeat("b", 40), strings.Repeat("c", 40), nil, "nonce", "ordinary2", "intent", "", false, nil, assertion, proof)
+	parent, err := database.InsertRunWithLaunchAssertion(repo.ID, "feature", head, strings.Repeat("c", 40), nil, "nonce", "ordinary2", "intent", "", false, nil, assertion, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +60,7 @@ func terminalSuccessorFixture(t *testing.T, name types.StepName, limit, spent in
 	if err != nil {
 		t.Fatal(err)
 	}
-	event, _, err := database.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, StepNames: []types.StepName{name}, CandidateSHA: parent.HeadSHA, CandidateTree: strings.Repeat("d", 40), Reason: "fresh validation", Operator: "fixture", Assertion: assertion, Proof: proof})
+	event, _, err := database.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, StepNames: []types.StepName{name}, CandidateSHA: parent.HeadSHA, CandidateTree: tree, Reason: "fresh validation", Operator: "fixture", Assertion: assertion, Proof: proof})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +73,7 @@ func TestExecutorTerminalSuccessorDoesNotRenewRepairCapacity(t *testing.T) {
 		limit, spent int
 	}{{types.StepReview, 2, 3}, {types.StepCI, 1, 1}} {
 		t.Run(string(test.name), func(t *testing.T) {
-			database, p, repo, event := terminalSuccessorFixture(t, test.name, test.limit, test.spent)
+			database, p, repo, event := terminalSuccessorFixture(t, test.name, test.limit, test.spent, strings.Repeat("b", 40), strings.Repeat("d", 40))
 			child, err := database.GetRun(event.Successor.ID)
 			if err != nil {
 				t.Fatal(err)
@@ -96,7 +99,7 @@ func TestExecutorTerminalSuccessorDoesNotRenewRepairCapacity(t *testing.T) {
 }
 
 func TestExecutorTerminalSuccessorFailureLeavesNoPendingOrphan(t *testing.T) {
-	database, p, repo, event := terminalSuccessorFixture(t, types.StepReview, 2, 3)
+	database, p, repo, event := terminalSuccessorFixture(t, types.StepReview, 2, 3, strings.Repeat("b", 40), strings.Repeat("d", 40))
 	child, err := database.GetRun(event.Successor.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -116,5 +119,39 @@ func TestExecutorTerminalSuccessorFailureLeavesNoPendingOrphan(t *testing.T) {
 	parent, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
 	if err != nil || !reflect.DeepEqual(parent, &event.Snapshot) {
 		t.Fatal("failure changed predecessor")
+	}
+}
+
+func TestExecutorTerminalSuccessorRefusesAnUntrackedFileTheStatusConfigHides(t *testing.T) {
+	checkout := t.TempDir()
+	initGitRepo(t, checkout)
+	head, err := git.HeadSHA(context.Background(), checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := git.Run(context.Background(), checkout, "rev-parse", "HEAD^{tree}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, checkout, "hidden.txt", "only copy\n")
+	execGit(t, checkout, "config", "status.showUntrackedFiles", "no")
+	database, p, repo, event := terminalSuccessorFixture(t, types.StepReview, 2, 0, head, tree)
+	child, err := database.GetRun(event.Successor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := newPassStep(types.StepReview)
+	executor := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+
+	err = executor.ExecuteTerminalSuccessor(context.Background(), child, repo, checkout, event)
+
+	if err == nil || !strings.Contains(err.Error(), "dirty") {
+		t.Fatalf("successor validated a checkout holding a hidden untracked file: %v", err)
+	}
+	if step.callCount() != 0 {
+		t.Fatal("validation started on incomplete source")
+	}
+	if _, statErr := os.Stat(filepath.Join(checkout, "hidden.txt")); statErr != nil {
+		t.Fatalf("hidden source was removed: %v", statErr)
 	}
 }

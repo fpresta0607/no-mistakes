@@ -64,7 +64,7 @@ func (s *Service) terminalSource(ctx context.Context, run *db.Run, event *db.Ter
 		if base == "" || !isAncestor(ctx, s.workDir(), base, callerHead) {
 			return nil, fmt.Errorf("caller head is not descended from retained reviewed or published source")
 		}
-		if clean, _ := worktreeClean(ctx, s.workDir()); !clean {
+		if clean, _ := terminalSourceClean(ctx, s.workDir()); !clean {
 			return nil, fmt.Errorf("caller candidate is dirty or unreadable; preserve and commit its complete content before adoption")
 		}
 	}
@@ -126,7 +126,7 @@ func (s *Service) terminalSource(ctx context.Context, run *db.Run, event *db.Ter
 		if err != nil || worktrees.Canonical(common) != worktrees.Canonical(s.GateDir) {
 			return nil, fmt.Errorf("managed source does not belong to this run's gate")
 		}
-		clean, reason := worktreeClean(ctx, managed)
+		clean, reason := terminalSourceClean(ctx, managed)
 		if !clean {
 			return nil, fmt.Errorf("managed source is %s; preserve its tracked, staged and untracked content before adoption", reason)
 		}

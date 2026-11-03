@@ -460,6 +460,78 @@ func TestTerminalSuccessorInheritsPublicBindingWithoutValidationStamps(t *testin
 	}
 }
 
+func TestTerminalHistoryLeavesOnlyWithItsRepository(t *testing.T) {
+	database, event := newTerminalAdoptionFixture(t)
+	adopted, _, err := database.AdoptTerminalCandidate(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentID := event.Snapshot.Run.ID
+	for name, statement := range map[string]string{
+		"predecessor": `DELETE FROM runs WHERE id = '` + parentID + `'`,
+		"successor":   `DELETE FROM runs WHERE id = '` + adopted.Successor.ID + `'`,
+		"step":        `DELETE FROM step_results WHERE id = '` + event.Snapshot.Steps[0].ID + `'`,
+		"round":       `DELETE FROM step_rounds WHERE id = '` + event.Snapshot.Rounds[0][0].ID + `'`,
+		"adoption":    `DELETE FROM terminal_adoptions WHERE run_id = '` + parentID + `'`,
+	} {
+		if _, err := database.sql.Exec(statement); err == nil {
+			t.Fatalf("%s deleted while its repository is registered", name)
+		}
+	}
+
+	if err := database.DeleteRepo(event.Snapshot.Repo.ID); err != nil {
+		t.Fatalf("repository with terminal history could not be removed: %v", err)
+	}
+
+	for table, query := range map[string]string{
+		"runs":               `SELECT COUNT(*) FROM runs`,
+		"step_results":       `SELECT COUNT(*) FROM step_results`,
+		"step_rounds":        `SELECT COUNT(*) FROM step_rounds`,
+		"terminal_adoptions": `SELECT COUNT(*) FROM terminal_adoptions`,
+	} {
+		var count int
+		if err := database.sql.QueryRow(query).Scan(&count); err != nil || count != 0 {
+			t.Errorf("%s kept %d rows after its repository was removed: %v", table, count, err)
+		}
+	}
+}
+
+func TestTerminalSuccessorKeepsTheConfiguredAllowanceOfAnUnreachedPhase(t *testing.T) {
+	database, event := newTerminalAdoptionFixture(t)
+	// The predecessor ended at Review: every later phase stayed pending, never
+	// started and so never recorded an allowance or spent a repair.
+	for _, step := range event.Snapshot.Steps {
+		if step.StepOrder <= types.StepReview.Order() {
+			continue
+		}
+		if _, err := database.sql.Exec(`DELETE FROM step_rounds WHERE step_result_id = ?`, step.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.sql.Exec(`UPDATE step_results SET status = ?, started_at = NULL, completed_at = NULL, auto_fix_limit = NULL, exit_code = NULL, duration_ms = NULL, log_path = NULL WHERE id = ?`, types.StepStatusPending, step.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.Snapshot = *snapshot
+	adopted, _, err := database.AdoptTerminalCandidate(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unreached, _, err := database.TerminalPhaseRemaining(adopted.Successor.ID, types.StepTest, 2)
+	reached, _, reachedErr := database.TerminalPhaseRemaining(adopted.Successor.ID, types.StepReview, 2)
+
+	if err != nil || unreached.Limit != 2 || unreached.Spent != 0 || unreached.Remaining != 2 {
+		t.Errorf("unreached phase lost its configured allowance: %+v err=%v", unreached, err)
+	}
+	if reachedErr != nil || reached.Limit != 1 || reached.Remaining != 0 {
+		t.Errorf("reached phase escaped its recorded allowance: %+v err=%v", reached, reachedErr)
+	}
+}
+
 func TestTerminalSuccessorGivesAnUnrecordedPhaseNoAutomaticAllowance(t *testing.T) {
 	database, event := newTerminalAdoptionFixture(t)
 	adopted, _, err := database.AdoptTerminalCandidate(context.Background(), event)

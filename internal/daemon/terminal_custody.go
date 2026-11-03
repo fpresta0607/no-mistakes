@@ -308,6 +308,9 @@ func validateTerminalSteps(snapshot *db.TerminalSnapshot, sequence []pipeline.St
 
 func freezeTerminalLimits(cfg *config.Config, snapshot *db.TerminalSnapshot) {
 	for _, step := range snapshot.Steps {
+		if step.StartedAt == nil {
+			continue
+		}
 		limit := 0
 		if step.AutoFixLimit != nil {
 			limit = min(*step.AutoFixLimit, cfg.AutoFixLimit(step.StepName))

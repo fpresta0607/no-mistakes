@@ -36,7 +36,7 @@ func (e *Executor) ExecuteTerminalSuccessor(ctx context.Context, run *db.Run, re
 	if err != nil || tree != event.CandidateTree {
 		return e.failRun(run, repo, fmt.Errorf("accepted candidate content changed"), ctx)
 	}
-	dirty, err := git.HasUncommittedChanges(ctx, workDir)
+	dirty, err := git.HasUncommittedChangesIncludingHidden(ctx, workDir)
 	if err != nil || dirty {
 		return e.failRun(run, repo, fmt.Errorf("accepted candidate became dirty before validation"), ctx)
 	}

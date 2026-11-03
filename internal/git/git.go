@@ -654,8 +654,20 @@ func LsRemote(ctx context.Context, dir, remote, ref string) (string, error) {
 
 // HasUncommittedChanges reports whether the working tree or index differs from HEAD.
 // Returns true if any tracked file is modified, staged, or deleted, or if there are
-// untracked files, regardless of the user's status display configuration.
+// untracked files. Equivalent to a non-empty `git status --porcelain`.
 func HasUncommittedChanges(ctx context.Context, dir string) (bool, error) {
+	out, err := Run(ctx, dir, "status", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	return out != "", nil
+}
+
+// HasUncommittedChangesIncludingHidden is HasUncommittedChanges that also
+// counts untracked files the status.showUntrackedFiles configuration hides.
+// Managed-checkout custody and cleanup use it because a hidden file is still
+// source that removal would destroy.
+func HasUncommittedChangesIncludingHidden(ctx context.Context, dir string) (bool, error) {
 	out, err := Run(ctx, dir, "status", "--porcelain", "--untracked-files=all")
 	if err != nil {
 		return false, err

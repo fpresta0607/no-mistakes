@@ -600,6 +600,7 @@ The successor pins the current trusted repository gates at acceptance; the prede
 The predecessor-linked phase ledger includes actual manual and automatic fixes and dispatched attempts interrupted before a round was recorded.
 Automatic repair capacity cannot exceed the original remaining allowance; an exhausted phase receives no renewed capacity.
 A newly required phase without a recorded predecessor allowance receives zero automatic repairs.
+A phase the predecessor never started spent nothing and keeps its configured allowance.
 Further manual repairs require explicit gate decisions and remain recorded as additional spending.
 
 The result reports `adopted_unvalidated`, the successor `run`, `predecessor`, exact `candidate` and `candidate_tree`, adoption ID, cumulative `phase_budgets` and whether validation started.

@@ -2065,6 +2065,16 @@ func refreshable(state State) bool {
 }
 
 func worktreeClean(ctx context.Context, dir string) (bool, string) {
+	return worktreeCleanBy(ctx, dir, git.HasUncommittedChanges)
+}
+
+// terminalSourceClean also counts untracked files the status configuration
+// hides, because adopted terminal source must be complete.
+func terminalSourceClean(ctx context.Context, dir string) (bool, string) {
+	return worktreeCleanBy(ctx, dir, git.HasUncommittedChangesIncludingHidden)
+}
+
+func worktreeCleanBy(ctx context.Context, dir string, hasChanges func(context.Context, string) (bool, error)) (bool, string) {
 	markers := []struct{ path, reason string }{
 		{"MERGE_HEAD", "merge_in_progress"}, {"rebase-merge", "rebase_in_progress"}, {"rebase-apply", "rebase_in_progress"},
 		{"CHERRY_PICK_HEAD", "cherry_pick_in_progress"}, {"REVERT_HEAD", "revert_in_progress"}, {"BISECT_LOG", "bisect_in_progress"}, {"sequencer", "sequencer_in_progress"},
@@ -2080,7 +2090,7 @@ func worktreeClean(ctx context.Context, dir string) (bool, string) {
 			}
 		}
 	}
-	dirty, err := git.HasUncommittedChanges(ctx, dir)
+	dirty, err := hasChanges(ctx, dir)
 	if err != nil {
 		return false, "status_unavailable"
 	}

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -44,7 +43,7 @@ func runTerminalContinuation(cmd *cobra.Command, reason string) error {
 		if event != nil {
 			snapshot = &event.Snapshot
 		}
-		directory, err := filepath.Abs(".")
+		directory, err := git.FindGitRoot(".")
 		if err != nil {
 			return emitError(cmd, 1, err.Error())
 		}

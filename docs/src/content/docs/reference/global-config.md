@@ -1341,12 +1341,13 @@ Enabling this pushes a branch to your remote, so pick a `branch` name your CI wo
 Evidence lives under the app root rather than the system temp directory. On Linux the daemon runs from a service unit that does not export `TMPDIR`, so the old temp-directory default resolved to the shared `/tmp`, which current Ubuntu mounts as a RAM-backed `tmpfs`. The app root is disk backed on macOS, Linux, and Windows alike.
 
 no-mistakes reaps its recorded run directories itself rather than relying on an operating-system temp cleaner. Unrecognized directories under a custom `local_root` are left untouched.
-The daemon's [source retention rules](/no-mistakes/concepts/daemon/#what-it-does) also govern cleanup eligibility.
+The daemon's [source retention rules](/no-mistakes/concepts/daemon/#what-it-does) keep worktrees, not evidence: a dirty or unreadable retained checkout does not hold its run's evidence back.
 
 - A finished run that produced no artifacts leaves nothing behind.
-- Eligible recorded run directories older than `retention` are removed.
-- Whatever eligible recorded run evidence survives is trimmed to `max_runs`, oldest first.
+- Recorded run directories older than `retention` are removed.
+- Whatever recorded run evidence survives is trimmed to `max_runs`, oldest first.
 - A run that is still pending or running is never touched.
+- A `ci_monitor_interrupted` run keeps its evidence while its checkout's head is unreadable or differs from the run's recorded head, since that checkout may still hold an unpushed CI auto-fix commit.
 
 Reaping runs after each finished run and again at daemon startup. An upgraded daemon also drains the pre-relocation directory in the system temp directory under the same rules; nothing is migrated, because absolute paths recorded in older pull request bodies name the old location.
 
@@ -1354,7 +1355,7 @@ Reaping runs after each finished run and again at daemon startup. An upgraded da
 
 The publication fields are global defaults. Repo config can override `store_in_repo`, `attach_media`, and `dir`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
 
-`test.evidence.retention` and `test.evidence.max_runs` also bound eligible `<NM_HOME>/logs/<run-id>` directories (per-run step logs), reaped on the same cadence and subject to the same source retention rules rather than through a second config surface for the same kind of per-run diagnostic artifact.
+`test.evidence.retention` and `test.evidence.max_runs` also bound `<NM_HOME>/logs/<run-id>` directories (per-run step logs), reaped on the same cadence under the same active-run and interrupted-CI guards rather than through a second config surface for the same kind of per-run diagnostic artifact.
 
 ### eval
 

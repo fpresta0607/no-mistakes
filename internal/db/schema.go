@@ -276,14 +276,14 @@ CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
 // were created before the referenced columns existed. Each statement must be
 // idempotent via its error being tolerated when the column already exists.
 var migrationStatements = []string{
-	`CREATE TRIGGER IF NOT EXISTS terminal_adoptions_no_delete BEFORE DELETE ON terminal_adoptions BEGIN SELECT RAISE(ABORT, 'terminal adoption is immutable'); END`,
+	`CREATE TRIGGER IF NOT EXISTS terminal_adoptions_no_delete BEFORE DELETE ON terminal_adoptions WHEN EXISTS (SELECT 1 FROM runs WHERE id = OLD.run_id) BEGIN SELECT RAISE(ABORT, 'terminal adoption is immutable'); END`,
 	`ALTER TABLE terminal_adoptions ADD COLUMN successor_run_id TEXT REFERENCES runs(id)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS terminal_adoptions_successor ON terminal_adoptions(successor_run_id)`,
 	`CREATE TRIGGER IF NOT EXISTS terminal_predecessor_update BEFORE UPDATE ON runs WHEN EXISTS (SELECT 1 FROM terminal_adoptions WHERE run_id = OLD.id) BEGIN SELECT RAISE(ABORT, 'terminal predecessor is immutable'); END`,
-	`CREATE TRIGGER IF NOT EXISTS terminal_predecessor_delete BEFORE DELETE ON runs WHEN EXISTS (SELECT 1 FROM terminal_adoptions WHERE run_id = OLD.id) BEGIN SELECT RAISE(ABORT, 'terminal predecessor is immutable'); END`,
+	`CREATE TRIGGER IF NOT EXISTS terminal_predecessor_delete BEFORE DELETE ON runs WHEN EXISTS (SELECT 1 FROM terminal_adoptions WHERE run_id = OLD.id) AND EXISTS (SELECT 1 FROM repos WHERE id = OLD.repo_id) BEGIN SELECT RAISE(ABORT, 'terminal predecessor is immutable'); END`,
 	`CREATE TRIGGER IF NOT EXISTS terminal_predecessor_step_insert BEFORE INSERT ON step_results WHEN EXISTS (SELECT 1 FROM terminal_adoptions WHERE run_id = NEW.run_id) BEGIN SELECT RAISE(ABORT, 'terminal predecessor steps are immutable'); END`,
 	`CREATE TRIGGER IF NOT EXISTS terminal_predecessor_step_update BEFORE UPDATE ON step_results WHEN EXISTS (SELECT 1 FROM terminal_adoptions WHERE run_id IN (OLD.run_id, NEW.run_id)) BEGIN SELECT RAISE(ABORT, 'terminal predecessor steps are immutable'); END`,
-	`CREATE TRIGGER IF NOT EXISTS terminal_predecessor_step_delete BEFORE DELETE ON step_results WHEN EXISTS (SELECT 1 FROM terminal_adoptions WHERE run_id = OLD.run_id) BEGIN SELECT RAISE(ABORT, 'terminal predecessor steps are immutable'); END`,
+	`CREATE TRIGGER IF NOT EXISTS terminal_predecessor_step_delete BEFORE DELETE ON step_results WHEN EXISTS (SELECT 1 FROM terminal_adoptions WHERE run_id = OLD.run_id) AND EXISTS (SELECT 1 FROM runs WHERE id = OLD.run_id) BEGIN SELECT RAISE(ABORT, 'terminal predecessor steps are immutable'); END`,
 	`CREATE TRIGGER IF NOT EXISTS terminal_predecessor_round_insert BEFORE INSERT ON step_rounds WHEN EXISTS (SELECT 1 FROM terminal_adoptions a JOIN step_results s ON s.run_id = a.run_id WHERE s.id = NEW.step_result_id) BEGIN SELECT RAISE(ABORT, 'terminal predecessor rounds are immutable'); END`,
 	`CREATE TRIGGER IF NOT EXISTS terminal_predecessor_round_update BEFORE UPDATE ON step_rounds WHEN EXISTS (SELECT 1 FROM terminal_adoptions a JOIN step_results s ON s.run_id = a.run_id WHERE s.id IN (OLD.step_result_id, NEW.step_result_id)) BEGIN SELECT RAISE(ABORT, 'terminal predecessor rounds are immutable'); END`,
 	`CREATE TRIGGER IF NOT EXISTS terminal_predecessor_round_delete BEFORE DELETE ON step_rounds WHEN EXISTS (SELECT 1 FROM terminal_adoptions a JOIN step_results s ON s.run_id = a.run_id WHERE s.id = OLD.step_result_id) BEGIN SELECT RAISE(ABORT, 'terminal predecessor rounds are immutable'); END`,

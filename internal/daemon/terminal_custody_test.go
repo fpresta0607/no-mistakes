@@ -161,6 +161,23 @@ func TestTerminalAgentsRequireActualInactivity(t *testing.T) {
 	}
 }
 
+func TestTerminalLimitsKeepTheConfiguredAllowanceOfAnUnreachedPhase(t *testing.T) {
+	started := time.Now().Unix()
+	recorded := 1
+	cfg := &config.Config{AutoFix: config.AutoFix{Review: 2, Test: 3, Document: 3}}
+	snapshot := &db.TerminalSnapshot{Steps: []db.StepResult{
+		{StepName: types.StepReview, StartedAt: &started, AutoFixLimit: &recorded},
+		{StepName: types.StepTest, StartedAt: &started},
+		{StepName: types.StepDocument},
+	}}
+
+	freezeTerminalLimits(cfg, snapshot)
+
+	if cfg.AutoFix.Review != 1 || cfg.AutoFix.Test != 0 || cfg.AutoFix.Document != 3 {
+		t.Fatalf("frozen limits review=%d test=%d document=%d, want 1 (recorded), 0 (started without allowance), 3 (unreached keeps configured)", cfg.AutoFix.Review, cfg.AutoFix.Test, cfg.AutoFix.Document)
+	}
+}
+
 func TestTerminalCleanupPreservesCommittedCorrectionsBeforeAdoption(t *testing.T) {
 	for _, status := range []types.RunStatus{types.RunFailed, types.RunCancelled} {
 		for _, cleanupPath := range []string{"completion", "recorded startup", "default reap"} {

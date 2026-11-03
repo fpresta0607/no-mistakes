@@ -359,7 +359,7 @@ func (d *DB) TerminalPhaseRemaining(runID string, name types.StepName, configure
 				continue
 			}
 			hasPhase = true
-			if snapshot.Run.ID != runID {
+			if snapshot.Run.ID != runID && step.StartedAt != nil {
 				limit := 0
 				if step.AutoFixLimit != nil {
 					limit = *step.AutoFixLimit

@@ -561,9 +561,12 @@ func preserveRunHead(d *db.DB, workDir string, run *db.Run) (string, bool) {
 	if d == nil || run == nil || strings.TrimSpace(workDir) == "" {
 		return "", false
 	}
+	// A slow source scan must not spend the budget that pins crash work.
+	observeCtx, cancelObserve := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = terminalWorktreeSourceReason(observeCtx, d, run.ID, workDir)
+	cancelObserve()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = terminalWorktreeSourceReason(ctx, d, run.ID, workDir)
 	head, err := git.HeadSHA(ctx, workDir)
 	if err != nil {
 		slog.Warn("failed to read managed worktree head before terminalization", "run", run.ID, "error", err)
@@ -1054,7 +1057,7 @@ func terminalWorktreeSourceReason(ctx context.Context, database *db.DB, runID, w
 		return ""
 	}
 	head, headErr := git.HeadSHA(ctx, workDir)
-	dirty, statusErr := git.HasUncommittedChanges(ctx, workDir)
+	dirty, statusErr := git.HasUncommittedChangesIncludingHidden(ctx, workDir)
 	state := "clean:" + head
 	if headErr != nil || statusErr != nil {
 		state = "unreadable"
