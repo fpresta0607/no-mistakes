@@ -1426,7 +1426,11 @@ rounds:
 		// Only auto-fix findings whose action is "auto-fix".
 		// This runs before the NeedsApproval check so that all severity
 		// levels (including "info") get a chance at automatic fixing.
-		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit {
+		familyRemaining, terminalFamily, budgetErr := e.db.TerminalPhaseRemaining(run.ID, stepName, autoFixLimit)
+		if budgetErr != nil {
+			return false, "", fmt.Errorf("terminal repair ledger: %w", budgetErr)
+		}
+		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit && (!terminalFamily || familyRemaining.Remaining > 0) {
 			fixableFindings := autoFixableFindingsJSON(roundFindings)
 			if carryFindings {
 				fixableFindings = remapFindingIDsJSON(effectiveFindings, fixableFindings)
@@ -2195,8 +2199,13 @@ func (e *Executor) preserveUnpublishedTerminalHead(ctx context.Context, run *db.
 		published = *run.LastPushedSHA
 	}
 	if published == "" {
-		if run.SubmittedHeadSHA != nil {
-			published = *run.SubmittedHeadSHA
+		submitted, err := e.db.CustodySubmittedHead(run)
+		if err != nil {
+			slog.Warn("failed to read custody before anchoring terminal head", "run", run.ID, "error", err)
+			return false
+		}
+		if submitted != nil {
+			published = *submitted
 		}
 	}
 	if head == published {

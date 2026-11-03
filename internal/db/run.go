@@ -53,6 +53,7 @@ type Run struct {
 	PushGeneration         *int64
 	PushActive             bool
 	TerminalHeadVerifiedAt *int64
+	TerminalSourceState    *string
 	// CustodyReturnedAt is non-nil once a guarded branch-sync recovery
 	// explicitly ended this run's ownership of an unpublished pipeline head
 	// (terminal run whose head was never successfully pushed, or moved after
@@ -108,7 +109,7 @@ type Run struct {
 	UpdatedAt                int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, launch_assertion, launch_assertion_proof, pr_base_branch, COALESCE(omit_intent, 0), pi_profile, verification_plan, closing_issue_refs, closing_issue_refs_locked_at, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, launch_assertion, launch_assertion_proof, pr_base_branch, COALESCE(omit_intent, 0), pi_profile, verification_plan, closing_issue_refs, closing_issue_refs_locked_at, created_at, updated_at, terminal_source_state`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -126,6 +127,7 @@ func scanRun(row interface {
 		&r.PRBaseBranch, &r.OmitIntent, &r.PiProfile, &r.VerificationPlan,
 		&storedClosingIssues, &r.ClosingIssueRefsLockedAt,
 		&r.CreatedAt, &r.UpdatedAt,
+		&r.TerminalSourceState,
 	)
 	if err != nil {
 		return err
@@ -1246,7 +1248,7 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 	ciArgs = append(ciArgs, args...)
 	ciResult, err := tx.Exec(
 		`UPDATE runs
-		 SET status = ?, error = ?, awaiting_agent_since = NULL, updated_at = ?
+		 SET status = ?, error = ?, push_active = 0, awaiting_agent_since = NULL, updated_at = ?
 		 WHERE status IN (?, ?)
 		   AND pr_url IS NOT NULL
 		   AND pr_url <> ''
@@ -1292,6 +1294,9 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 	)
 	if err != nil {
 		return 0, fmt.Errorf("recover interrupted ci monitor steps: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE runs SET push_active = 0 WHERE status = ? AND push_active <> 0`, types.RunCIMonitorInterrupted); err != nil {
+		return 0, fmt.Errorf("clear interrupted ci monitor publisher: %w", err)
 	}
 
 	// Fail stale steps (running, awaiting_approval, fixing, fix_review) for

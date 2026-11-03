@@ -1001,10 +1001,10 @@ Retention for leftover run-worktree directories under the default `<NM_HOME>/wor
 
 | Field                | Type     | Default          | Description                                                                    |
 | -------------------- | -------- | ---------------- | ------------------------------------------------------------------------------ |
-| `worktree.retention` | `string` | `24h`            | How long a leftover run worktree survives; `unlimited`/`none`/`off`/`never` or a non-positive duration disables the bound |
-| `worktree.max_runs`  | `int`    | `20`             | How many leftover worktree directories survive regardless of age; `0` disables the bound |
+| `worktree.retention` | `string` | `24h`            | How long an eligible leftover run worktree survives; `unlimited`/`none`/`off`/`never` or a non-positive duration disables the bound |
+| `worktree.max_runs`  | `int`    | `20`             | How many eligible leftover worktree directories survive regardless of age; `0` disables the bound |
 
-A run's own worktree is already removed the instant its pipeline finishes, so this budget is a safety net rather than the normal path: it only ever governs the directory left behind by a `git worktree remove` failure (for example a vendored `.git` nested somewhere under a large `node_modules` tree) or a [protected-path](/no-mistakes/reference/repo-config/#protected_paths) refusal that later became removable. Without it, a leftover like that survived indefinitely on a long-running daemon that never restarts, since the crash-recovery sweep that also reclaims it (see the daemon's [worktree cleanup](/no-mistakes/concepts/daemon/#what-it-does)) runs only at startup.
+This budget is a safety net for eligible leftovers after run-finish cleanup; the daemon's [source and refusal retention rules](/no-mistakes/concepts/daemon/#what-it-does) determine which worktrees may be removed.
 
 This reap runs after every finished run and again at daemon startup, the same cadence `test.evidence.retention` uses. Only the default `<NM_HOME>/worktrees` tree is bounded; a checkout you placed with [`worktree_roots`](#worktree_roots) is your own directory, and only the directories no-mistakes' own run records name there are ever touched, per that section's rules.
 
@@ -1341,11 +1341,13 @@ Enabling this pushes a branch to your remote, so pick a `branch` name your CI wo
 Evidence lives under the app root rather than the system temp directory. On Linux the daemon runs from a service unit that does not export `TMPDIR`, so the old temp-directory default resolved to the shared `/tmp`, which current Ubuntu mounts as a RAM-backed `tmpfs`. The app root is disk backed on macOS, Linux, and Windows alike.
 
 no-mistakes reaps its recorded run directories itself rather than relying on an operating-system temp cleaner. Unrecognized directories under a custom `local_root` are left untouched.
+The daemon's [source retention rules](/no-mistakes/concepts/daemon/#what-it-does) keep worktrees, not evidence: a dirty or unreadable retained checkout does not hold its run's evidence back.
 
 - A finished run that produced no artifacts leaves nothing behind.
 - Recorded run directories older than `retention` are removed.
 - Whatever recorded run evidence survives is trimmed to `max_runs`, oldest first.
 - A run that is still pending or running is never touched.
+- A `ci_monitor_interrupted` run keeps its evidence while its checkout's head is unreadable or differs from the run's recorded head, since that checkout may still hold an unpushed CI auto-fix commit.
 
 Reaping runs after each finished run and again at daemon startup. An upgraded daemon also drains the pre-relocation directory in the system temp directory under the same rules; nothing is migrated, because absolute paths recorded in older pull request bodies name the old location.
 
@@ -1353,7 +1355,7 @@ Reaping runs after each finished run and again at daemon startup. An upgraded da
 
 The publication fields are global defaults. Repo config can override `store_in_repo`, `attach_media`, and `dir`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
 
-`test.evidence.retention` and `test.evidence.max_runs` also bound `<NM_HOME>/logs/<run-id>` (per-run step logs), reaped on the same cadence rather than through a second config surface for the same kind of per-run diagnostic artifact.
+`test.evidence.retention` and `test.evidence.max_runs` also bound `<NM_HOME>/logs/<run-id>` directories (per-run step logs), reaped on the same cadence under the same active-run and interrupted-CI guards rather than through a second config surface for the same kind of per-run diagnostic artifact.
 
 ### eval
 

@@ -663,6 +663,18 @@ func HasUncommittedChanges(ctx context.Context, dir string) (bool, error) {
 	return out != "", nil
 }
 
+// HasUncommittedChangesIncludingHidden is HasUncommittedChanges that also
+// counts untracked files the status.showUntrackedFiles configuration hides.
+// Managed-checkout custody and cleanup use it because a hidden file is still
+// source that removal would destroy.
+func HasUncommittedChangesIncludingHidden(ctx context.Context, dir string) (bool, error) {
+	out, err := Run(ctx, dir, "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return false, err
+	}
+	return out != "", nil
+}
+
 // UntrackedFiles returns each untracked path in git's order. Ignored files
 // are not included.
 func UntrackedFiles(ctx context.Context, dir string) ([]string, error) {

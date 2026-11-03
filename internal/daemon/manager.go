@@ -112,6 +112,7 @@ type recoveredRunPlan struct {
 	agent     agent.Agent
 	steps     []pipeline.Step
 	forge     *forgecontext.Context
+	terminal  *db.TerminalAdoption
 }
 
 func (m *RunManager) recoverableParkedRuns(ctx context.Context) ([]recoveredRunPlan, map[string]struct{}) {
@@ -281,13 +282,26 @@ func validateRecoveredSessionProviders(database *db.DB, runID string, ag agent.A
 }
 
 func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) (*config.Config, error) {
-	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
-	if err != nil {
-		return nil, fmt.Errorf("load global config: %w", err)
-	}
 	repoCfg, err := config.LoadRepo(workDir)
 	if err != nil {
 		return nil, fmt.Errorf("load repo config: %w", err)
+	}
+	cfg, err := m.loadRecoveredConfigWithRepo(ctx, run, repo, workDir, repoCfg)
+	if err != nil {
+		return nil, err
+	}
+	// A parked run keeps its original sequence; a new successor pins fresh gates.
+	cfg.Gates, err = m.pinnedRunGates(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func (m *RunManager) loadRecoveredConfigWithRepo(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, repoCfg *config.RepoConfig) (*config.Config, error) {
+	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
+	if err != nil {
+		return nil, fmt.Errorf("load global config: %w", err)
 	}
 	var trustedSHA string
 	if repo.DefaultBranch != "" {
@@ -316,17 +330,6 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
 	cfg := config.MergeForRemote(globalCfg, effectiveRepoCfg, repo.UpstreamURL)
-	// Gates are read back from the run, never re-resolved. Everything else here
-	// is deliberately re-read from the live default branch, but a gate decides
-	// which steps the run HAS: the default branch may have gained or lost one
-	// since this run parked, and rebuilding the sequence from the current list
-	// would leave recovery matching the run's recorded steps against a sequence
-	// it never executed - failing a healthy parked run as a crash.
-	gates, err := m.pinnedRunGates(run.ID)
-	if err != nil {
-		return nil, err
-	}
-	cfg.Gates = gates
 	if err := cfg.ApplyPiProfile(run.PiProfile); err != nil {
 		return nil, err
 	}
@@ -540,7 +543,9 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		}()
 
 		var executionError error
-		if plan.admission != nil {
+		if plan.terminal != nil {
+			executionError = executor.ExecuteTerminalSuccessor(runCtx, plan.run, plan.repo, plan.workDir, plan.terminal)
+		} else if plan.admission != nil {
 			executionError = pipeline.ValidateAuthoredCandidate(runCtx, m.db, plan.run, plan.workDir, plan.steps, plan.admission)
 			if executionError == nil {
 				executionError = executor.Execute(runCtx, plan.run, plan.repo, plan.workDir)
@@ -736,18 +741,17 @@ func (m *RunManager) cleanupRunEvidence(cfg *config.Config, runID string) {
 	}
 	now := time.Now()
 	reapEvidence(m.db, root, policy, now)
-	reapWorktrees(m.db, m.paths, wtPolicy, now)
+	m.reapWorktrees(wtPolicy, now)
 	reapRunLogs(m.db, m.paths.LogsDir(), policy, now)
 }
 
 // removeRunWorktree sweeps processes before deciding whether to remove the
-// directory, so refusal retention cannot keep escaped workers alive.
+// directory, so source or refusal retention cannot keep escaped workers alive.
 //
-// Every removal of a run worktree this package performs goes through here, and
-// none calls git.WorktreeRemove directly, because the ordering is easy to forget
-// at one site and invisible when forgotten - a run whose setup failed, whose
-// execution returned, or which was resumed after a crash all reach this point by
-// different routes. reason distinguishes the routes in the log.
+// Run setup failure, completion, and recovered-run cleanup all go through here
+// so each route sweeps before checking source and refusals. Orphan cleanup uses
+// removeOrphanWorktree after its own sweep. reason distinguishes the routes in
+// the log.
 func (m *RunManager) removeRunWorktree(repoID, runID, gateDir, wtDir, reason string) {
 	m.sweepRunWorktreeProcesses(repoID, runID, wtDir)
 	run, err := m.db.GetRun(runID)
@@ -758,6 +762,12 @@ func (m *RunManager) removeRunWorktree(repoID, runID, gateDir, wtDir, reason str
 	if refusal := protectedPathCleanupReason(m.db, run); refusal != "" {
 		slog.Warn("preserving run worktree", "run_id", runID, "path", wtDir, "reason", refusal)
 		return
+	}
+	if run != nil {
+		if reason := terminalWorktreeSourceReason(context.Background(), m.db, runID, wtDir); reason != "" {
+			slog.Warn("preserving run worktree", "run_id", runID, "path", wtDir, "reason", reason)
+			return
+		}
 	}
 	if err := git.WorktreeRemove(context.Background(), gateDir, wtDir); err != nil {
 		slog.Warn("failed to remove run worktree", "reason", reason, "run_id", runID, "path", wtDir, "error", err)
@@ -1209,7 +1219,11 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	if latestForBranch == nil {
 		return "", fmt.Errorf("no previous run for branch %s", branch)
 	}
-	headSHA, err := resolveRerunHead(ctx, gateDir, branch, latestForBranch)
+	submitted, err := m.db.CustodySubmittedHead(latestForBranch)
+	if err != nil {
+		return "", fmt.Errorf("refusing rerun: read custody of run %s: %w", latestForBranch.ID, err)
+	}
+	headSHA, err := resolveRerunHead(ctx, gateDir, branch, latestForBranch, submitted)
 	if err != nil {
 		return "", err
 	}
@@ -1273,7 +1287,9 @@ func inheritablePRURL(run *db.Run) string {
 	return strings.TrimSpace(*run.PRURL)
 }
 
-func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Run) (string, error) {
+// resolveRerunHead takes the latest run's custody submitted head
+// (db.CustodySubmittedHead), never its raw submitted head.
+func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Run, submitted *string) (string, error) {
 	gateHead, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
 	if err != nil {
 		return "", fmt.Errorf("resolve gate head: %w", err)
@@ -1284,8 +1300,8 @@ func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Ru
 	published := ""
 	if latest.LastPushedSHA != nil {
 		published = *latest.LastPushedSHA
-	} else if latest.SubmittedHeadSHA != nil {
-		published = *latest.SubmittedHeadSHA
+	} else if submitted != nil {
+		published = *submitted
 	}
 	if published == latest.HeadSHA || latest.TerminalHeadVerifiedAt == nil {
 		return gateHead, nil
@@ -1441,10 +1457,14 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 	})
 }
 
-func (m *RunManager) withBranchLock(repoID, branch string, action func() (string, error)) (string, error) {
+func (m *RunManager) branchMutex(repoID, branch string) *sync.Mutex {
 	lockKey := repoID + "/" + branch
 	lockVal, _ := m.branchLocks.LoadOrStore(lockKey, &sync.Mutex{})
-	branchMu := lockVal.(*sync.Mutex)
+	return lockVal.(*sync.Mutex)
+}
+
+func (m *RunManager) withBranchLock(repoID, branch string, action func() (string, error)) (string, error) {
+	branchMu := m.branchMutex(repoID, branch)
 	branchMu.Lock()
 	defer branchMu.Unlock()
 	return action()

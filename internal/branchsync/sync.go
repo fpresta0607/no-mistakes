@@ -691,6 +691,9 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		state.Changed = false
 		return state
 	}
+	if state.Safety == "blocked_custody_unreadable" {
+		return state
+	}
 	if state.State != StatePipelineOwned || run == nil {
 		return blockedPlan(state, state.State, "blocked_recover_not_applicable", "nothing to recover: the branch is not held by a terminal run with unpublished pipeline commits; no files or refs were changed")
 	}
@@ -1045,6 +1048,9 @@ func (s *Service) recoverKeepLocalFromArchive(ctx context.Context, run *db.Run, 
 		s.beforeGateReset()
 	}
 	freshRun, err := s.DB.GetRun(run.ID)
+	if err == nil && freshRun != nil {
+		freshRun, err = s.custodyView(freshRun)
+	}
 	if err != nil || freshRun == nil {
 		blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the terminal run could not be reloaded while archived custody was being returned; no files or refs were changed")
 		blocked.Recovery = state.Recovery
@@ -1511,6 +1517,9 @@ func (s *Service) preserveKeepLocalCandidates(ctx context.Context, runIDs, candi
 	}
 	for i, runID := range runIDs {
 		candidate, err := s.DB.GetRun(runID)
+		if err == nil && candidate != nil {
+			candidate, err = s.custodyView(candidate)
+		}
 		if err != nil || candidate == nil || candidate.HeadSHA != candidateHeads[i] || candidate.TerminalHeadVerifiedAt == nil || !terminalRunStatus(candidate.Status) || !unpublishedPipelineHead(candidate) {
 			return fmt.Errorf("run %s changed after preflight", runID)
 		}
@@ -1723,11 +1732,21 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 		if candidate.Branch != branch {
 			continue
 		}
+		candidate, err = s.custodyView(candidate)
+		if err != nil {
+			// Skipping a run whose custody cannot be read would hand the branch
+			// to an older binding, so the branch stays held instead.
+			state.State = StatePipelineOwned
+			state.Safety = "blocked_custody_unreadable"
+			state.Error = "a pipeline run's custody provenance cannot be read; no files or refs were changed"
+			state.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "no-mistakes axi status"}
+			return state, nil, false
+		}
 		if candidate.Status == types.RunPending || candidate.Status == types.RunRunning || unpublishedPipelineHead(candidate) {
 			// A terminal unpublished run can be superseded only by a newer
 			// exact binding whose pushed head is proven, in the local gate, to
 			// contain the preserved head. Active ownership remains absolute.
-			if unpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, branch) {
+			if unpublishedPipelineHead(candidate) && (s.supersededUnpublishedRun(ctx, candidate, newerPushed, branch) || s.handedToTerminalSuccessor(candidate)) {
 				continue
 			}
 			run = candidate
@@ -2065,6 +2084,16 @@ func refreshable(state State) bool {
 }
 
 func worktreeClean(ctx context.Context, dir string) (bool, string) {
+	return worktreeCleanBy(ctx, dir, git.HasUncommittedChanges)
+}
+
+// terminalSourceClean also counts untracked files the status configuration
+// hides, because adopted terminal source must be complete.
+func terminalSourceClean(ctx context.Context, dir string) (bool, string) {
+	return worktreeCleanBy(ctx, dir, git.HasUncommittedChangesIncludingHidden)
+}
+
+func worktreeCleanBy(ctx context.Context, dir string, hasChanges func(context.Context, string) (bool, error)) (bool, string) {
 	markers := []struct{ path, reason string }{
 		{"MERGE_HEAD", "merge_in_progress"}, {"rebase-merge", "rebase_in_progress"}, {"rebase-apply", "rebase_in_progress"},
 		{"CHERRY_PICK_HEAD", "cherry_pick_in_progress"}, {"REVERT_HEAD", "revert_in_progress"}, {"BISECT_LOG", "bisect_in_progress"}, {"sequencer", "sequencer_in_progress"},
@@ -2080,7 +2109,7 @@ func worktreeClean(ctx context.Context, dir string) (bool, string) {
 			}
 		}
 	}
-	dirty, err := git.HasUncommittedChanges(ctx, dir)
+	dirty, err := hasChanges(ctx, dir)
 	if err != nil {
 		return false, "status_unavailable"
 	}
@@ -2140,6 +2169,29 @@ func (s *Service) supersededUnpublishedRun(ctx context.Context, older, newer *db
 		return false
 	}
 	return isAncestor(ctx, s.GateDir, older.HeadSHA, pushed)
+}
+
+// handedToTerminalSuccessor reports a terminal run whose source an explicit
+// continuation adopted: custody of its unpublished head moved to the successor
+// and its own history is immutable. A read failure keeps the run authoritative.
+func (s *Service) handedToTerminalSuccessor(run *db.Run) bool {
+	adoption, err := s.DB.GetTerminalAdoption(run.ID)
+	return err == nil && adoption != nil
+}
+
+// custodyView is the run as branch custody judges it: submitted at the head it
+// owes the operator (db.CustodySubmittedHead).
+func (s *Service) custodyView(run *db.Run) (*db.Run, error) {
+	submitted, err := s.DB.CustodySubmittedHead(run)
+	if err != nil {
+		return nil, fmt.Errorf("read custody of run %s: %w", run.ID, err)
+	}
+	if submitted == run.SubmittedHeadSHA {
+		return run, nil
+	}
+	view := *run
+	view.SubmittedHeadSHA = submitted
+	return &view, nil
 }
 
 func samePushTargetBinding(older, newer *db.Run) bool {
@@ -2266,7 +2318,11 @@ func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, ru
 		if candidate.Branch != state.Local.Branch {
 			continue
 		}
-		if unpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, state.Local.Branch) {
+		candidate, err = s.custodyView(candidate)
+		if err != nil {
+			return nil, nil, false, false
+		}
+		if unpublishedPipelineHead(candidate) && (s.supersededUnpublishedRun(ctx, candidate, newerPushed, state.Local.Branch) || s.handedToTerminalSuccessor(candidate)) {
 			continue
 		}
 		if newerPushed == nil && exactPushedBinding(s.Repo, candidate, state.Local.Branch) {
