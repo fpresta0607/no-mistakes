@@ -571,7 +571,7 @@ On a `user_owned` branch, `--recover` is an idempotent no-op success: nothing pi
 ### Continue validation of preserved terminal source
 
 `axi sync --recover --continue --reason "validate preserved source"` explicitly accepts committed source into one fresh-validation successor of the current branch's terminal run.
-The predecessor's status, source, steps, findings, rounds, decisions and launch receipt remain immutable.
+The predecessor's status, source, steps, findings, rounds, decisions and launch receipt remain immutable while the repository stays registered; [`eject`](#no-mistakes-eject) removes that history with the repository record.
 Initial acceptance requires the latest run on the current repository and branch to be terminal, neither completed nor custody-returned.
 It requires the complete recorded pipeline with completed Intent and Rebase, no deliberately skipped required step, and the original bound launch selection and frozen policy.
 Active parked CI adoption and conflict handback use their own operations.
