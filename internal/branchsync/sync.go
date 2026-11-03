@@ -1050,6 +1050,7 @@ func (s *Service) recoverKeepLocalFromArchive(ctx context.Context, run *db.Run, 
 		blocked.Recovery = state.Recovery
 		return blocked
 	}
+	freshRun = s.custodyView(freshRun)
 	proof := s.verifyBoundRecoveryArchive(ctx, &state, freshRun)
 	if !proof.available || proof.archive == nil || archive == nil || proof.archive.ID != archive.ID {
 		return proof.apply(state)
@@ -1511,6 +1512,9 @@ func (s *Service) preserveKeepLocalCandidates(ctx context.Context, runIDs, candi
 	}
 	for i, runID := range runIDs {
 		candidate, err := s.DB.GetRun(runID)
+		if err == nil && candidate != nil {
+			candidate = s.custodyView(candidate)
+		}
 		if err != nil || candidate == nil || candidate.HeadSHA != candidateHeads[i] || candidate.TerminalHeadVerifiedAt == nil || !terminalRunStatus(candidate.Status) || !unpublishedPipelineHead(candidate) {
 			return fmt.Errorf("run %s changed after preflight", runID)
 		}
@@ -1723,6 +1727,7 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 		if candidate.Branch != branch {
 			continue
 		}
+		candidate = s.custodyView(candidate)
 		if candidate.Status == types.RunPending || candidate.Status == types.RunRunning || unpublishedPipelineHead(candidate) {
 			// A terminal unpublished run can be superseded only by a newer
 			// exact binding whose pushed head is proven, in the local gate, to
@@ -2160,6 +2165,24 @@ func (s *Service) handedToTerminalSuccessor(run *db.Run) bool {
 	return err == nil && adoption != nil
 }
 
+// custodyView is the run as branch custody judges it. A continuation successor
+// records its adopted candidate as its submitted head, but the operator's branch
+// stood at the adoption's caller head, so unless the caller stood at the
+// candidate, the candidate's commits are pipeline-created and still owed to the
+// operator. A read failure drops the submitted head, which custody refuses.
+func (s *Service) custodyView(run *db.Run) *db.Run {
+	adoption, err := s.DB.GetTerminalPredecessor(run.ID)
+	if err == nil && (adoption == nil || adoption.CallerHead == adoption.CandidateSHA) {
+		return run
+	}
+	view := *run
+	view.SubmittedHeadSHA = nil
+	if err == nil {
+		view.SubmittedHeadSHA = &adoption.CallerHead
+	}
+	return &view
+}
+
 func samePushTargetBinding(older, newer *db.Run) bool {
 	return older != nil && newer != nil &&
 		older.PushTargetKind != nil && newer.PushTargetKind != nil && ptr(older.PushTargetKind) == ptr(newer.PushTargetKind) &&
@@ -2284,6 +2307,7 @@ func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, ru
 		if candidate.Branch != state.Local.Branch {
 			continue
 		}
+		candidate = s.custodyView(candidate)
 		if unpublishedPipelineHead(candidate) && (s.supersededUnpublishedRun(ctx, candidate, newerPushed, state.Local.Branch) || s.handedToTerminalSuccessor(candidate)) {
 			continue
 		}

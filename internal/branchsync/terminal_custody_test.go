@@ -167,49 +167,75 @@ func TestTerminalManagedCandidateMustContainRetainedPublicOutput(t *testing.T) {
 }
 
 func TestRefreshHandsAnAdoptedPredecessorsBranchToItsSuccessor(t *testing.T) {
-	t.Parallel()
-	f := newRecoverFixture(t, types.RunFailed)
-	if err := f.db.SetRunCustodyReturned(f.run.ID); err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name              string
+		callerAtCandidate bool
+		keepLocal         bool
+		wantState         string
+		wantCandidateHead bool
+	}{
+		{name: "recover fast-forwards the operator to the owed candidate", wantState: StatePipelineOwned, wantCandidateHead: true},
+		{name: "keep-local returns custody at the operator's own head", keepLocal: true, wantState: StatePipelineOwned},
+		{name: "a caller that stood at the candidate already owns it", callerAtCandidate: true, wantState: StateUserOwned, wantCandidateHead: true},
 	}
-	profile := agentcfg.Selection{Harness: types.AgentCodex, Model: "fixture", Effort: agentcfg.EffortXHigh, ServiceTier: "default"}
-	assertion := &launchassert.Expectation{TrustedSHA: strings.Repeat("a", 40), Profiles: map[string][]agentcfg.Selection{"primary": {profile}, "reviewer": {profile}, "fixer": {profile}}}
-	proof, err := assertion.Verify(assertion.TrustedSHA, assertion.Profiles)
-	if err != nil {
-		t.Fatal(err)
-	}
-	predecessor, err := f.db.InsertRunWithLaunchAssertion(f.repo.ID, f.run.Branch, f.submitted, f.base, nil, "nonce", "generation", "intent", "", false, nil, assertion, proof)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.db.UpdateRunHeadSHA(predecessor.ID, f.preserved); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.db.UpdateRunErrorStatusWithVerifiedHead(predecessor.ID, "interrupted", types.RunFailed, f.preserved); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := f.db.ReadContinuationSnapshot(predecessor.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	adoption, _, err := f.db.AdoptTerminalCandidate(f.ctx, db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: f.preserved, CandidateTree: mustRun(t, f.gate, "rev-parse", f.preserved+"^{tree}"), SourceRef: "refs/no-mistakes/terminal-candidate/successor", Reason: "validate preserved source", Operator: "fixture", Assertion: assertion, Proof: proof})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.db.UpdateRunErrorStatusWithVerifiedHead(adoption.Successor.ID, types.RunCancelReasonAbortedByUser, types.RunCancelled, f.preserved); err != nil {
-		t.Fatal(err)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newRecoverFixture(t, types.RunFailed)
+			if err := f.db.SetRunCustodyReturned(f.run.ID); err != nil {
+				t.Fatal(err)
+			}
+			callerHead := f.submitted
+			if tc.callerAtCandidate {
+				mustRun(t, f.local, "fetch", f.gate, f.preserved)
+				mustRun(t, f.local, "merge", "--ff-only", f.preserved)
+				callerHead = f.preserved
+			}
+			profile := agentcfg.Selection{Harness: types.AgentCodex, Model: "fixture", Effort: agentcfg.EffortXHigh, ServiceTier: "default"}
+			assertion := &launchassert.Expectation{TrustedSHA: strings.Repeat("a", 40), Profiles: map[string][]agentcfg.Selection{"primary": {profile}, "reviewer": {profile}, "fixer": {profile}}}
+			proof, err := assertion.Verify(assertion.TrustedSHA, assertion.Profiles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			predecessor, err := f.db.InsertRunWithLaunchAssertion(f.repo.ID, f.run.Branch, f.submitted, f.base, nil, "nonce", "generation", "intent", "", false, nil, assertion, proof)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.UpdateRunHeadSHA(predecessor.ID, f.preserved); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.UpdateRunErrorStatusWithVerifiedHead(predecessor.ID, "interrupted", types.RunFailed, f.preserved); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := f.db.ReadContinuationSnapshot(predecessor.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			adoption, _, err := f.db.AdoptTerminalCandidate(f.ctx, db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: f.preserved, CandidateTree: mustRun(t, f.gate, "rev-parse", f.preserved+"^{tree}"), SourceRef: "refs/no-mistakes/terminal-candidate/successor", CallerDir: f.local, CallerHead: callerHead, Reason: "validate preserved source", Operator: "fixture", Assertion: assertion, Proof: proof})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The successor ends unmoved at its candidate, the predecessor's pipeline-created head.
+			if err := f.db.UpdateRunErrorStatusWithVerifiedHead(adoption.Successor.ID, types.RunCancelReasonAbortedByUser, types.RunCancelled, f.preserved); err != nil {
+				t.Fatal(err)
+			}
 
-	refreshed := f.service.Refresh(f.ctx)
-	recovered := f.service.Recover(f.ctx, false)
-	kept := f.service.Recover(f.ctx, true)
+			refreshed := f.service.Refresh(f.ctx)
+			recovered := f.service.Recover(f.ctx, tc.keepLocal)
 
-	if refreshed.Pipeline.RunID != adoption.Successor.ID || refreshed.Safety != "user_owned" {
-		t.Fatalf("refresh selected run %s (%s), want the released successor %s", refreshed.Pipeline.RunID, refreshed.Safety, adoption.Successor.ID)
-	}
-	for _, state := range []State{recovered, kept} {
-		if state.Pipeline.RunID != adoption.Successor.ID || !state.Recovered {
-			t.Fatalf("recover selected run %s (%s: %s), want the released successor %s", state.Pipeline.RunID, state.Safety, state.Error, adoption.Successor.ID)
-		}
+			if refreshed.Pipeline.RunID != adoption.Successor.ID || refreshed.State != tc.wantState {
+				t.Fatalf("refresh selected run %s as %s (%s), want the successor %s as %s", refreshed.Pipeline.RunID, refreshed.State, refreshed.Safety, adoption.Successor.ID, tc.wantState)
+			}
+			if recovered.Pipeline.RunID != adoption.Successor.ID || !recovered.Recovered {
+				t.Fatalf("recover selected run %s (%s: %s), want custody of the successor %s returned", recovered.Pipeline.RunID, recovered.Safety, recovered.Error, adoption.Successor.ID)
+			}
+			wantHead := callerHead
+			if tc.wantCandidateHead {
+				wantHead = f.preserved
+			}
+			if head := mustRun(t, f.local, "rev-parse", "HEAD"); head != wantHead {
+				t.Fatalf("operator branch head = %s, want %s", head, wantHead)
+			}
+		})
 	}
 }
