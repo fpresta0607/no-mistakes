@@ -691,6 +691,9 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		state.Changed = false
 		return state
 	}
+	if state.Safety == "blocked_custody_unreadable" {
+		return state
+	}
 	if state.State != StatePipelineOwned || run == nil {
 		return blockedPlan(state, state.State, "blocked_recover_not_applicable", "nothing to recover: the branch is not held by a terminal run with unpublished pipeline commits; no files or refs were changed")
 	}
@@ -1045,12 +1048,14 @@ func (s *Service) recoverKeepLocalFromArchive(ctx context.Context, run *db.Run, 
 		s.beforeGateReset()
 	}
 	freshRun, err := s.DB.GetRun(run.ID)
+	if err == nil && freshRun != nil {
+		freshRun, err = s.custodyView(freshRun)
+	}
 	if err != nil || freshRun == nil {
 		blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the terminal run could not be reloaded while archived custody was being returned; no files or refs were changed")
 		blocked.Recovery = state.Recovery
 		return blocked
 	}
-	freshRun = s.custodyView(freshRun)
 	proof := s.verifyBoundRecoveryArchive(ctx, &state, freshRun)
 	if !proof.available || proof.archive == nil || archive == nil || proof.archive.ID != archive.ID {
 		return proof.apply(state)
@@ -1513,7 +1518,7 @@ func (s *Service) preserveKeepLocalCandidates(ctx context.Context, runIDs, candi
 	for i, runID := range runIDs {
 		candidate, err := s.DB.GetRun(runID)
 		if err == nil && candidate != nil {
-			candidate = s.custodyView(candidate)
+			candidate, err = s.custodyView(candidate)
 		}
 		if err != nil || candidate == nil || candidate.HeadSHA != candidateHeads[i] || candidate.TerminalHeadVerifiedAt == nil || !terminalRunStatus(candidate.Status) || !unpublishedPipelineHead(candidate) {
 			return fmt.Errorf("run %s changed after preflight", runID)
@@ -1727,7 +1732,16 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 		if candidate.Branch != branch {
 			continue
 		}
-		candidate = s.custodyView(candidate)
+		candidate, err = s.custodyView(candidate)
+		if err != nil {
+			// Skipping a run whose custody cannot be read would hand the branch
+			// to an older binding, so the branch stays held instead.
+			state.State = StatePipelineOwned
+			state.Safety = "blocked_custody_unreadable"
+			state.Error = "a pipeline run's custody provenance cannot be read; no files or refs were changed"
+			state.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "no-mistakes axi status"}
+			return state, nil, false
+		}
 		if candidate.Status == types.RunPending || candidate.Status == types.RunRunning || unpublishedPipelineHead(candidate) {
 			// A terminal unpublished run can be superseded only by a newer
 			// exact binding whose pushed head is proven, in the local gate, to
@@ -2166,16 +2180,18 @@ func (s *Service) handedToTerminalSuccessor(run *db.Run) bool {
 }
 
 // custodyView is the run as branch custody judges it: submitted at the head it
-// owes the operator (db.CustodySubmittedHead). A read failure leaves no
-// submitted head, which custody refuses.
-func (s *Service) custodyView(run *db.Run) *db.Run {
+// owes the operator (db.CustodySubmittedHead).
+func (s *Service) custodyView(run *db.Run) (*db.Run, error) {
 	submitted, err := s.DB.CustodySubmittedHead(run)
-	if err == nil && submitted == run.SubmittedHeadSHA {
-		return run
+	if err != nil {
+		return nil, fmt.Errorf("read custody of run %s: %w", run.ID, err)
+	}
+	if submitted == run.SubmittedHeadSHA {
+		return run, nil
 	}
 	view := *run
 	view.SubmittedHeadSHA = submitted
-	return &view
+	return &view, nil
 }
 
 func samePushTargetBinding(older, newer *db.Run) bool {
@@ -2302,7 +2318,10 @@ func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, ru
 		if candidate.Branch != state.Local.Branch {
 			continue
 		}
-		candidate = s.custodyView(candidate)
+		candidate, err = s.custodyView(candidate)
+		if err != nil {
+			return nil, nil, false, false
+		}
 		if unpublishedPipelineHead(candidate) && (s.supersededUnpublishedRun(ctx, candidate, newerPushed, state.Local.Branch) || s.handedToTerminalSuccessor(candidate)) {
 			continue
 		}

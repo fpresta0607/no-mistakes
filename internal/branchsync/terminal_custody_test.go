@@ -1,6 +1,7 @@
 package branchsync
 
 import (
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -237,5 +238,40 @@ func TestRefreshHandsAnAdoptedPredecessorsBranchToItsSuccessor(t *testing.T) {
 				t.Fatalf("operator branch head = %s, want %s", head, wantHead)
 			}
 		})
+	}
+}
+
+func TestAnUnreadableCustodyHoldsTheBranch(t *testing.T) {
+	t.Parallel()
+	f := newRecoverFixture(t, types.RunFailed)
+	held := f.service.Refresh(f.ctx)
+	if held.State != StatePipelineOwned || held.Pipeline.RunID != f.run.ID {
+		t.Fatalf("fixture refresh = %s for run %q, want the terminal run %s holding the branch", held.State, held.Pipeline.RunID, f.run.ID)
+	}
+	raw, err := sql.Open("sqlite", filepath.Join(filepath.Dir(f.local), "state.sqlite")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	// Every custody read now fails, as a read error or a damaged adoption row does.
+	if _, err := raw.Exec(`ALTER TABLE terminal_adoptions RENAME TO terminal_adoptions_unreadable`); err != nil {
+		t.Fatal(err)
+	}
+
+	refreshed := f.service.Refresh(f.ctx)
+	recovered := f.service.Recover(f.ctx, false)
+	_, _, _, allEligible := f.service.missingHeadKeepLocalRuns(f.ctx, &held, f.run)
+
+	if refreshed.State != StatePipelineOwned || refreshed.Safety != "blocked_custody_unreadable" {
+		t.Fatalf("refresh = %s (%s), want the branch held as blocked_custody_unreadable", refreshed.State, refreshed.Safety)
+	}
+	if recovered.Recovered || recovered.Safety != "blocked_custody_unreadable" {
+		t.Fatalf("recover = %s (%s), recovered %v; want it refused as blocked_custody_unreadable", recovered.State, recovered.Safety, recovered.Recovered)
+	}
+	if allEligible {
+		t.Fatal("keep-local found the run set eligible although a run's custody cannot be read")
+	}
+	if head := mustRun(t, f.local, "rev-parse", "HEAD"); head != f.submitted {
+		t.Fatalf("operator branch head = %s, want unchanged %s", head, f.submitted)
 	}
 }
