@@ -217,8 +217,9 @@ With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` fi
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
 The [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths) are an exception to this automatic handling.
 So is a Test budget-cut gate that reports `test-agent-unvalidated-work`: approval is refused there, so `--yes` stops at it and leaves the choice between `--action fix` and `no-mistakes axi abort` to the operator (see [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout)).
+So is every gate of an [authored validation child](#no-mistakes-axi-validate-authored): it has no repair authority, so `--yes` stops there and leaves the decision to the operator.
 Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.
-Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
+Review gates outside an authored validation child include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
 `--wait` defaults to 8m so an agent harness with a 10-minute tool cap gets a structured error instead of an unbounded hang. It bounds the active-run lookup, event-subscription acknowledgement, and subsequent run driving. Elapsed wait is not a pipeline failure and does not mean the daemon is dead: run `no-mistakes axi status` and reattach with `axi run`. A live daemon that is slow to answer a pre-drive `get_active_run` or `get_run` state read is retried after a health probe rather than reported as an I/O failure or mistaken for an absent run.
 Backgrounding a call is fine for an agent harness, but the run never advances past a gate on its own.
@@ -343,6 +344,50 @@ A named harness the daemon cannot run is not skipped: the proved chain then diff
 The selection is stored with the run as the assertion is, replays of the nonce must supply it unchanged, and recovery after a daemon restart applies the stored selection again before it proves it.
 A selection cannot be combined with `--model` or `--effort`, the per-run Pi profile.
 A daemon that proves assertions but cannot apply them refuses the unknown `apply` field, so a selection is never proved without being applied.
+
+## no-mistakes axi validate-authored
+
+Validate one explicitly declared, clean authored commit and tree linked to an immutable terminal predecessor: a failed, cancelled, or `ci_monitor_interrupted` run (which is never resumed), or a completed authored child.
+A branch with authored lineage can therefore validate a follow-up change after its child completes, while a completed run that was not itself admitted through `validate-authored` is refused as a predecessor.
+This is a new validation-only child: the predecessor stays terminal, and every core stage and current trusted custom gate starts fresh without an inherited pass, review approval, CI-ready state, exception or agent session.
+All automatic and manual repair authority is zero, including stages the predecessor never reached.
+Fix selections, skips, CI handbacks, ordinary fresh launches that would drop the lineage, and repair dispatch after restart are refused.
+
+```sh
+no-mistakes axi validate-authored --admission-file admission.json --wait 8m
+```
+
+The input is one operator-owned UTF-8 JSON object, at most 64 KiB, with these fields:
+
+| Fields | Required binding |
+| --- | --- |
+| `predecessor_id`, `snapshot_digest`, `repo_id`, `branch` | The terminal predecessor and its native validation history (run record, gates, steps and rounds, with the repository by ID only); `axi status` reports `terminal_snapshot_digest` and `repository_id` |
+| `caller_dir`, `candidate_sha`, `candidate_tree` | The invoking canonical repository root and full lowercase commit/tree identities; staged, tracked, untracked and submodule changes must all be absent |
+| `launch_nonce`, `validation_generation`, `intent_digest` | The predecessor's preserved launch receipt; the child receives its own fresh nonce and proof |
+| `published_head_sha`, `push_generation`, `push_target_fingerprint` | The predecessor's exact publication binding, verified against the live target and open PR; use `""`, `0`, `""` for an unpublished predecessor |
+| `launch_assertion` | A complete [launch assertion](#launch-assertions) naming the current trusted source and exactly the predecessor's original role selections |
+| `controller_policy` | `{ "sha256": "<64 lowercase hex characters>", "class": "<original class>", "review_cycles": 2 }`, recorded only as the controller's historical assertion, never as a native historical policy fact or a grant of repair authority |
+| `historical_source_completeness` | Exactly `"unknown"`; declaring the authored candidate complete for validation does not certify recovery of missing historical dirty, untracked or later source |
+| `reason` | A nonempty explicit reason, at most 4096 bytes |
+
+The daemon checks the authenticated caller, registered Git identity, exact clean source, immutable predecessor history, launch selection and publication facts before accepting the child.
+The declared candidate must differ from the predecessor's submitted, terminal and published heads; this operation does not replace ordinary validation of those historical targets.
+It imports the exact candidate object without overwriting an author branch or the gate branch.
+Historical findings, failed checks, automatic and manual spending, and the unknown historical source completeness stay attached to the lineage.
+Cumulative spending counts the predecessor and its authored descendants from the native round ledger.
+Runs on the branch before the predecessor are outside that ledger; they appear only through the controller policy assertion and the unknown historical source completeness.
+Later changes to the repository's registered path, URLs or default branch, and custody-return bookkeeping on the predecessor, do not change its validation history; the live publication target is verified again at admission.
+The output and subsequent status include `authored_validation`, cumulative per-stage spending, zero remaining repair authority and `policy_origin: controller_assertion`.
+This command grants no authority to install the candidate or operate another run.
+
+An exact repeated request returns the same admission and child.
+After a crash, an untouched pending acceptance remains idle until the exact request is explicitly replayed and revalidated.
+A progressed child is observed or recovered through its existing execution; a cancelled child is never restarted by replay.
+Later authored descendants must preserve the same controller policy assertion, historical uncertainty and zero repair authority.
+Continuing from a published predecessor requires a GitHub repository with the predecessor's PR open.
+A child that publishes but then cannot run its PR or CI stage fails and cannot itself be continued, so confirm forge access before admission.
+An accepted pending child can be cancelled with `axi abort`.
+Ordinary explicit gate acknowledgements and review-question answers retain their existing meaning; they do not create repair capacity or turn an approved failure into a clean pass.
 
 ## no-mistakes axi respond
 

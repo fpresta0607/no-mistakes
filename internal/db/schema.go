@@ -123,6 +123,18 @@ CREATE INDEX IF NOT EXISTS idx_step_results_run_order
 CREATE INDEX IF NOT EXISTS idx_step_rounds_step_round
     ON step_rounds (step_result_id, round);
 
+CREATE TABLE IF NOT EXISTS validation_admissions (
+    predecessor_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    child_id TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
+    id TEXT NOT NULL UNIQUE,
+    request_digest TEXT NOT NULL,
+    event_json TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS validation_admission_immutable
+BEFORE UPDATE ON validation_admissions
+BEGIN SELECT RAISE(ABORT, 'validation admission is immutable'); END;
+
 CREATE TABLE IF NOT EXISTS agent_invocations (
     id                    TEXT PRIMARY KEY,
     run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,

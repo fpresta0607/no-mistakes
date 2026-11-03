@@ -146,6 +146,7 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Before resuming a parked CI gate without an open handback reservation, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked.
   The [`protected_paths` refusal exception](/no-mistakes/reference/repo-config/#protected_paths) also prevents automatic reconciliation.
 - Preserves a run that was actively monitoring CI for an already-created PR as `ci_monitor_interrupted` rather than failing it: the PR is still open, so a restart mid-monitor is not a pipeline failure. That run is terminal and never resumed
+- Leaves an intact, untouched pending [authored validation](/no-mistakes/reference/cli/#no-mistakes-axi-validate-authored) acceptance idle, neither started nor failed, until its exact request is explicitly replayed; a pending acceptance that is no longer intact is treated as any other stale active run
 - Before failing any other stale active run, verifies its managed worktree head and pins an unpublished descendant under the run-specific recovery ref so later rerun or guarded custody recovery does not fall back to a stale gate branch
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard

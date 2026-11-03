@@ -120,6 +120,13 @@ Rules:
 Previous lint findings to address:
 ` + sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
 		}
+		isValidationOnly, err := sctx.IsValidationOnly()
+		if err != nil {
+			return nil, err
+		}
+		if isValidationOnly {
+			prompt = fmt.Sprintf("Validate lint and formatting for %s..%s. Discover and run the relevant checks without applying fixes or editing files. Report every issue as a finding and return a summary. Do not run tests.\n%s", baseSHA, sctx.Run.HeadSHA, reassessHistory)
+		}
 		before, err := untrackedFiles(sctx)
 		if err != nil {
 			return nil, err
@@ -248,9 +255,16 @@ Previous lint findings to address:
 // step's own agent path: blocking (error/warning) findings park for a
 // decision, info findings pass through.
 func lintOutcomeFromHousekeeping(sctx *pipeline.StepContext, stash pipeline.HousekeepingLintResult) (*pipeline.StepOutcome, error) {
+	isValidationOnly, err := sctx.IsValidationOnly()
+	if err != nil {
+		return nil, err
+	}
 	findings, err := types.ParseFindingsJSON(stash.FindingsJSON)
 	if err != nil {
 		return nil, fmt.Errorf("validate combined housekeeping lint result: %w", err)
+	}
+	if isValidationOnly {
+		stash.Summary = ""
 	}
 	sctx.Log(fmt.Sprintf("lint assessed in the combined document+lint housekeeping pass: %d unresolved items", len(findings.Items)))
 	return &pipeline.StepOutcome{

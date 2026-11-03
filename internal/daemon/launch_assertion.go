@@ -57,6 +57,16 @@ func resolvePipelineAgentRoles(ctx context.Context, cfg *config.Config, lookPath
 }
 
 func (m *RunManager) newRunPipelineAgent(ctx context.Context, run *db.Run, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error), environment runenv.Overlay) (agent.Agent, error) {
+	family, err := m.db.ValidationFamily(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if family != nil {
+		if family.HasChildRepairs {
+			return nil, fmt.Errorf("validation-only child contains a forbidden repair selection")
+		}
+		cfg.AutoFix, cfg.SideBySide = config.AutoFix{}, false
+	}
 	if err := run.LaunchAssertionProof.Check(run.LaunchAssertion); err != nil {
 		return nil, err
 	}

@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/authoredvalidation"
 	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
@@ -485,8 +486,10 @@ type ShutdownResult struct {
 
 // RunInfo is the IPC representation of a pipeline run.
 type RunInfo struct {
-	VerificationPlan *verificationplan.Snapshot `json:"verification_plan"`
-	PiProfile        *agentcfg.PiProfile        `json:"pi_profile,omitempty"`
+	AuthoredValidation      *authoredvalidation.Family `json:"authored_validation,omitempty"`
+	AuthoredValidationError string                     `json:"authored_validation_error,omitempty"`
+	VerificationPlan        *verificationplan.Snapshot `json:"verification_plan"`
+	PiProfile               *agentcfg.PiProfile        `json:"pi_profile,omitempty"`
 
 	ID               string          `json:"id"`
 	RepoID           string          `json:"repo_id"`

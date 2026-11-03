@@ -58,9 +58,11 @@ type Executor struct {
 
 	// sessions manages this run's durable review-loop agent sessions; shared
 	// carries run-scoped step-to-step results. Both are created per Execute.
-	sessions *RunSessions
-	shared   *RunShared
-	workDir  string
+	sessions       *RunSessions
+	shared         *RunShared
+	workDir        string
+	runID          string
+	validationOnly bool
 	// stepRecords are this Execute's step rows by name. They let the review
 	// step be offered a context for another step's early work (side_by_side).
 	// Nil on a recovered run, which therefore starts nothing early.
@@ -212,6 +214,10 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		e.mu.Unlock()
 		return fmt.Errorf("step mismatch: responding to %q but %q is awaiting approval", step, e.waitingStep)
 	}
+	if err := e.refuseValidationRepair(action); err != nil {
+		e.mu.Unlock()
+		return err
+	}
 	if action == types.ActionApprove && e.waitingApprovalRefusal != "" {
 		refusal := e.waitingApprovalRefusal
 		e.mu.Unlock()
@@ -237,6 +243,9 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
 	e.workDir = workDir
 	ctx = e.runContext(ctx)
+	if err := e.initializeValidationAuthority(run); err != nil {
+		return e.failRun(run, repo, err, ctx)
+	}
 	// Mark run as running. Route write failures through failRun so the
 	// in-memory lifecycle and subscriber stream still become terminal instead
 	// of leaving a silent pending run.
@@ -435,6 +444,9 @@ func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
 	if run.AwaitingAgentSince == nil {
 		return fmt.Errorf("run is not a recoverable parked run")
 	}
+	if _, err := validationOnlyAuthority(database, run.ID); err != nil {
+		return err
+	}
 	_, err := (&Executor{db: database, steps: steps}).recoveredGate(run.ID)
 	return err
 }
@@ -445,6 +457,9 @@ func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
 func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
 	e.workDir = workDir
 	ctx = e.runContext(ctx)
+	if err := e.initializeValidationAuthority(run); err != nil {
+		return err
+	}
 	if repo == nil {
 		return fmt.Errorf("recovered run has no repository")
 	}
@@ -589,6 +604,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	if reconciled {
 		return completeReconciledGate()
+	}
+	if err := e.refuseValidationRepair(response.action); err != nil {
+		return e.failRun(run, repo, err, ctx)
 	}
 	if response.action == actionCIFollowup {
 		index, err := e.prepareRestart(run.ID, types.StepReview, gate.index)
@@ -982,7 +1000,7 @@ func (e *Executor) sideLaneContext(ctx context.Context, run *db.Run, repo *db.Re
 }
 
 func (e *Executor) autoFixLimit(stepName types.StepName) int {
-	if e.config == nil {
+	if e.validationOnly || e.config == nil {
 		return 0
 	}
 	return e.config.AutoFixLimit(stepName)
@@ -992,6 +1010,12 @@ func (e *Executor) autoFixLimit(stepName types.StepName) int {
 // Returns whether to skip the remainder, an optional earlier restart step,
 // and any execution error.
 func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult, run *db.Run, repo *db.Repo, workDir, logDir string, state stepExecutionState) (bool, types.StepName, error) {
+	if _, err := validationOnlyAuthority(e.db, run.ID); err != nil {
+		return false, "", err
+	}
+	if e.validationOnly && state.fixing {
+		return false, "", fmt.Errorf("validation-only authored admission cannot dispatch a fix round")
+	}
 	stepName := step.Name()
 	logPath := filepath.Join(logDir, string(stepName)+".log")
 	finalExitCode := 0
@@ -1255,9 +1279,21 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// Execute with possible fix loop
 rounds:
 	for {
+		if _, err := validationOnlyAuthority(e.db, run.ID); err != nil {
+			return false, "", err
+		}
+		if e.validationOnly && sctx.Fixing {
+			return false, "", fmt.Errorf("validation-only authored admission cannot dispatch a fixer")
+		}
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
+		if err := sctx.AssertValidationSource(); err != nil {
+			return false, "", err
+		}
 		outcome, err := step.Execute(sctx)
+		if sourceErr := sctx.AssertValidationSource(); sourceErr != nil {
+			err = errors.Join(err, sourceErr)
+		}
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
@@ -1281,6 +1317,9 @@ rounds:
 			return false, "", fmt.Errorf("step %s failed: %s", stepName, redactedErr)
 		}
 		restartFrom = outcome.RestartFrom
+		if e.validationOnly && (outcome.Skipped || outcome.SkipRemaining) {
+			return false, "", fmt.Errorf("validation-only authored admission requires fresh stage %s; automatic skipping is refused", stepName)
+		}
 
 		if stepName == types.StepReview {
 			reviewApprovedHeadSHA = outcome.ReviewApprovedHeadSHA
@@ -1541,6 +1580,9 @@ rounds:
 				return false, "", fmt.Errorf("step %s: aborted by user", stepName)
 
 			case types.ActionFix:
+				if err := e.refuseValidationRepair(response.action); err != nil {
+					return false, "", err
+				}
 				telemetry.Track("fix", e.fixTelemetryFields("user", stepName, selectedFindingCount(effectiveFindings, response.findingIDs), 0))
 				// Fix - mark step as fixing, resume execution timer, re-execute.
 				phaseStart = time.Now()
@@ -1912,6 +1954,12 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 			handler, ok := step.(CIHandbackStep)
 			if !ok || step.Name() != types.StepCI || e.autoFixLimit(types.StepCI) != 0 {
 				request.reply <- ciHandbackReply{err: fmt.Errorf("handback requires a published CI gate with automatic CI repair disabled")}
+				continue
+			}
+			// A validation-only run reports zero CI repairs as disabled repair,
+			// so the handback precondition alone would release its source.
+			if err := e.refuseValidationRepair(actionCIFollowup); err != nil {
+				request.reply <- ciHandbackReply{err: err}
 				continue
 			}
 			copyContext := *sctx

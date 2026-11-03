@@ -82,6 +82,21 @@ func (sctx *StepContext) RunAgentSessionBudget(parent context.Context, timeout, 
 }
 
 func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, sessionRole SessionRole, timeout, working time.Duration, cause error) (*agent.Result, error) {
+	if sctx != nil {
+		if err := sctx.AssertValidationSource(); err != nil {
+			return nil, err
+		}
+		isValidationOnly, err := sctx.IsValidationOnly()
+		if err != nil {
+			return nil, err
+		}
+		if isValidationOnly {
+			if sessionRole == SessionRoleFixer || strings.HasSuffix(opts.Purpose, "-fix") {
+				return nil, fmt.Errorf("validation-only authored admission cannot invoke a repair agent")
+			}
+			opts.Prompt += "\n\nAuthored validation authority: report findings only. Do not edit, format, commit, rebase or merge source files. Run checks without applying repairs. Source changes will refuse this turn and publication."
+		}
+	}
 	var ag agent.Agent
 	if timeout <= 0 {
 		timeout = AgentTimeout(nil)
@@ -98,7 +113,7 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 		ag = sctx.Agent
 	}
 	activity := observeAgentActivity(&opts)
-	return invokeAgent(parent, timeout, working, cause, activity, func(ctx context.Context) (*agent.Result, error) {
+	result, err := invokeAgent(parent, timeout, working, cause, activity, func(ctx context.Context) (*agent.Result, error) {
 		if sessionRole != "" && sctx != nil && sctx.Sessions != nil {
 			return sctx.Sessions.Run(ctx, ag, sessionRole, opts, sctx.Log)
 		}
@@ -107,6 +122,12 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 		}
 		return ag.Run(ctx, opts)
 	})
+	if sctx != nil {
+		if sourceErr := sctx.AssertValidationSource(); sourceErr != nil {
+			return nil, errors.Join(err, sourceErr)
+		}
+	}
+	return result, err
 }
 
 func invokeAgent(parent context.Context, timeout, working time.Duration, cause error, activity *agentActivity, run func(context.Context) (*agent.Result, error)) (*agent.Result, error) {

@@ -27,6 +27,13 @@ func (s *RebaseStep) Name() types.StepName { return types.StepRebase }
 const forkBranchRefPrefix = "refs/remotes/no-mistakes-push/"
 
 func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := sctx.AssertValidationSource(); err != nil {
+		return nil, err
+	}
+	isValidationOnly, err := sctx.IsValidationOnly()
+	if err != nil {
+		return nil, err
+	}
 	ctx := sctx.Ctx
 	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
 	defaultBranch := effectivePRBaseBranch(sctx)
@@ -100,6 +107,26 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	}
 
 	merging := mergesMovedBase(sctx)
+	if isValidationOnly {
+		var findings Findings
+		for _, target := range targets {
+			targetSHA, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", "--quiet", target+"^{commit}")
+			if err != nil {
+				if target == branchTarget {
+					continue
+				}
+				return nil, fmt.Errorf("resolve validation integration target %s: %w", target, err)
+			}
+			if !isAncestor(ctx, sctx.WorkDir, targetSHA, sctx.Run.HeadSHA) {
+				findings.Items = append(findings.Items, Finding{Severity: types.FindingSeverityWarning, Action: types.ActionAskUser, Description: fmt.Sprintf("authored candidate does not contain %s; validation-only authority cannot rebase, merge or fast-forward source", target)})
+			}
+		}
+		payload, err := types.MarshalFindingsJSON(findings)
+		if err != nil {
+			return nil, err
+		}
+		return &pipeline.StepOutcome{Findings: payload, NeedsApproval: len(findings.Items) > 0}, nil
+	}
 
 	if sctx.Fixing {
 		before, err := git.HeadSHA(ctx, sctx.WorkDir)
@@ -728,6 +755,13 @@ func shouldSkipRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef
 	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", targetRef, "HEAD"); err == nil {
 		sctx.Log(fmt.Sprintf("already ahead of %s", targetRef))
 		return true, nil
+	}
+	isValidationOnly, err := sctx.IsValidationOnly()
+	if err != nil {
+		return false, err
+	}
+	if isValidationOnly {
+		return false, fmt.Errorf("validation-only authored admission cannot integrate %s", targetRef)
 	}
 	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", "HEAD", targetRef); err == nil {
 		sctx.Log(fmt.Sprintf("fast-forwarding to %s", targetRef))

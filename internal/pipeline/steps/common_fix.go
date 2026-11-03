@@ -269,6 +269,9 @@ func normalizeReviewedPath(value string) string {
 // step and the whole run abort (executor.failRun) before doing more work -
 // nothing is committed or shipped.
 func assertPipelineHeadContinuity(sctx *pipeline.StepContext, stepName types.StepName) error {
+	if err := sctx.AssertValidationSource(); err != nil {
+		return err
+	}
 	recorded := strings.TrimSpace(sctx.Run.HeadSHA)
 	if recorded == "" {
 		return nil
