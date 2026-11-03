@@ -41,6 +41,10 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if m.shuttingDown.Load() {
 			return "", fmt.Errorf("daemon is shutting down")
 		}
+		// Validation-only authored lineage never regains repair authority.
+		if err := m.db.RefuseUnlinkedValidation(request.RepoID, request.Branch); err != nil {
+			return "", err
+		}
 		runs, err := m.db.GetRunsByRepo(request.RepoID)
 		if err != nil {
 			return "", err
@@ -218,7 +222,7 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if err != nil || !reflect.DeepEqual(source, rechecked) {
 			return "", fmt.Errorf("candidate source changed during verification")
 		}
-		for _, anchor := range []struct{ ref, head string }{{candidateRef, source.Head}, {"refs/no-mistakes/terminal-lane/" + successorID, source.GateHead}, {custody.RecoveryRef(successorID), source.Head}} {
+		for _, anchor := range []struct{ ref, head string }{{candidateRef, source.Head}, {"refs/no-mistakes/terminal-lane/" + successorID, source.GateHead}} {
 			if err := custody.PreserveRecoveryAnchor(ctx, service.GateDir, anchor.ref, anchor.head); err != nil {
 				return "", err
 			}

@@ -305,7 +305,13 @@ func (d *DB) TerminalPhaseRemaining(runID string, name types.StepName, configure
 		}
 		seen[event.Snapshot.Run.ID] = true
 		original, err := d.ReadContinuationSnapshot(event.Snapshot.Run.ID)
-		if err != nil || !reflect.DeepEqual(original, &event.Snapshot) {
+		if err != nil {
+			return TerminalPhaseBudget{}, true, fmt.Errorf("terminal predecessor history changed")
+		}
+		// The repository record is registration, not run history: re-registering
+		// may change its remotes or default branch while the successor runs.
+		original.Repo = event.Snapshot.Repo
+		if !reflect.DeepEqual(original, &event.Snapshot) {
 			return TerminalPhaseBudget{}, true, fmt.Errorf("terminal predecessor history changed")
 		}
 		snapshots = append(snapshots, event.Snapshot)

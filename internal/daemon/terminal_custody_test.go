@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -761,19 +762,24 @@ func TestTerminalRestart(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	NewRunManager(database, p, nil).removeRunWorktree(repo.ID, accepted.RunID, gate, managed, "terminal continuation regression")
-	if preserved := gitOutput(t, managed, "rev-parse", "HEAD"); preserved != later {
-		t.Fatal("later continuation correction was discarded")
+	if !current.Status.Terminal() || current.HeadSHA != later || current.TerminalHeadVerifiedAt == nil {
+		t.Fatalf("cancelled successor did not verify its later correction: %+v", current)
+	}
+	if anchored := gitOutput(t, gate, "rev-parse", custody.RecoveryRef(accepted.RunID)); anchored != later {
+		t.Fatalf("successor recovery anchor = %s, want its later correction %s", anchored, later)
 	}
 	if original := gitOutput(t, gate, "rev-parse", custody.RecoveryRef(run.ID)); original != candidate {
 		t.Fatal("original recovery anchor was rewritten")
 	}
-	if err := database.UpdateRunPushBinding(accepted.RunID, db.PushBinding{HeadSHA: later, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(repo.UpstreamURL), Ref: "refs/heads/feature"}); err != nil {
-		t.Fatal(err)
+	// The daemon's own run-finish cleanup reclaims clean, exactly anchored source.
+	deadline = time.Now().Add(15 * time.Second)
+	_, err = os.Stat(managed)
+	for !os.IsNotExist(err) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		_, err = os.Stat(managed)
 	}
-	NewRunManager(database, p, nil).removeRunWorktree(repo.ID, accepted.RunID, gate, managed, "published continuation regression")
-	if _, err := os.Stat(managed); !os.IsNotExist(err) {
-		t.Fatalf("clean successfully published source was not reclaimed: %v", err)
+	if !os.IsNotExist(err) {
+		t.Fatalf("clean exactly anchored source was not reclaimed: %v", err)
 	}
 }
 
@@ -936,6 +942,76 @@ func TestTerminalRefusedPreflightDoesNotBindAnUnacceptedCandidate(t *testing.T) 
 	unchanged, err := database.ReadContinuationSnapshot(run.ID)
 	if err != nil || !reflect.DeepEqual(unchanged, before) {
 		t.Fatal("preflight/retry changed predecessor")
+	}
+}
+
+func TestTerminalContinuationRefusesAValidationOnlyAuthoredChild(t *testing.T) {
+	factory := func() []pipeline.Step {
+		var sequence []pipeline.Step
+		for _, name := range types.AllSteps() {
+			sequence = append(sequence, &mockPassStep{name: name})
+		}
+		return sequence
+	}
+	manager, database, repo, authored, gate := authoredAdmissionFixture(t, factory)
+	snapshot, err := database.ReadTerminalSnapshot(authored.Request.PredecessorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := authored.Request.LaunchAssertion.Verify(authored.Request.LaunchAssertion.TrustedSHA, authored.Request.LaunchAssertion.Profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, _, err := database.AcceptValidationAdmission(context.Background(), db.ValidationAdmission{Request: authored.Request, Snapshot: *snapshot, AssertionProof: proof, WorktreeRoot: filepath.Dir(manager.paths.WorktreeDir(repo.ID, "pending")), Gates: "[]", Steps: types.AllSteps(), Operator: "fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := database.GetRun(admission.ChildID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, gate, "fetch", "--no-tags", authored.CallerDir, "refs/heads/feature:refs/heads/feature")
+	managed := child.WorktreePath()
+	if err := git.WorktreeAdd(context.Background(), gate, managed, child.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := git.CopyLocalUserIdentity(context.Background(), repo.WorkingPath, managed); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range types.AllSteps() {
+		step, err := database.InsertStepResult(child.ID, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := database.CompleteStepWithStatus(step.ID, types.StepStatusCompleted, 0, 1, "child.log"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.UpdateRunErrorStatusWithVerifiedHead(child.ID, "interrupted", types.RunFailed, child.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(managed, "repair.txt"), []byte("repair in the authored child\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, managed, "add", "repair.txt")
+	gitCmd(t, managed, "commit", "-m", "repair in the authored child")
+	before, err := database.ReadContinuationSnapshot(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := ipc.RecoverTerminalParams{RepoID: repo.ID, RunID: child.ID, Branch: child.Branch, CallerDir: authored.CallerDir, SnapshotDigest: before.Digest(), Reason: "regain repairs for an authored child"}
+
+	result, err := manager.recoverTerminal(context.Background(), request, os.Getpid())
+
+	if err == nil || !strings.Contains(err.Error(), "validation-only authored lineage") {
+		t.Fatalf("terminal continuation of an authored child = %+v, %v", result, err)
+	}
+	refs, err := git.Run(context.Background(), gate, "for-each-ref", "--format=%(refname)", "refs/no-mistakes/terminal-candidate/", "refs/no-mistakes/terminal-lane/")
+	if err != nil || refs != "" {
+		t.Fatalf("refused continuation pinned refs %q: %v", refs, err)
+	}
+	if event, err := database.GetTerminalAdoption(child.ID); err != nil || event != nil {
+		t.Fatalf("refused continuation recorded adoption %+v: %v", event, err)
 	}
 }
 

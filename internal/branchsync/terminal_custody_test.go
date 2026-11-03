@@ -2,10 +2,13 @@ package branchsync
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -160,5 +163,53 @@ func TestTerminalManagedCandidateMustContainRetainedPublicOutput(t *testing.T) {
 	}
 	if mustRun(t, f.gate, "show-ref") != before {
 		t.Fatal("refusal mutated gate refs")
+	}
+}
+
+func TestRefreshHandsAnAdoptedPredecessorsBranchToItsSuccessor(t *testing.T) {
+	t.Parallel()
+	f := newRecoverFixture(t, types.RunFailed)
+	if err := f.db.SetRunCustodyReturned(f.run.ID); err != nil {
+		t.Fatal(err)
+	}
+	profile := agentcfg.Selection{Harness: types.AgentCodex, Model: "fixture", Effort: agentcfg.EffortXHigh, ServiceTier: "default"}
+	assertion := &launchassert.Expectation{TrustedSHA: strings.Repeat("a", 40), Profiles: map[string][]agentcfg.Selection{"primary": {profile}, "reviewer": {profile}, "fixer": {profile}}}
+	proof, err := assertion.Verify(assertion.TrustedSHA, assertion.Profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	predecessor, err := f.db.InsertRunWithLaunchAssertion(f.repo.ID, f.run.Branch, f.submitted, f.base, nil, "nonce", "generation", "intent", "", false, nil, assertion, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunHeadSHA(predecessor.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunErrorStatusWithVerifiedHead(predecessor.ID, "interrupted", types.RunFailed, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := f.db.ReadContinuationSnapshot(predecessor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adoption, _, err := f.db.AdoptTerminalCandidate(f.ctx, db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: f.preserved, CandidateTree: mustRun(t, f.gate, "rev-parse", f.preserved+"^{tree}"), SourceRef: "refs/no-mistakes/terminal-candidate/successor", Reason: "validate preserved source", Operator: "fixture", Assertion: assertion, Proof: proof})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunErrorStatusWithVerifiedHead(adoption.Successor.ID, types.RunCancelReasonAbortedByUser, types.RunCancelled, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+
+	refreshed := f.service.Refresh(f.ctx)
+	recovered := f.service.Recover(f.ctx, false)
+	kept := f.service.Recover(f.ctx, true)
+
+	if refreshed.Pipeline.RunID != adoption.Successor.ID || refreshed.Safety != "user_owned" {
+		t.Fatalf("refresh selected run %s (%s), want the released successor %s", refreshed.Pipeline.RunID, refreshed.Safety, adoption.Successor.ID)
+	}
+	for _, state := range []State{recovered, kept} {
+		if state.Pipeline.RunID != adoption.Successor.ID || !state.Recovered {
+			t.Fatalf("recover selected run %s (%s: %s), want the released successor %s", state.Pipeline.RunID, state.Safety, state.Error, adoption.Successor.ID)
+		}
 	}
 }

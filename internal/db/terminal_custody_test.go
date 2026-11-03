@@ -532,6 +532,23 @@ func TestTerminalSuccessorKeepsTheConfiguredAllowanceOfAnUnreachedPhase(t *testi
 	}
 }
 
+func TestTerminalSuccessorBudgetSurvivesARepositoryRegistrationChange(t *testing.T) {
+	database, event := newTerminalAdoptionFixture(t)
+	adopted, _, err := database.AdoptTerminalCandidate(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.UpdateRepoMetadataWithFork(event.Snapshot.Repo.ID, "git@github.com:example/fixture.git", "https://github.com/fork/fixture", "trunk"); err != nil {
+		t.Fatal(err)
+	}
+
+	budget, family, err := database.TerminalPhaseRemaining(adopted.Successor.ID, types.StepReview, 3)
+
+	if err != nil || !family || budget.Limit != 1 || budget.Spent != 1 || budget.Remaining != 0 {
+		t.Fatalf("re-registered repository broke the successor's repair budget: %+v family=%v err=%v", budget, family, err)
+	}
+}
+
 func TestTerminalSuccessorGivesAnUnrecordedPhaseNoAutomaticAllowance(t *testing.T) {
 	database, event := newTerminalAdoptionFixture(t)
 	adopted, _, err := database.AdoptTerminalCandidate(context.Background(), event)

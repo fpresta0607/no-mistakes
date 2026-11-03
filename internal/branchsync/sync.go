@@ -1727,7 +1727,7 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 			// A terminal unpublished run can be superseded only by a newer
 			// exact binding whose pushed head is proven, in the local gate, to
 			// contain the preserved head. Active ownership remains absolute.
-			if unpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, branch) {
+			if unpublishedPipelineHead(candidate) && (s.supersededUnpublishedRun(ctx, candidate, newerPushed, branch) || s.handedToTerminalSuccessor(candidate)) {
 				continue
 			}
 			run = candidate
@@ -2152,6 +2152,14 @@ func (s *Service) supersededUnpublishedRun(ctx context.Context, older, newer *db
 	return isAncestor(ctx, s.GateDir, older.HeadSHA, pushed)
 }
 
+// handedToTerminalSuccessor reports a terminal run whose source an explicit
+// continuation adopted: custody of its unpublished head moved to the successor
+// and its own history is immutable. A read failure keeps the run authoritative.
+func (s *Service) handedToTerminalSuccessor(run *db.Run) bool {
+	adoption, err := s.DB.GetTerminalAdoption(run.ID)
+	return err == nil && adoption != nil
+}
+
 func samePushTargetBinding(older, newer *db.Run) bool {
 	return older != nil && newer != nil &&
 		older.PushTargetKind != nil && newer.PushTargetKind != nil && ptr(older.PushTargetKind) == ptr(newer.PushTargetKind) &&
@@ -2276,7 +2284,7 @@ func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, ru
 		if candidate.Branch != state.Local.Branch {
 			continue
 		}
-		if unpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, state.Local.Branch) {
+		if unpublishedPipelineHead(candidate) && (s.supersededUnpublishedRun(ctx, candidate, newerPushed, state.Local.Branch) || s.handedToTerminalSuccessor(candidate)) {
 			continue
 		}
 		if newerPushed == nil && exactPushedBinding(s.Repo, candidate, state.Local.Branch) {

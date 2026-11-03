@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -154,7 +155,16 @@ func TestAxiTerminalCustodyContinuation(t *testing.T) {
 	if out, err := h.RunInDir(caller, "axi", "abort"); err != nil {
 		t.Fatalf("end fixture run: %v\n%s", err, out)
 	}
-	if preserved := gitIn(t, h, managed, "rev-parse", "HEAD"); preserved != repaired {
-		t.Fatal("later committed correction was discarded during terminal cleanup")
+	ended, err := database.GetRun(childID)
+	abortDeadline := time.Now().Add(30 * time.Second)
+	for err == nil && (!ended.Status.Terminal() || ended.TerminalHeadVerifiedAt == nil) && time.Now().Before(abortDeadline) {
+		time.Sleep(50 * time.Millisecond)
+		ended, err = database.GetRun(childID)
+	}
+	if err != nil || !ended.Status.Terminal() || ended.HeadSHA != repaired || ended.TerminalHeadVerifiedAt == nil {
+		t.Fatalf("aborted successor did not verify its later correction: %+v err=%v", ended, err)
+	}
+	if preserved := gitIn(t, h, paths.WithRoot(h.NMHome).RepoDir(run.RepoID), "rev-parse", custody.RecoveryRef(childID)); preserved != repaired {
+		t.Fatal("later committed correction lost its exact recovery anchor during terminal cleanup")
 	}
 }

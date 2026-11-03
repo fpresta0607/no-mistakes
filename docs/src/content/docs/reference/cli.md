@@ -619,6 +619,7 @@ On a `user_owned` branch, `--recover` is an idempotent no-op success: nothing pi
 The predecessor's status, source, steps, findings, rounds, decisions and launch receipt remain immutable while the repository stays registered; [`eject`](#no-mistakes-eject) removes that history with the repository record.
 Initial acceptance requires the latest run on the current repository and branch to be terminal, neither completed nor custody-returned.
 It requires the complete recorded pipeline with completed Intent and Rebase, no deliberately skipped required step, and the original bound launch selection and frozen policy.
+A branch with validation-only [authored lineage](#no-mistakes-axi-validate-authored) refuses, so that lineage never regains repair authority.
 Active parked CI adoption and conflict handback use their own operations.
 This command accepts no caller-selected run or candidate SHA.
 Use it without `--check`, `--keep-local`, `--adopt-published`, or `--bind-archive-ref`.
@@ -650,6 +651,7 @@ Further manual repairs require explicit gate decisions and remain recorded as ad
 
 The result reports `adopted_unvalidated`, the successor `run`, `predecessor`, exact `candidate` and `candidate_tree`, adoption ID, cumulative `phase_budgets` and whether validation started.
 Use `axi status` and ordinary gate responses to inspect and drive the successor.
+Branch synchronization and `--recover` then follow the successor; the adopted predecessor no longer holds the branch.
 An exact repeat returns the same durable child only while its identity and pending acceptance remain untouched.
 It may start that pending child's first execution after rechecking source and launch provenance.
 Changed, progressed, failed or cancelled successors refuse; the command never reopens the predecessor or silently reruns a terminal executor.
