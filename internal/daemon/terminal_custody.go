@@ -59,7 +59,7 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if selected == nil || selected.ID != request.RunID && (event == nil || selected.ID != event.Successor.ID) {
 			return "", fmt.Errorf("terminal request no longer identifies this branch's run")
 		}
-		snapshot, err := m.db.ReadTerminalSnapshot(request.RunID)
+		snapshot, err := m.db.ReadContinuationSnapshot(request.RunID)
 		if err != nil {
 			return "", err
 		}
@@ -275,7 +275,7 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 	return result, err
 }
 
-func validateTerminalAgentInactivity(snapshot *db.TerminalSnapshot) error {
+func validateTerminalAgentInactivity(snapshot *db.ContinuationSnapshot) error {
 	for _, step := range snapshot.Steps {
 		if step.AgentPID == nil || *step.AgentPID == 0 {
 			continue
@@ -288,7 +288,7 @@ func validateTerminalAgentInactivity(snapshot *db.TerminalSnapshot) error {
 	return nil
 }
 
-func validateTerminalSteps(snapshot *db.TerminalSnapshot, sequence []pipeline.Step) error {
+func validateTerminalSteps(snapshot *db.ContinuationSnapshot, sequence []pipeline.Step) error {
 	if len(snapshot.Steps) != len(sequence) || len(snapshot.Rounds) != len(sequence) {
 		return fmt.Errorf("terminal recovery requires the complete original step sequence")
 	}
@@ -306,7 +306,7 @@ func validateTerminalSteps(snapshot *db.TerminalSnapshot, sequence []pipeline.St
 	return nil
 }
 
-func freezeTerminalLimits(cfg *config.Config, snapshot *db.TerminalSnapshot) {
+func freezeTerminalLimits(cfg *config.Config, snapshot *db.ContinuationSnapshot) {
 	for _, step := range snapshot.Steps {
 		if step.StartedAt == nil {
 			continue

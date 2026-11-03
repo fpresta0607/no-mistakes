@@ -56,7 +56,7 @@ func TestTerminalContinuationExcludesConcurrentWorktreeReaping(t *testing.T) {
 			if err := database.UpdateRunErrorStatusWithVerifiedHead(run.ID, "interrupted", types.RunFailed, head); err != nil {
 				t.Fatal(err)
 			}
-			snapshot, err := database.ReadTerminalSnapshot(run.ID)
+			snapshot, err := database.ReadContinuationSnapshot(run.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -97,7 +97,7 @@ func TestTerminalContinuationExcludesConcurrentWorktreeReaping(t *testing.T) {
 				if _, err := os.Stat(managed); err != nil {
 					return "", fmt.Errorf("cleanup removed source during continuation: %w", err)
 				}
-				current, err := database.ReadTerminalSnapshot(run.ID)
+				current, err := database.ReadContinuationSnapshot(run.ID)
 				if err != nil {
 					return "", err
 				}
@@ -153,7 +153,7 @@ func TestTerminalAgentsRequireActualInactivity(t *testing.T) {
 		isAccepted bool
 	}{{"no agent", nil, true}, {"exited agent", &missing, true}, {"live agent", &active, false}} {
 		t.Run(test.name, func(t *testing.T) {
-			err := validateTerminalAgentInactivity(&db.TerminalSnapshot{Steps: []db.StepResult{{AgentPID: test.pid}}})
+			err := validateTerminalAgentInactivity(&db.ContinuationSnapshot{Steps: []db.StepResult{{AgentPID: test.pid}}})
 			if (err == nil) != test.isAccepted {
 				t.Fatalf("agent inactivity = %v, want %v: %v", err == nil, test.isAccepted, err)
 			}
@@ -165,7 +165,7 @@ func TestTerminalLimitsKeepTheConfiguredAllowanceOfAnUnreachedPhase(t *testing.T
 	started := time.Now().Unix()
 	recorded := 1
 	cfg := &config.Config{AutoFix: config.AutoFix{Review: 2, Test: 3, Document: 3}}
-	snapshot := &db.TerminalSnapshot{Steps: []db.StepResult{
+	snapshot := &db.ContinuationSnapshot{Steps: []db.StepResult{
 		{StepName: types.StepReview, StartedAt: &started, AutoFixLimit: &recorded},
 		{StepName: types.StepTest, StartedAt: &started},
 		{StepName: types.StepDocument},
@@ -253,7 +253,7 @@ func TestTerminalCleanupPreservesCommittedCorrectionsBeforeAdoption(t *testing.T
 				if err := database.UpdateRunErrorStatusWithVerifiedHead(run.ID, terminalError, status, head); err != nil {
 					t.Fatal(err)
 				}
-				before, err := database.ReadTerminalSnapshot(run.ID)
+				before, err := database.ReadContinuationSnapshot(run.ID)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -288,7 +288,7 @@ func TestTerminalCleanupPreservesCommittedCorrectionsBeforeAdoption(t *testing.T
 				if actual := gitOutput(t, managed, "rev-parse", "HEAD"); actual != candidate {
 					t.Fatalf("cleanup lost the committed correction: %s, want %s", actual, candidate)
 				}
-				observed, err := database.ReadTerminalSnapshot(run.ID)
+				observed, err := database.ReadContinuationSnapshot(run.ID)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -434,7 +434,7 @@ func TestTerminalAbortDoesNotExtendProtectedPathDisposal(t *testing.T) {
 				if err := f.db.UpdateRunStatus(run.ID, types.RunFailed); err != nil {
 					t.Fatal(err)
 				}
-				snapshot, err := f.db.ReadTerminalSnapshot(run.ID)
+				snapshot, err := f.db.ReadContinuationSnapshot(run.ID)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -644,7 +644,7 @@ func TestTerminalRestart(t *testing.T) {
 	gitCmd(t, gate, "update-ref", "refs/heads/main", candidate)
 	stop = start()
 	defer stop()
-	before, err := database.ReadTerminalSnapshot(run.ID)
+	before, err := database.ReadContinuationSnapshot(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -709,7 +709,7 @@ func TestTerminalRestart(t *testing.T) {
 	if current.AwaitingAgentSince == nil || current.ReviewApprovedHeadSHA != nil || current.TerminalHeadVerifiedAt != nil {
 		t.Fatalf("candidate bypassed fresh Review: %+v", current)
 	}
-	childSnapshot, err := database.ReadTerminalSnapshot(current.ID)
+	childSnapshot, err := database.ReadContinuationSnapshot(current.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -737,7 +737,7 @@ func TestTerminalRestart(t *testing.T) {
 	if err := client.Call(ipc.MethodRecoverTerminal, request, &repeated); err == nil {
 		t.Fatal("progressed successor accepted as an untouched repeat")
 	}
-	unchanged, err := database.ReadTerminalSnapshot(run.ID)
+	unchanged, err := database.ReadContinuationSnapshot(run.ID)
 	if err != nil || !reflect.DeepEqual(unchanged, before) {
 		t.Fatal("successor execution changed predecessor")
 	}
@@ -900,7 +900,7 @@ func TestTerminalRefusedPreflightDoesNotBindAnUnacceptedCandidate(t *testing.T) 
 	if err := database.UpdateRunErrorStatusWithVerifiedHead(run.ID, "interrupted", types.RunFailed, head); err != nil {
 		t.Fatal(err)
 	}
-	before, err := database.ReadTerminalSnapshot(run.ID)
+	before, err := database.ReadContinuationSnapshot(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -933,7 +933,7 @@ func TestTerminalRefusedPreflightDoesNotBindAnUnacceptedCandidate(t *testing.T) 
 	if err != nil || accepted.RunID == run.ID || accepted.CandidateSHA != candidate || !accepted.Started {
 		t.Fatalf("corrected preflight=%+v err=%v", accepted, err)
 	}
-	unchanged, err := database.ReadTerminalSnapshot(run.ID)
+	unchanged, err := database.ReadContinuationSnapshot(run.ID)
 	if err != nil || !reflect.DeepEqual(unchanged, before) {
 		t.Fatal("preflight/retry changed predecessor")
 	}
@@ -953,7 +953,7 @@ func TestTerminalPendingSuccessorSurvivesStartupWithoutAnExecutor(t *testing.T) 
 	if err := database.UpdateRunErrorStatusWithVerifiedHead(parent.ID, "interrupted", types.RunFailed, head); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := database.ReadTerminalSnapshot(parent.ID)
+	snapshot, err := database.ReadContinuationSnapshot(parent.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -984,7 +984,7 @@ func TestTerminalPendingSuccessorSurvivesStartupWithoutAnExecutor(t *testing.T) 
 	if err != nil || ordinaryAfter.Status != types.RunFailed {
 		t.Fatal("ordinary stale pending recovery changed")
 	}
-	original, err := database.ReadTerminalSnapshot(parent.ID)
+	original, err := database.ReadContinuationSnapshot(parent.ID)
 	if err != nil || !reflect.DeepEqual(original, snapshot) {
 		t.Fatal("startup changed predecessor")
 	}

@@ -54,7 +54,7 @@ func newTerminalAdoptionFixture(t *testing.T) (*DB, TerminalAdoption) {
 	if err := database.UpdateRunErrorStatusWithVerifiedHead(run.ID, "interrupted", types.RunFailed, run.HeadSHA); err != nil {
 		t.Fatal(err)
 	}
-	before, err := database.ReadTerminalSnapshot(run.ID)
+	before, err := database.ReadContinuationSnapshot(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestTerminalContinuationKeepsCancelledPredecessorImmutable(t *testing.T) {
 	if err := database.UpdateRunErrorStatusWithVerifiedHead(event.Snapshot.Run.ID, types.RunCancelReasonAbortedByUser, types.RunCancelled, event.CandidateSHA); err != nil {
 		t.Fatal(err)
 	}
-	before, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
+	before, err := database.ReadContinuationSnapshot(event.Snapshot.Run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestTerminalContinuationKeepsCancelledPredecessorImmutable(t *testing.T) {
 	if _, _, err := database.AdoptTerminalCandidate(context.Background(), event); err != nil {
 		t.Fatal(err)
 	}
-	after, err := database.ReadTerminalSnapshot(before.Run.ID)
+	after, err := database.ReadContinuationSnapshot(before.Run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,14 +106,14 @@ func TestTerminalAdoptionKeepsHistoryAndOriginalLaunchReceipt(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("adoption = %+v, %v, %v", accepted, created, err)
 	}
-	after, err := database.ReadTerminalSnapshot(run.ID)
+	after, err := database.ReadContinuationSnapshot(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(after, before) {
 		t.Fatal("adoption mutated predecessor source, history or receipt")
 	}
-	child, err := database.ReadTerminalSnapshot(accepted.Successor.ID)
+	child, err := database.ReadContinuationSnapshot(accepted.Successor.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,14 +180,14 @@ func TestTerminalAdoptionRefusalIsAtomic(t *testing.T) {
 			database, event := newTerminalAdoptionFixture(t)
 			runID := event.Snapshot.Run.ID
 			test.mutate(t, database, &event)
-			before, err := database.ReadTerminalSnapshot(runID)
+			before, err := database.ReadContinuationSnapshot(runID)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if _, _, err := database.AdoptTerminalCandidate(context.Background(), event); err == nil {
 				t.Fatal("invalid adoption was accepted")
 			}
-			after, err := database.ReadTerminalSnapshot(runID)
+			after, err := database.ReadContinuationSnapshot(runID)
 			if err != nil || !reflect.DeepEqual(before, after) {
 				t.Fatalf("refusal mutated source history: %v", err)
 			}
@@ -246,7 +246,7 @@ func TestTerminalAdoptionRefusesChangedOrProgressedSuccessor(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			before, err := database.ReadTerminalSnapshot(childID)
+			before, err := database.ReadContinuationSnapshot(childID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -258,11 +258,11 @@ func TestTerminalAdoptionRefusesChangedOrProgressedSuccessor(t *testing.T) {
 			} else if err == nil {
 				t.Fatal("changed successor accepted")
 			}
-			after, readErr := database.ReadTerminalSnapshot(childID)
+			after, readErr := database.ReadContinuationSnapshot(childID)
 			if readErr != nil || !reflect.DeepEqual(before, after) {
 				t.Fatal("replay changed successor")
 			}
-			parent, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
+			parent, err := database.ReadContinuationSnapshot(event.Snapshot.Run.ID)
 			if err != nil || !reflect.DeepEqual(parent, &event.Snapshot) {
 				t.Fatal("replay changed predecessor")
 			}
@@ -330,7 +330,7 @@ func TestTerminalSuccessorSerializesIndependentAcceptances(t *testing.T) {
 	if err != nil || len(runs) != 2 {
 		t.Fatal("race changed run count")
 	}
-	original, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
+	original, err := database.ReadContinuationSnapshot(event.Snapshot.Run.ID)
 	if err != nil || !reflect.DeepEqual(original, &event.Snapshot) {
 		t.Fatal("race changed predecessor")
 	}
@@ -357,7 +357,7 @@ func TestTerminalSuccessorCountsManualAndAutomaticFamilySpending(t *testing.T) {
 				}
 
 			}
-			snapshot, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
+			snapshot, err := database.ReadContinuationSnapshot(event.Snapshot.Run.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -382,7 +382,7 @@ func TestTerminalSuccessorCountsManualAndAutomaticFamilySpending(t *testing.T) {
 			if err != nil || remaining.Remaining != max(0, expected-1) {
 				t.Fatalf("child manual spending=%+v err=%v", remaining, err)
 			}
-			untouched, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
+			untouched, err := database.ReadContinuationSnapshot(event.Snapshot.Run.ID)
 			if err != nil || !reflect.DeepEqual(untouched, &event.Snapshot) {
 				t.Fatal("budget query changed predecessor")
 			}
@@ -413,7 +413,7 @@ func TestTerminalPredecessorRejectsHistoryMutation(t *testing.T) {
 	if err := database.RecordTerminalSourceState(event.Snapshot.Run.ID, "dirty:changed"); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
+	snapshot, err := database.ReadContinuationSnapshot(event.Snapshot.Run.ID)
 	if err != nil || !reflect.DeepEqual(snapshot, &event.Snapshot) {
 		t.Fatal("immutable history changed")
 	}
@@ -431,7 +431,7 @@ func TestTerminalSuccessorInheritsPublicBindingWithoutValidationStamps(t *testin
 	if err := database.UpdateRunPRState(parentID, "open"); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := database.ReadTerminalSnapshot(parentID)
+	snapshot, err := database.ReadContinuationSnapshot(parentID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,7 +451,7 @@ func TestTerminalSuccessorInheritsPublicBindingWithoutValidationStamps(t *testin
 	if err != nil || published.PushGeneration == nil || *published.PushGeneration != 2 {
 		t.Fatalf("generation=%+v err=%v", published, err)
 	}
-	unchanged, err := database.ReadTerminalSnapshot(parentID)
+	unchanged, err := database.ReadContinuationSnapshot(parentID)
 	if err != nil || !reflect.DeepEqual(unchanged, snapshot) {
 		t.Fatal("successor publication changed predecessor")
 	}
@@ -511,7 +511,7 @@ func TestTerminalSuccessorKeepsTheConfiguredAllowanceOfAnUnreachedPhase(t *testi
 			t.Fatal(err)
 		}
 	}
-	snapshot, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
+	snapshot, err := database.ReadContinuationSnapshot(event.Snapshot.Run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

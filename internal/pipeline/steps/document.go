@@ -134,6 +134,17 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	}
 
 	prompt := s.buildPrompt(sctx, baseSHA, ignorePatterns, combinedLint)
+	isValidationOnly, err := sctx.IsValidationOnly()
+	if err != nil {
+		return nil, err
+	}
+	if isValidationOnly {
+		prompt = fmt.Sprintf("Validate documentation for %s..%s and report every stale or contradictory fact without editing files. Follow the documentation ownership and scope policies below. Return findings and a summary.\n\n%s\n\n%s%s%s",
+			baseSHA, sctx.Run.HeadSHA, documentPlacementPolicy, documentScopeDiscipline, trustedDocumentPolicySection(sctx), executionContextPromptSection(sctx.WorkDir)+roundHistoryPromptSection(sctx)+userIntentPromptSection(sctx))
+		if combinedLint {
+			prompt += "\nAlso discover and run lint and formatting checks without applying fixes. Categorize every finding as documentation or lint."
+		}
+	}
 	schema := findingsSchema
 	purpose := "document"
 	if combinedLint {

@@ -159,6 +159,7 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
   [Explicit terminal continuation](/no-mistakes/reference/cli/#continue-validation-of-preserved-terminal-source) accepts proven source into a fresh-validation successor with cumulative repair spending, leaving the terminal predecessor immutable.
 - Keeps an untouched pending terminal-continuation successor pending without starting it while its predecessor, successor and branch ownership still match the adoption record; an explicit repeat of the continuation can start it.
   A successor whose binding cannot be read or no longer matches is failed like any other stale active run.
+- Leaves an intact, untouched pending [authored validation](/no-mistakes/reference/cli/#no-mistakes-axi-validate-authored) acceptance idle, neither started nor failed, until its exact request is explicitly replayed; a pending acceptance that is no longer intact is treated as any other stale active run
 - Before failing any other stale active run, verifies its managed worktree head and pins an unpublished descendant under the run-specific recovery ref so later rerun or guarded custody recovery does not fall back to a stale gate branch
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard

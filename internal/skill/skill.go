@@ -361,6 +361,17 @@ not skip Test, which would publish that work. Ask the operator to choose:
 ` + "`--action fix`" + ` spends another agent budget to validate the work, and
 ` + "`no-mistakes axi abort`" + ` stops the run.
 
+## Authored validation without renewed repairs
+
+Only when explicitly authorized, use ` + "`no-mistakes axi validate-authored --admission-file <file>`" + ` to validate a declared clean authored commit/tree linked to an immutable terminal predecessor.
+The controller supplies the exact source, predecessor snapshot, preserved launch/publication binding and frozen policy assertion described in the [CLI reference](https://kunchenguid.github.io/no-mistakes/reference/cli/#no-mistakes-axi-validate-authored).
+Every required stage and trusted custom gate runs fresh, and all automatic/manual repair authority is zero, including after restart and in descendants.
+Never use fix, skip, a broader policy or an ordinary fresh run to obtain more allowance for that lineage.
+The controller-supplied old policy is an assertion, not a native historical fact, and historical dirty/untracked source completeness remains explicitly unknown.
+Repeating an identical request observes the same child; only an untouched pending acceptance may be explicitly started after revalidation, and a cancelled child stays cancelled.
+At an authored gate, follow its zero-capacity help, answer review questions when needed, and return unresolved work to its authorized owner.
+This is validation of the declared candidate, not recovery of missing source or permission to install it or operate another run.
+
 ## Inspecting state
 
 ` + "```sh" + `

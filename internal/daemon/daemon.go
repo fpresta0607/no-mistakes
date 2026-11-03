@@ -17,6 +17,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/authoredvalidation"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -466,6 +467,18 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 				continue
 			}
 			preserved[run.ID] = struct{}{}
+		}
+	}
+	// An accepted candidate has no execution to recover until explicit replay.
+	if admissions, err := d.PendingValidationAdmissions(); err != nil {
+		slog.Error("failed to read pending authored admissions", "error", err)
+	} else {
+		for _, admission := range admissions {
+			if err := d.ValidatePendingAdmission(admission); err != nil {
+				slog.Warn("pending authored admission is not intact", "run_id", admission.ChildID, "error", err)
+				continue
+			}
+			preserved[admission.ChildID] = struct{}{}
 		}
 	}
 	logStartupPhase("parked_runs", parkedStarted, "preserved", len(preserved))
@@ -1565,6 +1578,28 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return cfg.ResolvePiProfile(&request)
 	})
 
+	srv.Handle(ipc.MethodValidateAuthored, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		var wire struct {
+			Request   json.RawMessage `json:"request"`
+			CallerDir string          `json:"caller_dir"`
+		}
+		if err := json.Unmarshal(params, &wire); err != nil {
+			return nil, fmt.Errorf("invalid authored admission params: %w", err)
+		}
+		classification, err := classify(ctx, wire.CallerDir, false, false)
+		if err != nil {
+			return nil, err
+		}
+		if classification.Nested {
+			return nil, fmt.Errorf("%s", gatecontext.RefusalMessage(classification))
+		}
+		request, err := authoredvalidation.Decode(wire.Request)
+		if err != nil {
+			return nil, err
+		}
+		return mgr.validateAuthored(ctx, ipc.ValidateAuthoredParams{Request: *request, CallerDir: wire.CallerDir}, ipc.PeerPID(ctx))
+	})
+
 	srv.Handle(ipc.MethodStartFreshRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		if err := refuseNested(ctx, false); err != nil {
 			return nil, err
@@ -1754,6 +1789,12 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		AwaitingAgentSince: r.AwaitingAgentSince,
 		CreatedAt:          r.CreatedAt,
 		UpdatedAt:          r.UpdatedAt,
+	}
+	family, err := d.ValidationFamily(r.ID)
+	if err != nil {
+		info.AuthoredValidationError = err.Error()
+	} else {
+		info.AuthoredValidation = family
 	}
 	if len(steps) > 0 {
 		info.Steps = make([]ipc.StepResultInfo, 0, len(steps))

@@ -69,14 +69,14 @@ func TestAxiTerminalCustodyContinuation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	before, err := database.ReadTerminalSnapshot(run.ID)
+	before, err := database.ReadContinuationSnapshot(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cleanupDeadline := time.Now().Add(15 * time.Second)
 	for before.Run.TerminalSourceState == nil && time.Now().Before(cleanupDeadline) {
 		time.Sleep(50 * time.Millisecond)
-		before, err = database.ReadTerminalSnapshot(run.ID)
+		before, err = database.ReadContinuationSnapshot(run.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -100,9 +100,9 @@ func TestAxiTerminalCustodyContinuation(t *testing.T) {
 	}
 	childID := adoption.Successor.ID
 	deadline := time.Now().Add(30 * time.Second)
-	var current *db.TerminalSnapshot
+	var current *db.ContinuationSnapshot
 	for time.Now().Before(deadline) {
-		current, err = database.ReadTerminalSnapshot(childID)
+		current, err = database.ReadContinuationSnapshot(childID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -114,7 +114,7 @@ func TestAxiTerminalCustodyContinuation(t *testing.T) {
 	if current.Run.AwaitingAgentSince == nil || current.Run.HeadSHA != before.Run.HeadSHA || current.Run.ReviewApprovedHeadSHA != nil || current.Run.TerminalHeadVerifiedAt != nil {
 		t.Fatalf("fresh Review was bypassed: %+v", current.Run)
 	}
-	original, err := database.ReadTerminalSnapshot(run.ID)
+	original, err := database.ReadContinuationSnapshot(run.ID)
 	if err != nil || !reflect.DeepEqual(original, before) {
 		t.Fatal("original native history or launch receipt changed")
 	}

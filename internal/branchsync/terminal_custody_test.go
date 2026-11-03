@@ -28,7 +28,7 @@ func TestAcceptedTerminalSourceReconstructsExactCandidateAfterCrash(t *testing.T
 	}
 	ref := "refs/no-mistakes/terminal-candidate/successor"
 	mustRun(t, f.gate, "update-ref", ref, candidate)
-	event := &db.TerminalAdoption{Snapshot: db.TerminalSnapshot{Run: *f.run}, CandidateSHA: candidate, RetainedSHA: candidate, CandidateTree: source.Tree, SourceRef: ref, GateHead: source.GateHead, RecoveryHead: source.RecoveryHead, ManagedDir: managed}
+	event := &db.TerminalAdoption{Snapshot: db.ContinuationSnapshot{Run: *f.run}, CandidateSHA: candidate, RetainedSHA: candidate, CandidateTree: source.Tree, SourceRef: ref, GateHead: source.GateHead, RecoveryHead: source.RecoveryHead, ManagedDir: managed}
 	current := *f.run
 	current.ID = "successor"
 	current.HeadSHA = candidate

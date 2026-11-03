@@ -29,7 +29,7 @@ func runTerminalContinuation(cmd *cobra.Command, reason string) error {
 		if run.Branch != branch {
 			continue
 		}
-		snapshot, err := env.d.ReadTerminalSnapshot(run.ID)
+		snapshot, err := env.d.ReadContinuationSnapshot(run.ID)
 		if err != nil {
 			return emitError(cmd, 1, err.Error())
 		}

@@ -56,7 +56,7 @@ func terminalSuccessorFixture(t *testing.T, name types.StepName, limit, spent in
 	if err := database.UpdateRunErrorStatus(parent.ID, "original cancelled", types.RunCancelled); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := database.ReadTerminalSnapshot(parent.ID)
+	snapshot, err := database.ReadContinuationSnapshot(parent.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestExecutorTerminalSuccessorDoesNotRenewRepairCapacity(t *testing.T) {
 			if err != nil || !family || budget.Spent != test.spent || budget.Remaining != 0 {
 				t.Fatalf("family budget=%+v err=%v", budget, err)
 			}
-			parent, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
+			parent, err := database.ReadContinuationSnapshot(event.Snapshot.Run.ID)
 			if err != nil || !reflect.DeepEqual(parent, &event.Snapshot) {
 				t.Fatal("fresh finding changed predecessor")
 			}
@@ -116,7 +116,7 @@ func TestExecutorTerminalSuccessorFailureLeavesNoPendingOrphan(t *testing.T) {
 	if events.findRunEvent(ipc.EventRunCompleted) == nil {
 		t.Fatal("failure omitted terminal event")
 	}
-	parent, err := database.ReadTerminalSnapshot(event.Snapshot.Run.ID)
+	parent, err := database.ReadContinuationSnapshot(event.Snapshot.Run.ID)
 	if err != nil || !reflect.DeepEqual(parent, &event.Snapshot) {
 		t.Fatal("failure changed predecessor")
 	}

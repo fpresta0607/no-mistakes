@@ -14,6 +14,7 @@ Pipeline steps do not treat missing, malformed, or semantically incomplete struc
 The Test evidence analyzer first returns the validation errors to the agent for a bounded correction, and Review runs a fresh review up to three times in total when no-mistakes rejects the reviewer's final output; exhausting either bound, and every other step's invalid analyzer output, still stops the affected step.
 Beyond these core steps, a repository can declare extra checks that run immediately after one of them. [`gates`](/no-mistakes/reference/repo-config/#gates) owns their placement, failure handling, and limits.
 See [TUI yolo mode](/no-mistakes/guides/tui/#action-bar) for automatic gate handling and its exceptions.
+In an [authored validation child](/no-mistakes/reference/cli/#no-mistakes-axi-validate-authored), no step changes source: Rebase parks with an `ask-user` finding for each integration target the candidate does not already contain instead of integrating it, Document and Lint report findings without editing files, Push skips `commands.format` and refuses to commit leftover changes, and CI runs no repair.
 Every pipeline agent invocation is prompt-steered to keep intentional writes inside the run worktree and avoid mutating system state outside it.
 This is a soft boundary, not OS-level sandbox enforcement.
 The steering still allows requested test evidence and the Test step's disposable scratch directory under the run's managed evidence directory, plus incidental temp or cache writes from normal development tools.

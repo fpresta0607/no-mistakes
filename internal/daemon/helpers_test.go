@@ -477,15 +477,11 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"structured
 func waitForRunTerminalState(t *testing.T, d *db.DB, runID string) *db.Run {
 	t.Helper()
 
-	timeout := 5 * time.Second
-	if runtime.GOOS == "windows" {
-		// Git-backed daemon runs routinely take about 10x longer on Windows,
-		// especially while the git-heavy CI shard runs several packages at once.
-		// Keep the assertion bounded without treating normal process-spawn load as
-		// a pipeline failure.
-		timeout = time.Minute
-	}
-	deadline := time.Now().Add(timeout)
+	// Git-backed daemon runs routinely take about 10x longer on Windows, and a
+	// full authored run outlasts a few seconds on a loaded race-instrumented
+	// macOS runner too. Keep the assertion bounded without treating normal
+	// process-spawn load as a pipeline failure.
+	deadline := time.Now().Add(time.Minute)
 	for time.Now().Before(deadline) {
 		run, err := d.GetRun(runID)
 		if err != nil {
