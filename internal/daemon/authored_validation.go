@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
+	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -181,6 +183,13 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 			if err != nil {
 				return "", err
 			}
+		}
+		// Like an ordinary launch, publish to the registration verified against the
+		// working clone, so the child binds the target a later admission proves.
+		if refreshed, _, refreshErr := gate.RefreshRepoURLs(ctx, m.db, repo); refreshErr != nil {
+			slog.Warn("repository URL refresh skipped; continuing with existing registration", "repo_id", repo.ID, "reason", gate.ReasonForRefreshFailure(refreshErr))
+		} else {
+			repo = refreshed
 		}
 		// Init records the gate's origin as the clone resolves it through
 		// url.*.insteadOf, while the registry keeps the clone's literal origin.

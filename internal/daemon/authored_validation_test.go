@@ -531,3 +531,87 @@ func TestAuthoredAdmissionAcceptsAnOriginRewrittenAtInit(t *testing.T) {
 		})
 	}
 }
+
+// A published authored child must bind the registered push target, the one a
+// later admission proves, whichever origin form init stored on the gate.
+func TestAuthoredAdmissionContinuesAChildPublishedThroughEitherInitOrigin(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		isRewrittenAtInit bool
+	}{
+		{name: "literal gate origin"},
+		{name: "gate origin rewritten at init", isRewrittenAtInit: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+			t.Setenv("PATH", writeMockGHNoPR(t, t.TempDir())+string(os.PathListSeparator)+os.Getenv("PATH"))
+			const prURL = "https://github.com/test/repo/pull/17"
+			var calls atomic.Int32
+			manager, database, repo, request, gate := authoredAdmissionFixture(t, func() []pipeline.Step {
+				return []pipeline.Step{&authoredFixtureStep{name: types.StepReview, calls: &calls}, &authoredPublishStep{prURL: prURL}}
+			})
+			published := filepath.ToSlash(filepath.Join(t.TempDir(), "published.git"))
+			gitCmd(t, "", "init", "--bare", published)
+			gitCmd(t, gate, "push", published, "refs/heads/main")
+			gitCmd(t, gate, "config", "--unset", "url."+filepath.ToSlash(gate)+".insteadOf")
+			gitCmd(t, repo.WorkingPath, "config", "--global", "url."+published+".insteadOf", repo.UpstreamURL)
+			gitCmd(t, repo.WorkingPath, "remote", "add", "origin", repo.UpstreamURL)
+			if test.isRewrittenAtInit {
+				gitCmd(t, gate, "remote", "set-url", "origin", gitOutput(t, repo.WorkingPath, "remote", "get-url", "origin"))
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			first, err := manager.validateAuthored(ctx, request, os.Getpid())
+			if err != nil || !first.Started {
+				t.Fatalf("first admission: %+v %v", first, err)
+			}
+			child := waitForRunTerminalState(t, database, first.Receipt.RunID)
+			if child.Status != types.RunCompleted || child.LastPushedSHA == nil || *child.LastPushedSHA != request.Request.CandidateSHA {
+				t.Fatalf("authored child did not publish its candidate: status=%s error=%v", child.Status, child.Error)
+			}
+			childSnapshot, err := database.ReadTerminalSnapshot(child.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(repo.WorkingPath, "authored.txt"), []byte("follow-up after PR review\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, repo.WorkingPath, "commit", "-am", "author follow-up")
+			request.Request.PredecessorID, request.Request.SnapshotDigest, request.Request.LaunchNonce = child.ID, childSnapshot.Digest(), *childSnapshot.Run.LaunchNonce
+			request.Request.PublishedHeadSHA, request.Request.PushGeneration, request.Request.PushTargetFingerprint = *child.LastPushedSHA, *child.PushGeneration, *child.PushTargetFingerprint
+			request.Request.CandidateSHA = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+			request.Request.CandidateTree = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD^{tree}")
+			originalOutput := authoredPRCommandOutput
+			t.Cleanup(func() { authoredPRCommandOutput = originalOutput })
+			authoredPRCommandOutput = func(*exec.Cmd) ([]byte, error) {
+				return []byte(fmt.Sprintf(`{"html_url":%q,"state":"open","head":{"sha":%q,"ref":"feature","repo":{"full_name":"test/repo"}},"base":{"ref":"main","repo":{"full_name":"test/repo"}}}`, prURL, *child.LastPushedSHA)), nil
+			}
+
+			continuation, err := manager.validateAuthored(ctx, request, os.Getpid())
+
+			if err != nil || !continuation.Started || continuation.Receipt.RunID == child.ID {
+				t.Fatalf("continuation from the published authored child: %+v %v", continuation, err)
+			}
+			waitForRunTerminalState(t, database, continuation.Receipt.RunID)
+		})
+	}
+}
+
+// authoredPublishStep stands in for Review's approval and the PR step's open
+// PR around the real Push step.
+type authoredPublishStep struct{ prURL string }
+
+func (step *authoredPublishStep) Name() types.StepName { return types.StepPush }
+func (step *authoredPublishStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := sctx.DB.UpdateRunReviewApprovedHeadSHA(sctx.Run.ID, sctx.Run.HeadSHA); err != nil {
+		return nil, err
+	}
+	outcome, err := (&steps.PushStep{}).Execute(sctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, step.prURL); err != nil {
+		return nil, err
+	}
+	return outcome, sctx.DB.UpdateRunPRState(sctx.Run.ID, "open")
+}

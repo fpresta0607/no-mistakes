@@ -132,7 +132,7 @@ func TestAxiAuthoredValidationHasFreshStagesAndNoRepairAuthorityAfterCrash(t *te
 			t.Fatalf("did not freshly execute %s", step.StepName)
 		}
 	}
-	if out, err := h.RunInDir(caller, "axi", "respond", "--action", "fix"); err == nil || !strings.Contains(out, "zero") {
+	if out, err := h.RunInDir(caller, "axi", "respond", "--action", "fix", "--findings", "sync-1"); err == nil || !strings.Contains(out, "zero") {
 		t.Fatalf("manual repair was renewed: %v\n%s", err, out)
 	}
 	pid, err := daemon.ReadPID(root)
@@ -164,7 +164,7 @@ func TestAxiAuthoredValidationHasFreshStagesAndNoRepairAuthorityAfterCrash(t *te
 	if out, err := h.Run("daemon", "start"); err != nil {
 		t.Fatalf("restart isolated daemon: %v\n%s", err, out)
 	}
-	if out, err := h.RunInDir(caller, "axi", "respond", "--action", "fix"); err == nil || !strings.Contains(out, "zero") {
+	if out, err := h.RunInDir(caller, "axi", "respond", "--action", "fix", "--findings", "sync-1"); err == nil || !strings.Contains(out, "zero") {
 		t.Fatalf("restart restored manual repair capacity: %v\n%s", err, out)
 	}
 	if out, err := h.RunInDir(caller, "axi", "validate-authored", "--admission-file", admissionFile, "--wait", "5s"); err != nil || !strings.Contains(out, child.ID) || !strings.Contains(out, "started: false") {
