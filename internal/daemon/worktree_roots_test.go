@@ -375,7 +375,7 @@ func TestCleanupOrphanWorktrees_UnconfiguredRepoUsesDefaultRoot(t *testing.T) {
 	// aware); force every eligible directory past the retention window
 	// regardless of its actual mtime, mirroring recoverOnStartup's order.
 	future := time.Now().Add(365 * 24 * time.Hour)
-	reapWorktrees(d, p, worktreeReapPolicy{Retention: time.Nanosecond}, future)
+	NewRunManager(d, p, nil).reapWorktrees(worktreeReapPolicy{Retention: time.Nanosecond}, future)
 	cleanupOrphanWorktrees(d, p, leftoverRecordedRunWorktrees(d, p))
 
 	if _, err := os.Stat(terminalWT); !os.IsNotExist(err) {

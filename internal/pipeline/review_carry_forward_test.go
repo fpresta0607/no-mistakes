@@ -1567,10 +1567,12 @@ func TestExecutor_ReviewCarryForward_AnEmptyOutstandingSetRecordsNoRetraction(t 
 	waitExecutorDone(t, done)
 }
 
-// waitForFindings blocks until the step's persisted findings carry marker. The
-// gate status alone cannot say a round landed when consecutive rounds park the
-// same way, which is how an earlier version of these tests read a pre-round
-// snapshot and passed vacuously.
+// waitForFindings blocks until the step's persisted findings carry marker and
+// that round has parked its gate. The gate status alone cannot say a round
+// landed when consecutive rounds park the same way, which is how an earlier
+// version of these tests read a pre-round snapshot and passed vacuously. The
+// marker alone cannot say the gate is open: findings persist before the
+// executor accepts a response, so responding on the marker races the park.
 func waitForFindings(t *testing.T, database *db.DB, runID, marker string) []*db.StepResult {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
@@ -1579,19 +1581,23 @@ func waitForFindings(t *testing.T, database *db.DB, runID, marker string) []*db.
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(steps) > 0 && steps[0].FindingsJSON != nil && strings.Contains(*steps[0].FindingsJSON, marker) {
+		if len(steps) > 0 && steps[0].FindingsJSON != nil && strings.Contains(*steps[0].FindingsJSON, marker) &&
+			(steps[0].Status == types.StepStatusAwaitingApproval || steps[0].Status == types.StepStatusFixReview) {
 			return steps
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the round carrying %q never landed", marker)
+			t.Fatalf("the round carrying %q never landed and parked", marker)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 }
 
-// waitForRounds blocks until the step has persisted at least want rounds. A
-// round that reports nothing changes no marker, so its row is the only place
-// its arrival is visible.
+// waitForRounds blocks until the step has persisted at least want rounds and
+// the latest one has parked its gate. A round that reports nothing changes no
+// marker, so its row is the only place its arrival is visible; the row lands
+// before the executor accepts a response, so the step must also read as parked.
+// Rounds are read first: the step returns to running before the round runs, so
+// a parked status read after the row is that round's park.
 func waitForRounds(t *testing.T, database *db.DB, stepResultID string, want int) []*db.StepRound {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
@@ -1600,11 +1606,15 @@ func waitForRounds(t *testing.T, database *db.DB, stepResultID string, want int)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(rounds) >= want {
+		step, err := database.GetStepResult(stepResultID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rounds) >= want && (step.Status == types.StepStatusAwaitingApproval || step.Status == types.StepStatusFixReview) {
 			return rounds
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d rounds landed", len(rounds), want)
+			t.Fatalf("%d of %d rounds landed, step %s", len(rounds), want, step.Status)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
