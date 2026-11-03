@@ -93,7 +93,8 @@ When a push arrives via the post-receive hook:
 
 An unresolved [`protected_paths`](/no-mistakes/reference/repo-config/#protected_paths) refusal preserves the index and working files across daemon shutdown, cancellation by a newer push, and crash recovery, including when trusted-config loading fails and the run cannot resume. This retention does not weaken recovery validation or keep a terminal run active: orphan-process cleanup and test-evidence expiry still apply. Successful completion of the refused step releases this protection; deliberate operator skip and abort retain their existing cleanup behavior.
 
-For a recorded run, terminal cleanup preserves staged or unstaged tracked changes, untracked files, and unreadable nonempty checkouts.
+An operator abort of an unresolved refusal still discards the checkout at the run's original submitted head, but never adopted or later committed source.
+Otherwise, terminal cleanup of a recorded run preserves staged or unstaged tracked changes, untracked files, and unreadable nonempty checkouts.
 The untracked check includes hidden files even when Git's status display settings hide them.
 Clean committed corrections are also retained unless an exact durable preservation anchor or a recorded successful push binding protects the checked-out head.
 This includes corrections committed after terminalization and before the first terminal continuation.
@@ -156,6 +157,8 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Preserves a run that was actively monitoring CI for an already-created PR as `ci_monitor_interrupted` rather than failing it: the PR is still open, so a restart mid-monitor is not a pipeline failure.
   That run is terminal and never automatically resumed; its stale publisher marker is cleared.
   [Explicit terminal continuation](/no-mistakes/reference/cli/#continue-validation-of-preserved-terminal-source) accepts proven source into a fresh-validation successor with cumulative repair spending, leaving the terminal predecessor immutable.
+- Keeps an untouched pending terminal-continuation successor pending without starting it while its predecessor, successor and branch ownership still match the adoption record; an explicit repeat of the continuation can start it.
+  A successor whose binding cannot be read or no longer matches is failed like any other stale active run.
 - Before failing any other stale active run, verifies its managed worktree head and pins an unpublished descendant under the run-specific recovery ref so later rerun or guarded custody recovery does not fall back to a stale gate branch
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
