@@ -50,7 +50,7 @@ After publication, a CI repair whose continuity with the reviewed head cannot be
 
 Validation runs in a fresh context against the actual branch, never inside the authoring session, because an author is biased toward believing its own work is correct.
 Validation must not hold the author hostage: runs happen in disposable isolation so the working tree stays untouched and the next task can start immediately.
-Reviewer and fixer are separate roles with separate memory; the reviewer never inherits the fixer's rationale, and every review pass covers the complete change, judging each file anew unless a repair round left it unchanged since a previous round judged it and no finding sent to the fixer names it.
+Reviewer and fixer are separate roles with separate memory; the reviewer never inherits the fixer's rationale, and every review pass covers the complete change, judging each file anew unless a repair round left it unchanged since a previous round judged it and no open finding names it.
 The pipeline's own fixes are author code: a change the gate wrote is held to the same standard as a change the author wrote, judged at the gate of the step that wrote it, and a reviewer never certifies its own prescription.
 The author's intent, with its provenance, is part of what review checks the diff against; agent confidence is not evidence.
 The pushed branch is untrusted input: nothing on it may choose what executes with the owner's credentials, and gate agents never adopt the identity or instructions of the code under validation.

@@ -737,7 +737,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			if recorded, err := types.ParseFindingsJSON(gate.findings); err == nil {
 				state.previousReviewedPaths = recorded.ReviewedPaths
 			}
-			state.deferredFindings = removeMatchingFindingsJSON(gate.findings, selected)
+			state.deferredFindings = RemoveMatchingFindingsJSON(gate.findings, selected)
 			state.outstandingFindings = outstandingFindings
 			state.selectedOutstandingIDs = selectedOutstandingIDs
 		}
@@ -1460,7 +1460,7 @@ rounds:
 				sctx.SkipFixExecution = false
 				sctx.PreviousFindings = fixableFindings
 				sctx.PreviousReviewedPaths = outcome.ReviewedPaths
-				sctx.DeferredFindings = removeMatchingFindingsJSON(effectiveFindings, fixableFindings)
+				sctx.DeferredFindings = RemoveMatchingFindingsJSON(effectiveFindings, fixableFindings)
 				if carryFindings {
 					pendingVerificationIDs = combineFindingIDLists(pendingVerificationIDs, findingIDList(fixableFindings))
 					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, findingIDList(fixableFindings))
@@ -1606,7 +1606,7 @@ rounds:
 				mergedFindings := mergeUserOverridesJSON(selectedFindings, response.instructions, response.addedFindings)
 				sctx.PreviousFindings = mergedFindings
 				sctx.PreviousReviewedPaths = outcome.ReviewedPaths
-				sctx.DeferredFindings = removeMatchingFindingsJSON(effectiveFindings, selectedFindings)
+				sctx.DeferredFindings = RemoveMatchingFindingsJSON(effectiveFindings, selectedFindings)
 				selectedForPersistence := mergedFindings
 				if carryFindings {
 					// APPEND-ONLY: the selection is additionally handed to the fixer

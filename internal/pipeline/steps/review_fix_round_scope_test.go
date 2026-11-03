@@ -21,7 +21,7 @@ import (
 // measured week of gate records, rereviews after a fix round were 45% of the
 // review spend and cost as much as a first review. These tests pin the
 // narrower rule: the rereview judges what the fix changed, the files of the
-// findings sent to the fixer, and whatever the round before left unjudged,
+// open findings, and whatever the round before left unjudged,
 // and every other changed file keeps that round's verdict.
 
 const carriedVerdictMarker = "Changed files whose verdict carries from the previous review round"
@@ -34,6 +34,7 @@ func TestFixRoundCarriedPaths(t *testing.T) {
 		previouslyReviewed []string
 		changedSinceStart  []string
 		sentToFix          []Finding
+		deferred           []Finding
 		want               []string
 	}{
 		{
@@ -65,6 +66,21 @@ func TestFixRoundCarriedPaths(t *testing.T) {
 			want:               nil,
 		},
 		{
+			name:               "judges a deferred finding's file",
+			previouslyReviewed: []string{"a.go", "b.go", "c.go"},
+			changedSinceStart:  []string{"a.go"},
+			sentToFix:          []Finding{{File: "a.go"}},
+			deferred:           []Finding{{File: "b.go"}},
+			want:               []string{"c.go"},
+		},
+		{
+			name:               "a fileless deferred finding keeps nothing",
+			previouslyReviewed: []string{"a.go", "b.go", "c.go"},
+			changedSinceStart:  []string{"a.go"},
+			sentToFix:          []Finding{{File: "a.go"}},
+			deferred:           []Finding{{}},
+		},
+		{
 			name:               "an unknown previous record keeps nothing",
 			previouslyReviewed: nil,
 			changedSinceStart:  []string{"a.go"},
@@ -82,7 +98,7 @@ func TestFixRoundCarriedPaths(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := fixRoundCarriedPaths(reviewable, tc.previouslyReviewed, tc.changedSinceStart, tc.sentToFix)
+			got := fixRoundCarriedPaths(reviewable, tc.previouslyReviewed, tc.changedSinceStart, append(tc.sentToFix, tc.deferred...))
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("fixRoundCarriedPaths() = %v, want %v", got, tc.want)
 			}
@@ -240,5 +256,114 @@ func TestReviewLoop_RepairRoundJudgesWhatThePreviousRoundLeftUncovered(t *testin
 		if !strings.Contains(rereview, want) {
 			t.Fatalf("the rereview must be held to %q:\n%s", strings.TrimSpace(want), rereview)
 		}
+	}
+}
+
+func TestReviewLoop_DeferredFindingKeepsPendingFindingUnverified(t *testing.T) {
+	reviewTurn, fixTurn := 0, 0
+	mock := &sessionMockAgent{}
+	mock.respond = func(opts agent.RunOpts) *agent.Result {
+		switch opts.Purpose {
+		case "review":
+			reviewTurn++
+			switch reviewTurn {
+			case 1:
+				return &agent.Result{Output: []byte(`{"findings":[{"id":"f-1","severity":"error","file":"feature.txt","line":1,"description":"original bug","action":"auto-fix"}],"summary":"bug","risk_level":"medium","risk_rationale":"bug","risk_scope":"source-or-external","reviewed_paths":["feature.txt","feature2.txt"]}`)}
+			case 2:
+				return &agent.Result{Output: []byte(`{"findings":[{"id":"note","severity":"info","file":"feature.txt","line":1,"description":"still relevant","action":"no-op"},{"id":"f-2","severity":"error","file":"feature2.txt","line":1,"description":"second bug","action":"auto-fix"}],"summary":"issues","risk_level":"medium","risk_rationale":"issues","risk_scope":"source-or-external","reviewed_paths":["feature.txt","feature2.txt"]}`)}
+			default:
+				return &agent.Result{Output: []byte(`{"findings":[{"id":"decision","severity":"warning","file":"feature2.txt","line":1,"description":"needs decision","action":"ask-user"}],"summary":"decision","risk_level":"medium","risk_rationale":"decision","risk_scope":"source-or-external","reviewed_paths":["feature2.txt"]}`)}
+			}
+		case "review-fix":
+			fixTurn++
+			if fixTurn == 1 {
+				return rewriteFeatureFix(t, opts)
+			}
+			if err := os.WriteFile(filepath.Join(opts.CWD, "feature2.txt"), []byte("second fix\n"), 0o644); err != nil {
+				t.Errorf("write second fix: %v", err)
+			}
+			return &agent.Result{Output: []byte(`{"summary":"fix second bug"}`)}
+		default:
+			t.Errorf("unexpected agent purpose %q", opts.Purpose)
+			return &agent.Result{Output: []byte(`{}`)}
+		}
+	}
+	exec, database, run, repo, workDir := fixRoundScopeHarness(t, mock)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(ctx, run, repo, workDir) }()
+	var parked *db.StepResult
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		steps, err := database.GetStepsByRun(run.ID)
+		if err == nil && len(steps) == 1 && (steps[0].Status == types.StepStatusFixReview || steps[0].Status == types.StepStatusAwaitingApproval) {
+			parked = steps[0]
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("executor ended before parking: %v", err)
+		default:
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if parked == nil {
+		t.Fatal("review did not park")
+	}
+	cancel()
+	<-done
+	reviews := reviewCalls(mock.snapshot())
+	if len(reviews) != 3 {
+		t.Fatalf("review turns = %d, want 3", len(reviews))
+	}
+	held, carried, _ := strings.Cut(reviews[2].Prompt, carriedVerdictMarker)
+	if !strings.Contains(held, "- feature.txt\n") || strings.Contains(carried, "- feature.txt\n") {
+		t.Fatalf("deferred finding's file must be held for review, not carried: %s", reviews[2].Prompt)
+	}
+	if parked.FindingsJSON == nil || !strings.Contains(*parked.FindingsJSON, "original bug") {
+		t.Fatalf("unverified original finding disappeared: %+v", parked.FindingsJSON)
+	}
+}
+
+func TestReviewLoop_RepairScopeIncludesUnchangedHeldFile(t *testing.T) {
+	reviewTurn := 0
+	mock := &sessionMockAgent{}
+	mock.respond = func(opts agent.RunOpts) *agent.Result {
+		switch opts.Purpose {
+		case "review":
+			reviewTurn++
+			if reviewTurn == 1 {
+				return &agent.Result{Output: []byte(`{"findings":[{"id":"f-1","severity":"error","file":"feature.txt","line":1,"description":"bug","action":"auto-fix"}],"summary":"bug","risk_level":"medium","risk_rationale":"bug","risk_scope":"source-or-external","reviewed_paths":["feature.txt","feature3.txt"]}`)}
+			}
+			return &agent.Result{Output: []byte(`{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external","reviewed_paths":["feature.txt","feature2.txt"]}`)}
+		case "review-fix":
+			return rewriteFeatureFix(t, opts)
+		default:
+			t.Errorf("unexpected agent purpose %q", opts.Purpose)
+			return &agent.Result{Output: []byte(`{}`)}
+		}
+	}
+	exec, _, run, repo, workDir := fixRoundScopeHarness(t, mock)
+	if err := os.WriteFile(filepath.Join(workDir, "feature3.txt"), []byte("third feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, workDir, "add", "feature3.txt")
+	gitCmd(t, workDir, "commit", "-m", "add third feature")
+	run.HeadSHA = gitCmd(t, workDir, "rev-parse", "HEAD")
+	startingHead := run.HeadSHA
+	executeWithoutAPark(t, exec, run, repo, workDir)
+	reviews := reviewCalls(mock.snapshot())
+	if len(reviews) != 2 {
+		t.Fatalf("review turns = %d, want 2", len(reviews))
+	}
+	prompt := reviews[1].Prompt
+	held, carried, ok := strings.Cut(prompt, carriedVerdictMarker)
+	if !ok || !strings.Contains(held, "- feature2.txt\n") || !strings.Contains(carried, "- feature3.txt\n") {
+		t.Fatalf("uncovered file must be held and covered untouched file carried: %s", prompt)
+	}
+	want := "the branch changes relative to base commit " + run.BaseSHA + " in the changed files this review is held to, including this fix round's changes since starting head " + startingHead
+	if !strings.Contains(prompt, want) {
+		t.Fatalf("review scope must include branch changes in all held files, want %q in %s", want, prompt)
 	}
 }

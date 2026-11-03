@@ -173,7 +173,7 @@ func mergeFindingsJSON(existingRaw, additionalRaw string) string {
 	return mergedRaw
 }
 
-func removeMatchingFindingsJSON(existingRaw, removeRaw string) string {
+func RemoveMatchingFindingsJSON(existingRaw, removeRaw string) string {
 	if existingRaw == "" || removeRaw == "" {
 		return existingRaw
 	}

@@ -231,7 +231,7 @@ Previous review findings to address:
 	}
 
 	// A repair round's rereview judges what the fix changed, the files of the
-	// findings sent to the fixer, and whatever the round before left
+	// open findings, and whatever the round before left
 	// unjudged; every other changed file keeps that round's verdict, which
 	// joins this round's coverage record below. An answer round reviews in
 	// full: its starting head is already past the fix.
@@ -242,10 +242,16 @@ Previous review findings to address:
 			return nil, fmt.Errorf("get files changed since starting head: %w", err)
 		}
 		if sentToFix, err := types.ParseFindingsJSON(sctx.PreviousFindings); err == nil {
-			carried = fixRoundCarriedPaths(reviewable, sctx.PreviousReviewedPaths, changedPathList(sinceStart), sentToFix.Items)
+			deferred := types.Findings{}
+			if sctx.DeferredFindings != "" {
+				deferred, err = types.ParseFindingsJSON(sctx.DeferredFindings)
+			}
+			if err == nil {
+				carried = fixRoundCarriedPaths(reviewable, sctx.PreviousReviewedPaths, changedPathList(sinceStart), append(sentToFix.Items, deferred.Items...))
+			}
 		}
 		if len(carried) > 0 {
-			reviewScope = fmt.Sprintf("this fix round's changes since starting head %s, within the branch changes relative to base commit %s", sctx.ReviewStartingHeadSHA, baseSHA)
+			reviewScope = fmt.Sprintf("the branch changes relative to base commit %s in the changed files this review is held to, including this fix round's changes since starting head %s", baseSHA, sctx.ReviewStartingHeadSHA)
 		}
 	}
 
@@ -660,17 +666,17 @@ func reviewCoverageCompletionSection(missing []string) string {
 // fixRoundCarriedPaths returns the reviewable paths whose verdict a repair
 // round's rereview keeps from the round before instead of judging them again:
 // each one that round covered, that is unchanged since the starting head it
-// judged, and that no finding sent to the fixer names. A finding is verified
+// judged, and that no open finding names. A finding is verified
 // only by a rereview that covers its file, so its file is always judged again,
 // and a finding with no file can be verified only by a pass over every path,
 // so it keeps nothing. A round left with nothing of its own to judge reviews
 // in full.
-func fixRoundCarriedPaths(reviewable, previouslyReviewed, changedSinceStart []string, sentToFix []Finding) []string {
-	judgeAgain := make(map[string]bool, len(changedSinceStart)+len(sentToFix))
+func fixRoundCarriedPaths(reviewable, previouslyReviewed, changedSinceStart []string, openFindings []Finding) []string {
+	judgeAgain := make(map[string]bool, len(changedSinceStart)+len(openFindings))
 	for _, changed := range changedSinceStart {
 		judgeAgain[normalizeReviewedPath(changed)] = true
 	}
-	for _, finding := range sentToFix {
+	for _, finding := range openFindings {
 		file := normalizeReviewedPath(finding.File)
 		if file == "" {
 			return nil
@@ -701,7 +707,7 @@ func carriedVerdictSection(carried []string) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("\nChanged files whose verdict carries from the previous review round (it judged them at their current content, this fix round did not change them, and no finding sent to the fixer names them):\n")
+	b.WriteString("\nChanged files whose verdict carries from the previous review round (it judged them at their current content, this fix round did not change them, and no open finding names them):\n")
 	for _, p := range carried {
 		fmt.Fprintf(&b, "- %s\n", coveragePathLine(p))
 	}
