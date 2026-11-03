@@ -273,7 +273,7 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 	defer baseAgent.Close()
 	observed := &observedAgent{inner: agent.WithSteering(baseAgent, isolatedPaths.EvidenceDir()), ownership: ownership}
 
-	replayDB, stepResultID, fixing, previousFindings, err := replayRoundContext(isolatedPaths, c, workDir)
+	replayDB, stepResultID, fixing, previousFindings, previousReviewedPaths, err := replayRoundContext(isolatedPaths, c, workDir)
 	if err != nil {
 		evaluation.Error = safeurl.RedactText(err.Error())
 		evaluation.CompletedAt = time.Now().Unix()
@@ -314,6 +314,7 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 		EvalReplay:            true,
 		ReviewStartingHeadSHA: startingHeadSHA,
 		PreviousFindings:      previousFindings,
+		PreviousReviewedPaths: previousReviewedPaths,
 		// Keep NM_HOME on the nested sandbox so replay cannot see or mutate
 		// production pipeline/eval state. Do not rewrite HOME: candidates use
 		// the same harness sign-in and user settings as an ordinary pipeline
@@ -372,22 +373,22 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 	return evaluation
 }
 
-func replayRoundContext(p *paths.Paths, c Case, workDir string) (*db.DB, string, bool, string, error) {
+func replayRoundContext(p *paths.Paths, c Case, workDir string) (*db.DB, string, bool, string, []string, error) {
 	var selected sourceRound
 	if err := readJSON(filepath.Join(c.Dir, "original", "round.json"), &selected); err != nil {
-		return nil, "", false, "", fmt.Errorf("read captured review round: %w", err)
+		return nil, "", false, "", nil, fmt.Errorf("read captured review round: %w", err)
 	}
 	var rounds []sourceRound
 	if err := readJSON(filepath.Join(c.Dir, "original", "rounds.json"), &rounds); err != nil {
-		return nil, "", false, "", fmt.Errorf("read captured round history: %w", err)
+		return nil, "", false, "", nil, fmt.Errorf("read captured round history: %w", err)
 	}
 	database, err := db.Open(p.DB())
 	if err != nil {
-		return nil, "", false, "", fmt.Errorf("open isolated replay database: %w", err)
+		return nil, "", false, "", nil, fmt.Errorf("open isolated replay database: %w", err)
 	}
-	fail := func(err error) (*db.DB, string, bool, string, error) {
+	fail := func(err error) (*db.DB, string, bool, string, []string, error) {
 		database.Close()
-		return nil, "", false, "", err
+		return nil, "", false, "", nil, err
 	}
 	repo, err := database.InsertRepoWithID("eval-repo", workDir, "local://eval", c.DefaultBranch)
 	if err != nil {
@@ -402,6 +403,7 @@ func replayRoundContext(p *paths.Paths, c Case, workDir string) (*db.DB, string,
 		return fail(fmt.Errorf("create isolated replay step: %w", err))
 	}
 	var previousFindings string
+	var previousReviewedPaths []string
 	for _, round := range rounds {
 		if round.StepName != "" && round.StepName != string(types.StepReview) {
 			continue
@@ -429,13 +431,16 @@ func replayRoundContext(p *paths.Paths, c Case, workDir string) (*db.DB, string,
 			if previousFindings == "" {
 				previousFindings = stringValue(round.FindingsJSON)
 			}
+			if recorded, err := types.ParseFindingsJSON(stringValue(round.FindingsJSON)); err == nil {
+				previousReviewedPaths = recorded.ReviewedPaths
+			}
 		}
 	}
 	fixing := selected.Trigger == "auto_fix" || selected.Trigger == "user_fix"
 	if fixing && previousFindings == "" {
 		return fail(fmt.Errorf("captured fix round %d has no previous findings", selected.Round))
 	}
-	return database, step.ID, fixing, previousFindings, nil
+	return database, step.ID, fixing, previousFindings, previousReviewedPaths, nil
 }
 
 func stringValue(value *string) string {

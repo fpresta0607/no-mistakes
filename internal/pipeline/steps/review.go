@@ -230,6 +230,25 @@ Previous review findings to address:
 		})
 	}
 
+	// A repair round's rereview judges what the fix changed, the files of the
+	// findings sent to the fixer, and whatever the round before left
+	// unjudged; every other changed file keeps that round's verdict, which
+	// joins this round's coverage record below. An answer round reviews in
+	// full: its starting head is already past the fix.
+	var carried []string
+	if sctx.Fixing && !sctx.FinalizingAnswers && sctx.ReviewStartingHeadSHA != "" {
+		sinceStart, err := git.Run(ctx, sctx.WorkDir, "diff", "--name-only", "-z", "--no-renames", sctx.ReviewStartingHeadSHA)
+		if err != nil {
+			return nil, fmt.Errorf("get files changed since starting head: %w", err)
+		}
+		if sentToFix, err := types.ParseFindingsJSON(sctx.PreviousFindings); err == nil {
+			carried = fixRoundCarriedPaths(reviewable, sctx.PreviousReviewedPaths, changedPathList(sinceStart), sentToFix.Items)
+		}
+		if len(carried) > 0 {
+			reviewScope = fmt.Sprintf("this fix round's changes since starting head %s, within the branch changes relative to base commit %s", sctx.ReviewStartingHeadSHA, baseSHA)
+		}
+	}
+
 	// Ask agent to review. This fresh deadline is invocation-owned: a
 	// successful fixer above cannot consume any of this independent,
 	// session-free turn's review_agent_timeout allowance.
@@ -385,7 +404,7 @@ Risk assessment (after listing all findings):
 		reviewScope,
 		baseBranch,
 		ignorePatterns,
-		reviewCoverageSection(reviewable),
+		reviewCoverageSection(uncoveredReviewablePaths(carried, reviewable))+carriedVerdictSection(carried),
 		historySection,
 		pathInstructions,
 		agent.MemoryFilesRule,
@@ -490,6 +509,9 @@ Risk assessment (after listing all findings):
 		}
 		sctx.Log(fmt.Sprintf("review analyzer findings rejected (%s); rerunning the review (attempt %d of %d)", strings.ReplaceAll(err.Error(), "\n", "; "), attempt+1, reviewAnalyzerMaxAttempts))
 		opts.Prompt = turnPrompt + reviewRetryNote(err)
+	}
+	if len(carried) > 0 {
+		findings.ReviewedPaths = mergeReviewedPaths(findings.ReviewedPaths, carried)
 	}
 
 	// Phase ownership boundary: drop findings that only claim later pipeline-
@@ -632,6 +654,59 @@ func reviewCoverageCompletionSection(missing []string) string {
 	b.WriteString("- Review ONLY the files listed above in this turn: read each one's change in the branch diff, trace it, and judge it under the same rules as the rest of this review.\n")
 	b.WriteString("- Return the complete review JSON again. List in reviewed_paths exactly the files you examined in THIS turn; the pipeline merges your record with the earlier pass. Never list a file you did not examine.\n")
 	b.WriteString("- Report any defect you find in those files as a finding in the same JSON. If they are clean, return an empty findings array.\n")
+	return b.String()
+}
+
+// fixRoundCarriedPaths returns the reviewable paths whose verdict a repair
+// round's rereview keeps from the round before instead of judging them again:
+// each one that round covered, that is unchanged since the starting head it
+// judged, and that no finding sent to the fixer names. A finding is verified
+// only by a rereview that covers its file, so its file is always judged again,
+// and a finding with no file can be verified only by a pass over every path,
+// so it keeps nothing. A round left with nothing of its own to judge reviews
+// in full.
+func fixRoundCarriedPaths(reviewable, previouslyReviewed, changedSinceStart []string, sentToFix []Finding) []string {
+	judgeAgain := make(map[string]bool, len(changedSinceStart)+len(sentToFix))
+	for _, changed := range changedSinceStart {
+		judgeAgain[normalizeReviewedPath(changed)] = true
+	}
+	for _, finding := range sentToFix {
+		file := normalizeReviewedPath(finding.File)
+		if file == "" {
+			return nil
+		}
+		judgeAgain[file] = true
+	}
+	judged := make(map[string]bool, len(previouslyReviewed))
+	for _, reviewed := range previouslyReviewed {
+		judged[normalizeReviewedPath(reviewed)] = true
+	}
+	var carried []string
+	for _, candidate := range reviewable {
+		key := normalizeReviewedPath(candidate)
+		if key != "" && judged[key] && !judgeAgain[key] {
+			carried = append(carried, candidate)
+		}
+	}
+	if len(carried) == len(reviewable) {
+		return nil
+	}
+	return carried
+}
+
+// carriedVerdictSection names the changed files a repair round's rereview
+// does not judge again. Empty when the rereview judges every changed file.
+func carriedVerdictSection(carried []string) string {
+	if len(carried) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nChanged files whose verdict carries from the previous review round (it judged them at their current content, this fix round did not change them, and no finding sent to the fixer names them):\n")
+	for _, p := range carried {
+		fmt.Fprintf(&b, "- %s\n", coveragePathLine(p))
+	}
+	b.WriteString("- Do not review these files again. Read one only as context for the files this review is held to, and judge it again, listing it in reviewed_paths, only when a change in this round alters how its code behaves.\n")
+	b.WriteString("- The pipeline adds these files to this round's reviewed_paths itself.\n")
 	return b.String()
 }
 
