@@ -117,7 +117,12 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 				return "", err
 			}
 			result = &ipc.ValidateAuthoredResult{Receipt: receipt, Family: family}
-			if child.Status != types.RunPending {
+			// A scheduled child stays pending until its executor starts, so a
+			// registered executor already owns it and a replay only observes.
+			m.mu.Lock()
+			childExecutor := m.executors[child.ID]
+			m.mu.Unlock()
+			if child.Status != types.RunPending || childExecutor != nil {
 				return child.ID, nil
 			}
 			if err := m.db.ValidatePendingAdmission(event); err != nil {

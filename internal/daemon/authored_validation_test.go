@@ -186,6 +186,53 @@ func TestAuthoredPendingAdmissionStaysIdleAcrossStartupAndCanBeCancelled(t *test
 	}
 }
 
+func TestAuthoredReplayLeavesAScheduledPendingChildToItsExecutor(t *testing.T) {
+	var calls atomic.Int32
+	manager, database, repo, request, _ := authoredAdmissionFixture(t, func() []pipeline.Step {
+		return []pipeline.Step{&authoredFixtureStep{name: types.StepReview, calls: &calls}}
+	})
+	snapshot, err := database.ReadTerminalSnapshot(request.Request.PredecessorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := request.Request.LaunchAssertion.Verify(request.Request.LaunchAssertion.TrustedSHA, request.Request.LaunchAssertion.Profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	global, err := config.LoadGlobal(manager.paths.ConfigFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	layout, err := validatedWorktreeLayout(database, manager.paths, global)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, _, err := database.AcceptValidationAdmission(context.Background(), db.ValidationAdmission{Request: request.Request, Snapshot: *snapshot, AssertionProof: proof, WorktreeRoot: filepath.Dir(layout.Dir(repo.ID, repo.WorkingPath, "pending")), Steps: []types.StepName{types.StepReview}, Operator: "fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// resumeRecoveredRun registers the child's executor before Execute moves
+	// the row past pending, so a replay in that window sees a pending child.
+	scheduled := &pipeline.Executor{}
+	manager.mu.Lock()
+	manager.executors[event.ChildID] = scheduled
+	manager.mu.Unlock()
+	defer func() {
+		manager.mu.Lock()
+		delete(manager.executors, event.ChildID)
+		manager.mu.Unlock()
+	}()
+
+	repeated, err := manager.validateAuthored(context.Background(), request, os.Getpid())
+
+	manager.mu.Lock()
+	current := manager.executors[event.ChildID]
+	manager.mu.Unlock()
+	if err != nil || repeated.Started || repeated.Receipt.RunID != event.ChildID || current != scheduled || calls.Load() != 0 {
+		t.Fatalf("replay scheduled a second executor for a scheduled child: %+v %v calls=%d", repeated, err, calls.Load())
+	}
+}
+
 func TestAuthoredAdmissionContinuesAnUnpublishedTerminalChild(t *testing.T) {
 	for _, status := range []types.RunStatus{types.RunCancelled, types.RunCompleted} {
 		t.Run(string(status), func(t *testing.T) {
@@ -569,6 +616,9 @@ func TestAuthoredAdmissionContinuesAChildPublishedThroughEitherInitOrigin(t *tes
 			if child.Status != types.RunCompleted || child.LastPushedSHA == nil || *child.LastPushedSHA != request.Request.CandidateSHA {
 				t.Fatalf("authored child did not publish its candidate: status=%s error=%v", child.Status, child.Error)
 			}
+			// The terminal row lands before the manager releases the child's
+			// executor, and admission refuses a predecessor with a live executor.
+			manager.wg.Wait()
 			childSnapshot, err := database.ReadTerminalSnapshot(child.ID)
 			if err != nil {
 				t.Fatal(err)
