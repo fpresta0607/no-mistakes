@@ -384,6 +384,7 @@ type stepExecutionState struct {
 	// what skipFixExecution above is for.
 	answering              bool
 	previousFindings       string
+	previousReviewedPaths  []string
 	deferredFindings       string
 	roundNum               int
 	autoFixAttempts        int
@@ -733,7 +734,10 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFixing), "", "", nil)
 			state.fixing = true
 			state.previousFindings = merged
-			state.deferredFindings = removeMatchingFindingsJSON(gate.findings, selected)
+			if recorded, err := types.ParseFindingsJSON(gate.findings); err == nil {
+				state.previousReviewedPaths = recorded.ReviewedPaths
+			}
+			state.deferredFindings = RemoveMatchingFindingsJSON(gate.findings, selected)
 			state.outstandingFindings = outstandingFindings
 			state.selectedOutstandingIDs = selectedOutstandingIDs
 		}
@@ -1203,29 +1207,30 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		return nil
 	}
 	sctx := &StepContext{
-		Ctx:               ctx,
-		Run:               run,
-		Repo:              repo,
-		WorkDir:           workDir,
-		GateDir:           e.paths.RepoDir(repo.ID),
-		Agent:             stepAgent,
-		Config:            e.config,
-		ForgeContext:      e.forge,
-		DB:                e.db,
-		StepResultID:      sr.ID,
-		UserIntent:        userIntent,
-		IntentSource:      userIntentSource,
-		Sessions:          e.sessions,
-		Shared:            e.shared,
-		EvidenceDir:       e.runEvidenceDir(run.ID),
-		Fixing:            state.fixing,
-		SkipFixExecution:  state.skipFixExecution,
-		FinalizingAnswers: state.answering,
-		CarriedFindings:   answerRoundCarriedFindings(state.answering, outstandingFindings),
-		PreviousFindings:  state.previousFindings,
-		DeferredFindings:  state.deferredFindings,
-		Log:               writeLog,
-		LogChunk:          writeLogChunk,
+		Ctx:                   ctx,
+		Run:                   run,
+		Repo:                  repo,
+		WorkDir:               workDir,
+		GateDir:               e.paths.RepoDir(repo.ID),
+		Agent:                 stepAgent,
+		Config:                e.config,
+		ForgeContext:          e.forge,
+		DB:                    e.db,
+		StepResultID:          sr.ID,
+		UserIntent:            userIntent,
+		IntentSource:          userIntentSource,
+		Sessions:              e.sessions,
+		Shared:                e.shared,
+		EvidenceDir:           e.runEvidenceDir(run.ID),
+		Fixing:                state.fixing,
+		SkipFixExecution:      state.skipFixExecution,
+		FinalizingAnswers:     state.answering,
+		CarriedFindings:       answerRoundCarriedFindings(state.answering, outstandingFindings),
+		PreviousFindings:      state.previousFindings,
+		DeferredFindings:      state.deferredFindings,
+		PreviousReviewedPaths: state.previousReviewedPaths,
+		Log:                   writeLog,
+		LogChunk:              writeLogChunk,
 		LogFile: func(text string) {
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)
@@ -1458,7 +1463,8 @@ rounds:
 				sctx.FinalizingAnswers = false
 				sctx.SkipFixExecution = false
 				sctx.PreviousFindings = fixableFindings
-				sctx.DeferredFindings = removeMatchingFindingsJSON(effectiveFindings, fixableFindings)
+				sctx.PreviousReviewedPaths = outcome.ReviewedPaths
+				sctx.DeferredFindings = RemoveMatchingFindingsJSON(effectiveFindings, fixableFindings)
 				if carryFindings {
 					pendingVerificationIDs = combineFindingIDLists(pendingVerificationIDs, findingIDList(fixableFindings))
 					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, findingIDList(fixableFindings))
@@ -1603,7 +1609,8 @@ rounds:
 				selectedFindings := filterFindingsJSON(effectiveFindings, response.findingIDs)
 				mergedFindings := mergeUserOverridesJSON(selectedFindings, response.instructions, response.addedFindings)
 				sctx.PreviousFindings = mergedFindings
-				sctx.DeferredFindings = removeMatchingFindingsJSON(effectiveFindings, selectedFindings)
+				sctx.PreviousReviewedPaths = outcome.ReviewedPaths
+				sctx.DeferredFindings = RemoveMatchingFindingsJSON(effectiveFindings, selectedFindings)
 				selectedForPersistence := mergedFindings
 				if carryFindings {
 					// APPEND-ONLY: the selection is additionally handed to the fixer

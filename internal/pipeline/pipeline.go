@@ -52,6 +52,13 @@ type StepContext struct {
 	// combination is reachable - not to forbid it.
 	FinalizingAnswers     bool
 	ReviewStartingHeadSHA string
+	// PreviousReviewedPaths is the coverage record of the review round a fix
+	// round answers: the changed files whose content at ReviewStartingHeadSHA
+	// that round's review turns judged. The rereview after the fixer keeps
+	// that verdict for each such file the fix left unchanged and no open finding
+	// names, and judges the rest. Nil when unknown, which
+	// has the rereview judge every changed file.
+	PreviousReviewedPaths []string
 	// CarriedFindings is the outstanding set an ANSWER round carries in, minus
 	// the reviewer's own open-question rows (see answerRoundCarriedFindings),
 	// so the finalize turn re-adjudicates by id only findings it made itself.

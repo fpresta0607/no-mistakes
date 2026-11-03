@@ -19,6 +19,65 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestReplayRoundContextPreservesDeferredFindings(t *testing.T) {
+	all := `{"findings":[{"id":"a","file":"a.go","description":"selected"},{"id":"b","file":"b.go","description":"deferred"},{"id":"c","description":"fileless"}],"summary":"issues","reviewed_paths":["a.go","b.go"]}`
+	selected := `{"findings":[{"id":"a","file":"a.go","description":"selected","user_instructions":"fix it"}],"summary":"issues"}`
+	ids := `["a"]`
+	for _, tc := range []struct {
+		name         string
+		trigger      string
+		userFindings *string
+		wantDeferred []string
+	}{
+		{name: "automatic selection retains recorded findings", trigger: "auto_fix"},
+		{name: "user selection preserves deferred anchored and fileless findings", trigger: "user_fix", userFindings: &selected, wantDeferred: []string{"b", "c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			original := filepath.Join(root, "original")
+			if err := os.MkdirAll(original, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeJSON(filepath.Join(original, "round.json"), sourceRound{Round: 2, Trigger: tc.trigger}); err != nil {
+				t.Fatal(err)
+			}
+			rounds := []sourceRound{{Round: 1, FindingsJSON: &all, UserFindingsJSON: tc.userFindings, SelectedFindingIDs: &ids}}
+			if err := writeJSON(filepath.Join(original, "rounds.json"), rounds); err != nil {
+				t.Fatal(err)
+			}
+			c := Case{Dir: root}
+			c.DefaultBranch = "main"
+			c.Branch = "feature"
+			database, _, fixing, previous, deferred, reviewed, err := replayRoundContext(paths.WithRoot(t.TempDir()), c, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			if !fixing || previous == "" || len(reviewed) != 2 {
+				t.Fatalf("replay context lost fix or previous coverage: fixing=%v previous=%q reviewed=%v", fixing, previous, reviewed)
+			}
+			if len(tc.wantDeferred) == 0 {
+				if deferred != "" {
+					t.Fatalf("deferred = %q, want none", deferred)
+				}
+				return
+			}
+			findings, err := types.ParseFindingsJSON(deferred)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(findings.Items) != len(tc.wantDeferred) {
+				t.Fatalf("deferred = %+v, want IDs %v", findings.Items, tc.wantDeferred)
+			}
+			for i, id := range tc.wantDeferred {
+				if findings.Items[i].ID != id {
+					t.Fatalf("deferred = %+v, want IDs %v", findings.Items, tc.wantDeferred)
+				}
+			}
+		})
+	}
+}
+
 func TestCaptureCreatesPortableReviewCaseWithoutRecordingRemoteURL(t *testing.T) {
 	ctx := context.Background()
 	p, sourceDB, run, repo, reviewRound := setupCapturedRun(t, ctx)
