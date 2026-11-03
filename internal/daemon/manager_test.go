@@ -1203,7 +1203,7 @@ func TestResolveRerunHeadUsesPreservedTerminalHeadInsteadOfStaleGateBranch(t *te
 	run.TerminalHeadVerifiedAt = &now
 	gitCmd(t, work, "push", gate, preserved+":refs/no-mistakes/recover/"+run.ID)
 
-	head, err := resolveRerunHead(context.Background(), gate, run.Branch, run)
+	head, err := resolveRerunHead(context.Background(), gate, run.Branch, run, run.SubmittedHeadSHA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1215,7 +1215,7 @@ func TestResolveRerunHeadUsesPreservedTerminalHeadInsteadOfStaleGateBranch(t *te
 	}
 
 	gitCmd(t, gate, "update-ref", custody.RecoveryRef(run.ID), submitted)
-	if _, err := resolveRerunHead(context.Background(), gate, run.Branch, run); err == nil {
+	if _, err := resolveRerunHead(context.Background(), gate, run.Branch, run, run.SubmittedHeadSHA); err == nil {
 		t.Fatal("rerun accepted a mismatched recovery ref")
 	}
 	if got := gitOutput(t, gate, "rev-parse", custody.RecoveryRef(run.ID)); got != submitted {
@@ -1224,7 +1224,7 @@ func TestResolveRerunHeadUsesPreservedTerminalHeadInsteadOfStaleGateBranch(t *te
 
 	blob := gitOutput(t, gate, "hash-object", "-w", filepath.Join(work, "file.txt"))
 	gitCmd(t, gate, "update-ref", custody.RecoveryRef(run.ID), blob)
-	if _, err := resolveRerunHead(context.Background(), gate, run.Branch, run); err == nil {
+	if _, err := resolveRerunHead(context.Background(), gate, run.Branch, run, run.SubmittedHeadSHA); err == nil {
 		t.Fatal("rerun accepted an unpeelable recovery ref")
 	}
 	if got := gitOutput(t, gate, "rev-parse", custody.RecoveryRef(run.ID)); got != blob {
@@ -1257,7 +1257,7 @@ func TestResolveRerunHeadUsesAdvancedGateWhenSubmittedHeadWasTerminal(t *testing
 	now := int64(1)
 	run := &db.Run{ID: "run-1", Branch: "feature/recover", Status: types.RunFailed, HeadSHA: submitted, SubmittedHeadSHA: &submitted, TerminalHeadVerifiedAt: &now}
 
-	head, err := resolveRerunHead(context.Background(), gate, run.Branch, run)
+	head, err := resolveRerunHead(context.Background(), gate, run.Branch, run, run.SubmittedHeadSHA)
 	if err != nil {
 		t.Fatal(err)
 	}

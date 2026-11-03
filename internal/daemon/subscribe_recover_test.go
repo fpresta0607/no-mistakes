@@ -851,6 +851,24 @@ func TestSkipWorktreeCleanup_CIMonitorInterrupted(t *testing.T) {
 			t.Fatalf("worktree at pushed head should be reclaimed (skip=false), got skip=true: %s", reason)
 		}
 	})
+	for _, source := range []string{"tracked", "staged", "untracked"} {
+		t.Run("preserves "+source+" source at pushed head", func(t *testing.T) {
+			runID, wtPath := newInterruptedWorktree(t, headSHA)
+			file := "retained.txt"
+			if source != "untracked" {
+				file = "test.txt"
+			}
+			if err := os.WriteFile(filepath.Join(wtPath, file), []byte("unpublished source\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if source == "staged" {
+				gitCmd(t, wtPath, "add", file)
+			}
+			if skip, reason := skipWorktreeCleanup(ctx, d, runID, wtPath); !skip {
+				t.Fatalf("%s source would be deleted at the published head: %s", source, reason)
+			}
+		})
+	}
 
 	t.Run("preserves worktree holding an unpushed commit", func(t *testing.T) {
 		runID, wtPath := newInterruptedWorktree(t, headSHA)
