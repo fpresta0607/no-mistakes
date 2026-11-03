@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -40,6 +41,76 @@ func TestDogfoodConfig_NoBroadLocalTestCommand(t *testing.T) {
 	} {
 		if strings.Contains(content, forbid) {
 			t.Fatalf(".no-mistakes.yaml still configures broad local Test %q", forbid)
+		}
+	}
+}
+
+// PR drafting and PR body rendering run only in the PR phase, the built CLI
+// has no standalone preview of them, and the gate-step boundary keeps the Test
+// turn out of the outer run's PR phase, so without a named path every such
+// scenario ended untested (issue #55). The trusted runbook names the e2e
+// harness, which builds this worktree and runs every phase in a disposable
+// home against a local upstream and stub forge CLIs, as the supported live
+// path, and keeps package tests out of the live count. The journeys and hooks
+// it cites must stay real, or the runbook sends the agent nowhere.
+func TestDogfoodConfig_RunbookNamesTheIsolatedLaterPhaseLivePath(t *testing.T) {
+	t.Parallel()
+
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e2eFiles, err := filepath.Glob(filepath.Join(root, "internal", "e2e", "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var e2eSource strings.Builder
+	for _, path := range e2eFiles {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e2eSource.Write(data)
+	}
+
+	cfg, err := config.LoadRepo(root)
+	if err != nil {
+		t.Fatalf("LoadRepo: %v", err)
+	}
+	runbook := cfg.Test.Instructions
+
+	for _, want := range []string{
+		"bash scripts/e2e.sh -tags=e2e",
+		"temporary NM_HOME",
+		"local bare upstream",
+		"PR body",
+		"AgentInvocations",
+		"FAKEAGENT_GH_LOG",
+		"readGHStubInvocations",
+		"is live",
+		"never return them as artifacts",
+		"never the outer run",
+		"not live",
+	} {
+		if !strings.Contains(runbook, want) {
+			t.Errorf("trusted test.instructions is missing %q:\n%s", want, runbook)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "scripts", "e2e.sh")); err != nil {
+		t.Errorf("runbook names a missing runner: %v", err)
+	}
+	for _, hook := range []string{"func (h *Harness) AgentInvocations(", `"FAKEAGENT_GH_LOG"`, "func readGHStubInvocations("} {
+		if !strings.Contains(e2eSource.String(), hook) {
+			t.Errorf("internal/e2e no longer has %s, which the runbook names", hook)
+		}
+	}
+	journeys := regexp.MustCompile(`\bTest[A-Z]\w*`).FindAllString(runbook, -1)
+	if len(journeys) == 0 {
+		t.Error("runbook cites no e2e journey to copy")
+	}
+	for _, journey := range journeys {
+		if !strings.Contains(e2eSource.String(), "func "+journey+"(t *testing.T)") {
+			t.Errorf("runbook cites %s, which internal/e2e does not define", journey)
 		}
 	}
 }

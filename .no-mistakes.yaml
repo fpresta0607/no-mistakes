@@ -39,3 +39,41 @@ document:
     stale test name or moved owner file); never add sections, facts, or
     pointers to them to close a documentation gap - missing content there is
     not a gap this step resolves.
+
+# Live-validation runbook for the Test step, honored only from the default
+# branch. PR drafting and PR body rendering run only in the PR phase and the
+# built CLI has no standalone preview of them, so this names their live path.
+test:
+  instructions: |
+    The product is the no-mistakes CLI and daemon built from this worktree.
+    Never drive the installed no-mistakes, the operator's NM_HOME, daemon or
+    gates, or a real forge.
+    Behavior only a later pipeline phase reaches (PR drafting prompts, PR title
+    and body rendering, push, PR and CI handling) is driven live through the e2e
+    harness in internal/e2e:
+    bash scripts/e2e.sh -tags=e2e -count=1 -v -run '<journey>' ./internal/e2e/
+    The harness builds this worktree's no-mistakes and fake agent, then runs the
+    real binary, daemon, gate hook and every phase in a temporary NM_HOME and
+    HOME against a local bare upstream, with the fake agent and fail-closed gh
+    and tea stubs first on PATH.
+    Harness.AgentInvocations returns every agent prompt. With FAKEAGENT_GH_MODE
+    and FAKEAGENT_GH_LOG set, readGHStubInvocations returns each gh call,
+    including the PR body the PR phase would have published.
+    TestOmitIntentJourney and
+    TestPRWhatChangedScopesToFinalDiffWhileEvidenceStaysStepScoped show how to
+    route a github.com origin to a local bare repository and read the PR body.
+    A scenario driven this way is live: the real product built from this change
+    ran that phase end to end against a disposable setup.
+    Cite the journey as the scenario's evidence and keep the captured prompts
+    and PR markdown in the evidence directory, but never return them as artifacts:
+    a text artifact is embedded in the public PR body. Say in the scenario's
+    evidence what they showed.
+    When no journey drives a scenario, write a scratch e2e test for this turn,
+    keep what it captured as evidence, and delete it before finishing.
+    This stays inside the gate-step boundary: the harness drives its own
+    disposable pipeline, never the outer run.
+    Never run no-mistakes pipeline-control commands yourself, and never let the
+    harness reach a remote other than its local bare repositories.
+    Package tests without the e2e tag (renderers, prompt builders, config
+    resolution) are supporting evidence, not live: list them in tested, never
+    as a live scenario.
