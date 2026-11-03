@@ -147,8 +147,9 @@ func hasInvalidReviewedPath(reviewedPaths []string) bool {
 
 // mergeReviewedPaths unions two coverage records, keeping each path's first
 // spelling and order. It is the deterministic merge behind the focused
-// coverage pass: the round's record is what its turns actually examined
-// together, and the strict coverage check re-runs on the union.
+// coverage pass and carried verdicts: the record combines what the turns
+// examined with eligible prior verdicts, and the strict coverage check re-runs
+// on the union.
 //
 // An entry that does not normalize to a path is kept, not folded away: it is
 // invalid coverage evidence, and dropping it would let the completion turn

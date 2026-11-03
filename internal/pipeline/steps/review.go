@@ -548,8 +548,8 @@ Risk assessment (after listing all findings):
 		// A clean round certifies the whole head, so it is held to a positive
 		// coverage record over every trusted reviewable path. An omitted
 		// reviewed_paths is not a legacy pass: the field is optional in the
-		// schema only so an older payload still parses, and an absent list is
-		// the same missing evidence as an empty or partial one (VISION.md R4:
+		// schema only so an older payload still parses; an absent reviewer list
+		// supplies no new coverage beyond any carried verdicts (VISION.md R4:
 		// every review pass covers the complete change).
 		//
 		// Before parking, one focused completion turn reviews exactly the
@@ -626,9 +626,9 @@ func coveragePathLine(p string) string {
 	return b.String()
 }
 
-// reviewCoverageSection enumerates the trusted reviewable changed-file set in
-// the review prompt. The coverage gate holds the round to exactly this set,
-// but the prompt used to leave its enumeration to the reviewer, which had to
+// reviewCoverageSection enumerates the changed files this turn must judge in
+// the review prompt. The coverage gate also accepts eligible carried verdicts,
+// but the prompt used to leave enumeration to the reviewer, which had to
 // reconstruct it from its own diff reading and then retype it into
 // reviewed_paths - a lossy round trip that dropped a different handful of
 // files on each of three consecutive real rounds. Handing the reviewer the
