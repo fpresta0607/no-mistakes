@@ -6,10 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -152,4 +154,87 @@ func TestRerunRefusalDoesNotSupersedeActiveRun(t *testing.T) {
 		t.Fatalf("caller refs changed: before=%s after=%s", callerRefs, got)
 	}
 	t.Logf("original run_id=%s remains %s; persisted runs=%d; caller and gate refs unchanged", active.ID, active.Status, len(runs))
+}
+
+func TestRerunOfAnUnmovedSuccessorSelectsTheCandidateItsCallerNeverHad(t *testing.T) {
+	for _, relation := range []string{"clean caller at its own head", "caller head omitted"} {
+		t.Run(relation, func(t *testing.T) {
+			step := &mockPassStep{name: types.StepReview}
+			p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{step} })
+			repo, submitted := setupTestGitRepo(t, p, d, "successor-rerun-repo")
+			gate := p.RepoDir(repo.ID)
+			// The predecessor's pipeline fix reaches only its recovery anchor in the
+			// gate; the operator's branch and the gate branch stay at the submitted head.
+			gitCmd(t, repo.WorkingPath, "commit", "--allow-empty", "-m", "pipeline fix")
+			candidate := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+			gitCmd(t, repo.WorkingPath, "reset", "--hard", submitted)
+			profile := agentcfg.Selection{Harness: types.AgentCodex, Model: "fixture", Effort: agentcfg.EffortXHigh, ServiceTier: "default"}
+			assertion := &launchassert.Expectation{TrustedSHA: strings.Repeat("a", 40), Profiles: map[string][]agentcfg.Selection{"primary": {profile}, "reviewer": {profile}, "fixer": {profile}}}
+			proof, err := assertion.Verify(assertion.TrustedSHA, assertion.Profiles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			predecessor, err := d.InsertRunWithLaunchAssertion(repo.ID, "main", submitted, submitted, nil, "nonce", "generation", "intent", "", false, nil, assertion, proof)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, repo.WorkingPath, "push", "gate", candidate+":"+custody.RecoveryRef(predecessor.ID))
+			if err := d.UpdateRunHeadSHA(predecessor.ID, candidate); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateRunErrorStatusWithVerifiedHead(predecessor.ID, "interrupted", types.RunFailed, candidate); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := d.ReadContinuationSnapshot(predecessor.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			adoption, _, err := d.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: candidate, CandidateTree: gitOutput(t, gate, "rev-parse", candidate+"^{tree}"), SourceRef: "refs/no-mistakes/terminal-candidate/successor", CallerDir: repo.WorkingPath, CallerHead: submitted, Reason: "validate preserved source", Operator: "fixture", Assertion: assertion, Proof: proof})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateRunErrorStatusWithVerifiedHead(adoption.Successor.ID, types.RunCancelReasonAbortedByUser, types.RunCancelled, candidate); err != nil {
+				t.Fatal(err)
+			}
+			client, err := ipc.Dial(p.Socket())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			params := map[string]string{"repo_id": repo.ID, "branch": "main"}
+			if relation == "clean caller at its own head" {
+				params["caller_head_sha"] = submitted
+			}
+
+			var result ipc.RerunResult
+			err = client.Call(ipc.MethodRerun, params, &result)
+
+			if relation == "clean caller at its own head" {
+				if err == nil || !strings.Contains(err.Error(), candidate) || !strings.Contains(err.Error(), submitted) {
+					t.Fatalf("rerun from the caller's own head = run %s, err %v; want a refusal naming candidate %s and caller head %s", result.RunID, err, candidate, submitted)
+				}
+				if runs, err := d.GetRunsByRepo(repo.ID); err != nil || len(runs) != 2 || step.execCnt.Load() != 0 {
+					t.Fatalf("refused rerun performed work: runs=%d executions=%d err=%v", len(runs), step.execCnt.Load(), err)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				run := waitForRunTerminalState(t, d, result.RunID)
+				validated := ""
+				if run.SubmittedHeadSHA != nil {
+					validated = *run.SubmittedHeadSHA
+				}
+				if validated != candidate {
+					t.Fatalf("rerun validated %q, want the successor's owed candidate %s", validated, candidate)
+				}
+				if anchored := gitOutput(t, gate, "rev-parse", custody.RecoveryRef(adoption.Successor.ID)); anchored != candidate {
+					t.Fatalf("successor recovery anchor = %s, want %s", anchored, candidate)
+				}
+			}
+			if got := gitOutput(t, gate, "rev-parse", "refs/heads/main"); got != submitted {
+				t.Fatalf("gate branch moved to %s, want %s", got, submitted)
+			}
+		})
+	}
 }

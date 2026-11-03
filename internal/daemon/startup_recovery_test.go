@@ -7,12 +7,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -139,6 +142,50 @@ func TestPreserveRunHeadAnchorsCrashWorkWhenTheSourceObservationStalls(t *testin
 	}
 	if observed.TerminalSourceState == nil || *observed.TerminalSourceState != "unreadable" {
 		t.Fatalf("stalled observation recorded %v, want unreadable", observed.TerminalSourceState)
+	}
+}
+
+func TestPreserveRunHeadAnchorsASuccessorUnmovedAtACandidateItsCallerNeverHad(t *testing.T) {
+	t.Parallel()
+	fixture := newCrashedRunFixture(t)
+	d, run, submitted, preserved := fixture.database, fixture.run, fixture.submitted, fixture.preserved
+	profile := agentcfg.Selection{Harness: types.AgentCodex, Model: "fixture", Effort: agentcfg.EffortXHigh, ServiceTier: "default"}
+	assertion := &launchassert.Expectation{TrustedSHA: strings.Repeat("a", 40), Profiles: map[string][]agentcfg.Selection{"primary": {profile}, "reviewer": {profile}, "fixer": {profile}}}
+	proof, err := assertion.Verify(assertion.TrustedSHA, assertion.Profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The crashed fixture run holds its own branch, so the continuation uses another.
+	predecessor, err := d.InsertRunWithLaunchAssertion(run.RepoID, "feature/successor", submitted, submitted, nil, "nonce", "generation", "intent", "", false, nil, assertion, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunHeadSHA(predecessor.ID, preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunErrorStatusWithVerifiedHead(predecessor.ID, "interrupted", types.RunFailed, preserved); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := d.ReadContinuationSnapshot(predecessor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adoption, _, err := d.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: preserved, CandidateTree: gitOutput(t, fixture.gate, "rev-parse", preserved+"^{tree}"), SourceRef: "refs/no-mistakes/terminal-candidate/successor", CallerDir: t.TempDir(), CallerHead: submitted, Reason: "validate preserved source", Operator: "fixture", Assertion: assertion, Proof: proof})
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor, err := d.GetRun(adoption.Successor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	head, isPreserved := preserveRunHead(d, fixture.managed, successor)
+
+	if !isPreserved || head != preserved {
+		t.Fatalf("preserveRunHead = %q, %v; want the owed candidate %s anchored", head, isPreserved, preserved)
+	}
+	if got := gitOutput(t, fixture.gate, "rev-parse", custody.RecoveryRef(successor.ID)); got != preserved {
+		t.Fatalf("successor recovery anchor = %s, want %s", got, preserved)
 	}
 }
 

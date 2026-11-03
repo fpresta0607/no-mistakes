@@ -593,8 +593,15 @@ func preserveRunHead(d *db.DB, workDir string, run *db.Run) (string, bool) {
 	published := ""
 	if run.LastPushedSHA != nil {
 		published = *run.LastPushedSHA
-	} else if run.SubmittedHeadSHA != nil {
-		published = *run.SubmittedHeadSHA
+	} else {
+		submitted, err := d.CustodySubmittedHead(run)
+		if err != nil {
+			slog.Warn("failed to read custody before anchoring managed worktree head", "run", run.ID, "error", err)
+			return "", false
+		}
+		if submitted != nil {
+			published = *submitted
+		}
 	}
 	if head != published {
 		if err := custody.PreserveRecoveryHead(ctx, workDir, run.ID, head); err != nil {

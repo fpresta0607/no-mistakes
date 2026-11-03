@@ -2199,8 +2199,13 @@ func (e *Executor) preserveUnpublishedTerminalHead(ctx context.Context, run *db.
 		published = *run.LastPushedSHA
 	}
 	if published == "" {
-		if run.SubmittedHeadSHA != nil {
-			published = *run.SubmittedHeadSHA
+		submitted, err := e.db.CustodySubmittedHead(run)
+		if err != nil {
+			slog.Warn("failed to read custody before anchoring terminal head", "run", run.ID, "error", err)
+			return false
+		}
+		if submitted != nil {
+			published = *submitted
 		}
 	}
 	if head == published {

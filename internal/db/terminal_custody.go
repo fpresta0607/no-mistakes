@@ -99,6 +99,23 @@ func (d *DB) GetTerminalPredecessor(runID string) (*TerminalAdoption, error) {
 	return readTerminalAdoption(d.sql.QueryRow(`SELECT id, successor_run_id, event_json FROM terminal_adoptions WHERE successor_run_id = ?`, runID), "")
 }
 
+// CustodySubmittedHead is the head the operator's branch held when the run took
+// custody, which every choice between the operator's head and the run's head
+// must use instead of the raw submitted head. A continuation successor records
+// its adopted candidate as its submitted head, but the operator stood at the
+// adoption's caller head, so unless the caller stood at the candidate, the
+// candidate's commits are pipeline-created and still owed to the operator.
+func (d *DB) CustodySubmittedHead(run *Run) (*string, error) {
+	adoption, err := d.GetTerminalPredecessor(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if adoption == nil || adoption.CallerHead == adoption.CandidateSHA {
+		return run.SubmittedHeadSHA, nil
+	}
+	return &adoption.CallerHead, nil
+}
+
 func readTerminalAdoption(row *sql.Row, runID string) (*TerminalAdoption, error) {
 	var id, successorID, payload string
 	if err := row.Scan(&id, &successorID, &payload); err == sql.ErrNoRows {

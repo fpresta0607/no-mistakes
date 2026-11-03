@@ -1219,7 +1219,11 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	if latestForBranch == nil {
 		return "", fmt.Errorf("no previous run for branch %s", branch)
 	}
-	headSHA, err := resolveRerunHead(ctx, gateDir, branch, latestForBranch)
+	submitted, err := m.db.CustodySubmittedHead(latestForBranch)
+	if err != nil {
+		return "", fmt.Errorf("refusing rerun: read custody of run %s: %w", latestForBranch.ID, err)
+	}
+	headSHA, err := resolveRerunHead(ctx, gateDir, branch, latestForBranch, submitted)
 	if err != nil {
 		return "", err
 	}
@@ -1283,7 +1287,9 @@ func inheritablePRURL(run *db.Run) string {
 	return strings.TrimSpace(*run.PRURL)
 }
 
-func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Run) (string, error) {
+// resolveRerunHead takes the latest run's custody submitted head
+// (db.CustodySubmittedHead), never its raw submitted head.
+func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Run, submitted *string) (string, error) {
 	gateHead, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
 	if err != nil {
 		return "", fmt.Errorf("resolve gate head: %w", err)
@@ -1294,8 +1300,8 @@ func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Ru
 	published := ""
 	if latest.LastPushedSHA != nil {
 		published = *latest.LastPushedSHA
-	} else if latest.SubmittedHeadSHA != nil {
-		published = *latest.SubmittedHeadSHA
+	} else if submitted != nil {
+		published = *submitted
 	}
 	if published == latest.HeadSHA || latest.TerminalHeadVerifiedAt == nil {
 		return gateHead, nil

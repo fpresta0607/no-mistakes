@@ -652,7 +652,7 @@ Further manual repairs require explicit gate decisions and remain recorded as ad
 The result reports `adopted_unvalidated`, the successor `run`, `predecessor`, exact `candidate` and `candidate_tree`, adoption ID, cumulative `phase_budgets` and whether validation started.
 Use `axi status` and ordinary gate responses to inspect and drive the successor.
 Branch synchronization and `--recover` then follow the successor; the adopted predecessor no longer holds the branch.
-Unless the caller stood at the candidate, its commits stay pipeline-owned until the successor publishes them or `--recover` fast-forwards the branch to them.
+Unless the caller stood at the candidate, its commits stay pipeline-owned until the successor publishes them or `--recover` fast-forwards the branch to them, and [`no-mistakes rerun`](#no-mistakes-rerun) selects the candidate as the successor's unpublished head.
 An exact repeat returns the same durable child only while its identity and pending acceptance remain untouched.
 It may start that pending child's first execution after rechecking source and launch provenance.
 Changed, progressed, failed or cancelled successors refuse; the command never reopens the predecessor or silently reruns a terminal executor.

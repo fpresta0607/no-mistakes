@@ -2165,21 +2165,16 @@ func (s *Service) handedToTerminalSuccessor(run *db.Run) bool {
 	return err == nil && adoption != nil
 }
 
-// custodyView is the run as branch custody judges it. A continuation successor
-// records its adopted candidate as its submitted head, but the operator's branch
-// stood at the adoption's caller head, so unless the caller stood at the
-// candidate, the candidate's commits are pipeline-created and still owed to the
-// operator. A read failure drops the submitted head, which custody refuses.
+// custodyView is the run as branch custody judges it: submitted at the head it
+// owes the operator (db.CustodySubmittedHead). A read failure leaves no
+// submitted head, which custody refuses.
 func (s *Service) custodyView(run *db.Run) *db.Run {
-	adoption, err := s.DB.GetTerminalPredecessor(run.ID)
-	if err == nil && (adoption == nil || adoption.CallerHead == adoption.CandidateSHA) {
+	submitted, err := s.DB.CustodySubmittedHead(run)
+	if err == nil && submitted == run.SubmittedHeadSHA {
 		return run
 	}
 	view := *run
-	view.SubmittedHeadSHA = nil
-	if err == nil {
-		view.SubmittedHeadSHA = &adoption.CallerHead
-	}
+	view.SubmittedHeadSHA = submitted
 	return &view
 }
 
