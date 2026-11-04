@@ -1114,7 +1114,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
 			}
 		case agent.LifecyclePhaseExit:
-			if dbErr := e.db.SetStepAgentActivity(sr.ID, text, nil); dbErr != nil {
+			if dbErr := e.db.SetStepAgentActivity(sr.ID, truncateActivity(text), nil); dbErr != nil {
 				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
 			}
 		case agent.LifecyclePhaseActivity:
@@ -1308,7 +1308,8 @@ rounds:
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
-		if refusal := safetyRefusalOutcome(err); refusal != nil {
+		refusal := safetyRefusalOutcome(err)
+		if refusal != nil {
 			writeLog(safeurl.RedactText(err.Error()))
 			if lanes := sctx.Shared.SideLanes(); lanes != nil {
 				lanes.Stop(sctx)
@@ -1342,7 +1343,7 @@ rounds:
 		if stepName == types.StepReview {
 			reviewApprovedHeadSHA = outcome.ReviewApprovedHeadSHA
 		}
-		outcome.Findings = normalizeFindingsJSON(outcome.Findings, string(stepName))
+		outcome.Findings = normalizeFindingsJSON(outcome.Findings, string(stepName), refusal != nil)
 		finalExitCode = outcome.ExitCode
 		durationOverrideMS += outcome.DurationOverrideMS
 
@@ -2390,13 +2391,29 @@ func shouldTrackStepTelemetry(eventType ipc.EventType, status string) bool {
 }
 
 func (e *Executor) emitLogChunk(run *db.Run, repo *db.Repo, stepName types.StepName, content string) {
-	e.onEvent(ipc.Event{
-		Type:     ipc.EventLogChunk,
-		RunID:    run.ID,
-		RepoID:   repo.ID,
-		StepName: &stepName,
-		Content:  &content,
-	})
+	for {
+		end := min(len(content), 32*1024)
+		if end < len(content) {
+			for end > 0 && !utf8.RuneStart(content[end]) {
+				end--
+			}
+			if end == 0 {
+				end = 32 * 1024
+			}
+		}
+		chunk := content[:end]
+		e.onEvent(ipc.Event{
+			Type:     ipc.EventLogChunk,
+			RunID:    run.ID,
+			RepoID:   repo.ID,
+			StepName: &stepName,
+			Content:  &chunk,
+		})
+		if end == len(content) {
+			break
+		}
+		content = content[end:]
+	}
 }
 
 func (e *Executor) telemetryAgentName() string {
