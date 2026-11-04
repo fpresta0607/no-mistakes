@@ -33,6 +33,20 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # pipeline/steps is one package whose ~1000 top-level tests cost about
+      # 1600-1850s of test time on a 4-core Windows runner, more than one 15m
+      # go test budget. Proven here, on every run, before any Windows job spends
+      # a slot: the parts the Windows jobs use are a real partition of this
+      # package's `go test -list '^Test'` output, every part pattern is what Go's
+      # own matching selects back, and no part pattern is too long for a Windows
+      # command line. tools/testshard computes the parts for both this check and
+      # the Windows jobs, so they cannot drift.
+      - name: Proven partition of pipeline/steps tests for the Windows shards
+        run: go run ./tools/testshard -verify
+
+      - name: Proven partition of git-heavy tests for the Windows shards
+        run: go run ./tools/testshard -parts 2 -packages ./internal/git,./internal/branchsync,./internal/gate,./internal/evidence,./internal/daemon,./internal/eval -verify
+
   test:
     name: ${{ matrix.name }}
     strategy:
@@ -47,11 +61,25 @@ jobs:
             name: test (windows-core)
             shard: core
           - os: windows-latest
-            name: test (windows-git)
+            name: test (windows-git 1/2)
             shard: git
+            git_part: 1
           - os: windows-latest
-            name: test (windows-steps)
+            name: test (windows-git 2/2)
+            shard: git
+            git_part: 2
+          - os: windows-latest
+            name: test (windows-steps 1/3)
             shard: steps
+            steps_part: 1
+          - os: windows-latest
+            name: test (windows-steps 2/3)
+            shard: steps
+            steps_part: 2
+          - os: windows-latest
+            name: test (windows-steps 3/3)
+            shard: steps
+            steps_part: 3
     runs-on: ${{ matrix.os }}
     # Sized for each Windows shard, which still sets the floor: git.exe plus
     # Defender tax makes git-backed packages ~10x their Linux time (see the
@@ -111,13 +139,30 @@ jobs:
       # overlap. pipeline/steps is its own shard (~10 min) so it runs in
       # parallel with the remaining git-heavy packages instead of setting a
       # ~21 min serial floor.
-      - name: Test on Windows (git-heavy)
+      # branchsync and daemon also exceed a single package budget as the suite
+      # grows. Reuse the proven partition without changing either timeout.
+      - name: Test on Windows (git-heavy, part ${{ matrix.git_part }}/2)
         if: runner.os == 'Windows' && matrix.shard == 'git'
-        run: go test -v -timeout=15m ./internal/git ./internal/branchsync ./internal/gate ./internal/evidence ./internal/daemon ./internal/eval
+        shell: pwsh
+        run: |
+          $run = (go run ./tools/testshard -parts 2 -part ${{ matrix.git_part }} -packages ./internal/git,./internal/branchsync,./internal/gate,./internal/evidence,./internal/daemon,./internal/eval).Trim()
+          if (-not $run) { throw "tools/testshard printed no -run pattern for part ${{ matrix.git_part }}" }
+          Write-Host "git-heavy part ${{ matrix.git_part }}/2: -run pattern is $($run.Length) characters"
+          go test -v -timeout=15m -run $run ./internal/git ./internal/branchsync ./internal/gate ./internal/evidence ./internal/daemon ./internal/eval
 
-      - name: Test on Windows (pipeline/steps)
+      # One part of the package's top-level tests per job, from the real
+      # `go test -list '^Test'` output. -timeout and this job's cap are unchanged,
+      # no test is skipped and no parallelism is lowered: the same tests run, in
+      # three jobs instead of one. tools/testshard -verify in the check job proves
+      # the parts cover every listed test exactly once.
+      - name: Test on Windows (pipeline/steps, part ${{ matrix.steps_part }}/3)
         if: runner.os == 'Windows' && matrix.shard == 'steps'
-        run: go test -v -timeout=15m ./internal/pipeline/steps/...
+        shell: pwsh
+        run: |
+          $run = (go run ./tools/testshard -parts 3 -part ${{ matrix.steps_part }}).Trim()
+          if (-not $run) { throw "tools/testshard printed no -run pattern for part ${{ matrix.steps_part }}" }
+          Write-Host "pipeline/steps part ${{ matrix.steps_part }}/3: -run pattern is $($run.Length) characters"
+          go test -v -timeout=15m -run $run ./internal/pipeline/steps/...
 
       - name: Test on Windows (core)
         if: runner.os == 'Windows' && matrix.shard == 'core'

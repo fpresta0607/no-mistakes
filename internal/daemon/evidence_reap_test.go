@@ -10,6 +10,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -107,6 +108,103 @@ func TestReapEvidenceHonorsRetentionAndSparesActiveRuns(t *testing.T) {
 	}
 	if !f.exists(activeRunning) {
 		t.Error("a running run's evidence was removed while the run is still in flight")
+	}
+}
+
+func TestDiagnosticReapersSeparateSourceRetentionFromInterruptedCI(t *testing.T) {
+	f := newEvidenceFixture(t)
+	repo, head := setupTestGitRepo(t, f.p, f.db, "diagnostic-source")
+	f.repo = repo
+	gitCmd(t, repo.WorkingPath, "commit", "--allow-empty", "-m", "later source")
+	later := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/later")
+	for _, test := range []struct {
+		name       string
+		status     types.RunStatus
+		source     string
+		shouldKeep bool
+	}{
+		{"failed dirty", types.RunFailed, "dirty", false},
+		{"cancelled dirty", types.RunCancelled, "dirty", false},
+		{"completed unreadable", types.RunCompleted, "unreadable", false},
+		{"pending unreadable", types.RunPending, "unreadable", true},
+		{"running unreadable", types.RunRunning, "unreadable", true},
+		{"interrupted dirty equal head", types.RunCIMonitorInterrupted, "dirty", false},
+		{"interrupted clean equal head", types.RunCIMonitorInterrupted, "clean", false},
+		{"interrupted moved head", types.RunCIMonitorInterrupted, "moved", true},
+		{"interrupted unreadable", types.RunCIMonitorInterrupted, "unreadable", true},
+		{"interrupted missing", types.RunCIMonitorInterrupted, "missing", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f.root = t.TempDir()
+			runID := f.seed(test.name, test.status, 30*24*time.Hour, map[string]string{"output.txt": "retained diagnostic"})
+			if err := f.db.UpdateRunHeadSHA(runID, head); err != nil {
+				t.Fatal(err)
+			}
+			workDir := f.p.WorktreeDir(repo.ID, runID)
+			if err := f.db.SetRunWorktreeDir(runID, workDir); err != nil {
+				t.Fatal(err)
+			}
+			if test.source == "unreadable" {
+				if err := os.MkdirAll(workDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(workDir, "test.txt"), []byte("hello"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if test.source != "missing" {
+				worktreeHead := head
+				if test.source == "moved" {
+					worktreeHead = later
+				}
+				if err := git.WorktreeAdd(context.Background(), f.p.RepoDir(repo.ID), workDir, worktreeHead); err != nil {
+					t.Fatal(err)
+				}
+				if test.source == "dirty" {
+					if err := os.WriteFile(filepath.Join(workDir, "test.txt"), []byte("dirty source"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			logRoot := t.TempDir()
+			logDir := filepath.Join(logRoot, runID)
+			if err := os.MkdirAll(logDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			logFile := filepath.Join(logDir, "review.log")
+			if err := os.WriteFile(logFile, []byte("retained diagnostic"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			expired := now.Add(-30 * 24 * time.Hour)
+			for _, path := range []string{logFile, logDir} {
+				if err := os.Chtimes(path, expired, expired); err != nil {
+					t.Fatal(err)
+				}
+			}
+			policy := evidenceReapPolicy{Retention: 14 * 24 * time.Hour}
+			reapEvidence(f.db, f.root, policy, now)
+			reapRunLogs(f.db, logRoot, policy, now)
+			for _, path := range []string{filepath.Join(f.root, runID), logDir} {
+				_, err := os.Stat(path)
+				if test.shouldKeep && err != nil || !test.shouldKeep && !os.IsNotExist(err) {
+					t.Errorf("diagnostic retention for %s: should keep=%v, error=%v", path, test.shouldKeep, err)
+				}
+			}
+			if test.source != "missing" {
+				expected := "hello"
+				if test.source == "dirty" {
+					expected = "dirty source"
+				}
+				if content, err := os.ReadFile(filepath.Join(workDir, "test.txt")); err != nil || string(content) != expected {
+					t.Fatalf("diagnostic cleanup changed source: %q, %v", content, err)
+				}
+			}
+			run, err := f.db.GetRun(runID)
+			if err != nil || run.TerminalSourceState != nil {
+				t.Fatalf("diagnostic cleanup observed source: %+v, %v", run, err)
+			}
+		})
 	}
 }
 

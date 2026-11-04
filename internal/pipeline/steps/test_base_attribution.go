@@ -190,7 +190,11 @@ func runTestCommandOnBase(sctx *pipeline.StepContext, testCmd, baseSHA string) (
 	}
 	// A second whole run of the suite stands behind the machine's wrapper like
 	// the first. Its wait counts against this run's deadline.
-	output, exitCode, err := runShellCommandBehind(ctx, checkout, env, testCmd, sctx.Config.CommandOverrides["test"].Nice, commandWrapperWords(sctx, "test"))
+	words, err := commandWrapperWords(sctx, "test")
+	if err != nil {
+		return "", 0, err
+	}
+	output, exitCode, err := runShellCommandBehind(ctx, checkout, env, testCmd, sctx.Config.CommandOverrides["test"].Nice, words)
 	if err := exceeded(); err != nil {
 		return "", 0, err
 	}

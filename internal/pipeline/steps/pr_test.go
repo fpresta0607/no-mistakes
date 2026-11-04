@@ -1220,7 +1220,8 @@ func TestAppendGeneratedSections_StripsAgentGeneratedSections(t *testing.T) {
 
 func TestAssemblePRBody_NoLimitKeepsEverything(t *testing.T) {
 	t.Parallel()
-	sctx := &pipeline.StepContext{UserIntent: "wanted a Bar() helper"}
+	shouldPublishIntent := true
+	sctx := &pipeline.StepContext{UserIntent: "wanted a Bar() helper", Config: &config.Config{PR: config.PR{PublishIntent: &shouldPublishIntent}}}
 	testing := "## Testing\n\n```text\n" + strings.Repeat("log ", 2000) + "\n```"
 
 	got := assemblePRBody(sctx, "## What Changed\n\n- add Bar()", "low risk", testing, "## Pipeline\n\n- ok", 0, scm.ProviderGitHub)
@@ -1234,7 +1235,8 @@ func TestAssemblePRBody_NoLimitKeepsEverything(t *testing.T) {
 
 func TestAssemblePRBody_DropsTestingEmbedsToFitAzureCap(t *testing.T) {
 	t.Parallel()
-	sctx := &pipeline.StepContext{UserIntent: "wanted a Bar() helper for foo callers"}
+	shouldPublishIntent := true
+	sctx := &pipeline.StepContext{UserIntent: "wanted a Bar() helper for foo callers", Config: &config.Config{PR: config.PR{PublishIntent: &shouldPublishIntent}}}
 	limit := scm.MaxPRBodyChars(scm.ProviderAzureDevOps) // 4000
 
 	// A Testing section whose embedded logs alone blow well past the cap.
@@ -1271,7 +1273,8 @@ func TestAssemblePRBody_ClampsWhenCoreAloneExceedsCap(t *testing.T) {
 	t.Parallel()
 	// An Intent so long that even Intent + What Changed overruns the cap, with no
 	// Testing section to drop. The clamp backstop must keep it within budget.
-	sctx := &pipeline.StepContext{UserIntent: strings.Repeat("x", 6000)}
+	shouldPublishIntent := true
+	sctx := &pipeline.StepContext{UserIntent: strings.Repeat("x", 6000), Config: &config.Config{PR: config.PR{PublishIntent: &shouldPublishIntent}}}
 	limit := scm.MaxPRBodyChars(scm.ProviderAzureDevOps)
 
 	got := assemblePRBody(sctx, "## What Changed\n\n- add Bar()", "low risk", "", "## Pipeline\n\n- ok", limit, scm.ProviderAzureDevOps)
@@ -1317,7 +1320,8 @@ func TestAssembleDraftPRBody_OmitsIssuesThatCannotFit(t *testing.T) {
 
 func TestAssemblePRBody_RetainsAttestationWhenCoreExceedsAzureCap(t *testing.T) {
 	t.Parallel()
-	sctx := &pipeline.StepContext{UserIntent: strings.Repeat("intent 😀 ", 1000)}
+	shouldPublishIntent := true
+	sctx := &pipeline.StepContext{UserIntent: strings.Repeat("intent 😀 ", 1000), Config: &config.Config{PR: config.PR{PublishIntent: &shouldPublishIntent}}}
 	limit := scm.MaxPRBodyChars(scm.ProviderAzureDevOps)
 	steps := []*db.StepResult{
 		{StepName: types.StepReview, Status: types.StepStatusCompleted},
@@ -1673,6 +1677,8 @@ func TestAppendGeneratedSections_TrimsBodyToKeepLatestPipelineUpdate(t *testing.
 func TestBuildPRBody_TrimsOversizedLaterSectionWithoutDroppingSmallEssentials(t *testing.T) {
 	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
 	sctx.UserIntent = "Keep the release notes readable."
+	shouldPublishIntent := true
+	sctx.Config.PR.PublishIntent = &shouldPublishIntent
 	body := strings.Join([]string{
 		"## What Changed",
 		"",
@@ -1756,6 +1762,8 @@ func TestAppendGeneratedSections_TruncatesUTF8OnValidBoundary(t *testing.T) {
 func TestBuildPRBody_TruncatesOversizedIntentBeforeGeneratedSections(t *testing.T) {
 	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
 	sctx.UserIntent = "Keep generated sections visible.\n" + strings.Repeat("oversized intent context line\n", 2500)
+	shouldPublishIntent := true
+	sctx.Config.PR.PublishIntent = &shouldPublishIntent
 	body := "## What Changed\n\n- essential summary survives"
 	riskLine := "✅ Low: generated PR body length guard only"
 	testingMD := "## Testing\n\n- go test ./internal/pipeline/steps"
@@ -1795,6 +1803,8 @@ func TestPRStep_CreateKeepsGeneratedSectionsAfterOversizedIntent(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.UserIntent = "Keep generated sections visible.\n" + strings.Repeat("oversized intent context line\n", 2500)
+	shouldPublishIntent := true
+	sctx.Config.PR.PublishIntent = &shouldPublishIntent
 
 	reviewFindings := `{"findings":[],"summary":"clean","risk_level":"medium","risk_rationale":"validates generated PR body length handling"}`
 	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
@@ -1863,6 +1873,8 @@ func TestPRStep_BuildPRContentTruncatesGeneratedPipelineUpdates(t *testing.T) {
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = "Keep PR creation postable when long validation runs accumulate many pipeline update rounds."
+	shouldPublishIntent := true
+	sctx.Config.PR.PublishIntent = &shouldPublishIntent
 
 	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
 	if err != nil {
@@ -1924,6 +1936,8 @@ func TestPRStep_CreateCapsBodyAfterPrependedIntent(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.UserIntent = "Keep PR creation postable.\n" + strings.Repeat("intent context line stays visible\n", 900)
+	shouldPublishIntent := true
+	sctx.Config.PR.PublishIntent = &shouldPublishIntent
 
 	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
 	if err != nil {
@@ -1970,6 +1984,8 @@ func TestFallbackPRContentCapsBodyAfterPrependedIntent(t *testing.T) {
 	t.Parallel()
 	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
 	sctx.UserIntent = "Fallback intent survives.\n" + strings.Repeat("fallback intent context line\n", 900)
+	shouldPublishIntent := true
+	sctx.Config.PR.PublishIntent = &shouldPublishIntent
 
 	rounds := make([]string, 0, 140)
 	for i := 1; i <= 140; i++ {
@@ -2112,7 +2128,7 @@ func assertNoPartialRoundLinesForTest(t *testing.T, body string, rounds []string
 	}
 }
 
-func TestPRStep_PrependsIntentSectionWhenIntentSet(t *testing.T) {
+func TestPRStep_PrependsIntentSectionWhenPublicationEnabled(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -2128,6 +2144,8 @@ func TestPRStep_PrependsIntentSectionWhenIntentSet(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.UserIntent = "user wanted to add a Bar() helper for foo callers"
+	shouldPublishIntent := true
+	sctx.Config.PR.PublishIntent = &shouldPublishIntent
 
 	step := &PRStep{}
 	if _, err := step.Execute(sctx); err != nil {
@@ -2205,6 +2223,8 @@ func TestPRStep_StripsAgentEmittedIntentBeforePrepend(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.UserIntent = "real user intent string"
+	shouldPublishIntent := true
+	sctx.Config.PR.PublishIntent = &shouldPublishIntent
 
 	step := &PRStep{}
 	if _, err := step.Execute(sctx); err != nil {
@@ -2271,6 +2291,8 @@ func TestPRStep_FallbackUsesWhatChangedAndIntent(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.UserIntent = "fallback intent text"
+	shouldPublishIntent := true
+	sctx.Config.PR.PublishIntent = &shouldPublishIntent
 
 	step := &PRStep{}
 	if _, err := step.Execute(sctx); err != nil {
@@ -2891,6 +2913,8 @@ func TestPRStep_ForeignAttestationsInEveryComponentDoNotShadowTheRealOne(t *test
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = "Capture the generated PR body as evidence. " + foreign("b")
+	shouldPublishIntent := true
+	sctx.Config.PR.PublishIntent = &shouldPublishIntent
 
 	insertCompletedStep(t, sctx, types.StepReview, findingsJSON(t, types.Findings{
 		Items: []types.Finding{{
@@ -2949,10 +2973,7 @@ func TestPRAppendixModes_RenderBodies(t *testing.T) {
 		if mode != "" {
 			sctx.Config.PR.Appendix = mode
 		}
-		if !publishIntent {
-			no := false
-			sctx.Config.PR.PublishIntent = &no
-		}
+		sctx.Config.PR.PublishIntent = &publishIntent
 		return assemblePRBody(sctx, narrative, riskLine, testingMD, pipelineMD, 0, provider)
 	}
 
@@ -3038,7 +3059,8 @@ func TestPRAppendixModes_RenderBodies(t *testing.T) {
 	// Owned Bitbucket bodies carry the marker in a fence; keep that fence.
 	owned := strings.Replace(pipelineMD, attestation, "", 1)
 	owned = strings.TrimRight(owned, "\n") + "\n\n" + fenced
-	sctx := &pipeline.StepContext{UserIntent: intent, Config: &config.Config{PR: config.PR{Appendix: config.PRAppendixMinimal}}}
+	shouldPublishIntent := true
+	sctx := &pipeline.StepContext{UserIntent: intent, Config: &config.Config{PR: config.PR{Appendix: config.PRAppendixMinimal, PublishIntent: &shouldPublishIntent}}}
 	ownedMinimal := assemblePRBody(sctx, narrative, risk, testingMD, owned, 0, scm.ProviderBitbucket)
 	if strings.Count(ownedMinimal, pipelineAttestationCommentPrefix) != 1 || !strings.Contains(ownedMinimal, fenced) || strings.Contains(ownedMinimal, "evidence log line") {
 		t.Fatalf("owned Bitbucket minimal body:\n%s", ownedMinimal)
@@ -3047,7 +3069,7 @@ func TestPRAppendixModes_RenderBodies(t *testing.T) {
 	limit := scm.MaxPRBodyChars(scm.ProviderAzureDevOps)
 	hugeTesting := "## Testing\n\n```text\n" + strings.Repeat("verbose test log line\n", 600) + "```"
 	for _, mode := range []string{config.PRAppendixCollapsed, config.PRAppendixMinimal} {
-		sctx := &pipeline.StepContext{UserIntent: intent, Config: &config.Config{PR: config.PR{Appendix: mode}}}
+		sctx := &pipeline.StepContext{UserIntent: intent, Config: &config.Config{PR: config.PR{Appendix: mode, PublishIntent: &shouldPublishIntent}}}
 		got := assemblePRBody(sctx, narrative, risk, hugeTesting, pipelineMD, limit, scm.ProviderAzureDevOps)
 		if scm.PRBodyLen(got) > limit {
 			t.Fatalf("%s azure body = %d, limit %d", mode, scm.PRBodyLen(got), limit)
@@ -3062,7 +3084,7 @@ func TestPRAppendixModes_RenderBodies(t *testing.T) {
 
 	sctx = &pipeline.StepContext{
 		UserIntent: strings.Repeat("intent 😀 ", 2000),
-		Config:     &config.Config{PR: config.PR{Appendix: config.PRAppendixMinimal}},
+		Config:     &config.Config{PR: config.PR{Appendix: config.PRAppendixMinimal, PublishIntent: &shouldPublishIntent}},
 	}
 	capped := buildPRBody(narrative+"\n\n"+strings.Repeat("change ", 4000), risk, hugeTesting, pipelineMD, sctx, scm.ProviderGitHub)
 	if len(capped) > maxPullRequestBodyBytes {

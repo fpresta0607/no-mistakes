@@ -42,7 +42,7 @@ func TestPRPublishIntentDefaultsAndParsing(t *testing.T) {
 		yaml string
 		want bool
 	}{
-		{"{}", true}, {"pr: {}", true}, {"pr: {publish_intent: null}", true},
+		{"{}", false}, {"pr: {}", false}, {"pr: {publish_intent: null}", false},
 		{"pr: {publish_intent: true}", true}, {"pr: {publish_intent: false}", false},
 	} {
 		repo, err := LoadRepoFromBytes([]byte(tc.yaml))
@@ -53,8 +53,8 @@ func TestPRPublishIntentDefaultsAndParsing(t *testing.T) {
 			t.Errorf("%s: publish=%v, want %v", tc.yaml, got, tc.want)
 		}
 	}
-	if !(PR{}).PublishesIntent() {
-		t.Fatal("zero-value config must preserve default publication")
+	if (PR{}).PublishesIntent() {
+		t.Fatal("zero-value config must keep validation intent private")
 	}
 	if _, err := LoadRepoFromBytes([]byte("pr: {publish_intent: [false]}")); err == nil {
 		t.Fatal("invalid publication boolean accepted")

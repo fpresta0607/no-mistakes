@@ -17,7 +17,7 @@ import (
 // program's output and exit code through.
 type CommandWrapper struct {
 	// Command is the wrapper program and its own arguments. A word may name a
-	// run fact as {repo}, {branch}, {run} or {run_short}.
+	// run fact as {repo}, {branch}, {run}, {run_short} or {test_comparison_sha}.
 	Command []string `yaml:"command" json:"command,omitempty"`
 	// RefusalPrefix marks the wrapper's own last output line when it exits 125
 	// or 126 without having produced a result of the command. Empty means the
@@ -27,9 +27,10 @@ type CommandWrapper struct {
 
 // CommandWrapperValues are the run facts a wrapper word may name.
 type CommandWrapperValues struct {
-	Repo   string
-	Branch string
-	Run    string
+	Repo              string
+	Branch            string
+	Run               string
+	TestComparisonSHA string
 }
 
 // commandWrapperShortRun is how many characters of a run id {run_short}
@@ -37,8 +38,9 @@ type CommandWrapperValues struct {
 const commandWrapperShortRun = 8
 
 var (
-	commandWrapperPlaceholder  = regexp.MustCompile(`\{[a-z_]+\}`)
-	commandWrapperPlaceholders = []string{"{repo}", "{branch}", "{run}", "{run_short}"}
+	commandWrapperPlaceholder   = regexp.MustCompile(`\{[a-z_]+\}`)
+	commandWrapperPlaceholders  = []string{"{repo}", "{branch}", "{run}", "{run_short}", "{test_comparison_sha}"}
+	commandWrapperComparisonSHA = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 )
 
 // Enabled reports whether a wrapper is configured.
@@ -46,20 +48,37 @@ func (w CommandWrapper) Enabled() bool { return len(w.Command) > 0 }
 
 // Words returns the wrapper's words for one run, or nil when none is
 // configured. Each value is substituted once and is never read as a template.
-func (w CommandWrapper) Words(values CommandWrapperValues) []string {
+// A requested Test comparison must be a full nonzero SHA before expansion.
+func (w CommandWrapper) Words(values CommandWrapperValues) ([]string, error) {
 	if !w.Enabled() {
-		return nil
+		return nil, nil
+	}
+	for _, word := range w.Command {
+		if strings.Contains(word, "{test_comparison_sha}") {
+			if err := ValidateTestComparisonSHA(values.TestComparisonSHA); err != nil {
+				return nil, fmt.Errorf("test_command_wrapper {test_comparison_sha}: %w", err)
+			}
+		}
 	}
 	short := values.Run
 	if len(short) > commandWrapperShortRun {
 		short = short[:commandWrapperShortRun]
 	}
-	replacer := strings.NewReplacer("{repo}", values.Repo, "{branch}", values.Branch, "{run_short}", short, "{run}", values.Run)
+	replacer := strings.NewReplacer("{repo}", values.Repo, "{branch}", values.Branch, "{run_short}", short, "{run}", values.Run, "{test_comparison_sha}", values.TestComparisonSHA)
 	words := make([]string, len(w.Command))
 	for i, word := range w.Command {
 		words[i] = replacer.Replace(word)
 	}
-	return words
+	return words, nil
+}
+
+// ValidateTestComparisonSHA checks that the resolved comparison is a full
+// object ID, never an absent previous-push ref or an unresolved revision.
+func ValidateTestComparisonSHA(sha string) error {
+	if !commandWrapperComparisonSHA.MatchString(sha) || strings.Trim(sha, "0") == "" {
+		return fmt.Errorf("the resolved Test comparison must be a full nonzero SHA")
+	}
+	return nil
 }
 
 func copyCommandWrapper(w CommandWrapper) CommandWrapper {

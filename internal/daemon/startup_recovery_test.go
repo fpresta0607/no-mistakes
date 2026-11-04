@@ -4,19 +4,37 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func TestPreserveStaleRunHeadsAnchorsCrashWorkBeforeTerminalization(t *testing.T) {
-	t.Parallel()
+// crashedRunFixture is a running run whose managed worktree holds a committed
+// pipeline fix past the submitted head, as a daemon crash leaves it.
+type crashedRunFixture struct {
+	root      *paths.Paths
+	database  *db.DB
+	run       *db.Run
+	gate      string
+	managed   string
+	submitted string
+	preserved string
+}
+
+func newCrashedRunFixture(t *testing.T) crashedRunFixture {
+	t.Helper()
 	p := paths.WithRoot(t.TempDir())
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatal(err)
@@ -25,7 +43,7 @@ func TestPreserveStaleRunHeadsAnchorsCrashWorkBeforeTerminalization(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer d.Close()
+	t.Cleanup(func() { d.Close() })
 
 	source := filepath.Join(t.TempDir(), "source")
 	gitCmd(t, "", "init", source)
@@ -61,6 +79,13 @@ func TestPreserveStaleRunHeadsAnchorsCrashWorkBeforeTerminalization(t *testing.T
 	gitCmd(t, managed, "add", "fix.txt")
 	gitCmd(t, managed, "commit", "-m", "pipeline fix")
 	preserved := gitOutput(t, managed, "rev-parse", "HEAD")
+	return crashedRunFixture{root: p, database: d, run: run, gate: gate, managed: managed, submitted: submitted, preserved: preserved}
+}
+
+func TestPreserveStaleRunHeadsAnchorsCrashWorkBeforeTerminalization(t *testing.T) {
+	t.Parallel()
+	fixture := newCrashedRunFixture(t)
+	d, p, run, gate, submitted, preserved := fixture.database, fixture.root, fixture.run, fixture.gate, fixture.submitted, fixture.preserved
 
 	preserveStaleRunHeads(d, p, nil)
 	if got := gitOutput(t, gate, "rev-parse", custody.RecoveryRef(run.ID)); got != preserved {
@@ -78,6 +103,89 @@ func TestPreserveStaleRunHeadsAnchorsCrashWorkBeforeTerminalization(t *testing.T
 	}
 	if got := gitOutput(t, gate, "rev-parse", "refs/heads/feature/crash"); got != submitted {
 		t.Fatalf("startup preservation moved gate branch = %s, want %s", got, submitted)
+	}
+}
+
+func TestPreserveRunHeadAnchorsCrashWorkWhenTheSourceObservationStalls(t *testing.T) {
+	helperDirectory := t.TempDir()
+	helperPath := filepath.Join(helperDirectory, "git")
+	if runtime.GOOS == "windows" {
+		helperPath += ".exe"
+	}
+	build := exec.CommandContext(t.Context(), "go", "build", "-trimpath", "-ldflags=-s -w", "-o", helperPath, "../pipeline/fakecli")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build fake git: %v\n%s", err, output)
+	}
+	realGit, err := testgit.RealGit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := newCrashedRunFixture(t)
+	// The status scan outlives the observation's whole budget, the way a cold
+	// large checkout does right after a crash or reboot.
+	t.Setenv("FAKE_CLI_MODE", "git-hung-status")
+	t.Setenv("FAKE_CLI_REAL_GIT", realGit)
+	t.Setenv("PATH", helperDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	head, isPreserved := preserveRunHead(fixture.database, fixture.managed, fixture.run)
+
+	if !isPreserved || head != fixture.preserved {
+		t.Fatalf("preserveRunHead = %q, %v; want the crash work %s anchored", head, isPreserved, fixture.preserved)
+	}
+	if got := gitOutput(t, fixture.gate, "rev-parse", custody.RecoveryRef(fixture.run.ID)); got != fixture.preserved {
+		t.Fatalf("recovery anchor = %s, want %s", got, fixture.preserved)
+	}
+	observed, err := fixture.database.GetRun(fixture.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.TerminalSourceState == nil || *observed.TerminalSourceState != "unreadable" {
+		t.Fatalf("stalled observation recorded %v, want unreadable", observed.TerminalSourceState)
+	}
+}
+
+func TestPreserveRunHeadAnchorsASuccessorUnmovedAtACandidateItsCallerNeverHad(t *testing.T) {
+	t.Parallel()
+	fixture := newCrashedRunFixture(t)
+	d, run, submitted, preserved := fixture.database, fixture.run, fixture.submitted, fixture.preserved
+	profile := agentcfg.Selection{Harness: types.AgentCodex, Model: "fixture", Effort: agentcfg.EffortXHigh, ServiceTier: "default"}
+	assertion := &launchassert.Expectation{TrustedSHA: strings.Repeat("a", 40), Profiles: map[string][]agentcfg.Selection{"primary": {profile}, "reviewer": {profile}, "fixer": {profile}}}
+	proof, err := assertion.Verify(assertion.TrustedSHA, assertion.Profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The crashed fixture run holds its own branch, so the continuation uses another.
+	predecessor, err := d.InsertRunWithLaunchAssertion(run.RepoID, "feature/successor", submitted, submitted, nil, "nonce", "generation", "intent", "", false, nil, assertion, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunHeadSHA(predecessor.ID, preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunErrorStatusWithVerifiedHead(predecessor.ID, "interrupted", types.RunFailed, preserved); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := d.ReadContinuationSnapshot(predecessor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adoption, _, err := d.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: preserved, CandidateTree: gitOutput(t, fixture.gate, "rev-parse", preserved+"^{tree}"), SourceRef: "refs/no-mistakes/terminal-candidate/successor", CallerDir: t.TempDir(), CallerHead: submitted, Reason: "validate preserved source", Operator: "fixture", Assertion: assertion, Proof: proof})
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor, err := d.GetRun(adoption.Successor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	head, isPreserved := preserveRunHead(d, fixture.managed, successor)
+
+	if !isPreserved || head != preserved {
+		t.Fatalf("preserveRunHead = %q, %v; want the owed candidate %s anchored", head, isPreserved, preserved)
+	}
+	if got := gitOutput(t, fixture.gate, "rev-parse", custody.RecoveryRef(successor.ID)); got != preserved {
+		t.Fatalf("successor recovery anchor = %s, want %s", got, preserved)
 	}
 }
 
@@ -144,7 +252,7 @@ func TestRecoverOnStartup_DoesNotDeleteActiveRunWorktree(t *testing.T) {
 	// aware); force every eligible directory past the retention window
 	// regardless of its actual mtime, mirroring recoverOnStartup's order.
 	future := time.Now().Add(365 * 24 * time.Hour)
-	reapWorktrees(d, p, worktreeReapPolicy{Retention: time.Nanosecond}, future)
+	NewRunManager(d, p, nil).reapWorktrees(worktreeReapPolicy{Retention: time.Nanosecond}, future)
 	cleanupOrphanWorktrees(d, p, leftoverRecordedRunWorktrees(d, p))
 
 	if _, err := os.Stat(activeWT); err != nil {

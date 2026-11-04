@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -101,21 +103,24 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 }
 
 type recoveredRunPlan struct {
-	run     *db.Run
-	repo    *db.Repo
-	workDir string
-	gateDir string
-	cfg     *config.Config
-	agent   agent.Agent
-	steps   []pipeline.Step
-	forge   *forgecontext.Context
+	admission *db.ValidationAdmission
+	run       *db.Run
+	repo      *db.Repo
+	workDir   string
+	gateDir   string
+	cfg       *config.Config
+	agent     agent.Agent
+	steps     []pipeline.Step
+	forge     *forgecontext.Context
+	terminal  *db.TerminalAdoption
 }
 
-func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPlan {
+func (m *RunManager) recoverableParkedRuns(ctx context.Context) ([]recoveredRunPlan, map[string]struct{}) {
+	preserved := make(map[string]struct{})
 	runs, err := m.db.GetActiveRuns()
 	if err != nil {
 		slog.Error("failed to list active runs for recovery", "error", err)
-		return nil
+		return nil, preserved
 	}
 	plans := make([]recoveredRunPlan, 0, len(runs))
 	branchCounts := make(map[string]int, len(runs))
@@ -123,6 +128,14 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPl
 		branchCounts[run.RepoID+"\x00"+run.Branch]++
 	}
 	for _, run := range runs {
+		isHandbackPending, err := pipeline.CIHandbackRecoveryPending(m.db, run.ID)
+		if isHandbackPending {
+			preserved[run.ID] = struct{}{}
+		}
+		if err != nil {
+			slog.Warn("CI handback recovery evidence is unreadable; preserving run", "run_id", run.ID, "error", err)
+			continue
+		}
 		if branchCounts[run.RepoID+"\x00"+run.Branch] != 1 {
 			slog.Warn("active run cannot be safely resumed", "run_id", run.ID, "error", "conflicting active run for branch")
 			continue
@@ -133,13 +146,20 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPl
 			continue
 		}
 		plans = append(plans, *plan)
+		preserved[run.ID] = struct{}{}
 	}
-	return plans
+	return plans, preserved
 }
 
 func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*recoveredRunPlan, error) {
-	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil || run.Branch == "" {
+	if run == nil || run.Status != types.RunRunning || run.Branch == "" {
 		return nil, fmt.Errorf("run is not a parked running run")
+	}
+	if run.AwaitingAgentSince == nil {
+		receipt, err := m.db.LatestCIHandback(run.ID)
+		if err != nil || receipt == nil || receipt.AcceptedHead == nil || receipt.Candidate == nil {
+			return nil, fmt.Errorf("run is not a parked running run or checkpointed CI follow-up")
+		}
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
 	if err != nil {
@@ -152,10 +172,6 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if info, err := os.Stat(workDir); err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("worktree is missing")
 	}
-	headSHA, err := git.HeadSHA(ctx, workDir)
-	if err != nil || headSHA != run.HeadSHA {
-		return nil, fmt.Errorf("worktree head does not match run head")
-	}
 	gateDir := m.paths.RepoDir(repo.ID)
 	commonDir, err := git.Run(ctx, workDir, "rev-parse", "--git-common-dir")
 	if err != nil {
@@ -164,10 +180,46 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if !samePath(resolveGitPath(workDir, commonDir), gateDir) {
 		return nil, fmt.Errorf("worktree does not belong to its gate repository")
 	}
+	isHandbackPending, err := pipeline.CIHandbackRecoveryPending(m.db, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	receipt, err := m.db.LatestCIHandback(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if receipt != nil && receipt.Source != nil {
+		origins, err := git.GetConfiguredRemoteURLs(ctx, repo.WorkingPath, "origin")
+		if err != nil || len(origins) != 1 || branchsync.TargetFingerprint(origins[0]) != branchsync.TargetFingerprint(repo.UpstreamURL) || branchsync.TargetFingerprint(repo.PushURL()) != receipt.TargetFingerprint {
+			return nil, fmt.Errorf("ordinary CI handback repository source changed during recovery")
+		}
+		repo.URLsVerified = true
+	}
+	if isHandbackPending && receipt != nil && receipt.Candidate != nil {
+		if _, err := steps.CIHandbackManagedHead(&pipeline.StepContext{Ctx: ctx, WorkDir: workDir, GateDir: gateDir}, receipt); err != nil {
+			return nil, err
+		}
+	} else if headSHA, err := git.HeadSHA(ctx, workDir); err != nil || headSHA != run.HeadSHA {
+		return nil, fmt.Errorf("worktree head does not match run head")
+	}
 
 	cfg, err := m.loadRecoveredConfig(ctx, run, repo, workDir)
 	if err != nil {
 		return nil, err
+	}
+	if receipt != nil && receipt.Source != nil {
+		limits := receipt.Source.AutoFixLimits
+		for _, name := range types.AllSteps() {
+			if limit, ok := limits[name]; !ok || limit < 0 {
+				return nil, fmt.Errorf("ordinary CI handback repair policy is incomplete")
+			}
+		}
+		cfg.AutoFix.Review = min(cfg.AutoFix.Review, limits[types.StepReview])
+		cfg.AutoFix.Test = min(cfg.AutoFix.Test, limits[types.StepTest])
+		cfg.AutoFix.Document = min(cfg.AutoFix.Document, limits[types.StepDocument])
+		cfg.AutoFix.Lint = min(cfg.AutoFix.Lint, limits[types.StepLint])
+		cfg.AutoFix.CI = min(cfg.AutoFix.CI, limits[types.StepCI])
+		cfg.AutoFix.Rebase = min(cfg.AutoFix.Rebase, limits[types.StepRebase])
 	}
 	execSteps := steps.WithCustomGates(m.steps(), cfg.Gates)
 	if err := pipeline.ValidateRecoveredRun(m.db, run, execSteps); err != nil {
@@ -176,6 +228,17 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	forgeCtx, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
 	if err != nil {
 		return nil, fmt.Errorf("resolve forge profile: %w", err)
+	}
+	if isHandbackPending && receipt != nil && receipt.Candidate != nil {
+		recoveryContext, cancel := context.WithTimeout(ctx, 90*time.Second)
+		defer cancel()
+		if err := steps.RecoverCIHandback(&pipeline.StepContext{Ctx: recoveryContext, Run: run, Repo: repo, WorkDir: workDir, GateDir: gateDir, Config: cfg, ForgeContext: forgeCtx, DB: m.db}, receipt); err != nil {
+			return nil, err
+		}
+	}
+	headSHA, err := git.HeadSHA(ctx, workDir)
+	if err != nil || headSHA != run.HeadSHA {
+		return nil, fmt.Errorf("worktree head does not match run head")
 	}
 	ag, err := m.newRunPipelineAgent(ctx, run, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx))
 	if err != nil {
@@ -219,20 +282,39 @@ func validateRecoveredSessionProviders(database *db.DB, runID string, ag agent.A
 }
 
 func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) (*config.Config, error) {
-	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
-	if err != nil {
-		return nil, fmt.Errorf("load global config: %w", err)
-	}
 	repoCfg, err := config.LoadRepo(workDir)
 	if err != nil {
 		return nil, fmt.Errorf("load repo config: %w", err)
+	}
+	cfg, err := m.loadRecoveredConfigWithRepo(ctx, run, repo, workDir, repoCfg)
+	if err != nil {
+		return nil, err
+	}
+	// A parked run keeps its original sequence; a new successor pins fresh gates.
+	cfg.Gates, err = m.pinnedRunGates(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func (m *RunManager) loadRecoveredConfigWithRepo(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, repoCfg *config.RepoConfig) (*config.Config, error) {
+	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
+	if err != nil {
+		return nil, fmt.Errorf("load global config: %w", err)
 	}
 	var trustedSHA string
 	if repo.DefaultBranch != "" {
 		fetchCtx, cancel := context.WithTimeout(ctx, recoveredConfigFetchTimeout)
 		defer cancel()
-		if err := fetchRecoveredRemoteBranch(fetchCtx, workDir, "origin", repo.DefaultBranch); err != nil {
-			slog.Warn("failed to fetch default branch while recovering run; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
+		var fetchErr error
+		if repo.URLsVerified {
+			fetchErr = fetchRunDefaultBranch(fetchCtx, workDir, repo)
+		} else {
+			fetchErr = fetchRecoveredRemoteBranch(fetchCtx, workDir, "origin", repo.DefaultBranch)
+		}
+		if fetchErr != nil {
+			slog.Warn("failed to fetch default branch while recovering run; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", fetchErr)
 		} else if sha, err := git.ResolveRef(ctx, workDir, "refs/remotes/origin/"+repo.DefaultBranch); err != nil {
 			slog.Warn("failed to resolve default branch while recovering run; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
 		} else {
@@ -248,17 +330,6 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
 	cfg := config.MergeForRemote(globalCfg, effectiveRepoCfg, repo.UpstreamURL)
-	// Gates are read back from the run, never re-resolved. Everything else here
-	// is deliberately re-read from the live default branch, but a gate decides
-	// which steps the run HAS: the default branch may have gained or lost one
-	// since this run parked, and rebuilding the sequence from the current list
-	// would leave recovery matching the run's recorded steps against a sequence
-	// it never executed - failing a healthy parked run as a crash.
-	gates, err := m.pinnedRunGates(run.ID)
-	if err != nil {
-		return nil, err
-	}
-	cfg.Gates = gates
 	if err := cfg.ApplyPiProfile(run.PiProfile); err != nil {
 		return nil, err
 	}
@@ -439,6 +510,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	m.wg.Add(1)
 	go func() {
 		startedAt := time.Now()
+		isSuspended := false
 		defer m.wg.Done()
 		defer close(done)
 		defer func() {
@@ -453,12 +525,16 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			cancel(nil)
 			_ = plan.agent.Close()
 			m.closeSubscribers(plan.run.ID)
-			m.removeRunWorktree(plan.repo.ID, plan.run.ID, plan.gateDir, plan.workDir, "resumed_run_finished")
+			if !isSuspended {
+				m.removeRunWorktree(plan.repo.ID, plan.run.ID, plan.gateDir, plan.workDir, "resumed_run_finished")
+			}
 			// A recovered run is a finished run too. This is the second of the
 			// two completion boundaries, and leaving it out is what let a run
 			// resumed after a daemon restart keep its empty evidence directory
 			// until some later run or restart happened to sweep it.
-			m.cleanupRunEvidence(plan.cfg, plan.run.ID)
+			if !isSuspended {
+				m.cleanupRunEvidence(plan.cfg, plan.run.ID)
+			}
 			m.mu.Lock()
 			delete(m.executors, plan.run.ID)
 			delete(m.cancels, plan.run.ID)
@@ -466,16 +542,31 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			m.mu.Unlock()
 		}()
 
-		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
-			if plan.run.Status == types.RunRunning {
-				errMsg := err.Error()
+		var executionError error
+		if plan.terminal != nil {
+			executionError = executor.ExecuteTerminalSuccessor(runCtx, plan.run, plan.repo, plan.workDir, plan.terminal)
+		} else if plan.admission != nil {
+			executionError = pipeline.ValidateAuthoredCandidate(runCtx, m.db, plan.run, plan.workDir, plan.steps, plan.admission)
+			if executionError == nil {
+				executionError = executor.Execute(runCtx, plan.run, plan.repo, plan.workDir)
+			}
+		} else {
+			executionError = executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
+		}
+		if executionError != nil {
+			if errors.Is(executionError, pipeline.ErrCIHandbackSuspended) {
+				isSuspended = true
+				return
+			}
+			if plan.run.Status == types.RunRunning || plan.run.Status == types.RunPending {
+				errMsg := executionError.Error()
 				plan.run.Status = types.RunFailed
 				plan.run.Error = &errMsg
 				if dbErr := m.db.UpdateRunErrorStatus(plan.run.ID, errMsg, types.RunFailed); dbErr != nil {
 					slog.Error("failed to mark recovered run failed", "run_id", plan.run.ID, "error", dbErr)
 				}
 			}
-			slog.Error("recovered pipeline failed", "run_id", plan.run.ID, "error", err)
+			slog.Error("recovered pipeline failed", "run_id", plan.run.ID, "error", executionError)
 		}
 		fields := telemetry.Fields{
 			"action":      "finished",
@@ -650,18 +741,17 @@ func (m *RunManager) cleanupRunEvidence(cfg *config.Config, runID string) {
 	}
 	now := time.Now()
 	reapEvidence(m.db, root, policy, now)
-	reapWorktrees(m.db, m.paths, wtPolicy, now)
+	m.reapWorktrees(wtPolicy, now)
 	reapRunLogs(m.db, m.paths.LogsDir(), policy, now)
 }
 
 // removeRunWorktree sweeps processes before deciding whether to remove the
-// directory, so refusal retention cannot keep escaped workers alive.
+// directory, so source or refusal retention cannot keep escaped workers alive.
 //
-// Every removal of a run worktree this package performs goes through here, and
-// none calls git.WorktreeRemove directly, because the ordering is easy to forget
-// at one site and invisible when forgotten - a run whose setup failed, whose
-// execution returned, or which was resumed after a crash all reach this point by
-// different routes. reason distinguishes the routes in the log.
+// Run setup failure, completion, and recovered-run cleanup all go through here
+// so each route sweeps before checking source and refusals. Orphan cleanup uses
+// removeOrphanWorktree after its own sweep. reason distinguishes the routes in
+// the log.
 func (m *RunManager) removeRunWorktree(repoID, runID, gateDir, wtDir, reason string) {
 	m.sweepRunWorktreeProcesses(repoID, runID, wtDir)
 	run, err := m.db.GetRun(runID)
@@ -672,6 +762,12 @@ func (m *RunManager) removeRunWorktree(repoID, runID, gateDir, wtDir, reason str
 	if refusal := protectedPathCleanupReason(m.db, run); refusal != "" {
 		slog.Warn("preserving run worktree", "run_id", runID, "path", wtDir, "reason", refusal)
 		return
+	}
+	if run != nil {
+		if reason := terminalWorktreeSourceReason(context.Background(), m.db, runID, wtDir); reason != "" {
+			slog.Warn("preserving run worktree", "run_id", runID, "path", wtDir, "reason", reason)
+			return
+		}
 	}
 	if err := git.WorktreeRemove(context.Background(), gateDir, wtDir); err != nil {
 		slog.Warn("failed to remove run worktree", "reason", reason, "run_id", runID, "path", wtDir, "error", err)
@@ -1014,7 +1110,7 @@ func conflictingLaunchPRBaseBranch(launchNonce string) error {
 }
 
 func conflictingLaunchOmitIntent(launchNonce string) error {
-	return fmt.Errorf("conflicting launch_nonce %q is already bound to a run that publishes the Intent section", launchNonce)
+	return fmt.Errorf("conflicting launch_nonce %q is already bound to a run without a caller-side intent omission", launchNonce)
 }
 
 func validateLaunchNonce(nonce string) error {
@@ -1084,6 +1180,9 @@ func receiptForRun(run *db.Run, created bool) (ipc.LaunchReceipt, error) {
 // A supplied clean caller head must match the selected head before any run
 // starts or is superseded. It never changes head selection.
 func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prBaseBranch string, omitIntent bool, callerHeadSHA, planID string, closingIssues []string, profiles ...*agentcfg.PiProfile) (string, error) {
+	if err := m.db.RefuseUnlinkedValidation(repoID, branch); err != nil {
+		return "", err
+	}
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
 		return "", fmt.Errorf("get repo: %w", err)
@@ -1120,7 +1219,11 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	if latestForBranch == nil {
 		return "", fmt.Errorf("no previous run for branch %s", branch)
 	}
-	headSHA, err := resolveRerunHead(ctx, gateDir, branch, latestForBranch)
+	submitted, err := m.db.CustodySubmittedHead(latestForBranch)
+	if err != nil {
+		return "", fmt.Errorf("refusing rerun: read custody of run %s: %w", latestForBranch.ID, err)
+	}
+	headSHA, err := resolveRerunHead(ctx, gateDir, branch, latestForBranch, submitted)
 	if err != nil {
 		return "", err
 	}
@@ -1184,7 +1287,9 @@ func inheritablePRURL(run *db.Run) string {
 	return strings.TrimSpace(*run.PRURL)
 }
 
-func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Run) (string, error) {
+// resolveRerunHead takes the latest run's custody submitted head
+// (db.CustodySubmittedHead), never its raw submitted head.
+func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Run, submitted *string) (string, error) {
 	gateHead, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
 	if err != nil {
 		return "", fmt.Errorf("resolve gate head: %w", err)
@@ -1195,8 +1300,8 @@ func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Ru
 	published := ""
 	if latest.LastPushedSHA != nil {
 		published = *latest.LastPushedSHA
-	} else if latest.SubmittedHeadSHA != nil {
-		published = *latest.SubmittedHeadSHA
+	} else if submitted != nil {
+		published = *submitted
 	}
 	if published == latest.HeadSHA || latest.TerminalHeadVerifiedAt == nil {
 		return gateHead, nil
@@ -1352,10 +1457,14 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 	})
 }
 
-func (m *RunManager) withBranchLock(repoID, branch string, action func() (string, error)) (string, error) {
+func (m *RunManager) branchMutex(repoID, branch string) *sync.Mutex {
 	lockKey := repoID + "/" + branch
 	lockVal, _ := m.branchLocks.LoadOrStore(lockKey, &sync.Mutex{})
-	branchMu := lockVal.(*sync.Mutex)
+	return lockVal.(*sync.Mutex)
+}
+
+func (m *RunManager) withBranchLock(repoID, branch string, action func() (string, error)) (string, error) {
+	branchMu := m.branchMutex(repoID, branch)
 	branchMu.Lock()
 	defer branchMu.Unlock()
 	return action()
@@ -1364,6 +1473,9 @@ func (m *RunManager) withBranchLock(repoID, branch string, action func() (string
 // startRunWithIntentSourceLocked performs run creation while the caller owns
 // the repository/branch lock. Proof fields are empty for ordinary launches.
 func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, inheritedPRURL, planID string, closingIssues []string, expected *launchassert.Expectation, profiles ...*agentcfg.PiProfile) (string, error) {
+	if err := m.db.RefuseUnlinkedValidation(repo.ID, branch); err != nil {
+		return "", err
+	}
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -1377,6 +1489,19 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	if m.shuttingDown.Load() {
 		trackStartFailure("daemon_shutdown")
 		return "", fmt.Errorf("daemon is shutting down")
+	}
+	active, err := m.db.GetActiveRun(repo.ID, branch)
+	if err != nil {
+		return "", err
+	}
+	if active != nil {
+		handback, err := m.db.LatestCIHandback(active.ID)
+		if err != nil {
+			return "", err
+		}
+		if handback != nil {
+			return "", fmt.Errorf("run %s retains its CI handback and budget history; use axi handback --resume for the caller follow-up", active.ID)
+		}
 	}
 	// Best-effort only: a clone's remotes may change after init. Refresh the
 	// registered URLs before constructing any run-owned Git operation, but keep
@@ -1728,6 +1853,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	m.wg.Add(1)
 	go func() {
 		startedAt := time.Now()
+		isSuspended := false
 		defer m.wg.Done()
 		defer close(done)
 		defer func() {
@@ -1766,8 +1892,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			ag.Close()
 			// Close subscriber channels for this run.
 			m.closeSubscribers(run.ID)
-			m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_finished")
-			m.cleanupRunEvidence(cfg, run.ID)
+			if !isSuspended {
+				m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_finished")
+				m.cleanupRunEvidence(cfg, run.ID)
+			}
 			// Remove tracking.
 			m.mu.Lock()
 			delete(m.executors, run.ID)
@@ -1777,6 +1905,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}()
 
 		if err := executor.Execute(runCtx, run, repo, wtDir); err != nil {
+			if errors.Is(err, pipeline.ErrCIHandbackSuspended) {
+				isSuspended = true
+				return
+			}
 			fields := telemetry.Fields{
 				"action":      "finished",
 				"trigger":     trigger,
@@ -2163,8 +2295,8 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 	return result, nil
 }
 
-// Shutdown cancels all active runs. Called during daemon shutdown to prevent
-// orphaned goroutines from continuing agent calls and git operations.
+// Shutdown stops every run's goroutines. An ordinary CI handback already parked
+// without a writer keeps its durable gate for recovery; user cancellation does not.
 func (m *RunManager) Shutdown() {
 	m.shuttingDown.Store(true)
 
@@ -2176,7 +2308,7 @@ func (m *RunManager) Shutdown() {
 	m.mu.Unlock()
 
 	for id, cancel := range cancels {
-		cancel(fmt.Errorf("daemon shutting down"))
+		cancel(pipeline.ErrDaemonShutdown)
 		slog.Info("cancelled run on shutdown", "run_id", id)
 	}
 
@@ -2198,12 +2330,48 @@ func (m *RunManager) HandleCancel(runID string) error {
 	cancel, ok := m.cancels[runID]
 	m.mu.Unlock()
 
-	if !ok {
-		return fmt.Errorf("no active run %s", runID)
+	if ok {
+		cancel(fmt.Errorf(types.RunCancelReasonAbortedByUser))
+		return nil
 	}
 
-	cancel(fmt.Errorf(types.RunCancelReasonAbortedByUser))
-	return nil
+	run, err := m.db.GetRun(runID)
+	if err != nil {
+		return err
+	}
+	if run == nil {
+		return fmt.Errorf("no active run %s", runID)
+	}
+	_, err = m.withBranchLock(run.RepoID, run.Branch, func() (string, error) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if cancel, ok := m.cancels[runID]; ok {
+			cancel(fmt.Errorf(types.RunCancelReasonAbortedByUser))
+			return "", nil
+		}
+		run, err := m.db.GetRun(runID)
+		if err != nil {
+			return "", err
+		}
+		if run == nil || run.Status.Terminal() {
+			return "", fmt.Errorf("no active run %s", runID)
+		}
+		if m.executors[runID] != nil || m.dones[runID] != nil {
+			return "", fmt.Errorf("run %s still has an active executor", runID)
+		}
+		if run.Status == types.RunPending {
+			if err := m.db.CancelPendingValidationAdmission(runID); err != nil {
+				return "", err
+			}
+		} else if err := m.db.CancelReleasedCIHandback(runID); err != nil {
+			return "", err
+		}
+		status, reason := string(types.RunCancelled), types.RunCancelReasonAbortedByUser
+		m.broadcast(ipc.Event{Type: ipc.EventRunCompleted, RunID: runID, RepoID: run.RepoID, Branch: &run.Branch, Status: &status, Error: &reason, PRURL: run.PRURL})
+		m.closeSubscribers(runID)
+		return "", nil
+	})
+	return err
 }
 
 // cancelActiveRuns cancels any in-progress runs for the given repo+branch

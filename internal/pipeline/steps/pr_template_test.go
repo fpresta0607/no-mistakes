@@ -143,7 +143,7 @@ func TestPRTemplateCreateThroughFakeGitHubAndReadback(t *testing.T) {
 	if got := parsePipelineAttestationForTest(t, string(body)).HeadSHA; got != sctx.Run.HeadSHA {
 		t.Fatalf("head = %q, want %s", got, sctx.Run.HeadSHA)
 	}
-	if len(ag.calls) != 1 || !strings.Contains(ag.calls[0].Prompt, "Complete reviewer context") || strings.Contains(ag.calls[0].Prompt, "CONTRIBUTOR TEMPLATE") {
+	if len(ag.calls) != 1 || strings.Contains(ag.calls[0].Prompt, "Complete reviewer context") || strings.Contains(ag.calls[0].Prompt, "CONTRIBUTOR TEMPLATE") {
 		t.Fatal("template trust/public-private audience boundary lost")
 	}
 	if sctx.UserIntent != "Complete reviewer context stays available." {
@@ -159,6 +159,8 @@ func TestPRAppendixModes_TemplatePublication(t *testing.T) {
 			t.Parallel()
 			sctx, _, _ := templateTestContext(t)
 			sctx.Config.PR.Appendix = mode
+			yes := true
+			sctx.Config.PR.PublishIntent = &yes
 			sctx.UserIntent = "Keep the template as the visible body."
 			steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
 			if err != nil {

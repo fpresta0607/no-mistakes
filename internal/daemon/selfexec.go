@@ -537,6 +537,13 @@ func daemonIsRunningViaIPC(p *paths.Paths) (bool, error) {
 		if os.IsNotExist(statErr) {
 			return false, nil
 		}
+		// A dead owner pid in the endpoint file is definitive proof that no
+		// daemon owns the endpoint (a reboot or an unclean exit), so let
+		// EnsureDaemon start a replacement. A connect timeout is different: the
+		// socket may belong to a live but wedged daemon, so it stays fatal.
+		if errors.Is(err, ipc.ErrEndpointProcessDead) {
+			return false, nil
+		}
 		if ipc.IsConnectTimeout(err) {
 			return false, err
 		}

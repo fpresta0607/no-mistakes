@@ -17,6 +17,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/authoredvalidation"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -85,7 +86,7 @@ func Run() (retErr error) {
 	}()
 
 	environmentStarted := time.Now()
-	if err := prepareDaemonEnvironment(); err != nil {
+	if err := prepareDaemonEnvironment(p); err != nil {
 		return err
 	}
 	logStartupPhase("environment", environmentStarted)
@@ -113,7 +114,7 @@ func Run() (retErr error) {
 	return runWithOptionsLocked(p, d, globalCfg, nil, startupStarted)
 }
 
-func prepareDaemonEnvironment() error {
+func prepareDaemonEnvironment(p *paths.Paths) error {
 	nmHome := os.Getenv("NM_HOME")
 	for _, key := range []string{
 		"CLAUDECODE",
@@ -128,6 +129,27 @@ func prepareDaemonEnvironment() error {
 	}
 	if err := applyLoginShellEnvironment(applyShellEnvToProcess, nmHome); err != nil {
 		return fmt.Errorf("apply login shell environment: %w", err)
+	}
+	// The daemon outlives its launcher, and the login shell can replace its
+	// environment. Pin temporary files to the already-resolved daemon home.
+	tempDir, err := filepath.Abs(filepath.Join(p.Root(), "tmp"))
+	if err != nil {
+		return fmt.Errorf("resolve daemon temporary directory: %w", err)
+	}
+	if err := os.MkdirAll(tempDir, 0o700); err != nil {
+		return fmt.Errorf("create daemon temporary directory %q: %w", tempDir, err)
+	}
+	probe, err := os.CreateTemp(tempDir, ".write-test-*")
+	if err != nil {
+		return fmt.Errorf("write daemon temporary directory %q: %w", tempDir, err)
+	}
+	if err := errors.Join(probe.Close(), os.Remove(probe.Name())); err != nil {
+		return fmt.Errorf("clean daemon temporary directory probe %q: %w", tempDir, err)
+	}
+	for _, key := range []string{"TEMP", "TMP", "TMPDIR", "GOTMPDIR"} {
+		if err := os.Setenv(key, tempDir); err != nil {
+			return fmt.Errorf("set %s: %w", key, err)
+		}
 	}
 	logDaemonPathSummary()
 	return nil
@@ -425,12 +447,41 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	}
 
 	parkedStarted := time.Now()
-	plans := mgr.recoverableParkedRuns(context.Background())
-	preserved := make(map[string]struct{}, len(plans))
-	for _, plan := range plans {
-		preserved[plan.run.ID] = struct{}{}
+	plans, preserved := mgr.recoverableParkedRuns(context.Background())
+	active, err := d.GetActiveRuns()
+	if err != nil {
+		slog.Error("failed to inspect pending terminal successors", "error", err)
 	}
-	logStartupPhase("parked_runs", parkedStarted, "preserved", len(plans))
+	for _, run := range active {
+		if run.Status != types.RunPending {
+			continue
+		}
+		event, err := d.GetTerminalPredecessor(run.ID)
+		if err != nil {
+			slog.Warn("pending terminal successor provenance cannot be read", "run_id", run.ID, "error", err)
+			continue
+		}
+		if event != nil {
+			if err := d.ValidateTerminalSuccessor(event); err != nil {
+				slog.Warn("pending terminal successor binding changed", "run_id", run.ID, "error", err)
+				continue
+			}
+			preserved[run.ID] = struct{}{}
+		}
+	}
+	// An accepted candidate has no execution to recover until explicit replay.
+	if admissions, err := d.PendingValidationAdmissions(); err != nil {
+		slog.Error("failed to read pending authored admissions", "error", err)
+	} else {
+		for _, admission := range admissions {
+			if err := d.ValidatePendingAdmission(admission); err != nil {
+				slog.Warn("pending authored admission is not intact", "run_id", admission.ChildID, "error", err)
+				continue
+			}
+			preserved[admission.ChildID] = struct{}{}
+		}
+	}
+	logStartupPhase("parked_runs", parkedStarted, "preserved", len(preserved))
 
 	// Read while the runs that were executing when this daemon started still say
 	// so: recovery below turns them terminal, and they are the ones whose
@@ -479,7 +530,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	// disabled or wide retention window is honored on the default tree
 	// instead of being bypassed by startup cleanup.
 	worktreeStarted := time.Now()
-	reapWorktrees(d, p, wtPolicy, now)
+	mgr.reapWorktrees(wtPolicy, now)
 	cleanupOrphanWorktrees(d, p, leftover)
 	logStartupPhase("worktree_cleanup", worktreeStarted)
 
@@ -523,6 +574,10 @@ func preserveRunHead(d *db.DB, workDir string, run *db.Run) (string, bool) {
 	if d == nil || run == nil || strings.TrimSpace(workDir) == "" {
 		return "", false
 	}
+	// A slow source scan must not spend the budget that pins crash work.
+	observeCtx, cancelObserve := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = terminalWorktreeSourceReason(observeCtx, d, run.ID, workDir)
+	cancelObserve()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	head, err := git.HeadSHA(ctx, workDir)
@@ -538,8 +593,15 @@ func preserveRunHead(d *db.DB, workDir string, run *db.Run) (string, bool) {
 	published := ""
 	if run.LastPushedSHA != nil {
 		published = *run.LastPushedSHA
-	} else if run.SubmittedHeadSHA != nil {
-		published = *run.SubmittedHeadSHA
+	} else {
+		submitted, err := d.CustodySubmittedHead(run)
+		if err != nil {
+			slog.Warn("failed to read custody before anchoring managed worktree head", "run", run.ID, "error", err)
+			return "", false
+		}
+		if submitted != nil {
+			published = *submitted
+		}
 	}
 	if head != published {
 		if err := custody.PreserveRecoveryHead(ctx, workDir, run.ID, head); err != nil {
@@ -578,12 +640,7 @@ func isGitAncestor(ctx context.Context, dir, ancestor, descendant string) bool {
 // orphaned once retention exists, so a run in this set is left alone here too,
 // exactly like the removal-scoped sweep reapWorktrees runs for itself later.
 func sweepOrphanRunProcesses(d *db.DB, p *paths.Paths, worktrees []procreap.Worktree, retained map[string]bool) {
-	ctx := context.Background()
 	wtRoot := p.WorktreesDir()
-	pathByRun := make(map[string]string, len(worktrees))
-	for _, wt := range worktrees {
-		pathByRun[wt.RunID] = wt.Dir
-	}
 	procreap.SweepAndLog(procreap.Options{
 		WorktreesRoot: wtRoot,
 		Worktrees:     worktrees,
@@ -592,12 +649,8 @@ func sweepOrphanRunProcesses(d *db.DB, p *paths.Paths, worktrees []procreap.Work
 			if retained[runID] {
 				return true
 			}
-			wtPath := pathByRun[runID]
-			if wtPath == "" {
-				wtPath = filepath.Join(wtRoot, repoID, runID)
-			}
-			skip, _ := skipWorktreeCleanup(ctx, d, runID, wtPath)
-			return skip
+			run, err := d.GetRun(runID)
+			return err != nil || run != nil && (run.Status == types.RunPending || run.Status == types.RunRunning)
 		},
 	}, "daemon_startup")
 }
@@ -804,8 +857,8 @@ func reportUnusableWorktreeRoots(d *db.DB, layout *worktrees.Layout) {
 // cleanupOrphanWorktrees removes worktree directories left behind by runs
 // that are no longer active, for the operator-placed leftovers named by
 // recordedOrphanWorktrees (see worktree_roots in the global config) - that
-// directory is the operator's own, so every eligible leftover there is
-// removed unconditionally, once, at startup. It is DB-aware: a worktree is
+// directory is the operator's own, so only eligible recorded leftovers are
+// considered, once, at startup. It is DB-aware: a worktree is
 // only removed when its run row is terminal, or when there is no matching
 // run row at all. This is what keeps cleanup from deleting the checkout out
 // from under a pipeline that is still actually running (see
@@ -838,7 +891,7 @@ func cleanupOrphanWorktrees(d *db.DB, p *paths.Paths, leftover []db.RunWorktree)
 	sweepRunWorktrees(p.WorktreesDir(), sweepable, "worktree_cleanup")
 
 	for _, wt := range removable {
-		removeOrphanWorktree(ctx, wt)
+		removeOrphanWorktree(ctx, d, wt)
 	}
 	for _, dir := range repoDirs {
 		os.Remove(dir)
@@ -917,10 +970,7 @@ func recordedOrphanWorktrees(d *db.DB, p *paths.Paths, leftover []db.RunWorktree
 	return removable
 }
 
-// removableOrphanWorktree combines the active-run guard with refusal retention.
-// This removal decision does not exempt retained terminal runs from evidence
-// expiry (a separate, unrelated budget); the startup process sweep now applies
-// the same worktree retention policy through retainedDefaultTreeRunIDs.
+// removableOrphanWorktree combines active-run, source, and refusal retention.
 func removableOrphanWorktree(d *db.DB, wt orphanWorktree) bool {
 	if skip, reason := skipWorktreeCleanup(context.Background(), d, wt.runID, wt.dir); skip {
 		slog.Info("skipping worktree cleanup", "path", wt.dir, "reason", reason)
@@ -938,11 +988,15 @@ func removableOrphanWorktree(d *db.DB, wt orphanWorktree) bool {
 	return true
 }
 
-// removeOrphanWorktree removes one run worktree directory its caller has
-// already decided on and swept (see cleanupOrphanWorktrees). It reports
-// whether the directory was actually removed, since git worktree remove and
-// its os.RemoveAll fallback can both fail and merely log a warning.
-func removeOrphanWorktree(ctx context.Context, wt orphanWorktree) bool {
+// removeOrphanWorktree rechecks cleanup eligibility after its caller's process
+// sweep, so workers' shutdown writes cannot be discarded using a stale clean
+// observation. It reports whether the directory was actually removed, since
+// git worktree remove and its os.RemoveAll fallback can both fail and merely
+// log a warning.
+func removeOrphanWorktree(ctx context.Context, d *db.DB, wt orphanWorktree) bool {
+	if !removableOrphanWorktree(d, wt) {
+		return false
+	}
 	gateDir, wtPath := wt.gateDir, wt.dir
 	if err := git.WorktreeRemove(ctx, gateDir, wtPath); err != nil {
 		slog.Warn("git worktree remove failed, falling back to os.RemoveAll", "path", wtPath, "error", err)
@@ -967,16 +1021,12 @@ func removeOrphanWorktree(ctx context.Context, wt orphanWorktree) bool {
 // "no matching run" directory is never one whose insert simply hasn't landed
 // yet - it is safe to remove immediately.
 //
-// A run marked RunCIMonitorInterrupted (the daemon restarted while monitoring
-// CI for an already-open PR, issue #361) is terminal and would otherwise leak
-// its checkout on every future restart. Such a worktree is reclaimed like any
-// other terminal-run leftover EXCEPT when it may hold unpushed work: a CI
-// auto-fix commits locally before pushing (see steps/ci_fix.go), so a crash in
-// that window leaves the only copy of the fix commit in this checkout. We
-// reclaim only when the worktree HEAD equals the head the run already pushed -
-// run.HeadSHA advances solely after a verified push, so a match proves nothing
-// local is unpushed - and fail safe to preservation on any mismatch or
-// unreadable HEAD so recoverable commits are never discarded.
+// An interrupted CI monitor also keeps a checkout whose head differs from the
+// recorded run head: it may hold the only copy of a CI repair committed before
+// publication. That equality is only a continuity guard. Terminal source
+// adoption can set run.HeadSHA to an unvalidated candidate, so it is not proof
+// of publication. terminalWorktreeSourceReason owns the separate source
+// preservation check.
 func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (bool, string) {
 	run, err := d.GetRun(runID)
 	if err != nil {
@@ -984,6 +1034,20 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 	}
 	if run != nil && (run.Status == types.RunPending || run.Status == types.RunRunning) {
 		return true, fmt.Sprintf("run %s is %s", runID, run.Status)
+	}
+	if run != nil {
+		if reason := terminalWorktreeSourceReason(ctx, d, runID, wtPath); reason != "" {
+			return true, reason
+		}
+	}
+	return skipRunArtifactCleanup(ctx, run, wtPath)
+}
+
+// Diagnostic retention keeps the active-run and interrupted-CI guards without
+// inspecting dirty source or recording a worktree preservation observation.
+func skipRunArtifactCleanup(ctx context.Context, run *db.Run, wtPath string) (bool, string) {
+	if run != nil && (run.Status == types.RunPending || run.Status == types.RunRunning) {
+		return true, fmt.Sprintf("run %s is %s", run.ID, run.Status)
 	}
 	if run != nil && run.Status == types.RunCIMonitorInterrupted {
 		if _, statErr := os.Stat(wtPath); errors.Is(statErr, os.ErrNotExist) {
@@ -996,13 +1060,87 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 		}
 		head, err := git.HeadSHA(ctx, wtPath)
 		if err != nil {
-			return true, fmt.Sprintf("run %s ci monitor interrupted; worktree head unreadable (%v); preserving", runID, err)
+			return true, fmt.Sprintf("run %s ci monitor interrupted; worktree head unreadable (%v); preserving", run.ID, err)
 		}
 		if strings.TrimSpace(head) != run.HeadSHA {
-			return true, fmt.Sprintf("run %s ci monitor interrupted; worktree may hold unpushed commits; preserving", runID)
+			return true, fmt.Sprintf("run %s ci monitor interrupted; worktree may hold unpushed commits; preserving", run.ID)
 		}
 	}
 	return false, ""
+}
+
+func terminalWorktreeSourceReason(ctx context.Context, database *db.DB, runID, workDir string) string {
+	if _, err := os.Stat(workDir); errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	if entries, err := os.ReadDir(workDir); err == nil && len(entries) == 0 {
+		return ""
+	}
+	head, headErr := git.HeadSHA(ctx, workDir)
+	dirty, statusErr := git.HasUncommittedChangesIncludingHidden(ctx, workDir)
+	state := "clean:" + head
+	if headErr != nil || statusErr != nil {
+		state = "unreadable"
+	} else if dirty {
+		state = "dirty:" + head
+	}
+	if err := database.RecordTerminalSourceState(runID, state); err != nil {
+		return fmt.Sprintf("run %s source observation cannot be recorded; preserving", runID)
+	}
+	adoption, err := database.GetTerminalAdoption(runID)
+	if err != nil {
+		return fmt.Sprintf("run %s source provenance cannot be read; preserving", runID)
+	}
+	run, err := database.GetRun(runID)
+	if err != nil || run == nil {
+		return fmt.Sprintf("run %s publication provenance cannot be read; preserving", runID)
+	}
+	// An original protected-path refusal can explicitly discard its working
+	// files. That permission never extends to adopted or later committed source.
+	if adoption == nil {
+		adoption, err = database.GetTerminalPredecessor(runID)
+		if err != nil {
+			return fmt.Sprintf("run %s successor provenance cannot be read; preserving", runID)
+		}
+	}
+	if adoption == nil && headErr == nil && statusErr == nil && run.SubmittedHeadSHA != nil && head == *run.SubmittedHeadSHA && head == run.HeadSHA {
+		steps, err := database.GetStepsByRun(runID)
+		if err != nil {
+			return fmt.Sprintf("run %s protected-path disposal authority cannot be read; preserving", runID)
+		}
+		for _, step := range steps {
+			if step.FindingsJSON == nil || !pipeline.HasProtectedPathRefusal(*step.FindingsJSON) || step.Status == types.StepStatusCompleted {
+				continue
+			}
+			if step.Status == types.StepStatusSkipped && (step.Error == nil || *step.Error != types.RunCIMonitorInterruptedReason) {
+				continue
+			}
+			if run.Status == types.RunCancelled && run.Error != nil && *run.Error == types.RunCancelReasonAbortedByUser || step.Error != nil && *step.Error == "aborted by user" {
+				return ""
+			}
+		}
+	}
+	if headErr != nil || statusErr != nil || dirty {
+		return fmt.Sprintf("run %s has dirty or unreadable source; preserving", runID)
+	}
+	if run.LastPushedSHA != nil && *run.LastPushedSHA == head && run.LastPushedAt != nil && run.PushGeneration != nil && *run.PushGeneration > 0 {
+		return ""
+	}
+	if adoption == nil && run.SubmittedHeadSHA != nil && *run.SubmittedHeadSHA == head {
+		return ""
+	}
+	ref := custody.RecoveryRef(runID)
+	if adoption != nil && head == adoption.CandidateSHA {
+		ref = adoption.SourceRef
+	}
+	if symbolic, err := git.Run(ctx, workDir, "symbolic-ref", "-q", ref); err == nil && symbolic != "" {
+		return fmt.Sprintf("run %s preservation anchor is symbolic; preserving", runID)
+	}
+	anchor, exists, err := git.ExactRefTarget(ctx, workDir, ref)
+	if err != nil || !exists || anchor != head {
+		return fmt.Sprintf("run %s has an unpushed correction without an exact preservation anchor; preserving", runID)
+	}
+	return ""
 }
 
 // protectedPathCleanupReason protects only the index and working files. It must
@@ -1161,6 +1299,16 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 
 	srv.Handle(ipc.MethodHealth, func(_ context.Context, _ json.RawMessage) (interface{}, error) {
 		return &ipc.HealthResult{Status: "ok"}, nil
+	})
+	srv.Handle(ipc.MethodRecoverTerminal, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var request ipc.RecoverTerminalParams
+		if err := json.Unmarshal(params, &request); err != nil {
+			return nil, err
+		}
+		return mgr.recoverTerminal(ctx, request, ipc.PeerPID(ctx))
 	})
 
 	srv.Handle(ipc.MethodShutdown, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
@@ -1437,6 +1585,28 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return cfg.ResolvePiProfile(&request)
 	})
 
+	srv.Handle(ipc.MethodValidateAuthored, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		var wire struct {
+			Request   json.RawMessage `json:"request"`
+			CallerDir string          `json:"caller_dir"`
+		}
+		if err := json.Unmarshal(params, &wire); err != nil {
+			return nil, fmt.Errorf("invalid authored admission params: %w", err)
+		}
+		classification, err := classify(ctx, wire.CallerDir, false, false)
+		if err != nil {
+			return nil, err
+		}
+		if classification.Nested {
+			return nil, fmt.Errorf("%s", gatecontext.RefusalMessage(classification))
+		}
+		request, err := authoredvalidation.Decode(wire.Request)
+		if err != nil {
+			return nil, err
+		}
+		return mgr.validateAuthored(ctx, ipc.ValidateAuthoredParams{Request: *request, CallerDir: wire.CallerDir}, ipc.PeerPID(ctx))
+	})
+
 	srv.Handle(ipc.MethodStartFreshRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		if err := refuseNested(ctx, false); err != nil {
 			return nil, err
@@ -1483,6 +1653,17 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			return nil, err
 		}
 		return &ipc.PushReceivedResult{RunID: runID}, nil
+	})
+
+	srv.Handle(ipc.MethodCIHandback, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var request ipc.CIHandbackParams
+		if err := json.Unmarshal(params, &request); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		return mgr.HandleCIHandback(ctx, request)
 	})
 
 	srv.Handle(ipc.MethodRespond, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
@@ -1615,6 +1796,12 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		AwaitingAgentSince: r.AwaitingAgentSince,
 		CreatedAt:          r.CreatedAt,
 		UpdatedAt:          r.UpdatedAt,
+	}
+	family, err := d.ValidationFamily(r.ID)
+	if err != nil {
+		info.AuthoredValidationError = err.Error()
+	} else {
+		info.AuthoredValidation = family
 	}
 	if len(steps) > 0 {
 		info.Steps = make([]ipc.StepResultInfo, 0, len(steps))

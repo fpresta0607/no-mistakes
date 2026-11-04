@@ -232,6 +232,85 @@ func TestReviewStep_DistinctSchemaFailuresAreAttributed(t *testing.T) {
 	}
 }
 
+func noAnswerAttempt(detail string) error {
+	return rejectedSchemaViolation{&agent.NoTextOutputError{Agent: "pi", Detail: detail}}
+}
+
+// TestReviewStep_NoAnswerIsRerunOnceThenFailsWithItsEvidence is
+// code-goblins#1576: a pi review that wrote no answer text was rerun as a
+// formatting slip, so two such turns could spend all three attempts at about
+// forty minutes each. A second turn with no answer fails the step at once, and
+// its error names both turns so the run parks with that evidence.
+func TestReviewStep_NoAnswerIsRerunOnceThenFailsWithItsEvidence(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	attempts := []error{
+		noAnswerAttempt("its final assistant message stopped at the model's output token limit (stopReason=length) and carried only thinking"),
+		noAnswerAttempt("its final assistant message ended with stopReason=stop and carried only thinking"),
+	}
+	calls := 0
+	ag := &mockAgent{
+		name: "pi",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			attempt := attempts[min(calls, len(attempts)-1)]
+			calls++
+			return nil, attempt
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+
+	if err == nil || outcome != nil {
+		t.Fatalf("Execute() = %+v, %v; a review that wrote no answer must never pass", outcome, err)
+	}
+	if len(ag.calls) != reviewNoAnswerMaxAttempts {
+		t.Fatalf("agent calls = %d, want %d: a second turn with no answer must not spend the last attempt", len(ag.calls), reviewNoAnswerMaxAttempts)
+	}
+	for _, want := range []string{
+		"agent review wrote no answer on 2 of 2 attempts, so its findings are unknown, not empty",
+		"attempt 1: agent review: " + attempts[0].Error(),
+		"attempt 2: agent review: " + attempts[1].Error(),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name %q", err, want)
+		}
+	}
+	note, ok := strings.CutPrefix(ag.calls[1].Prompt, ag.calls[0].Prompt)
+	if !ok || !strings.Contains(note, "ended without writing any answer text") || strings.Contains(note, "did not match the review schema") {
+		t.Fatalf("rerun note = %q, want it to name the missing answer, not a schema slip", note)
+	}
+}
+
+// TestReviewStep_NoAnswerRerunCanStillPass keeps the one rerun that succeeded
+// on the same head in code-goblins#1576: a single turn with no answer costs an
+// attempt but not the review.
+func TestReviewStep_NoAnswerRerunCanStillPass(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	calls := 0
+	ag := &mockAgent{
+		name: "pi",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			calls++
+			if calls == 1 {
+				return nil, noAnswerAttempt("its final assistant message stopped at the model's output token limit (stopReason=length) and carried only thinking")
+			}
+			return &agent.Result{Output: json.RawMessage(cleanReviewJSON)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+
+	if err != nil {
+		t.Fatalf("one turn with no answer must rerun the review: %v", err)
+	}
+	if len(ag.calls) != 2 || outcome == nil || outcome.NeedsApproval {
+		t.Fatalf("calls = %d, outcome = %+v; want the rerun's clean review", len(ag.calls), outcome)
+	}
+}
+
 func TestReviewStep_NonSchemaFailuresAreNotRetried(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

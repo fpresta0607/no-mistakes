@@ -240,6 +240,16 @@ func stepGitPush(sctx *pipeline.StepContext, remote, ref, expectedSHA string, fo
 // explicit source SHA (rather than HEAD) is what lets a caller publish exactly
 // the commit it verified, even if the worktree moves underneath it.
 func stepGitPushCommit(sctx *pipeline.StepContext, remote, commitSHA, ref, expectedSHA string, forceWithLease bool) error {
+	if err := sctx.AssertValidationSource(); err != nil {
+		return err
+	}
+	isValidationOnly, err := sctx.IsValidationOnly()
+	if err != nil {
+		return err
+	}
+	if isValidationOnly && commitSHA != sctx.Run.HeadSHA {
+		return fmt.Errorf("validation-only publication must use the exact authored candidate")
+	}
 	args := []string{"push", remote}
 	if forceWithLease {
 		if expectedSHA != "" {
@@ -249,7 +259,7 @@ func stepGitPushCommit(sctx *pipeline.StepContext, remote, commitSHA, ref, expec
 		}
 	}
 	args = append(args, commitSHA+":"+ref)
-	_, err := stepGitRun(sctx, args...)
+	_, err = stepGitRun(sctx, args...)
 	return err
 }
 
@@ -308,7 +318,11 @@ func runShellCommand(ctx context.Context, dir, cmdStr string) (string, int, erro
 }
 
 func runStepShellCommand(sctx *pipeline.StepContext, cmdStr string) (string, int, error) {
-	return runShellCommandWithProcessEnv(sctx.Ctx, sctx.WorkDir, stepEnvironment(sctx), cmdStr)
+	if err := sctx.AssertValidationSource(); err != nil {
+		return "", 0, err
+	}
+	output, exitCode, err := runShellCommandWithProcessEnv(sctx.Ctx, sctx.WorkDir, stepEnvironment(sctx), cmdStr)
+	return output, exitCode, errors.Join(err, sctx.AssertValidationSource())
 }
 
 func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdStr string) (string, int, error) {

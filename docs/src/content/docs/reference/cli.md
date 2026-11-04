@@ -192,7 +192,9 @@ Only attached runs receive plan-aware guidance. Review and Test assess the propo
 `--base-branch` is persisted on the run and honored after resume; the [Pipeline Steps scope rules](/no-mistakes/reference/pipeline-steps/) own its integration and change-scoping behavior.
 Reattaching with a `--base-branch` that differs from the active run's stored target is refused rather than silently discarded; omit the flag to reattach, or abort the active run first.
 `--no-publish-intent` is likewise persisted on the run, and reattaching with it against an active run started without it is refused rather than silently discarded; omit the flag to reattach, or abort the active run first.
-Before starting a run that may omit the section (this flag set, the global `intent.publish_intent` default `false`, or a global config that cannot be read), `axi run` probes the running daemon for the capability and refuses to start anything when that daemon is too old to honor it (an older daemon would silently drop the field, never read the global default, and publish); restart the daemon with the current binary. Only a run that cannot omit (flag unset, global default `true`) may reuse an older daemon. `rerun` always probes, because it inherits omission from the selected prior run and only the daemon knows that selection.
+Before starting a run that may request caller-side omission (this flag set, the global `intent.publish_intent` default `false`, or a global config that cannot be read), `axi run` probes the running daemon for the capability and refuses to start anything when that daemon is too old to honor it (an older daemon would silently drop the field, never read the global default, and could publish); restart the daemon with the current binary.
+Runs without a caller-side omission (flag unset, global default `true`) skip this capability probe.
+`rerun` always probes, because it inherits omission from the selected prior run and only the daemon knows that selection.
 Under the flag the PR-drafting turns receive no intent text at all and draft from the diff and commit messages only; every other step prompt keeps the full intent.
 The same omit-to-reattach rule applies to `--model`/`--effort` against an active run's [pinned Pi profile](/no-mistakes/reference/global-config/#per-run-pi-profiles); a different selection cannot change that pin.
 
@@ -215,15 +217,17 @@ With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` fi
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
 The [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths) are an exception to this automatic handling.
 So is a Test budget-cut gate that reports `test-agent-unvalidated-work`: approval is refused there, so `--yes` stops at it and leaves the choice between `--action fix` and `no-mistakes axi abort` to the operator (see [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout)).
+So is every gate of an [authored validation child](#no-mistakes-axi-validate-authored): it has no repair authority, so `--yes` stops there and leaves the decision to the operator.
 Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.
-Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
+Review gates outside an authored validation child include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
 `--wait` defaults to 8m so an agent harness with a 10-minute tool cap gets a structured error instead of an unbounded hang. It bounds the active-run lookup, event-subscription acknowledgement, and subsequent run driving. Elapsed wait is not a pipeline failure and does not mean the daemon is dead: run `no-mistakes axi status` and reattach with `axi run`. A live daemon that is slow to answer a pre-drive `get_active_run` or `get_run` state read is retried after a health probe rather than reported as an I/O failure or mistaken for an absent run.
 Backgrounding a call is fine for an agent harness, but the run never advances past a gate on its own.
 When the CI step is still monitoring an open PR and checks are green - or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) with no registered checks - `axi run` exits successfully with `outcome: checks-passed` instead of waiting for a human merge. A generic empty check list without that declaration is not ready.
 Treat that as the agent stopping point: ask the user to review and merge the PR from the `help` line.
 If that PR later falls behind the default branch or hits a merge conflict, do not run `axi run`, `rerun`, or a manual rebase while the CI monitor is still running.
-The monitor auto-rebases onto the base, resolves actual conflicts, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push; a PR that is merely behind but clean needs no command.
+When automatic CI repair is enabled, the monitor auto-rebases onto the base, resolves actual conflicts, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push; a PR that is merely behind but clean needs no command.
+For a published GitHub conflict parked with automatic CI repair disabled, see [`axi handback`](#no-mistakes-axi-handback).
 After that monitor ends, see [`no-mistakes rerun`](#no-mistakes-rerun) for the restart conditions.
 Successful outcomes (`checks-passed`, `passed`, `passed-with-override`, and `passed-with-skips`) also carry `help` instructions telling the agent to summarize the run.
 `passed-with-override` is a completed run with an explicitly approved Test exception or a CI approval over still-failing checks.
@@ -264,7 +268,7 @@ A conflicting submitted head, validation generation, intent, or [pinned Pi profi
 A different nonce creates a distinct run rather than reattaching to a same-head run; both post-receive creation and the up-to-date-push fallback follow this contract.
 The up-to-date-push fallback preserves the latest same-head run's PR URL unless its recorded PR state is closed or merged, including when an explicit `--base-branch` retargets that PR.
 An explicit `--base-branch` is persisted on creation and must match the stored per-run base on replay; omitting it on replay preserves the stored base.
-A replay that adds `--no-publish-intent` against a run bound to publish the section is refused for the same reason; the stored omit decision folds in the global [`intent.publish_intent`](/no-mistakes/reference/global-config/#intent) default at creation, so a replay without the flag still matches a run whose row omits publication.
+A replay that adds `--no-publish-intent` against a run without a caller-side omission is refused for the same reason; the stored omit decision folds in the global [`intent.publish_intent`](/no-mistakes/reference/global-config/#intent) default at creation, so a replay without the flag still matches a run whose row omits publication.
 Explicit `--model`/`--effort` must match a stored pin the same way; omitting both preserves it.
 A conflicting claim does not consume the first `created` disposition.
 Without the two proof flags, ordinary reattachment is unchanged, and historical runs without a nonce are not adopted into a proof binding.
@@ -340,6 +344,50 @@ A named harness the daemon cannot run is not skipped: the proved chain then diff
 The selection is stored with the run as the assertion is, replays of the nonce must supply it unchanged, and recovery after a daemon restart applies the stored selection again before it proves it.
 A selection cannot be combined with `--model` or `--effort`, the per-run Pi profile.
 A daemon that proves assertions but cannot apply them refuses the unknown `apply` field, so a selection is never proved without being applied.
+
+## no-mistakes axi validate-authored
+
+Validate one explicitly declared, clean authored commit and tree linked to an immutable terminal predecessor: a failed, cancelled, or `ci_monitor_interrupted` run (which is never resumed), or a completed authored child.
+A branch with authored lineage can therefore validate a follow-up change after its child completes, while a completed run that was not itself admitted through `validate-authored` is refused as a predecessor.
+This is a new validation-only child: the predecessor stays terminal, and every core stage and current trusted custom gate starts fresh without an inherited pass, review approval, CI-ready state, exception or agent session.
+All automatic and manual repair authority is zero, including stages the predecessor never reached.
+Fix selections, skips, CI handbacks, ordinary fresh launches that would drop the lineage, and repair dispatch after restart are refused.
+
+```sh
+no-mistakes axi validate-authored --admission-file admission.json --wait 8m
+```
+
+The input is one operator-owned UTF-8 JSON object, at most 64 KiB, with these fields:
+
+| Fields | Required binding |
+| --- | --- |
+| `predecessor_id`, `snapshot_digest`, `repo_id`, `branch` | The terminal predecessor and its native validation history (run record, gates, steps and rounds, with the repository by ID only); `axi status` reports `terminal_snapshot_digest` and `repository_id` |
+| `caller_dir`, `candidate_sha`, `candidate_tree` | The invoking canonical repository root and full lowercase commit/tree identities; staged, tracked, untracked and submodule changes must all be absent |
+| `launch_nonce`, `validation_generation`, `intent_digest` | The predecessor's preserved launch receipt; the child receives its own fresh nonce and proof |
+| `published_head_sha`, `push_generation`, `push_target_fingerprint` | The predecessor's exact publication binding, verified against the live target and open PR; use `""`, `0`, `""` for an unpublished predecessor |
+| `launch_assertion` | A complete [launch assertion](#launch-assertions) naming the current trusted source and exactly the predecessor's original role selections |
+| `controller_policy` | `{ "sha256": "<64 lowercase hex characters>", "class": "<original class>", "review_cycles": 2 }`, recorded only as the controller's historical assertion, never as a native historical policy fact or a grant of repair authority |
+| `historical_source_completeness` | Exactly `"unknown"`; declaring the authored candidate complete for validation does not certify recovery of missing historical dirty, untracked or later source |
+| `reason` | A nonempty explicit reason, at most 4096 bytes |
+
+The daemon checks the authenticated caller, registered Git identity, exact clean source, immutable predecessor history, launch selection and publication facts before accepting the child.
+The declared candidate must differ from the predecessor's submitted, terminal and published heads; this operation does not replace ordinary validation of those historical targets.
+It imports the exact candidate object without overwriting an author branch or the gate branch.
+Historical findings, failed checks, automatic and manual spending, and the unknown historical source completeness stay attached to the lineage.
+Cumulative spending counts the predecessor and its authored descendants from the native round ledger.
+Runs on the branch before the predecessor are outside that ledger; they appear only through the controller policy assertion and the unknown historical source completeness.
+Later changes to the repository's registered path, URLs or default branch, and custody-return bookkeeping on the predecessor, do not change its validation history; the live publication target is verified again at admission.
+The output and subsequent status include `authored_validation`, cumulative per-stage spending, zero remaining repair authority and `policy_origin: controller_assertion`.
+This command grants no authority to install the candidate or operate another run.
+
+An exact repeated request returns the same admission and child.
+After a crash, an untouched pending acceptance remains idle until the exact request is explicitly replayed and revalidated.
+A progressed child is observed or recovered through its existing execution; a cancelled child is never restarted by replay.
+Later authored descendants must preserve the same controller policy assertion, historical uncertainty and zero repair authority.
+Continuing from a published predecessor requires a GitHub repository with the predecessor's PR open.
+A child that publishes but then cannot run its PR or CI stage fails and cannot itself be continued, so confirm forge access before admission.
+An accepted pending child can be cancelled with `axi abort`.
+Ordinary explicit gate acknowledgements and review-question answers retain their existing meaning; they do not create repair capacity or turn an approved failure into a clean pass.
 
 ## no-mistakes axi respond
 
@@ -437,15 +485,66 @@ Finding descriptions are always rendered in full, so an `ask-user` finding can b
 Relevant current-branch states also include a cached `branch_sync` object with full SHAs, the run's status, the persisted pipeline push binding, target kind and ref, relation, safety result, PR lifecycle, and a structured next action.
 Cached home and status rendering performs no network read and labels the remote observation `pipeline_push`; only explicit sync check or apply reports `live` freshness.
 
+## no-mistakes axi handback
+
+Returns eligible failed published GitHub CI to its author for a correction in the same run.
+
+```bash
+no-mistakes axi sync
+no-mistakes axi handback
+# Preserve the released source, make the correction, and commit.
+no-mistakes axi handback --resume --receipt <id>
+```
+
+Release requires the latest branch run's CI `awaiting_approval` gate, automatic CI repair disabled (`auto_fix.ci: 0`), and every preceding required step completed.
+A published GitHub CI merge conflict requires an unresolved merge-conflict finding and a clean, synchronized caller.
+An ordinary handback requires genuine provider-structured failed checks, exact completed Review and Test evidence for the published head, and no review-bot, transient, safety or protected-path refusal.
+An ordinary caller may be clean and genuinely divergent; release anchors its original head and the exact published head in both repositories without moving its branch.
+Follow `branch_sync.next_action.command` to integrate that preserved published output additively before committing the correction.
+Behind callers use the existing guarded synchronization first; dirty callers retain their work and refuse release.
+The daemon verifies the managed worktree, gate lane, live PR identity and head, live push target, branch ref and push generation before recording the receipt.
+Dirty callers, moved heads, active writers, ambiguous ownership and mismatched publication evidence refuse without moving the caller or resolving the gate.
+
+The run stays active and CI stays `awaiting_approval` with its failed findings intact.
+Release invokes no fixer and records no approve, skip or declined-finding decision.
+It reserves the gate against ordinary responses and automatic reconciliation while the caller works.
+The receipt retains the run, PR, released head, base head and push provenance; previous validation rounds and repair selections remain unchanged.
+`axi status` exposes `ci_handback.state: released` alongside the original findings.
+Release returns `handback: released`, the run ID, PR URL, full `released_head`, and a native `receipt` containing its ID, run/repository/branch, original caller directory/head, current/published heads, publication generation, CI round and state.
+
+`--resume --receipt <id>` accepts a changed, clean head from that same caller worktree only after proving that it preserves the released published head and original author history.
+Conflict receipts additionally require the recorded and freshly resolved live PR base heads through an additive merge.
+It imports the head without a receive-hook push, revokes the previous review approval and readiness, and restarts Review, Test, Document, Lint, Push, PR and CI in the same run.
+The original intent, submitted head, PR identity, round history and spent automatic repair budget remain intact.
+The integration proof replaces another rebase; publication preserves the accepted follow-up, including the released head, as an ancestor and refuses any update requiring force.
+Fresh required validation and live checks must establish readiness for the resulting concrete head.
+Resubmission returns the full `accepted_head` and follows the next decision point, bounded by `--wait` (default `8m`).
+After acceptance, `axi status` reports `ci_handback.state: accepted` and the full `accepted_head`.
+Acceptance records the exact candidate checkpoint before moving the managed head; if acceptance fails, it restores the released managed head only while that checkpoint still matches.
+[Crash recovery](/no-mistakes/concepts/daemon/#crash-recovery) owns interrupted resubmissions and reservations whose recovery evidence cannot be verified.
+Ordinary handback parks survive orderly daemon restart without turning failed CI into success or recreating cancelled work.
+Storage failures retain the source and durable reservation; exact accepted retries return the same receipt without restarting validation.
+The IPC method remains `ci_handback`; the daemon binds the source, native receipt, CI round, exact publication and authenticated operator.
+The CLI selects only the current branch's active run and accepts no `--run` override.
+
+Wrappers can require an exact identity with `--expect binding.json` on release and resume.
+The file must contain exactly `repo_id`, `run_id`, `branch`, `caller_dir`, `caller_head`, `current_head`, `published_head` and `push_generation`.
+Use the canonical absolute invoking worktree root, full lowercase commit IDs and a positive publication generation.
+These fields are comparisons, never a selector that adopts another or newer run.
+On resume, `caller_head` is the authored correction; `current_head`, `published_head` and `push_generation` remain the original released binding.
+Unknown or missing fields, changed identities and a wrong receipt refuse before custody changes.
+If the bounded resume wait ends, its structured output still includes the accepted native receipt; inspect progress with `axi status` or reattach with `axi run`.
+
 ## no-mistakes axi sync
 
-Freshly check or apply the guarded synchronization offered by a `branch_sync.next_action`.
+Freshly check or apply guarded synchronization, return branch custody, or explicitly continue terminal validation.
 
 ```sh
 no-mistakes axi sync --check
 no-mistakes axi sync
 no-mistakes axi sync --recover
 no-mistakes axi sync --recover --keep-local
+no-mistakes axi sync --recover --continue --reason "validate preserved source"
 no-mistakes axi sync --bind-archive-ref refs/heads/archive/<name>
 no-mistakes axi sync --adopt-published
 ```
@@ -455,20 +554,23 @@ no-mistakes axi sync --adopt-published
 | `--check`            | `bool`   | `false` | Verify the live target and exact plan without changing `HEAD`                |
 | `--recover`          | `bool`   | `false` | Return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation already released the branch), or perform `recover_remote_rewritten` |
 | `--keep-local`       | `bool`   | `false` | With `--recover`: keep the current local head; never touches the worktree   |
+| `--continue`         | `bool`   | `false` | With `--recover --reason`: adopt bound terminal source as an unvalidated successor |
+| `--reason`           | `string` | (none)  | Explicit operator reason required by terminal continuation |
 | `--bind-archive-ref` | `string` | (none)  | Bind one existing `refs/heads/archive/*` commit as exact evidence for a keep-local recovery; never creates or moves a Git ref |
 | `--adopt-published`  | `bool`   | `false` | Adopt a clean diverged local head into its stale gate lane only when the configured push target has that exact head |
 
 The default command is an explicit non-interactive apply request and never prompts.
-All modes return the complete `branch_sync` object as TOON.
+Ordinary synchronization modes return the complete `branch_sync` object as TOON.
 Exit code `0` means an eligible check, applied synchronization or recovery, already-synchronized, a live-verified custody-returned no-op, a user-owned no-op, or an expected merged-and-removed no-op; blocked operational states return `1`.
 The ordinary worktree mutation is either a strict fast-forward of the invoking clean checked-out branch to the freshly verified pipeline-owned pushed SHA, or an equivalent-diverged advance.
 When a clean local branch and the pipeline-pushed head are diverged but the local unique work is content-equivalent to work already represented in the live pipeline head, `sync` reports `safety: safe_equivalent_advance`, anchors the pre-sync head under `refs/no-mistakes/sync-anchor/<run>`, and moves to the pipeline head with reset semantics.
 Genuine divergence still reports `safety: blocked_diverged` and changes nothing during ordinary synchronization.
-Under `--recover`, the possible worktree mutation is a strict fast-forward to the preserved pipeline head, or an adoption of a preserved head proven to carry every local change, both after relation-specific preservation checks. The bound-archive exception described below never changes the worktree at all.
+Without `--continue`, `--recover` can fast-forward to the preserved pipeline head or adopt a preserved head proven to carry every local change, both after relation-specific preservation checks.
+The bound-archive exception described below never changes the worktree at all.
 When the local gate branch is exactly at a newer same-branch pushed binding and Git proves that an older terminal run's unpublished preserved head is its ancestor, branch synchronization selects the newer binding; missing gate evidence, non-ancestor heads, or different or ambiguous target provenance remain blocked.
 Fork configurations verify the configured fork URL and exact feature ref rather than assuming `origin`.
 Dirty, in-progress, ahead, genuinely diverged, detached, wrong-branch, offline, changed-target, rewritten, deleted, legacy, or retired states fail closed without destructive recovery.
-Run `axi sync` only when structured output offers `next_action.code: sync`; process any blocked state instead of substituting reset, stash, merge, rebase, force, or branch replacement.
+For ordinary synchronization, run `axi sync` only when structured output offers `next_action.code: sync`; process any blocked state instead of substituting reset, stash, merge, rebase, force, or branch replacement.
 
 ### Rewritten push target recovery
 
@@ -510,6 +612,52 @@ A verified archive plan reports its evidence in `branch_sync.recovery`, keeps `n
 For the alternative validation path and its refusal conditions, see [`no-mistakes rerun`](#no-mistakes-rerun); it is not offered for the archive-backed keep-local plan.
 A recovered never-pushed run reports `state: custody_returned`; a recovered pushed run reports its ordinary classification against the last push binding, typically `local_ahead`.
 On a `user_owned` branch, `--recover` is an idempotent no-op success: nothing pipeline-created exists to recover, and no file, ref, or database row changes.
+
+### Continue validation of preserved terminal source
+
+`axi sync --recover --continue --reason "validate preserved source"` explicitly accepts committed source into one fresh-validation successor of the current branch's terminal run.
+The predecessor's status, source, steps, findings, rounds, decisions and launch receipt remain immutable while the repository stays registered; [`eject`](#no-mistakes-eject) removes that history with the repository record.
+Initial acceptance requires the latest run on the current repository and branch to be terminal, neither completed nor custody-returned.
+It requires the complete recorded pipeline with completed Intent and Rebase, no deliberately skipped required step, and the original bound launch selection and frozen policy.
+A branch with validation-only [authored lineage](#no-mistakes-axi-validate-authored) refuses, so that lineage never regains repair authority.
+Active parked CI adoption and conflict handback use their own operations.
+This command accepts no caller-selected run or candidate SHA.
+Use it without `--check`, `--keep-local`, `--adopt-published`, or `--bind-archive-ref`.
+
+The source must be the run's clean managed checkout at the recorded head or a descendant, or the exact verified recovery anchor when the managed checkout is missing.
+Initial acceptance of a missing checkout also requires a recorded clean-source observation bound to that commit.
+A clean caller correction may be selected when it descends from the retained reviewed or published output and contains the complete retained terminal history.
+Dirty, unreadable, contradictory, symbolic, or unbound source refuses; unavailable uncommitted files are never reconstructed from a commit.
+When the caller remains at an original recorded head, its tracked and untracked edits remain untouched and are not adopted.
+The exact candidate and tree, fresh clean retained-source observation, independent gate lane and source anchors are bound in the appended adoption record.
+An accepted clean observation is source provenance, not Review or terminal verification.
+
+For a published predecessor, the current target/ref, publication generation, open PR identity, branch and public head must still match its binding.
+Published terminal continuation currently requires GitHub PR identity verification.
+Its live base must equal the freshly resolved validation base; a mismatch refuses rather than reviewing a different change range.
+The successor explicitly inherits the public binding and generation, and a future authorized push advances that generation normally.
+Acceptance performs no push, attestation update or check approval.
+
+Acceptance atomically appends the source binding and creates a pending successor with its own fresh launch nonce and proof.
+The same model, effort and agent chain are freshly proved against the current trusted default-branch source under the frozen policy.
+No Review, Test, CI-ready or terminal-verification authority is copied.
+Intent, Rebase, full Review, Test and the remaining required gates execute afresh through the normal pipeline.
+The successor pins the current trusted repository gates at acceptance; the predecessor keeps its original pin.
+The predecessor-linked phase ledger includes actual manual and automatic fixes and dispatched attempts interrupted before a round was recorded.
+Automatic repair capacity cannot exceed the original remaining allowance; an exhausted phase receives no renewed capacity.
+A newly required phase without a recorded predecessor allowance receives zero automatic repairs.
+A phase the predecessor never started spent nothing and keeps its configured allowance.
+Further manual repairs require explicit gate decisions and remain recorded as additional spending.
+
+The result reports `adopted_unvalidated`, the successor `run`, `predecessor`, exact `candidate` and `candidate_tree`, adoption ID, cumulative `phase_budgets` and whether validation started.
+Use `axi status` and ordinary gate responses to inspect and drive the successor.
+Branch synchronization and `--recover` then follow the successor; the adopted predecessor no longer holds the branch.
+Unless the caller stood at the candidate, its commits stay pipeline-owned until the successor publishes them or `--recover` fast-forwards the branch to them, and [`no-mistakes rerun`](#no-mistakes-rerun) selects the candidate as the successor's unpublished head.
+When a run's custody record cannot be read, branch synchronization holds the branch as `pipeline_owned` with `safety: blocked_custody_unreadable`, and recovery and rerun refuse.
+An exact repeat returns the same durable child only while its identity and pending acceptance remain untouched.
+It may start that pending child's first execution after rechecking source and launch provenance.
+Changed, progressed, failed or cancelled successors refuse; the command never reopens the predecessor or silently reruns a terminal executor.
+A later trusted-source change refuses reuse of the appended proof.
 
 ## no-mistakes axi logs
 
@@ -560,6 +708,8 @@ Use it to reap an orphaned CI monitor whose worktree was torn down before the PR
 A `--run` id that is not currently active is resolved against the exact run's durable record rather than trusted blindly: a known already-terminal run returns an idempotent success carrying its terminal `run_status` with no fabricated new cancellation, a positively proven unknown id keeps the documented successful no-op with no fabricated state, and a run that is recorded as still nonterminal or cannot be read returns the nonzero terminal-unconfirmed contract.
 When the daemon is not running, nothing can be cancelled and abort never starts one: the durable record alone decides the same three outcomes, and a recorded nonterminal run reports that cancellation could not be requested.
 When the daemon is already running, `axi abort` can cancel an active run even if the global config file has become invalid, because it is not starting a fresh run.
+If restart retained a released CI handback but could not restore its executor, abort can still terminate that reservation after verifying its unchanged recorded publication binding and unresolved CI round, completed preceding steps, and absence of an executor, active writers, candidate or accepted follow-up.
+That cancellation preserves source, receipts, findings, validation and decision history, actual execution spend and repair limits; it does not approve failed CI or allow the cancelled handback to resume.
 Both abort surfaces report a completed cancellation only after the exact run positively confirms a terminal state within the bounded wait; success then includes the terminal `run_status`, and branch-scoped abort renders the refreshed `branch_sync` object and its exact next action, if any.
 When terminal quiescence cannot be confirmed - the bounded wait expires, the wait is cancelled, or a status read fails - abort exits nonzero, states explicitly that cancellation was requested but terminal quiescence is unconfirmed, includes the last structured run state when one is available, and never claims `aborted: true` or presents user-owned or recoverable ownership guidance as authoritative; re-run the abort or watch `axi status --run <id>` until a terminal status is confirmed.
 Pipeline-created commits remain preserved in the gate and a recoverable cancellation points directly to `no-mistakes axi sync --recover`; when the submitted head never moved, cancellation instead reports `state: user_owned` with no sync action.

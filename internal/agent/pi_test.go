@@ -616,6 +616,80 @@ printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"
 	}
 }
 
+// TestPiAgent_RunNamesWhyAReviewWroteNoText is code-goblins#1576: a pi review
+// ran 47 minutes and 182,072 output tokens, then exited 0 with no answer text,
+// and the gate saw only "pi returned no text output". The recorded turn here
+// is cut at the output token limit with reasoning only; the error must say so
+// and stay a typed no-text rejection the review step can tell from a slip.
+func TestPiAgent_RunNamesWhyAReviewWroteNoText(t *testing.T) {
+	const message = `{"role":"assistant","responseId":"r9","stopReason":"length","content":[{"type":"thinking","thinking":"checking the diff"}],"usage":{"input":40,"output":32000,"cacheRead":900,"cacheWrite":0,"reasoning":32000}}`
+	bin := writeFakePi(t, t.TempDir(), `#!/bin/sh
+cat > /dev/null
+printf '%s\n' '{"type":"message_end","message":`+message+`}'
+printf '%s\n' '{"type":"agent_end","messages":[`+message+`]}'
+`, strings.Join([]string{
+		"@echo off",
+		"more > nul",
+		`echo {"type":"message_end","message":` + message + `}`,
+		`echo {"type":"agent_end","messages":[` + message + `]}`,
+	}, "\r\n"))
+
+	result, err := (&piAgent{bin: bin}).Run(context.Background(), RunOpts{
+		Prompt:     "review",
+		CWD:        t.TempDir(),
+		JSONSchema: json.RawMessage(`{"type":"object"}`),
+	})
+
+	var noText *NoTextOutputError
+	if !errors.As(err, &noText) || !IsStructuredOutputRejected(err) {
+		t.Fatalf("err = %v, want a structured-output rejection carrying NoTextOutputError", err)
+	}
+	want := "pi returned no text output: its final assistant message stopped at the model's output token limit (stopReason=length) and carried only thinking; it spent 32000 output tokens, 32000 of them reasoning"
+	if err.Error() != want {
+		t.Fatalf("err = %q\nwant  %q", err, want)
+	}
+	if result == nil || result.Usage.OutputTokens != 32000 {
+		t.Fatalf("result = %+v, want the turn's usage kept", result)
+	}
+}
+
+func TestPiParser_NoTextDetailNamesTheFinalMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stream string
+		want   string
+	}{
+		{
+			name:   "reasoning only",
+			stream: `{"type":"message_end","message":{"role":"assistant","stopReason":"stop","content":[{"type":"thinking","thinking":"done"},{"type":"text","text":" "}],"usage":{"output":12}}}`,
+			want:   "its final assistant message ended with stopReason=stop and carried only thinking, blank text; it spent 12 output tokens",
+		},
+		{
+			name:   "no content",
+			stream: `{"type":"message_end","message":{"role":"assistant","content":[]}}`,
+			want:   "its final assistant message reported no stopReason and carried no content",
+		},
+		{
+			name:   "no assistant message",
+			stream: `{"type":"agent_end","messages":[]}`,
+			want:   "pi reported no assistant message",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pp := &piParser{}
+			if err := pp.parse(context.Background(), strings.NewReader(tc.stream)); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+
+			got := pp.noTextDetail()
+
+			if got != tc.want {
+				t.Fatalf("detail = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPiAgent_RunSurfacesNonZeroExit(t *testing.T) {
 	dir := t.TempDir()
 	bin := writeFakePi(t, dir, `#!/bin/sh

@@ -10,9 +10,96 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestPRPrivateValidationIntentIsNotPublishedByDefault(t *testing.T) {
+	t.Parallel()
+	const privateIntent = "Fix the request parser.\nExecution: use the internal deployment runbook.\nAuthentication scope: private-service only."
+	for _, policy := range []string{"pr: {}", "pr: {publish_intent: false}"} {
+		for _, path := range []string{"ordinary", "fallback", "template", "title"} {
+			t.Run(policy+"/"+path, func(t *testing.T) {
+				sctx, ag, _ := templateTestContext(t)
+				if path != "template" {
+					sctx.Config.PR.Template = ""
+				}
+				trusted, err := config.LoadRepoFromBytes([]byte(policy))
+				if err != nil {
+					t.Fatal(err)
+				}
+				pushed, err := config.LoadRepoFromBytes([]byte("pr: {publish_intent: true}"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				sctx.Config.PR.PublishIntent = config.Merge(config.DefaultGlobalConfig(), config.EffectiveRepoConfig(pushed, trusted, true)).PR.PublishIntent
+				sctx.UserIntent = privateIntent
+				sctx.IntentSource = db.RunIntentSourceAgent
+				sctx.ClosingIssueRefs = []string{"50"}
+				if err := sctx.DB.UpdateRunIntent(sctx.Run.ID, db.RunIntent{Summary: privateIntent, Source: db.RunIntentSourceAgent}); err != nil {
+					t.Fatal(err)
+				}
+				insertCompletedStep(t, sctx, types.StepTest, findingsJSON(t, types.Findings{TestingSummary: "Request parser regression passed."}), "")
+				if path == "fallback" {
+					ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+						return nil, errors.New("draft unavailable")
+					}
+				}
+
+				var content prContent
+				if path == "title" {
+					content.Title, err = (&PRStep{}).draftConfiguredPRTitle(sctx, "feature", "main", sctx.Run.BaseSHA)
+				} else {
+					content, err = (&PRStep{}).buildPRContent(sctx, "feature", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0)
+				}
+
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(ag.calls) == 0 {
+					t.Fatal("no public drafting turn ran")
+				}
+				for _, call := range ag.calls {
+					if strings.Contains(call.Prompt, privateIntent) || strings.Contains(call.Prompt, "USER INTENT") {
+						t.Error("public drafting turn received private validation intent")
+					}
+				}
+				if strings.Contains(content.Body, "## Intent") || strings.Contains(content.Body, "Authentication scope:") {
+					t.Error("PR body published operational instructions")
+				}
+				if path != "title" {
+					if !strings.Contains(content.Body, "Request parser regression passed.") || !strings.Contains(content.Body, "Closes #50") {
+						t.Error("public body lost test evidence or the requested issue reference")
+					}
+					if got := parsePipelineAttestationForTest(t, content.Body).HeadSHA; got != sctx.Run.HeadSHA {
+						t.Errorf("attestation head = %q, want %q", got, sctx.Run.HeadSHA)
+					}
+				}
+				stored, err := sctx.DB.GetRun(sctx.Run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if stored.Intent == nil || *stored.Intent != privateIntent || stored.IntentSource == nil || *stored.IntentSource != db.RunIntentSourceAgent {
+					t.Fatal("publication changed the stored validation intent or source")
+				}
+				if !strings.Contains(userIntentPromptSection(sctx), privateIntent) || !intentSourceIsAuthoritative(sctx) {
+					t.Fatal("private validation lost its complete authoritative requirements")
+				}
+			})
+		}
+	}
+}
+
+func TestPRIntentWithoutConfigurationStaysPrivate(t *testing.T) {
+	t.Parallel()
+	for _, sctx := range []*pipeline.StepContext{nil, {UserIntent: "private brief"}} {
+		if publicPRIntent(sctx) != "" || prDraftIntentPromptSection(sctx) != "" {
+			t.Fatal("missing configuration permitted intent publication")
+		}
+	}
+}
 
 func TestPROmitIntentSuppressionIsTightenOnly(t *testing.T) {
 	t.Parallel()
@@ -23,7 +110,8 @@ func TestPROmitIntentSuppressionIsTightenOnly(t *testing.T) {
 		wantIntSection bool
 	}{
 		// Without the stamp the repository's trusted policy alone decides.
-		{name: "default publishes", runOmitIntent: false, repoPolicy: "pr: {}", wantIntSection: true},
+		{name: "default keeps private", runOmitIntent: false, repoPolicy: "pr: {}", wantIntSection: false},
+		{name: "trusted opt-in publishes", runOmitIntent: false, repoPolicy: "pr: {publish_intent: true}", wantIntSection: true},
 		// The run stamp removes the section even where the repo publishes.
 		{name: "run stamp removes", runOmitIntent: true, repoPolicy: "pr: {}", wantIntSection: false},
 		{name: "run stamp removes with repo publish", runOmitIntent: true, repoPolicy: "pr: {publish_intent: true}", wantIntSection: false},
@@ -53,9 +141,7 @@ func TestPROmitIntentSuppressionIsTightenOnly(t *testing.T) {
 			if !strings.Contains(got.Body, "## What Changed") {
 				t.Fatalf("body lost its main section:\n%s", got.Body)
 			}
-			// The repository policy alone never withholds the intent from the
-			// drafter; the caller-side omission does (see the test below).
-			if got := strings.Contains(ag.calls[len(ag.calls)-1].Prompt, sctx.UserIntent); got == tc.runOmitIntent {
+			if got := strings.Contains(ag.calls[len(ag.calls)-1].Prompt, sctx.UserIntent); got != tc.wantIntSection {
 				t.Fatalf("drafting prompt contains intent = %v under runOmit=%v", got, tc.runOmitIntent)
 			}
 		})
@@ -87,6 +173,8 @@ func TestPROmitIntentWithholdsIntentFromDraftingTurns(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			sctx, ag := tc.setup(t)
 			sctx.UserIntent = secret
+			yes := true
+			sctx.Config.PR.PublishIntent = &yes
 			sctx.Run.OmitIntent = true
 			got, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0)
 			if err != nil {
@@ -119,7 +207,7 @@ func TestPRPublishIntentSuppressionCoversDefaultAgentAndFallback(t *testing.T) {
 		publish *bool
 		want    bool
 	}{
-		{"default", nil, true},
+		{"default", nil, false},
 		{"enabled", &yes, true},
 		{"disabled", &no, false},
 	} {
@@ -154,10 +242,10 @@ func TestPRPublishIntentSuppressionCoversDefaultAgentAndFallback(t *testing.T) {
 					}
 					t.Logf("Generated PR markdown: policy=%s fallback=%v limit=%d\n%s", tc.name, fallback, limit, got.Body)
 					if tc.want && !strings.Contains(got.Body, "## Intent\n\n"+sctx.UserIntent) {
-						t.Fatalf("default/enabled publication lost intent: %s", got.Body)
+						t.Fatalf("explicit publication lost intent: %s", got.Body)
 					}
-					if !strings.Contains(ag.calls[len(ag.calls)-1].Prompt, sctx.UserIntent) {
-						t.Fatal("suppression removed full intent from model context")
+					if got := strings.Contains(ag.calls[len(ag.calls)-1].Prompt, sctx.UserIntent); got != tc.want {
+						t.Fatalf("drafting prompt contains intent = %v, want %v", got, tc.want)
 					}
 				}
 			}

@@ -57,17 +57,58 @@ func resolvePipelineAgentRoles(ctx context.Context, cfg *config.Config, lookPath
 }
 
 func (m *RunManager) newRunPipelineAgent(ctx context.Context, run *db.Run, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error), environment runenv.Overlay) (agent.Agent, error) {
+	family, err := m.db.ValidationFamily(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if family != nil {
+		if family.HasChildRepairs {
+			return nil, fmt.Errorf("validation-only child contains a forbidden repair selection")
+		}
+		cfg.AutoFix, cfg.SideBySide = config.AutoFix{}, false
+	}
 	if err := run.LaunchAssertionProof.Check(run.LaunchAssertion); err != nil {
 		return nil, err
 	}
 	if run.LaunchAssertion == nil {
 		return newPipelineAgent(ctx, cfg, evidenceRoot, lookPath, environment)
 	}
-	roleConfigs, _, err := prepareLaunchAssertion(ctx, run.LaunchAssertion, cfg, lookPath)
+	expected := run.LaunchAssertion
+	event, err := m.db.GetTerminalPredecessor(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if event != nil {
+		if !event.Assertion.Matches(run.LaunchAssertion) || event.Snapshot.Run.LaunchValidationGeneration == nil || run.LaunchValidationGeneration == nil || *event.Snapshot.Run.LaunchValidationGeneration != *run.LaunchValidationGeneration {
+			return nil, fmt.Errorf("terminal recovery launch provenance conflicts with the original receipt")
+		}
+		if err := event.Proof.Check(event.Assertion); err != nil {
+			return nil, err
+		}
+		expected = event.Assertion
+		freezeTerminalLimits(cfg, &event.Snapshot)
+	}
+	roleConfigs, _, err := prepareLaunchAssertion(ctx, expected, cfg, lookPath)
 	if err != nil {
 		return nil, err
 	}
 	return newResolvedPipelineAgent(cfg, roleConfigs, evidenceRoot, environment)
+}
+
+func prepareTerminalLaunch(ctx context.Context, run *db.Run, cfg *config.Config, lookPath func(string) (string, error)) (*launchassert.Expectation, *launchassert.Proof, map[string]*config.Config, error) {
+	if run.LaunchAssertion == nil || run.LaunchValidationGeneration == nil || *run.LaunchValidationGeneration == "" {
+		return nil, nil, nil, fmt.Errorf("terminal recovery needs the original bound launch selection and frozen policy")
+	}
+	if err := run.LaunchAssertionProof.Check(run.LaunchAssertion); err != nil {
+		return nil, nil, nil, err
+	}
+	fresh := *run.LaunchAssertion
+	fresh.TrustedSHA = cfg.TrustedConfigSHA
+	roles, proof, err := prepareLaunchAssertion(ctx, &fresh, cfg, lookPath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return &fresh, proof, roles, nil
 }
 
 // applyLaunchSelection gives a run the agents its launch selection names,

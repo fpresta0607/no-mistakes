@@ -75,12 +75,17 @@ func isAxiWaitElapsed(parent, drive context.Context, err error) bool {
 	return deadlinePassed(drive)
 }
 
-func emitAxiWaitElapsed(cmd *cobra.Command, wait time.Duration, reattach string) error {
-	return emitError(cmd, 1, fmt.Sprintf("wait of %s elapsed while driving the run", wait),
-		"This bounded hold ended; it is not a pipeline failure and does not mean the daemon is dead.",
-		"Run `no-mistakes axi status` to inspect progress",
-		fmt.Sprintf("Re-run `%s` to reattach for another %s", reattach, wait),
+func emitAxiWaitElapsed(cmd *cobra.Command, wait time.Duration, reattach string, lead ...toon.Field) error {
+	fields := append(lead,
+		toon.Field{Key: "error", Value: fmt.Sprintf("wait of %s elapsed while driving the run", wait)},
+		toon.Field{Key: "help", Value: []string{
+			"This bounded hold ended; it is not a pipeline failure and does not mean the daemon is dead.",
+			"Run `no-mistakes axi status` to inspect progress",
+			fmt.Sprintf("Re-run `%s` to reattach for another %s", reattach, wait),
+		}},
 	)
+	emitDoc(cmd, fields...)
+	return &exitError{code: 1}
 }
 
 // terminalStatus reports whether a run has reached a final state.
@@ -367,6 +372,9 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		return emitError(cmd, 2, "--verification-plan is accepted only when starting a new run; omit it to reattach")
 	}
 	if runID == "" {
+		if err := env.d.RefuseUnlinkedValidation(env.repo.ID, branch); err != nil {
+			return emitError(cmd, 1, err.Error())
+		}
 		if err := configErrorForFreshAxiRun(env, runID); err != nil {
 			return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
 		}
@@ -587,6 +595,15 @@ func activeRunInfo(ctx context.Context, env *axiEnv, branch, headSHA string) (*i
 	if err := source.callWithSlowReplyRetry(ctx, ipc.MethodGetActiveRun, activeRunLookupParams(env.repo.ID, branch), &active); err != nil {
 		return nil, err
 	}
+	if active.Run != nil && !terminalStatus(string(active.Run.Status)) {
+		handback, err := env.d.LatestCIHandback(active.Run.ID)
+		if err != nil {
+			return nil, err
+		}
+		if handback != nil && handback.AcceptedHead != nil && *handback.AcceptedHead == headSHA {
+			return active.Run, nil
+		}
+	}
 	return activeRunInfoForHead(active.Run, headSHA), nil
 }
 
@@ -715,6 +732,22 @@ func inspectAxiBranchSync(ctx context.Context, env *axiEnv) branchsync.State {
 
 func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.State {
 	state := inspectAxiBranchSync(ctx, env)
+	if state.Pipeline.Status == "pending" || state.Pipeline.Status == "running" {
+		handback, err := env.d.LatestCIHandback(state.Pipeline.RunID)
+		if err != nil || handback != nil {
+			state.State = branchsync.StatePipelineOwned
+			state.Safety = "blocked_ci_handback"
+			state.Error = "this run retains its CI handback and budget history; inspect no-mistakes axi status for its exact receipt-bound continuation"
+			if err != nil {
+				state.Error = err.Error()
+			}
+			state.NextAction = &branchsync.NextAction{Code: "inspect_ci_handback", Command: "no-mistakes axi status"}
+			if err == nil {
+				state.NextAction = &branchsync.NextAction{Code: "resume_ci_handback", Command: "no-mistakes axi handback --resume --receipt " + handback.ID}
+			}
+			return &state
+		}
+	}
 	switch state.State {
 	case branchsync.StatePipelineOwned:
 		// The ownership block exists to keep a fresh push from discarding
@@ -1113,6 +1146,9 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 		if run == nil {
 			return nil, false, fmt.Errorf("run %s not found", runID)
 		}
+		if run.AuthoredValidationError != "" {
+			return nil, false, fmt.Errorf("validation family provenance is unreadable: %s", run.AuthoredValidationError)
+		}
 		pp.update(run)
 
 		rv := runViewFromIPC(run)
@@ -1120,7 +1156,7 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			return run, false, nil
 		}
 		if gate, ok := rv.awaitingStep(); ok {
-			if !autoApprove {
+			if !autoApprove || run.HasAuthoredValidation() {
 				return run, false, nil
 			}
 			if pipeline.HasProtectedPathRefusal(gate.FindingsJSON) {
@@ -1299,6 +1335,9 @@ func sendRespond(client *ipc.Client, runID string, step types.StepName, action t
 // fields, when given, open the document ahead of the run object, so a command
 // that did something before driving (axi answer) reports it in the same return.
 func renderDriveResult(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool, lead ...toon.Field) error {
+	if run.AuthoredValidationError != "" {
+		return emitError(cmd, 1, "validation family provenance is unreadable: "+run.AuthoredValidationError)
+	}
 	rv := runViewFromIPC(run)
 	fields := append(append([]toon.Field{}, lead...), runObjectField(rv))
 	hasBranchSync := false

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -472,8 +473,8 @@ func (lane *sideLane) adopt(sctx *pipeline.StepContext) string {
 		if err := lane.bringLeftovers(sctx); err != nil {
 			return fmt.Sprintf("what it left in its copy could not be brought over (%v)", err)
 		}
-		if _, passed, recorded := lane.shared.Baseline(); recorded {
-			sctx.Shared.RecordBaseline(lane.head, passed)
+		if _, comparison, passed, recorded := lane.shared.Baseline(); recorded {
+			sctx.Shared.RecordBaseline(lane.head, comparison, passed)
 		}
 	case types.StepDocument:
 		if strings.TrimSpace(lane.leftover) != "" {
@@ -636,12 +637,16 @@ func isDocumentationPath(sctx *pipeline.StepContext, path string) bool {
 // commit is the one the review started on, and the documentation pass, the
 // lint step and the formatter may all have added commits since.
 //
-// It always says which commits those are. When they touch more than
-// documentation, and a baseline is configured and passed on the tested
-// commit, it runs the baseline again on head. A baseline that does not pass
-// there stops the push: the run goes back to the Test step once, which owns
-// failing tests and their fix rounds, and a second failure fails the run with
-// nothing pushed.
+// A configured baseline requires Test's recorded comparison from this daemon
+// lifetime. Missing or malformed proof refuses the push rather than resolving
+// a new comparison.
+//
+// It names those commits when the comparison is proven or no baseline is
+// configured. When they touch more than documentation, and a baseline is
+// configured and passed on the tested commit, it runs the baseline again on
+// head. A baseline that does not pass there stops the push: the run goes back
+// to the Test step once, which owns failing tests and their fix rounds, and a
+// second failure fails the run with nothing pushed.
 //
 // It returns the note to record on the step, and whether to go back to Test.
 func baselineBeforePush(sctx *pipeline.StepContext, head string) (note string, restart bool, err error) {
@@ -665,7 +670,12 @@ func baselineBeforePush(sctx *pipeline.StepContext, head string) (note string, r
 
 	testCmd := strings.TrimSpace(sctx.Config.Commands.Test)
 	hasBaseline := testCmd != "" || len(sctx.Config.CommandOverrides["test"].Additional) > 0
-	tested, passed, recorded := sctx.Shared.Baseline()
+	tested, comparison, passed, recorded := sctx.Shared.Baseline()
+	if hasBaseline {
+		if err := config.ValidateTestComparisonSHA(comparison); err != nil {
+			return "", false, fmt.Errorf("the Test comparison is not proven in this daemon; run Test again before pushing: %w", err)
+		}
+	}
 	if recorded && tested == head {
 		sctx.Log(fmt.Sprintf("side by side: pushing %s, the commit the Test step ran on", shortObjectID(head)))
 		return "", false, nil
@@ -713,6 +723,9 @@ func baselineBeforePush(sctx *pipeline.StepContext, head string) (note string, r
 	if err := ensurePrepared(sctx, types.StepPush); err != nil {
 		return "", false, fmt.Errorf("prepare test dependencies before push: %w", err)
 	}
+	previousComparison := sctx.TestComparisonSHA
+	sctx.TestComparisonSHA = comparison
+	defer func() { sctx.TestComparisonSHA = previousComparison }()
 	declareCommandOverrides(sctx, "test")
 	sctx.Log(fmt.Sprintf("side by side: running the baseline test command again on %s, the head to push", shortObjectID(head)))
 	output, results, err := runConfiguredChecks(sctx, "test", testCmd)
@@ -722,11 +735,11 @@ func baselineBeforePush(sctx *pipeline.StepContext, head string) (note string, r
 	}
 	logConfiguredCommandOutput(sctx, output, types.StepPush)
 	if len(noTurnChecks(results)) == 0 && len(failedChecks(results)) == 0 {
-		sctx.Shared.RecordBaseline(head, true)
+		sctx.Shared.RecordBaseline(head, comparison, true)
 		sctx.Log(fmt.Sprintf("side by side: the baseline passed on %s", shortObjectID(head)))
 		return note + " The baseline test command was run again on the pushed head and passed.", false, nil
 	}
-	sctx.Shared.RecordBaseline(head, false)
+	sctx.Shared.RecordBaseline(head, comparison, false)
 	if sctx.Shared.CountPushGuardRestart() > 1 {
 		return "", false, fmt.Errorf("the baseline test command did not pass on %s, the head to push, for the second time in this run; nothing was pushed", shortObjectID(head))
 	}

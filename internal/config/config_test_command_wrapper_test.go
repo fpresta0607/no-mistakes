@@ -50,6 +50,13 @@ func TestLoadGlobal_TestCommandWrapperDefaultsOff(t *testing.T) {
 	}
 }
 
+func TestLoadGlobal_TestCommandWrapperAcceptsTestComparisonSHA(t *testing.T) {
+	_, err := LoadGlobalFromBytes([]byte("test_command_wrapper:\n  command: [wrapper, '--base={test_comparison_sha}', '--']\n"))
+	if err != nil {
+		t.Fatalf("the Test comparison placeholder was refused: %v", err)
+	}
+}
+
 // A wrapper that cannot be started, or a refusal rule with no wrapper to
 // apply it to, is a mistake the config must name rather than run with.
 func TestLoadGlobal_TestCommandWrapperRefusesUnusableValues(t *testing.T) {
@@ -101,7 +108,10 @@ func TestLoadRepo_TestCommandWrapperIsNotARepoSetting(t *testing.T) {
 
 func TestCommandWrapper_Words(t *testing.T) {
 	wrapper := CommandWrapper{Command: []string{"cfo", "gate", "turn", "--as", "{repo} {branch}, run {run_short} ({run})", "--"}}
-	got := wrapper.Words(CommandWrapperValues{Repo: "PrecisionDocs", Branch: "feat/x", Run: "01M4FG7FABCDEFGHJKMNPQRSTV"})
+	got, err := wrapper.Words(CommandWrapperValues{Repo: "PrecisionDocs", Branch: "feat/x", Run: "01M4FG7FABCDEFGHJKMNPQRSTV"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := []string{"cfo", "gate", "turn", "--as", "PrecisionDocs feat/x, run 01M4FG7F (01M4FG7FABCDEFGHJKMNPQRSTV)", "--"}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("Words() = %q, want %q", got, want)
@@ -112,12 +122,39 @@ func TestCommandWrapper_Words(t *testing.T) {
 
 	// A value is data, never a template: braces inside a branch name are not
 	// expanded a second time.
-	got = wrapper.Words(CommandWrapperValues{Repo: "{run}", Branch: "{repo}", Run: "short"})
+	got, err = wrapper.Words(CommandWrapperValues{Repo: "{run}", Branch: "{repo}", Run: "short"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got[4] != "{run} {repo}, run short (short)" {
 		t.Fatalf("Words() = %q, want values substituted once", got[4])
 	}
 
-	if words := (CommandWrapper{}).Words(CommandWrapperValues{Repo: "r"}); words != nil {
-		t.Fatalf("Words() of no wrapper = %q, want nil", words)
+	if words, err := (CommandWrapper{}).Words(CommandWrapperValues{Repo: "r"}); words != nil || err != nil {
+		t.Fatalf("Words() of no wrapper = %q, %v, want nil", words, err)
+	}
+}
+
+func TestCommandWrapper_TestComparisonSHA(t *testing.T) {
+	wrapper := CommandWrapper{Command: []string{"wrapper", "{repo}", "--base={test_comparison_sha}", "--"}}
+	for _, sha := range []string{strings.Repeat("a1", 20), strings.Repeat("b2", 32)} {
+		t.Run(sha, func(t *testing.T) {
+			words, err := wrapper.Words(CommandWrapperValues{Repo: "{test_comparison_sha}", TestComparisonSHA: sha})
+			if err != nil || strings.Join(words, "\x00") != "wrapper\x00{test_comparison_sha}\x00--base="+sha+"\x00--" {
+				t.Fatalf("Words() = %q, %v, want one substitution with the exact full SHA", words, err)
+			}
+		})
+	}
+	for name, sha := range map[string]string{
+		"missing": "", "zero": strings.Repeat("0", 40), "zero sha256": strings.Repeat("0", 64),
+		"short": "abc1234", "revision": "main", "whitespace": " " + strings.Repeat("a", 40),
+		"nonhex": strings.Repeat("z", 40), "shell": strings.Repeat("a", 40) + "&& echo bad",
+	} {
+		t.Run(name, func(t *testing.T) {
+			words, err := wrapper.Words(CommandWrapperValues{TestComparisonSHA: sha})
+			if err == nil || words != nil || !strings.Contains(err.Error(), "test_comparison_sha") {
+				t.Fatalf("Words() = %q, %v, want a named refusal with no executable words", words, err)
+			}
+		})
 	}
 }

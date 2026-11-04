@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/launchassert"
@@ -20,6 +22,34 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestTerminalLaunchReprovesChangedTrustedSourceWithoutRewritingReceipt(t *testing.T) {
+	_, root, _, _, head, _, _ := launchAssertionFixture(t, nil)
+	global, err := config.LoadGlobal(root.ConfigFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Merge(global, &config.RepoConfig{})
+	cfg.TrustedConfigSHA = strings.Repeat("d", 40)
+	original := launchExpectation(head)
+	proof, err := original.Verify(head, original.Profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := "frozen-policy"
+	run := &db.Run{LaunchAssertion: original, LaunchAssertionProof: proof, LaunchValidationGeneration: &generation}
+	fresh, freshProof, _, err := prepareTerminalLaunch(context.Background(), run, cfg, exec.LookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.TrustedSHA != cfg.TrustedConfigSHA || freshProof.Check(fresh) != nil || proof.Check(original) != nil || original.TrustedSHA != head {
+		t.Fatal("fresh provenance must prove current trusted source and leave the old receipt unchanged")
+	}
+	cfg.AgentConfig["codex"] = agentcfg.Profile{Model: "different", Effort: agentcfg.EffortXHigh}
+	if _, _, _, err := prepareTerminalLaunch(context.Background(), run, cfg, exec.LookPath); err == nil {
+		t.Fatal("changed model was accepted")
+	}
+}
 
 type launchAssertionFixtureStep struct{}
 

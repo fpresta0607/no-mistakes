@@ -92,7 +92,22 @@ func IsStructuredOutputRejected(err error) bool {
 	return errors.As(err, &rejection) && rejection.StructuredOutputRejected()
 }
 
-type structuredOutputRejection struct{ err error }
+// RejectedOutput returns the whole response an adapter refused as structured
+// output, or "" when err carries none. The error's message quotes only a
+// snippet of it, and a turn asked to correct the response needs all of it
+// (fpresta0607/code-goblins#1561).
+func RejectedOutput(err error) string {
+	var rejection *structuredOutputRejection
+	if errors.As(err, &rejection) {
+		return rejection.output
+	}
+	return ""
+}
+
+type structuredOutputRejection struct {
+	err    error
+	output string
+}
 
 func (e *structuredOutputRejection) Error() string                { return e.err.Error() }
 func (e *structuredOutputRejection) Unwrap() error                { return e.err }
@@ -364,7 +379,7 @@ func textResult(text string, usage TokenUsage) *Result {
 
 func finalizeTextResult(agentName, text string, schema json.RawMessage, usage TokenUsage) (*Result, error) {
 	if text == "" {
-		err := fmt.Errorf("%s returned no text output", agentName)
+		err := &NoTextOutputError{Agent: agentName}
 		if len(schema) > 0 {
 			return resultFromUsage(usage), rejectStructuredOutput(err)
 		}
@@ -376,7 +391,7 @@ func finalizeTextResult(agentName, text string, schema json.RawMessage, usage To
 
 	output, err := parseStructuredTextOutput(text, schema, strings.HasPrefix(agentName, "acp:"))
 	if err != nil {
-		return resultFromUsage(usage), rejectStructuredOutput(fmt.Errorf("%s output parse: %w (output snippet: %q)", agentName, err, outputSnippet(text)))
+		return resultFromUsage(usage), &structuredOutputRejection{err: fmt.Errorf("%s output parse: %w (output snippet: %q)", agentName, err, outputSnippet(text)), output: text}
 	}
 
 	res := textResult(text, usage)
@@ -1117,6 +1132,23 @@ type SchemaViolation struct {
 }
 
 func (e *SchemaViolation) Error() string { return e.Message }
+
+// NoTextOutputError is a turn that ended without any answer text. It is not an
+// empty answer: a review that found nothing still writes its JSON, so a caller
+// must never read this as a clean result. Detail names what the adapter saw in
+// place of the answer, such as a turn cut at the output token limit, when it
+// can tell.
+type NoTextOutputError struct {
+	Agent  string
+	Detail string
+}
+
+func (e *NoTextOutputError) Error() string {
+	if e.Detail == "" {
+		return e.Agent + " returned no text output"
+	}
+	return e.Agent + " returned no text output: " + e.Detail
+}
 
 func schemaViolation(field, format string, args ...any) error {
 	return &SchemaViolation{Field: field, Message: fmt.Sprintf(format, args...)}

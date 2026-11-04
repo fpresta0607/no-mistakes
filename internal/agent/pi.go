@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 
@@ -132,6 +133,10 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 
 	text := pp.finalText()
 	res, err := finalizeTextResult("pi", text, opts.JSONSchema, pp.usage)
+	var noText *NoTextOutputError
+	if errors.As(err, &noText) {
+		noText.Detail = pp.noTextDetail()
+	}
 	if res != nil {
 		res.Model = pp.model
 		res.ModelProvider = pp.provider
@@ -490,6 +495,60 @@ func (p *piParser) finalText() string {
 		return text
 	}
 	return strings.TrimSpace(joinByIndex(p.streamText))
+}
+
+// noTextDetail says what Pi's final assistant message carried in place of
+// answer text. JSON mode exits 0 on a turn cut at the output token limit
+// (stopReason "length"), which Pi's own text mode reports as a truncated
+// response, and on a turn that ended with reasoning only; both reach
+// finalText as an empty answer, so the detail is what tells them apart.
+func (p *piParser) noTextDetail() string {
+	msg := p.finalAssistant
+	if msg == nil {
+		return "pi reported no assistant message"
+	}
+	var b strings.Builder
+	switch reason, _ := msg["stopReason"].(string); reason {
+	case "":
+		b.WriteString("its final assistant message reported no stopReason")
+	case "length":
+		b.WriteString("its final assistant message stopped at the model's output token limit (stopReason=length)")
+	default:
+		fmt.Fprintf(&b, "its final assistant message ended with stopReason=%s", reason)
+	}
+	if kinds := assistantContentKinds(msg); len(kinds) == 0 {
+		b.WriteString(" and carried no content")
+	} else {
+		fmt.Fprintf(&b, " and carried only %s", strings.Join(kinds, ", "))
+	}
+	if usage, ok := msg["usage"].(map[string]any); ok {
+		fmt.Fprintf(&b, "; it spent %d output tokens", piIntField(usage, "output"))
+		if _, ok := usage["reasoning"]; ok {
+			fmt.Fprintf(&b, ", %d of them reasoning", piIntField(usage, "reasoning"))
+		}
+	}
+	return b.String()
+}
+
+// assistantContentKinds lists the distinct content block types of an assistant
+// message in order, naming a whitespace-only text block "blank text".
+func assistantContentKinds(msg map[string]any) []string {
+	blocks, _ := msg["content"].([]any)
+	var kinds []string
+	for _, raw := range blocks {
+		block, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		kind, _ := block["type"].(string)
+		if kind == "text" && strings.TrimSpace(piFirstString(block, "text")) == "" {
+			kind = "blank text"
+		}
+		if kind != "" && !slices.Contains(kinds, kind) {
+			kinds = append(kinds, kind)
+		}
+	}
+	return kinds
 }
 
 func textFromAssistantMessage(msg map[string]any) string {

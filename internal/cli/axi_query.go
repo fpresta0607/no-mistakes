@@ -73,7 +73,10 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 	if err != nil {
 		return emitError(cmd, 1, fmt.Sprintf("load steps: %v", err))
 	}
-	rv := runViewFromDB(run, steps, env.d)
+	rv, err := runViewFromDB(run, steps, env.d)
+	if err != nil {
+		return emitError(cmd, 1, err.Error())
+	}
 	annotateRunView(env, &rv)
 	var fields []toon.Field
 	// A run reached by an explicit --run may belong to another branch. Say so
@@ -88,6 +91,30 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 		fields = append(fields, toon.Field{Key: "current_branch", Value: branch})
 	}
 	fields = append(fields, runObjectFieldWithKey(runKey, rv))
+	if run.Status.Terminal() {
+		snapshot, err := env.d.ReadTerminalSnapshot(run.ID)
+		if err != nil {
+			return emitError(cmd, 1, fmt.Sprintf("read terminal snapshot: %v", err))
+		}
+		fields = append(fields, toon.Field{Key: "terminal_snapshot_digest", Value: snapshot.Digest()}, toon.Field{Key: "repository_id", Value: run.RepoID})
+	}
+	handback, err := env.d.LatestCIHandback(run.ID)
+	if err != nil {
+		return emitError(cmd, 1, err.Error())
+	}
+	if handback != nil {
+		state := "released"
+		handbackFields := []toon.Field{{Key: "id", Value: handback.ID}, {Key: "run_id", Value: handback.RunID}, {Key: "repo_id", Value: run.RepoID}, {Key: "branch", Value: run.Branch}, {Key: "caller_dir", Value: handback.CallerDir}, {Key: "released_head", Value: handback.ReleasedHead}, {Key: "published_head", Value: handback.ReleasedHead}, {Key: "push_generation", Value: handback.PushGeneration}, {Key: "round_id", Value: handback.RoundID}}
+		if handback.Source != nil {
+			handbackFields = append(handbackFields, toon.Field{Key: "caller_head", Value: handback.Source.CallerHead})
+		}
+		if handback.AcceptedHead != nil {
+			state = "accepted"
+			handbackFields = append(handbackFields, toon.Field{Key: "accepted_head", Value: *handback.AcceptedHead})
+		}
+		handbackFields = append(handbackFields, toon.Field{Key: "state", Value: state})
+		fields = append(fields, toon.Field{Key: "ci_handback", Value: toon.NewObject(handbackFields...)})
+	}
 	if syncField := cachedBranchSyncField(cmd, run.ID); syncField != nil {
 		fields = append(fields, *syncField)
 	}
@@ -102,7 +129,11 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 		if !branchScopedCommandsSafe {
 			fields = append(fields, inspectionOnlyGateFields(gate, run.ID)...)
 		} else {
-			fields = append(fields, gateFields(gate)...)
+			if handback != nil && handback.AcceptedHead == nil {
+				fields = append(fields, gateFieldsWithHelp(gate, []string{"Failed published CI is released to its recorded caller worktree. Preserve both histories, commit the correction there, then submit it with no-mistakes axi handback --resume --receipt " + handback.ID + "; the same run requires fresh validation."})...)
+			} else {
+				fields = append(fields, gateFields(gate)...)
+			}
 		}
 	} else if terminalStatus(rv.Status) {
 		fields = append(fields, toon.Field{Key: "outcome", Value: outcomeForRun(rv)})

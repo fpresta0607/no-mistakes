@@ -42,7 +42,9 @@ func newAxiCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newAxiRunCmd())
+	cmd.AddCommand(newAxiValidateAuthoredCmd())
 	cmd.AddCommand(newAxiRespondCmd())
+	cmd.AddCommand(newAxiHandbackCmd())
 	cmd.AddCommand(newAxiAnswerCmd())
 	cmd.AddCommand(newAxiStatusCmd())
 	cmd.AddCommand(newAxiSyncCmd())
@@ -203,10 +205,14 @@ func runAxiHome(cmd *cobra.Command) error {
 
 	gated := false
 	gatedOnAnswers := false
+	isApprovalRefused := false
 	hasBranchSync := false
 	if currentActive != nil {
 		steps, _ := env.d.GetStepsByRun(currentActive.ID)
-		rv := runViewFromDB(currentActive, steps, env.d)
+		rv, err := runViewFromDB(currentActive, steps, env.d)
+		if err != nil {
+			return emitError(cmd, 1, err.Error())
+		}
 		annotateRunView(env, &rv)
 		fields = append(fields, runObjectFieldWithKey("active_run", rv))
 		if syncField := cachedBranchSyncField(cmd, currentActive.ID); syncField != nil {
@@ -216,11 +222,15 @@ func runAxiHome(cmd *cobra.Command) error {
 		if gate, ok := rv.awaitingStep(); ok {
 			gated = true
 			gatedOnAnswers = pipeline.HasUnansweredReviewQuestion(gate.FindingsJSON)
+			isApprovalRefused = rv.AuthoredValidation != nil && (pipeline.HasProtectedPathRefusal(gate.FindingsJSON) || pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON))
 			fields = append(fields, gateFields(gate)...)
 		}
 	} else if otherActive != nil {
 		steps, _ := env.d.GetStepsByRun(otherActive.ID)
-		rv := runViewFromDB(otherActive, steps, env.d)
+		rv, err := runViewFromDB(otherActive, steps, env.d)
+		if err != nil {
+			return emitError(cmd, 1, err.Error())
+		}
 		annotateRunView(env, &rv)
 		fields = append(fields, runObjectFieldWithKey("other_branch_active_run", rv))
 	} else if syncField := cachedBranchSyncField(cmd, ""); syncField != nil {
@@ -245,6 +255,8 @@ func runAxiHome(cmd *cobra.Command) error {
 		// A review parked on its reviewer's own questions wants an answer, not
 		// a verdict: approving would discard the pass it paused.
 		help = append(help, "Run `no-mistakes axi answer --question <id> --answer \"<one of its options>\"` for each question in the gate; the reviewer resumes when none are open, and the answer that closes the last one follows the run to its next gate or outcome")
+	case gated && isApprovalRefused:
+		help = append(help, "Approval is refused; read the gate's permitted actions, or run `no-mistakes axi abort` to stop the run")
 	case gated:
 		help = append(help, "Run `no-mistakes axi respond --action approve` to clear the current gate")
 	default:

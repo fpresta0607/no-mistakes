@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Logging and stateful PR readback consume the same command stdin, not two
@@ -68,6 +69,8 @@ func handleFakeCLI(mode string) {
 		fakeGitStatusErrorHandler(args)
 	case "git-stale-dirty-status":
 		fakeGitStaleDirtyStatusHandler(args)
+	case "git-hung-status":
+		fakeGitHungStatusHandler(args)
 	case "git-commit-error":
 		fakeGitCommitErrorHandler(args)
 	case "git-remote-error":
@@ -92,6 +95,12 @@ func handleFakeCLI(mode string) {
 		binaryName := filepath.Base(os.Args[0])
 		if strings.TrimSuffix(binaryName, filepath.Ext(binaryName)) == "git" {
 			fakeGitInterveningPushPassthroughHandler(args)
+		} else {
+			fakeCIGHHandler(args)
+		}
+	case "ci-handback":
+		if strings.TrimSuffix(filepath.Base(os.Args[0]), filepath.Ext(os.Args[0])) == "git" {
+			fakeCIHandbackGit(args)
 		} else {
 			fakeCIGHHandler(args)
 		}
@@ -257,6 +266,16 @@ func fakeGitStaleDirtyStatusHandler(args []string) {
 		os.Exit(0)
 	}
 	fakeGitForward(args, realGit)
+}
+
+// fakeGitHungStatusHandler outlives its caller's deadline on a porcelain
+// status, the way a cold scan of a large checkout does after a reboot.
+func fakeGitHungStatusHandler(args []string) {
+	if len(args) >= 2 && args[0] == "status" && args[1] == "--porcelain" {
+		time.Sleep(time.Minute)
+		os.Exit(1)
+	}
+	fakeGitForward(args, os.Getenv("FAKE_CLI_REAL_GIT"))
 }
 
 func fakeGitCommitErrorHandler(args []string) {

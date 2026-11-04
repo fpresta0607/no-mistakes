@@ -7,13 +7,14 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -71,7 +72,7 @@ func dial(endpoint string, timeout time.Duration) (net.Conn, error) {
 		return nil, fmt.Errorf("invalid ipc endpoint file")
 	}
 	if pid, err := strconv.Atoi(pidStr); err == nil && !processAlive(pid) {
-		return nil, fmt.Errorf("daemon process %d is no longer running", pid)
+		return nil, &DeadEndpointError{PID: pid}
 	}
 	conn, err := dialNetworkWithTimeout("tcp", addr, timeout)
 	if err != nil {
@@ -225,12 +226,19 @@ func restrictFileACL(path string) error {
 	)
 }
 
+var openEndpointProcess = windows.OpenProcess
+
 func processAlive(pid int) bool {
-	const processQueryLimitedInformation = 0x1000
-	h, err := syscall.OpenProcess(processQueryLimitedInformation, false, uint32(pid))
-	if err != nil {
+	if pid <= 0 || uint64(pid) > math.MaxUint32 {
 		return false
 	}
-	syscall.CloseHandle(h)
-	return true
+	handle, err := openEndpointProcess(windows.SYNCHRONIZE, false, uint32(pid))
+	if err != nil {
+		return !errors.Is(err, windows.ERROR_INVALID_PARAMETER)
+	}
+	defer windows.CloseHandle(handle)
+	// Only a signaled process proves termination; a failed probe must not
+	// authorize recovery of an endpoint that could still have a live owner.
+	state, err := windows.WaitForSingleObject(handle, 0)
+	return err != nil || state != windows.WAIT_OBJECT_0
 }

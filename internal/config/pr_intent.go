@@ -1,7 +1,7 @@
 package config
 
-// PublishesIntent controls only the public Intent section, never the input
-// available to review or PR drafting. It makes no promise about model prose.
+// PublishesIntent requires an explicit opt-in to use validation intent in
+// public PR sections and drafting prompts. Validation prompts are unaffected.
 func (p PR) PublishesIntent() bool {
-	return p.PublishIntent == nil || *p.PublishIntent
+	return p.PublishIntent != nil && *p.PublishIntent
 }

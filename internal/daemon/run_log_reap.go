@@ -57,7 +57,7 @@ func reapRunLogs(d *db.DB, root string, policy evidenceReapPolicy, now time.Time
 		if run == nil {
 			continue
 		}
-		if skip, reason := skipWorktreeCleanup(context.Background(), d, runID, run.WorktreePath()); skip {
+		if skip, reason := skipRunArtifactCleanup(context.Background(), run, run.WorktreePath()); skip {
 			slog.Debug("skipping run log cleanup", "run_id", runID, "reason", reason)
 			continue
 		}

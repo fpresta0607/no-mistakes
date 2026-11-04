@@ -52,6 +52,13 @@ type StepContext struct {
 	// combination is reachable - not to forbid it.
 	FinalizingAnswers     bool
 	ReviewStartingHeadSHA string
+	// PreviousReviewedPaths is the coverage record of the review round a fix
+	// round answers: the changed files whose content at ReviewStartingHeadSHA
+	// that round's review turns judged. The rereview after the fixer keeps
+	// that verdict for each such file the fix left unchanged and no open finding
+	// names, and judges the rest. Nil when unknown, which
+	// has the rereview judge every changed file.
+	PreviousReviewedPaths []string
 	// CarriedFindings is the outstanding set an ANSWER round carries in, minus
 	// the reviewer's own open-question rows (see answerRoundCarriedFindings),
 	// so the finalize turn re-adjudicates by id only findings it made itself.
@@ -141,6 +148,9 @@ type StepContext struct {
 	// its copy has no upstream remote, and a second fetch beside the review's
 	// could collide with it on a ref lock.
 	SideLaneBaseSHA string
+	// TestComparisonSHA is the comparison already resolved by Test, shared by
+	// its head checks and base attribution. It is not the previous pushed head.
+	TestComparisonSHA string
 	// SideLaneContext returns a context in which another step of this run can
 	// do its work early, or false when that step is skipped or absent. The
 	// executor offers it to the review step alone, and only under global
