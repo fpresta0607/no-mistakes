@@ -217,10 +217,16 @@ func TestMakeInstallPathSurvivesThePosixShellOnWindows(t *testing.T) {
 		t.Skip("make not available")
 	}
 
+	gopath, err := exec.Command("go", "env", "GOPATH").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	output := runMakeDry(t, makePath, writeTestMakeWorkspace(t), "install", nil)
 
-	if strings.Contains(output, `\`) {
-		t.Fatalf("sh strips backslashes from unquoted install paths, got:\n%s", output)
+	want := "install -m 755 bin/no-mistakes " + filepath.ToSlash(strings.TrimSpace(string(gopath))) + "/bin/no-mistakes"
+	if !strings.Contains(output, want) {
+		t.Fatalf("make install should target the real GOPATH bin directory %q, got:\n%s", want, output)
 	}
 }
 
