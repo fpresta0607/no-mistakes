@@ -77,6 +77,27 @@ func TestHarnessFakeExecutablesPreserveDispatchAndInterception(t *testing.T) {
 	}
 }
 
+func TestHarnessFixtureCheckoutIgnoresSystemGitConfig(t *testing.T) {
+	systemConfig := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(systemConfig, []byte("[core]\n\tautocrlf = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_SYSTEM", systemConfig)
+	h := NewHarness(t, SetupOpts{})
+	const content = "seed for review-agents routing\n"
+	h.CommitChange("feature/line-endings", "feature.txt", content, "seed feature")
+
+	worktree := h.AddWorktree("feature/line-endings")
+
+	checkedOut, err := os.ReadFile(filepath.Join(worktree, "feature.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(checkedOut) != content {
+		t.Fatalf("fixture checkout of feature.txt = %q, want %q unchanged by the system git config", checkedOut, content)
+	}
+}
+
 func TestFixtureRootFromRepoRoot(t *testing.T) {
 	root, err := fixtureRootFromRepoRoot(t.TempDir())
 	if err == nil {

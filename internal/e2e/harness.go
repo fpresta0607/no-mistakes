@@ -145,6 +145,9 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	if home, err := os.UserHomeDir(); err != nil || home != h.HomeDir {
 		t.Fatalf("fixture user home = %q, %v; want %q", home, err, h.HomeDir)
 	}
+	// The machine's system git config is host state too: Git for Windows
+	// ships core.autocrlf=true, which checks scripted LF fixtures out as CRLF.
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("NM_HOME", h.NMHome)
 	t.Setenv("FAKEAGENT_LOG", h.AgentLog)
 	if h.Scenario != "" {
