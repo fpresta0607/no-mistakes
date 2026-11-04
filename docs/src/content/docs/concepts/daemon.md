@@ -153,7 +153,7 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
   An accepted candidate resumes fresh Review, including when acceptance committed before the validation steps were reset; it never recovers the old conflict gate as approval for that head.
   An open reservation or accepted follow-up still awaiting its fresh Review is kept active when its evidence is unreadable, dirty, changed or ambiguous, without guessed recovery or stale-run cleanup.
 - Before resuming a parked CI gate without an open handback reservation, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked.
-  The [`protected_paths` refusal exception](/no-mistakes/reference/repo-config/#protected_paths) also prevents automatic reconciliation.
+  The [`protected_paths` refusal exception](/no-mistakes/reference/repo-config/#protected_paths) and a [native safety refusal](/no-mistakes/reference/pipeline-steps/) also prevent automatic reconciliation.
 - Preserves a run that was actively monitoring CI for an already-created PR as `ci_monitor_interrupted` rather than failing it: the PR is still open, so a restart mid-monitor is not a pipeline failure.
   That run is terminal and never automatically resumed; its stale publisher marker is cleared.
   [Explicit terminal continuation](/no-mistakes/reference/cli/#continue-validation-of-preserved-terminal-source) accepts proven source into a fresh-validation successor with cumulative repair spending, leaving the terminal predecessor immutable.

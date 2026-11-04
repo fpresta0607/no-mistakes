@@ -150,7 +150,7 @@ agent: [codex, grok]
 The list is filtered to entries available to the daemon at run startup, and the first available entry becomes the primary agent.
 After resolving `auto`, entries that resolve to the same ACP target are deduplicated in list order, so `cursor` and `acp:cursor` (or `devin` and `acp:devin`) provide one fallback and preserve whichever spelling appears first.
 If no entry is available, the gate fails before its first pipeline step.
-If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
+If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback, except for an explicit [native safety refusal](/no-mistakes/reference/pipeline-steps/).
 Fallback candidates share the invocation's existing bounded context and use only its remaining time; once that context expires or is cancelled, no further candidate is announced or started.
 Structured findings and schema/output validation problems do not trigger fallback.
 
@@ -802,15 +802,17 @@ The run still runs one step at a time and holds one approval gate at a time.
 Work started early changes nothing of the run: it has its own clone, its own copy of the run record, and no approval.
 Each step takes that work at its own turn, in its usual order, only when it is still what the step would do now:
 
-- The run's head is still the commit the work ran on. A review fix moves the head, and work on the old head is stopped and removed at once.
+- The run's head is still the commit the work ran on. A review fix moves the head, and work on the old head is stopped at once and removed unless it refused.
 - The work finished without an error.
 - For the Test step, the work made no commit and the run's worktree holds nothing uncommitted. The test files its live check left uncommitted are brought into the run's worktree, where the step leaves them without the setting.
 - For the documentation pass, its commit changes no path the run's worktree holds uncommitted changes to. The commit is brought over as a fast-forward of the unchanged head.
 
 Anything else discards the work, the step log says why, and the step runs as it does without the setting.
-Work that ended in a native agent safety refusal is the exception: it is never run again, even after the head moved, and the step stops on that refusal at its turn.
+Work that ended in a native agent safety refusal is the exception: during the running daemon's lifetime it is not run again, even after the head moved, and the step stops on that refusal at its turn.
 Its copy of the worktree, with its edits, is kept and the step log says where; its evidence folder is still removed, since the run's evidence is published and refused work never is.
-When the run stops on a native agent safety refusal, all work still going beside the review is stopped, its log is kept in the stopped step's log, and work that did not itself refuse is removed.
+When the run stops on a native agent safety refusal, all work still going beside the review is stopped and work that did not itself refuse is removed.
+The stopped step's log includes up to the last 1 MiB of each lane's log and marks any earlier output that was truncated.
+Refused side-lane state is not carried across a daemon restart or crash.
 A fix round never takes work started early.
 Nothing starts beside the review when a harness other than `claude` or `codex` is configured, since those are the harnesses known to serve two calls at once, or when the repository has submodules or Git LFS files, which a plain clone would not hold.
 The review's log says which.
@@ -958,7 +960,9 @@ Per-run agent session reuse for the review loop's fixer role.
 When enabled and every fixer that can serve the run supports native session resume (Claude or Grok via `--resume`, Codex via `exec resume`, Pi via `--session <UUID>`, Antigravity via `--conversation <id>`), each run keeps one durable fixer session across its review-fix turns. A configured later-round fixer that cannot resume therefore makes all fixer turns cold for that run; see [later-round role overrides](#later-round-role-overrides).
 Review turns - the initial full review and every full rereview - always run as fresh invocations regardless of this setting. They are also session-free, unless the run has a [review conversation](/no-mistakes/reference/repo-config/#reviewconversation) AND this setting is on, in which case one reviewer session spans exactly one review pass - the asking turn and the finalize turn that receives its answers - and never a code change; with `session_reuse: false` that finalize turn runs cold, which costs a re-read rather than the answers, because the finalize prompt is the complete review prompt plus the answers. Either way a rereview certifies fixes that implement the previous review turn's findings, so it must never resume the session that prescribed them; cross-round review context travels only in the explicit sanitized round history.
 The fixer session is never lent to review turns, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
-When resume is unavailable or fails, the fix turn falls back to a cold run or a fresh fixer session and the fallback is recorded in the local `agent_invocations` performance record. Pi emits per-invocation usage after a resume, unlike Codex's cumulative session counters.
+When resume is unavailable or fails recoverably, the fix turn falls back to a cold run or a fresh fixer session and the fallback is recorded in the local `agent_invocations` performance record.
+An explicit [native safety refusal](/no-mistakes/reference/pipeline-steps/) stops instead of starting a fresh session.
+Pi emits per-invocation usage after a resume, unlike Codex's cumulative session counters.
 Session identities are persisted only as minimum local resume metadata, never as prompts or transcripts; Pi's own session directory retains its native transcript. Keep Pi's session directory private, and keep any `--session-dir` or `PI_CODING_AGENT_SESSION_DIR` setting stable while a run is active so a daemon restart can find the fixer session.
 The [daemon crash-recovery reference](/no-mistakes/concepts/daemon/#crash-recovery) owns which parked gates can resume or reconcile after a restart.
 Set `false` to force every agent invocation cold.

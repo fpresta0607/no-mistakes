@@ -70,7 +70,7 @@ var sideLaneAgents = map[types.AgentName]bool{types.AgentClaude: true, types.Age
 // needs.
 var errSideLaneStopped = errors.New("side lane stopped")
 
-// sideLaneLog keeps what a lane's step logged.
+// sideLaneLog keeps the bounded tail of what a lane's step logged.
 type sideLaneLog struct {
 	mu        sync.Mutex
 	text      []byte
@@ -303,9 +303,8 @@ func sideLaneCopyGap(sctx *pipeline.StepContext) string {
 	return ""
 }
 
-// stopStaleSideLanes stops and removes every lane started on a commit other
-// than head, as soon as the run's head moves to it. The lane's step would
-// discard it at its own turn, and until then it would only hold the machine.
+// stopStaleSideLanes stops every lane started on a commit other than head as
+// soon as the run's head moves. It removes the lane unless it refused.
 func stopStaleSideLanes(sctx *pipeline.StepContext, head string) {
 	if sctx.SideLane || sctx.Shared == nil {
 		return
