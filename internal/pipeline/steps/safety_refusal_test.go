@@ -14,6 +14,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -265,5 +266,195 @@ func TestSideBySide_StopEndsTheLanesAndKeepsTheirLogs(t *testing.T) {
 	}
 	if !strings.Contains(f.logText(), "log of the stopped test work") || !strings.Contains(f.logText(), "a native agent safety refusal stopped automatic execution") {
 		t.Fatalf("log = %q, want the lane's log and the reason it stopped", f.logText())
+	}
+}
+
+func TestSideBySide_RefusalPreservesLaneAtEveryExit(t *testing.T) {
+	for _, mode := range []string{"take", "stale", "stop", "stop while running"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newSideBySideFixture(t, config.Commands{})
+			started := make(chan string, 1)
+			scratch := make(chan string, 1)
+			f.agent.evidenceF = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				if err := os.WriteFile(filepath.Join(opts.CWD, "refused.txt"), []byte("preserved"), 0o644); err != nil {
+					return nil, err
+				}
+				for _, entry := range opts.Env {
+					if path, ok := strings.CutPrefix(entry, "TMP="); ok {
+						if err := os.WriteFile(filepath.Join(path, "refused-scratch.txt"), []byte("preserved"), 0o644); err != nil {
+							return nil, err
+						}
+						scratch <- path
+						break
+					}
+				}
+				started <- opts.CWD
+				if mode == "stop while running" {
+					<-ctx.Done()
+				}
+				return nil, errors.New(nativeSafetyRefusal)
+			}
+			startSideLanes(f.review, f.baseSHA)
+			var dir string
+			select {
+			case dir = <-started:
+			case <-time.After(sideBySideWait):
+				t.Fatal("lane did not start")
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(dir)) })
+			if mode != "stop while running" {
+				f.lanesDone()
+			}
+			switch mode {
+			case "stale":
+				stopStaleSideLanes(f.review, "new-head")
+			case "stop", "stop while running":
+				f.review.Shared.SideLanes().Stop(f.review)
+			}
+			_, err := (&TestStep{}).Execute(f.turn())
+			if !agent.IsSafetyRefusal(err) {
+				t.Fatalf("step error = %v", err)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, "refused.txt"))
+			if err != nil || string(data) != "preserved" {
+				t.Fatalf("lane edits = %q, %v", data, err)
+			}
+			select {
+			case path := <-scratch:
+				data, err = os.ReadFile(filepath.Join(path, "refused-scratch.txt"))
+				if err != nil || string(data) != "preserved" {
+					t.Fatalf("scratch edits = %q, %v", data, err)
+				}
+			default:
+				t.Fatal("agent did not receive scratch directory")
+			}
+			if len(f.agent.evidenceCalls()) != 1 {
+				t.Fatal("refused work ran again")
+			}
+		})
+	}
+}
+
+func TestSideBySide_RefusedDocumentLaneSurvivesStop(t *testing.T) {
+	f := newSideBySideFixture(t, config.Commands{Lint: "true"})
+	started := make(chan string, 1)
+	f.agent.documentF = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if err := os.WriteFile(filepath.Join(opts.CWD, "refused-doc.txt"), []byte("preserved"), 0o644); err != nil {
+			return nil, err
+		}
+		started <- opts.CWD
+		return nil, errors.New(nativeSafetyRefusal)
+	}
+	startSideLanes(f.review, f.baseSHA)
+	var dir string
+	select {
+	case dir = <-started:
+	case <-time.After(sideBySideWait):
+		t.Fatal("document lane did not start")
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(dir)) })
+	f.lanesDone()
+	f.review.Shared.SideLanes().Stop(f.review)
+	_, err := (&DocumentStep{}).Execute(f.turn())
+	if !agent.IsSafetyRefusal(err) {
+		t.Fatalf("document error = %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "refused-doc.txt"))
+	if err != nil || string(data) != "preserved" {
+		t.Fatalf("document edits = %q, %v", data, err)
+	}
+	if len(f.agent.documentCalls()) != 1 {
+		t.Fatal("refused document work ran again")
+	}
+}
+
+func TestAnalyzersDoNotRetryStructuredSafetyRefusals(t *testing.T) {
+	for _, name := range []string{"review", "test"} {
+		t.Run(name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			calls := 0
+			ag := &mockAgent{name: "codex", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				calls++
+				return nil, rejectedStructuredOutputError{message: nativeSafetyRefusal}
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+			var err error
+			if name == "review" {
+				_, err = (&ReviewStep{}).Execute(sctx)
+			} else {
+				_, err = runTestAnalyzer(sctx.Ctx, sctx, "test", "")
+			}
+			if !agent.IsSafetyRefusal(err) || calls != 1 {
+				t.Fatalf("error = %v, calls = %d", err, calls)
+			}
+		})
+	}
+}
+
+func TestIntentStepPropagatesSafetyRefusal(t *testing.T) {
+	sctx := newIntentStepContext(t)
+	step := &IntentStep{runIntent: func(context.Context, *pipeline.StepContext) (*intent.Result, error) {
+		return nil, errors.New(nativeSafetyRefusal)
+	}}
+	_, err := step.Execute(sctx)
+	if !agent.IsSafetyRefusal(err) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestConflictResolverPreservesRefusedEdits(t *testing.T) {
+	for _, strategy := range []string{"rebase", "merge"} {
+		t.Run(strategy, func(t *testing.T) {
+			dir := t.TempDir()
+			gitCmd(t, dir, "init")
+			gitCmd(t, dir, "config", "user.name", "test")
+			gitCmd(t, dir, "config", "user.email", "test@example.com")
+			gitCmd(t, dir, "checkout", "-b", "base")
+			path := filepath.Join(dir, "conflict.txt")
+			if err := os.WriteFile(path, []byte("base\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", "-A")
+			gitCmd(t, dir, "commit", "-m", "base")
+			base := gitCmd(t, dir, "rev-parse", "HEAD")
+			gitCmd(t, dir, "checkout", "-b", "feature")
+			if err := os.WriteFile(path, []byte("feature\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", "-A")
+			gitCmd(t, dir, "commit", "-m", "feature")
+			head := gitCmd(t, dir, "rev-parse", "HEAD")
+			gitCmd(t, dir, "checkout", "base")
+			if err := os.WriteFile(path, []byte("upstream\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", "-A")
+			gitCmd(t, dir, "commit", "-m", "upstream")
+			gitCmd(t, dir, "checkout", "feature")
+			ag := &mockAgent{name: "codex", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				if err := os.WriteFile(path, []byte("resolver edit\n"), 0o644); err != nil {
+					return nil, err
+				}
+				gitCmd(t, opts.CWD, "add", "conflict.txt")
+				return nil, errors.New(nativeSafetyRefusal)
+			}}
+			sctx := newTestContext(t, ag, dir, base, head, config.Commands{})
+			var err error
+			if strategy == "merge" {
+				err = mergeWithAgent(sctx.Ctx, sctx, "base")
+			} else {
+				err = rebaseWithAgent(sctx.Ctx, sctx, "base")
+			}
+			if !agent.IsSafetyRefusal(err) {
+				t.Fatalf("error = %v", err)
+			}
+			if got := gitCmd(t, dir, "show", ":conflict.txt"); got != "resolver edit" {
+				t.Fatalf("staged edit = %q", got)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || string(data) != "resolver edit\n" {
+				t.Fatalf("worktree edit = %q, %v", data, err)
+			}
+		})
 	}
 }

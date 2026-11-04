@@ -28,6 +28,7 @@ type fakeSessionAgent struct {
 	nextID       int
 	failResumes  map[string]error // session id -> error returned when resumed
 	failNext     error            // error returned on the next call regardless
+	failResult   *agent.Result
 	supportsFlag bool
 }
 
@@ -54,7 +55,7 @@ func (f *fakeSessionAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Re
 	if f.failNext != nil {
 		err := f.failNext
 		f.failNext = nil
-		return nil, err
+		return f.failResult, err
 	}
 
 	if opts.Session == nil {
@@ -68,6 +69,22 @@ func (f *fakeSessionAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Re
 	}
 	f.nextID++
 	return &agent.Result{Text: "started", SessionID: fmt.Sprintf("sess-%d", f.nextID)}, nil
+}
+
+func TestRunSessions_PersistsFreshRefusedSession(t *testing.T) {
+	d, run := sessionTestDB(t)
+	fake := newFakeSessionAgent()
+	fake.failNext = errors.New("This content was flagged for possible cybersecurity risk.")
+	fake.failResult = &agent.Result{SessionID: "refused-thread"}
+	rs := NewRunSessions(d, run.ID, fake, true)
+	_, err := rs.Run(context.Background(), fake, SessionRoleFixer, agent.RunOpts{}, nil)
+	if !agent.IsSafetyRefusal(err) || len(fake.calls) != 1 {
+		t.Fatalf("error = %v, calls = %d", err, len(fake.calls))
+	}
+	stored, err := d.GetRunAgentSessions(run.ID)
+	if err != nil || len(stored) != 1 || stored[0].SessionID != "refused-thread" {
+		t.Fatalf("sessions = %+v, %v", stored, err)
+	}
 }
 
 func sessionTestDB(t *testing.T) (*db.DB, *db.Run) {

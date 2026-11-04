@@ -90,6 +90,9 @@ func (rs *RunSessions) Run(ctx context.Context, a agent.Agent, role SessionRole,
 	storedID := stored.ID
 	opts.Session = &stored
 	result, err := a.Run(ctx, opts)
+	if agent.IsSafetyRefusal(err) && result != nil && storedID == "" {
+		rs.remember(role, result.SessionID, sessionProvider(a, result))
+	}
 	if err == nil {
 		rs.remember(role, result.SessionID, sessionProvider(a, result))
 		return result, nil
@@ -116,6 +119,9 @@ func (rs *RunSessions) Run(ctx context.Context, a agent.Agent, role SessionRole,
 	}
 	result, err = a.Run(ctx, opts)
 	if err != nil {
+		if agent.IsSafetyRefusal(err) && result != nil {
+			rs.remember(role, result.SessionID, sessionProvider(a, result))
+		}
 		return nil, err
 	}
 	rs.remember(role, result.SessionID, sessionProvider(a, result))

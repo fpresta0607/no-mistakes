@@ -550,6 +550,9 @@ func (a *agentActivity) untilIdle(d time.Duration) time.Duration {
 }
 
 func classifyAgentRun(ctx context.Context, budget *agentBudget, activity *agentActivity, err error) error {
+	if agent.IsSafetyRefusal(err) {
+		return err
+	}
 	cause := context.Cause(ctx)
 	if cause == nil {
 		return err

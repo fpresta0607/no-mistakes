@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/intent"
@@ -111,7 +112,7 @@ func (s *IntentStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.Step
 			sctx.Log("no diff between base and head, skipping intent extraction")
 			return &pipeline.StepOutcome{Skipped: true}, nil
 		}
-		if errors.Is(runErr, intent.ErrDisambiguatorCleanup) {
+		if errors.Is(runErr, intent.ErrDisambiguatorCleanup) || agent.IsSafetyRefusal(runErr) {
 			outcomeLabel = "error"
 			sctx.Log(fmt.Sprintf("intent extraction failed: %v", runErr))
 			return nil, runErr

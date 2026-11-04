@@ -119,7 +119,7 @@ func TestReapWorktreesPreservesAnUnresolvedNativeSafetyRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reapWorktrees(f.db, f.p, worktreeReapPolicy{Retention: time.Hour}, time.Now())
+	NewRunManager(f.db, f.p, nil).reapWorktrees(worktreeReapPolicy{Retention: time.Hour}, time.Now())
 
 	if !f.exists(runID) {
 		t.Fatal("shutdown or recovery must not discard work held at a native safety refusal")

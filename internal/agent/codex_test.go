@@ -422,6 +422,19 @@ exit 1
 	}
 }
 
+func TestCodexAgent_RefusalCarriesFreshThreadWithoutUsage(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' '{"type":"thread.started","thread_id":"refused-thread"}'
+printf '%s\n' '{"type":"error","message":"This content was flagged for possible cybersecurity risk."}'
+exit 1
+`, "@echo off\r\necho {\"type\":\"thread.started\",\"thread_id\":\"refused-thread\"}\r\necho {\"type\":\"error\",\"message\":\"This content was flagged for possible cybersecurity risk.\"}\r\nexit /b 1\r\n")
+	result, err := (&codexAgent{bin: bin}).Run(context.Background(), RunOpts{CWD: dir, Prompt: "test"})
+	if !IsSafetyRefusal(err) || result == nil || result.SessionID != "refused-thread" || result.UsageReported {
+		t.Fatalf("result = %+v, error = %v", result, err)
+	}
+}
+
 func TestCodexAgent_RunFillsOmittedNullableFields(t *testing.T) {
 	dir := t.TempDir()
 	bin := writeFakeCodex(t, dir, `#!/bin/sh

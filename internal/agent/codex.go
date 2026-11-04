@@ -117,8 +117,11 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 	metrics := newCodexMetricsAccumulator()
 	// An error return carries the same session facts the success path sets
 	// below, so cumulative thread usage is never read as a per-round delta.
-	partialResult := func() *Result {
+	partialResult := func(err error) *Result {
 		res := resultFromUsage(usage)
+		if IsSafetyRefusal(err) {
+			res = failedResult(usage, threadID)
+		}
 		if res != nil {
 			res.SessionID = threadID
 			res.Resumed = resumeID != ""
@@ -131,7 +134,7 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		stderrWG.Wait()
 		retErr := fmt.Errorf("codex parse events: %w", err)
 		emitAgentExited(opts, "codex", pid, retErr)
-		return partialResult(), retErr
+		return partialResult(retErr), retErr
 	}
 
 	waitErr := started.wait()
@@ -146,7 +149,7 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		}
 		retErr := fmt.Errorf("codex exited: %w: %s", waitErr, detail)
 		emitAgentExited(opts, "codex", pid, retErr)
-		return partialResult(), retErr
+		return partialResult(retErr), retErr
 	}
 
 	// Codex's strict output mode treats every property as required after
@@ -156,6 +159,9 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 	// response so omission remains compatible without weakening required fields.
 	lastMessage = codexFillNullableRequiredFields(lastMessage, opts.JSONSchema)
 	res, err := finalizeTextResult("codex", lastMessage, validationSchema, usage)
+	if res == nil && threadID != "" && IsSafetyRefusal(err) {
+		res = partialResult(err)
+	}
 	if res != nil {
 		res.SessionID = threadID
 		res.Resumed = resumeID != ""

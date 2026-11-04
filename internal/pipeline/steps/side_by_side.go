@@ -180,18 +180,21 @@ func (l *sideLanes) close() {
 func (l *sideLanes) Stop(sctx *pipeline.StepContext) {
 	for name, lane := range l.claimAll() {
 		on := shortObjectID(lane.head)
-		select {
-		case <-lane.done:
-			if lane.err != nil {
-				sctx.LogFile(fmt.Sprintf("side by side: the %s work on %s had ended with: %v", name, on, lane.err))
-			}
-		default:
-		}
 		lane.discard()
+		if lane.err != nil {
+			sctx.LogFile(fmt.Sprintf("side by side: the %s work on %s ended with: %v", name, on, lane.err))
+		}
+		if agent.IsSafetyRefusal(lane.err) {
+			l.keep(lane)
+		}
 		if text := strings.TrimSpace(lane.log.String()); text != "" {
 			sctx.LogFile(fmt.Sprintf("side by side: log of the stopped %s work on %s:\n%s", name, on, text))
 		}
-		sctx.Log(fmt.Sprintf("side by side: the %s work started beside the review on %s is stopped and removed, because a native agent safety refusal stopped automatic execution", name, on))
+		if agent.IsSafetyRefusal(lane.err) {
+			sctx.Log(fmt.Sprintf("side by side: the %s work on %s refused and is preserved at %s for its step", name, on, lane.checkout))
+		} else {
+			sctx.Log(fmt.Sprintf("side by side: the %s work started beside the review on %s is stopped and removed, because a native agent safety refusal stopped automatic execution", name, on))
+		}
 	}
 }
 
@@ -306,7 +309,8 @@ func stopStaleSideLanes(sctx *pipeline.StepContext, head string) {
 			// A new head does not answer a refusal. The step reports it at its
 			// turn rather than doing the refused work again on that head.
 			lanes.keep(lane)
-			sctx.Log(fmt.Sprintf("side by side: the %s work started beside the review on %s ended in a native agent safety refusal, which its step reports at its turn", lane.step.Name(), shortObjectID(lane.head)))
+			sctx.LogFile(fmt.Sprintf("side by side: the %s work on %s ended with: %v\n%s", lane.step.Name(), shortObjectID(lane.head), lane.err, lane.log.String()))
+			sctx.Log(fmt.Sprintf("side by side: the %s work started beside the review on %s ended in a native agent safety refusal and is preserved at %s for its step", lane.step.Name(), shortObjectID(lane.head), lane.checkout))
 			continue
 		}
 		sctx.Log(fmt.Sprintf("side by side: the %s work started beside the review on %s is stopped and removed, because the run's head moved to %s", lane.step.Name(), shortObjectID(lane.head), shortObjectID(head)))
@@ -403,6 +407,9 @@ func (lane *sideLane) execute(sctx *pipeline.StepContext, runWorkDir, baseSHA st
 func (lane *sideLane) discard() {
 	lane.cancel(errSideLaneStopped)
 	<-lane.done
+	if agent.IsSafetyRefusal(lane.err) {
+		return
+	}
 	lane.removeClone()
 	if lane.evidenceDir != "" {
 		_ = os.RemoveAll(lane.evidenceDir)
@@ -448,6 +455,7 @@ func takeSideLane(sctx *pipeline.StepContext, name types.StepName) (*pipeline.St
 			sctx.LogFile(fmt.Sprintf("side by side: log of the discarded %s work on %s:\n%s", name, on, text))
 		}
 		if agent.IsSafetyRefusal(lane.err) {
+			sctx.Log(fmt.Sprintf("side by side: refused %s work is preserved at %s", name, lane.checkout))
 			return nil, false, fmt.Errorf("side by side: the %s work started beside the review on %s: %w", name, on, lane.err)
 		}
 		sctx.Log(fmt.Sprintf("side by side: the %s work started beside the review on %s is not used: %s. The step runs now, as it does without side by side.", name, on, reason))

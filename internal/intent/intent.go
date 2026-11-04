@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 )
 
 // Result is what Extract returns when it successfully attaches an intent
@@ -177,7 +179,7 @@ func disambiguateMatch(ctx context.Context, p ExtractParams, fallback *Match, lo
 	}
 	choice, err := p.Disambiguator.Disambiguate(ctx, p.DiffFiles, candidates)
 	if err != nil {
-		if errors.Is(err, ErrDisambiguatorCleanup) {
+		if errors.Is(err, ErrDisambiguatorCleanup) || agent.IsSafetyRefusal(err) {
 			return nil, fmt.Errorf("intent: disambiguator cleanup: %w", err)
 		}
 		if p.Logf != nil {

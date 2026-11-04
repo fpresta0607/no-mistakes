@@ -808,8 +808,9 @@ Each step takes that work at its own turn, in its usual order, only when it is s
 - For the documentation pass, its commit changes no path the run's worktree holds uncommitted changes to. The commit is brought over as a fast-forward of the unchanged head.
 
 Anything else discards the work, the step log says why, and the step runs as it does without the setting.
-Work that ended in a native agent safety refusal is the exception: it is never run again, even after the head moved, and the step stops on that refusal at its turn.
-When the run stops on a native agent safety refusal, work still going beside the review is stopped and removed, and its log is kept in the stopped step's log.
+Work that ended in a native agent safety refusal is the exception: its clone and evidence are preserved, it is never run again even after the head moved, and the step stops on that refusal at its turn.
+When the run stops on a native agent safety refusal, work still going beside the review is stopped and its log is kept in the stopped step's log.
+Work that itself refused is preserved for its own step; other stopped work is removed.
 A fix round never takes work started early.
 Nothing starts beside the review when a harness other than `claude` or `codex` is configured, since those are the harnesses known to serve two calls at once, or when the repository has submodules or Git LFS files, which a plain clone would not hold.
 The review's log says which.

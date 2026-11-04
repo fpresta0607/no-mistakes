@@ -348,6 +348,20 @@ func TestExtract_ReturnsErrorWhenDisambiguatorCleanupFails(t *testing.T) {
 	}
 }
 
+func TestExtract_RefusedDisambiguatorDoesNotStartSummarizer(t *testing.T) {
+	head := time.Now()
+	r := &staticReader{name: "claude", sessions: []*Session{
+		{SessionID: "s1", LastActivity: head, Messages: []Message{{Role: RoleUser, FilePaths: []string{"foo.go"}}}},
+		{SessionID: "s2", LastActivity: head.Add(-time.Minute), Messages: []Message{{Role: RoleUser, FilePaths: []string{"foo.go"}}}},
+	}}
+	summary := &fixedSummarizer{summary: "fallback"}
+	refusal := errors.New("This content was flagged for possible cybersecurity risk.")
+	_, err := Extract(context.Background(), ExtractParams{OriginCWD: "/tmp/repo", DiffFiles: []string{"foo.go"}, HeadTime: head, BaseTime: head.Add(-time.Hour), Threshold: 0.2, Readers: []Reader{r}, Summarizer: summary, Disambiguator: &fixedDisambiguator{err: refusal}})
+	if !errors.Is(err, refusal) || summary.calls != 0 {
+		t.Fatalf("error = %v, summary calls = %d", err, summary.calls)
+	}
+}
+
 func TestExtract_SingleDecisiveCandidateBeatsRecentPartialMatch(t *testing.T) {
 	headTime := time.Now()
 	diffFiles := []string{
