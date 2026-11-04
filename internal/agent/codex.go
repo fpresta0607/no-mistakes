@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -130,13 +131,19 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
 		retErr := fmt.Errorf("codex parse events: %w", err)
+		if detail := strings.TrimSpace(strings.Join([]string{codexErr, string(stderrBuf)}, "\n")); detail != "" {
+			retErr = fmt.Errorf("%w: %s", retErr, detail)
+		}
 		emitAgentExited(opts, "codex", pid, retErr)
 		return partialResult(), retErr
 	}
 
 	waitErr := started.wait()
 	stderrWG.Wait()
-	if waitErr != nil {
+	if waitErr != nil || (ctx.Err() != nil && IsSafetyRefusal(errors.New(codexErr+"\n"+string(stderrBuf)))) {
+		if waitErr == nil {
+			waitErr = ctx.Err()
+		}
 		detail := strings.TrimSpace(codexErr)
 		stderr := strings.TrimSpace(string(stderrBuf))
 		if detail != "" && stderr != "" {
@@ -310,7 +317,7 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), us
 
 		switch event.Type {
 		case "error":
-			if event.Message != "" && codexErr != nil {
+			if event.Message != "" && codexErr != nil && !IsSafetyRefusal(errors.New(*codexErr)) {
 				*codexErr = event.Message
 			}
 

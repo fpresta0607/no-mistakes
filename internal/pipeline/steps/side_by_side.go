@@ -56,8 +56,6 @@ const (
 	// sideLaneBranch names a lane's commit inside its clone so the run's
 	// worktree can fetch it.
 	sideLaneBranch = "no-mistakes-side-lane"
-	// sideLaneLogLimit bounds how much of a lane's log is kept in memory.
-	sideLaneLogLimit = 1 << 20
 	// pushGuardCommitLimit bounds how many commits a note names.
 	pushGuardCommitLimit = 20
 )
@@ -71,7 +69,7 @@ var sideLaneAgents = map[types.AgentName]bool{types.AgentClaude: true, types.Age
 // needs.
 var errSideLaneStopped = errors.New("side lane stopped")
 
-// sideLaneLog keeps the tail of what a lane's step logged.
+// sideLaneLog keeps what a lane's step logged.
 type sideLaneLog struct {
 	mu   sync.Mutex
 	text []byte
@@ -81,9 +79,6 @@ func (l *sideLaneLog) write(text string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.text = append(l.text, text...)
-	if over := len(l.text) - sideLaneLogLimit; over > 0 {
-		l.text = append([]byte(nil), l.text[over:]...)
-	}
 }
 
 func (l *sideLaneLog) line(text string) { l.write(strings.TrimRight(text, "\n") + "\n") }
@@ -188,7 +183,7 @@ func (l *sideLanes) close() { l.stop() }
 func (l *sideLanes) Stop(sctx *pipeline.StepContext) {
 	for name, lane := range l.stop() {
 		on := shortObjectID(lane.head)
-		if text := strings.TrimSpace(lane.log.String()); text != "" {
+		if text := lane.log.String(); text != "" {
 			sctx.LogFile(fmt.Sprintf("side by side: log of the stopped %s work on %s:\n%s", name, on, text))
 		}
 		if agent.IsSafetyRefusal(lane.err) {
@@ -453,7 +448,7 @@ func takeSideLane(sctx *pipeline.StepContext, name types.StepName) (*pipeline.St
 	on := shortObjectID(lane.head)
 	refuse := func(reason string) (*pipeline.StepOutcome, bool, error) {
 		lane.discard()
-		if text := strings.TrimSpace(lane.log.String()); text != "" {
+		if text := lane.log.String(); text != "" {
 			sctx.LogFile(fmt.Sprintf("side by side: log of the discarded %s work on %s:\n%s", name, on, text))
 		}
 		if agent.IsSafetyRefusal(lane.err) {
@@ -482,7 +477,7 @@ func takeSideLane(sctx *pipeline.StepContext, name types.StepName) (*pipeline.St
 		return refuse(reason)
 	}
 	lane.removeClone()
-	if text := strings.TrimSpace(lane.log.String()); text != "" {
+	if text := lane.log.String(); text != "" {
 		sctx.LogFile(fmt.Sprintf("side by side: log of the %s work on %s:\n%s", name, on, text))
 	}
 	sctx.Log(fmt.Sprintf("side by side: took the %s result of the work started beside the review on %s, which is still the run's head. It ran for %s there.", name, on, lane.elapsed.Round(time.Second)))

@@ -25,6 +25,29 @@ func (m mutatingAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Resu
 }
 func (m mutatingAgent) Close() error { return nil }
 
+func TestAgentDisambiguatorPreservesWorkAfterSafetyRefusal(t *testing.T) {
+	repo := initDisambiguatorTestRepo(t)
+	d := NewAgentDisambiguator(mutatingAgent{run: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		for _, name := range []string{"conflict.txt", "new.txt"} {
+			if err := os.WriteFile(filepath.Join(opts.CWD, name), []byte("refused work\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return nil, errors.New("This content was flagged for possible cybersecurity risk")
+	}}, repo)
+
+	_, err := d.Disambiguate(context.Background(), []string{"conflict.txt"}, []*Match{{Session: &Session{SessionID: "s1", AgentName: "test"}}})
+	if !agent.IsSafetyRefusal(err) {
+		t.Fatalf("error = %v, want safety refusal", err)
+	}
+	for _, name := range []string{"conflict.txt", "new.txt"} {
+		data, err := os.ReadFile(filepath.Join(repo, name))
+		if err != nil || string(data) != "refused work\n" {
+			t.Fatalf("%s = %q, error %v, want refused work", name, data, err)
+		}
+	}
+}
+
 func TestAgentDisambiguatorRestoresAfterBranchSwitchWithDirtyConflict(t *testing.T) {
 	ctx := context.Background()
 	repo := initDisambiguatorTestRepo(t)

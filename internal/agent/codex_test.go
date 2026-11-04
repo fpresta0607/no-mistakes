@@ -313,6 +313,30 @@ sleep 100
 	}
 }
 
+func TestCodexAgent_CancellationPreservesObservedSafetyRefusal(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' 'diagnostic from stderr' >&2
+printf '%s\n' '{"type":"error","message":"This content was flagged for possible cybersecurity risk"}'
+printf '%s\n' '{"type":"error","message":"later ordinary error"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"progress"}}'
+printf '%s\n' '{"type":"turn.completed"}'
+`, strings.Join([]string{
+		"@echo off",
+		"echo diagnostic from stderr 1>&2",
+		"echo {\"type\":\"error\",\"message\":\"This content was flagged for possible cybersecurity risk\"}",
+		"echo {\"type\":\"error\",\"message\":\"later ordinary error\"}",
+		"echo {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"progress\"}}",
+		"echo {\"type\":\"turn.completed\"}",
+	}, "\r\n"))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := (&codexAgent{bin: bin}).Run(ctx, RunOpts{CWD: dir, OnChunk: func(string) { cancel() }})
+	if !IsSafetyRefusal(err) {
+		t.Fatalf("error = %v, want the observed refusal", err)
+	}
+}
+
 func TestCodexAgent_ProgressWithoutTerminalCompletionIsRejected(t *testing.T) {
 	dir := t.TempDir()
 	progress := `{"findings":[],"risk_level":"low"}`

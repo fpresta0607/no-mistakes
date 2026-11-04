@@ -350,7 +350,9 @@ func TestSideBySide_StopCancelsEveryLaneBeforeWaiting(t *testing.T) {
 func TestSideBySide_StopEndsTheLanesAndKeepsTheirLogs(t *testing.T) {
 	f := newSideBySideFixture(t, config.Commands{})
 	started := make(chan string, 1)
+	longLog := "beginning of lane log " + strings.Repeat("x", 1<<20) + " end of lane log"
 	f.agent.evidenceF = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		opts.OnChunk(longLog)
 		started <- opts.CWD
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -373,6 +375,9 @@ func TestSideBySide_StopEndsTheLanesAndKeepsTheirLogs(t *testing.T) {
 	}
 	if !strings.Contains(f.logText(), "log of the stopped test work") || !strings.Contains(f.logText(), "a native agent safety refusal stopped automatic execution") {
 		t.Fatalf("log = %q, want the lane's log and the reason it stopped", f.logText())
+	}
+	if !strings.Contains(f.logText(), longLog) {
+		t.Fatal("the parked step did not retain the complete lane log")
 	}
 }
 
