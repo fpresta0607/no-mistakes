@@ -76,6 +76,8 @@ make install
 
 `make build` embeds the telemetry host from `NO_MISTAKES_UMAMI_HOST` in a repo-local `.env` first, then `UMAMI_HOST` from the shell, then the default self-hosted host. It embeds the telemetry website ID from `NO_MISTAKES_UMAMI_WEBSITE_ID` in `.env` first, then `UMAMI_WEBSITE_ID` from the shell, then the default website ID.
 
+On native Windows the Makefile needs a POSIX shell. When `sh.exe` is not on `PATH`, it adds the `usr/bin` directory of Git for Windows, and it stops with an error if that provides no shell.
+
 ## Prerequisites
 
 - **git** - required

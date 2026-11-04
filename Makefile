@@ -1,3 +1,14 @@
+# Every probe and recipe below is POSIX shell, but GNU make for Windows falls
+# back to cmd.exe when no sh.exe is on PATH. Git for Windows ships sh, date and
+# perl in usr/bin, which its default install leaves off PATH.
+ifeq ($(SHELL),sh.exe)
+PATH := $(PATH);$(shell git --exec-path)/../../../usr/bin
+SHELL := sh.exe
+endif
+ifeq ($(SHELL),sh.exe)
+$(error This Makefile needs a POSIX shell: install Git for Windows or put sh.exe on PATH)
+endif
+
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -16,7 +27,8 @@ LDFLAGS := -X github.com/kunchenguid/no-mistakes/internal/buildinfo.Version=$(VE
 .PHONY: build dist install test e2e e2e-record lint fmt clean docs docs-build docs-preview demo skill skill-check
 
 DIST_DIR ?= dist
-INSTALL_BIN := $(shell go env GOPATH)/bin/no-mistakes
+# go env prints backslashes on Windows, which the shell would strip.
+INSTALL_BIN := $(subst \,/,$(shell go env GOPATH))/bin/no-mistakes
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/no-mistakes ./cmd/no-mistakes

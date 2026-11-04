@@ -5,15 +5,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestMakeBuildPrioritizesDotEnvUmamiWebsiteID(t *testing.T) {
-	skipMakeBuildTestsOnWindows(t)
-
 	makePath, err := exec.LookPath("make")
 	if err != nil {
 		t.Skip("make not available")
@@ -37,8 +37,6 @@ func TestMakeBuildPrioritizesDotEnvUmamiWebsiteID(t *testing.T) {
 }
 
 func TestMakeBuildUsesEnvUmamiWebsiteIDWhenDotEnvMissing(t *testing.T) {
-	skipMakeBuildTestsOnWindows(t)
-
 	makePath, err := exec.LookPath("make")
 	if err != nil {
 		t.Skip("make not available")
@@ -55,8 +53,6 @@ func TestMakeBuildUsesEnvUmamiWebsiteIDWhenDotEnvMissing(t *testing.T) {
 }
 
 func TestMakeBuildEmbedsDefaultSelfHostedTelemetryConfig(t *testing.T) {
-	skipMakeBuildTestsOnWindows(t)
-
 	makePath, err := exec.LookPath("make")
 	if err != nil {
 		t.Skip("make not available")
@@ -74,8 +70,6 @@ func TestMakeBuildEmbedsDefaultSelfHostedTelemetryConfig(t *testing.T) {
 }
 
 func TestMakeBuildPrioritizesDotEnvUmamiHost(t *testing.T) {
-	skipMakeBuildTestsOnWindows(t)
-
 	makePath, err := exec.LookPath("make")
 	if err != nil {
 		t.Skip("make not available")
@@ -99,8 +93,6 @@ func TestMakeBuildPrioritizesDotEnvUmamiHost(t *testing.T) {
 }
 
 func TestMakeBuildIgnoresUnrelatedDotEnvEntries(t *testing.T) {
-	skipMakeBuildTestsOnWindows(t)
-
 	makePath, err := exec.LookPath("make")
 	if err != nil {
 		t.Skip("make not available")
@@ -122,8 +114,6 @@ func TestMakeBuildIgnoresUnrelatedDotEnvEntries(t *testing.T) {
 }
 
 func TestMakeBuildStripsInlineCommentsFromDotEnvUmamiWebsiteID(t *testing.T) {
-	skipMakeBuildTestsOnWindows(t)
-
 	makePath, err := exec.LookPath("make")
 	if err != nil {
 		t.Skip("make not available")
@@ -145,8 +135,6 @@ func TestMakeBuildStripsInlineCommentsFromDotEnvUmamiWebsiteID(t *testing.T) {
 }
 
 func TestMakeBuildPreservesQuotedHashInDotEnvUmamiWebsiteID(t *testing.T) {
-	skipMakeBuildTestsOnWindows(t)
-
 	makePath, err := exec.LookPath("make")
 	if err != nil {
 		t.Skip("make not available")
@@ -167,11 +155,111 @@ func TestMakeBuildPreservesQuotedHashInDotEnvUmamiWebsiteID(t *testing.T) {
 	}
 }
 
-func skipMakeBuildTestsOnWindows(t *testing.T) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("make build tests are POSIX-oriented")
+func TestMakeBuildProbesWorkWhenWindowsMakeFallsBackToCmd(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only GNU make for Windows falls back to cmd.exe")
 	}
+
+	makePath, err := exec.LookPath("make")
+	if err != nil {
+		t.Skip("make not available")
+	}
+
+	workDir := writeTestMakeWorkspace(t)
+	commit := commitTestRepo(t, workDir)
+
+	output := runMakeDryBuild(t, makePath, workDir, nil)
+
+	for _, shellError := range []string{"is not recognized", "cannot find the path", "cannot accept the date"} {
+		if strings.Contains(output, shellError) {
+			t.Fatalf("make probes should not reach cmd.exe, got:\n%s", output)
+		}
+	}
+	for _, want := range []string{"buildinfo.Version=" + commit, "buildinfo.Commit=" + commit} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("make build output should contain %q, got:\n%s", want, output)
+		}
+	}
+	if !regexp.MustCompile(`buildinfo\.Date=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z `).MatchString(output) {
+		t.Fatalf("make build output should embed a UTC build date, got:\n%s", output)
+	}
+}
+
+func TestMakeBuildRefusesWithoutPosixShellOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only GNU make for Windows falls back to cmd.exe")
+	}
+
+	makePath, err := exec.LookPath("make")
+	if err != nil {
+		t.Skip("make not available")
+	}
+
+	cmd := exec.Command(makePath, "-n", "build")
+	cmd.Dir = writeTestMakeWorkspace(t)
+	cmd.Env = append(os.Environ(), "PATH="+pathWithout("sh.exe", "git.exe"))
+
+	out, err := cmd.CombinedOutput()
+
+	if err == nil {
+		t.Fatalf("make -n build should fail without a POSIX shell, got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "needs a POSIX shell") {
+		t.Fatalf("make -n build should name the missing shell, got:\n%s", out)
+	}
+}
+
+func TestMakeInstallPathSurvivesThePosixShellOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only Windows paths hold backslashes")
+	}
+
+	makePath, err := exec.LookPath("make")
+	if err != nil {
+		t.Skip("make not available")
+	}
+
+	output := runMakeDry(t, makePath, writeTestMakeWorkspace(t), "install", nil)
+
+	if strings.Contains(output, `\`) {
+		t.Fatalf("sh strips backslashes from unquoted install paths, got:\n%s", output)
+	}
+}
+
+// pathWithout returns PATH minus every directory holding one of executables.
+func pathWithout(executables ...string) string {
+	var kept []string
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		isHolder := slices.ContainsFunc(executables, func(name string) bool {
+			_, err := os.Stat(filepath.Join(dir, name))
+			return err == nil
+		})
+		if !isHolder {
+			kept = append(kept, dir)
+		}
+	}
+	return strings.Join(kept, string(os.PathListSeparator))
+}
+
+// commitTestRepo makes dir a repository with one commit and returns its short ID.
+func commitTestRepo(t *testing.T, dir string) string {
+	t.Helper()
+
+	var commit string
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "init"},
+		{"rev-parse", "--short", "HEAD"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+		commit = strings.TrimSpace(string(out))
+	}
+	return commit
 }
 
 func writeTestMakeWorkspace(t *testing.T) string {
@@ -190,19 +278,28 @@ func writeTestMakeWorkspace(t *testing.T) string {
 
 func runMakeDryBuild(t *testing.T, makePath, workDir string, extraEnv map[string]string) string {
 	t.Helper()
+	return runMakeDry(t, makePath, workDir, "build", extraEnv)
+}
+
+func runMakeDry(t *testing.T, makePath, workDir, target string, extraEnv map[string]string) string {
+	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, makePath, "-n", "build")
+	cmd := exec.CommandContext(ctx, makePath, "-n", target)
 	cmd.Dir = workDir
 	cmd.Env = filteredEnv(os.Environ(), "UMAMI_HOST", "UMAMI_WEBSITE_ID", "NO_MISTAKES_UMAMI_HOST", "NO_MISTAKES_UMAMI_WEBSITE_ID")
+	if runtime.GOOS == "windows" {
+		// A hosted runner has sh.exe on PATH; a default Git for Windows install does not.
+		cmd.Env = append(cmd.Env, "PATH="+pathWithout("sh.exe"))
+	}
 	for key, value := range extraEnv {
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("make -n build failed: %v\n%s", err, out)
+		t.Fatalf("make -n %s failed: %v\n%s", target, err, out)
 	}
 	return string(out)
 }
