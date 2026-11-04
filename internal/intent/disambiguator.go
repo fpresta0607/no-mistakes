@@ -79,6 +79,9 @@ func (d *agentDisambiguator) Disambiguate(ctx context.Context, diffFiles []strin
 	defer beforeState.cleanup()
 	if watchWorktree {
 		defer func() {
+			if agent.IsSafetyRefusal(retErr) {
+				return
+			}
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 

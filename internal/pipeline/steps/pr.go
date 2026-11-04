@@ -497,6 +497,10 @@ Final diff paths and statuses:
 		JSONSchema: prContentSchema,
 		OnChunk:    sctx.LogChunk,
 	})
+	if agent.IsSafetyRefusal(err) {
+		// Fallback content would publish the run past the refusal.
+		return prContent{}, err
+	}
 	if err != nil {
 		slog.Warn("agent failed for PR content, using fallback", "error", err)
 		fallback, fallbackErr := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit, provider)

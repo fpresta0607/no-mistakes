@@ -27,7 +27,7 @@ const (
 func TestReviewStep_SchemaRejectionRerunsAFreshReview(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	const validation = `pi output parse: JSON output missing required field "risk_level"`
+	const validation = `pi output parse: JSON output missing required field "risk_level" (output snippet: "This content was flagged for possible cybersecurity risk.")`
 	calls := 0
 	ag := &mockAgent{
 		name: "pi",

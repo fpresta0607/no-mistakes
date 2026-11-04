@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -261,7 +262,10 @@ func TestAnswerReviewQuestionOnDiskQuestionSurvivesTheSettingBeingTurnedOff(t *t
 // parkingReviewStep parks a review gate on one ordinary ask-user CODE finding -
 // no review question involved - which is the gate an orphan answer used to be
 // able to steal.
-type parkingReviewStep struct{ entered chan struct{} }
+type parkingReviewStep struct {
+	entered chan struct{}
+	refuse  bool
+}
 
 func (s *parkingReviewStep) Name() types.StepName { return types.StepReview }
 
@@ -269,6 +273,9 @@ func (s *parkingReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepO
 	select {
 	case s.entered <- struct{}{}:
 	default:
+	}
+	if s.refuse {
+		return nil, fmt.Errorf("%w: This content was flagged for possible cybersecurity risk.", agent.ErrSafetyRefusal)
 	}
 	return &pipeline.StepOutcome{
 		Findings: `{"findings":[{"id":"review-1","severity":"warning","description":"needs an operator decision","action":"ask-user"}],"summary":"one issue"}`,
@@ -280,6 +287,10 @@ func (s *parkingReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepO
 // bare executor is never waiting, so exec.Respond fails there for every input
 // and could not tell a correct refusal from the bug.
 func liveParkedGateFixture(t *testing.T) (*RunManager, *paths.Paths, string, *pipeline.Executor) {
+	return liveParkedGateFixtureWithRefusal(t, false)
+}
+
+func liveParkedGateFixtureWithRefusal(t *testing.T, refuse bool) (*RunManager, *paths.Paths, string, *pipeline.Executor) {
 	t.Helper()
 	p := paths.WithRoot(t.TempDir())
 	database, err := db.Open(filepath.Join(t.TempDir(), "state.sqlite"))
@@ -297,7 +308,7 @@ func liveParkedGateFixture(t *testing.T) (*RunManager, *paths.Paths, string, *pi
 		t.Fatal(err)
 	}
 
-	step := &parkingReviewStep{entered: make(chan struct{}, 1)}
+	step := &parkingReviewStep{entered: make(chan struct{}, 1), refuse: refuse}
 	cfg := &config.Config{Review: config.Review{Conversation: true}}
 	exec := pipeline.NewExecutor(database, p, cfg, nil, []pipeline.Step{step}, nil)
 
@@ -345,6 +356,23 @@ func liveParkedGateFixture(t *testing.T) (*RunManager, *paths.Paths, string, *pi
 		time.Sleep(10 * time.Millisecond)
 	}
 	return m, p, run.ID, exec
+}
+
+func TestAnswerReviewQuestionRecordsWithoutReleasingSafetyRefusal(t *testing.T) {
+	m, p, runID, exec := liveParkedGateFixtureWithRefusal(t, true)
+	dir := conversationDir(p, runID)
+	appendAgentQuestionLine(t, dir, `{"id":"q1","question":"keep the route?","options":["keep","remove"]}`)
+	result, err := m.HandleAnswerReviewQuestion(runID, "q1", "keep", "captain")
+	if err != nil || result.Resumed {
+		t.Fatalf("answer = %+v, %v", result, err)
+	}
+	conv, err := reviewqa.Load(dir)
+	if err != nil || len(conv.Answered()) != 1 {
+		t.Fatalf("answer was not recorded: %+v, %v", conv, err)
+	}
+	if err := exec.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+		t.Fatalf("refusal gate was released: %v", err)
+	}
 }
 
 // TestAnswerReviewQuestionOrphanAnswerLeavesAParkedGateAlone is the regression

@@ -73,6 +73,7 @@ type Executor struct {
 	waiting                bool                  // true when blocked on approval
 	waitingStep            types.StepName        // which step is currently awaiting approval
 	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
+	waitingSafetyRefusal   bool                  // true: an answer must not release the waiting gate
 	ciHandbackCh           chan ciHandbackRequest
 	ciHandbackPending      bool
 	ciHandbackReleased     bool
@@ -222,6 +223,10 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		refusal := e.waitingApprovalRefusal
 		e.mu.Unlock()
 		return errors.New(refusal)
+	}
+	if action == types.ActionAnswer && e.waitingSafetyRefusal {
+		e.mu.Unlock()
+		return errors.New("an answer cannot release a native agent safety refusal: it needs an explicit decision")
 	}
 	e.waiting = false
 	e.mu.Unlock()
@@ -577,6 +582,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
 	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
+	e.waitingSafetyRefusal = HasSafetyRefusal(gate.findings)
 	e.mu.Unlock()
 	e.emitStepEventWithFindingsAndError(
 		ipc.EventStepCompleted,
@@ -1108,7 +1114,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
 			}
 		case agent.LifecyclePhaseExit:
-			if dbErr := e.db.SetStepAgentActivity(sr.ID, text, nil); dbErr != nil {
+			if dbErr := e.db.SetStepAgentActivity(sr.ID, truncateActivity(text), nil); dbErr != nil {
 				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
 			}
 		case agent.LifecyclePhaseActivity:
@@ -1302,6 +1308,14 @@ rounds:
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
+		refusal := safetyRefusalOutcome(err)
+		if refusal != nil {
+			writeLog(safeurl.RedactText(err.Error()))
+			if lanes := sctx.Shared.SideLanes(); lanes != nil {
+				lanes.Stop(sctx)
+			}
+			outcome, err = refusal, nil
+		}
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
@@ -1329,7 +1343,7 @@ rounds:
 		if stepName == types.StepReview {
 			reviewApprovedHeadSHA = outcome.ReviewApprovedHeadSHA
 		}
-		outcome.Findings = normalizeFindingsJSON(outcome.Findings, string(stepName))
+		outcome.Findings = normalizeFindingsJSON(outcome.Findings, string(stepName), refusal != nil)
 		finalExitCode = outcome.ExitCode
 		durationOverrideMS += outcome.DurationOverrideMS
 
@@ -1506,6 +1520,7 @@ rounds:
 			e.waiting = true
 			e.waitingStep = stepName
 			e.waitingApprovalRefusal = approvalRefusal(stepName, effectiveFindings)
+			e.waitingSafetyRefusal = HasSafetyRefusal(effectiveFindings)
 			e.mu.Unlock()
 
 			// Parking starts before the gate becomes observable. This includes the
@@ -2063,7 +2078,7 @@ func (e *Executor) resumeApprovalGate(ctx context.Context, step Step, sctx *Step
 	if !ok {
 		return "", false, nil
 	}
-	if HasProtectedPathRefusal(findingsJSON) {
+	if HasProtectedPathRefusal(findingsJSON) || HasSafetyRefusal(findingsJSON) {
 		return "", false, nil
 	}
 	timeout := e.gateReconcileTimeout
@@ -2088,7 +2103,7 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 	if !ok {
 		return false, nil
 	}
-	if HasProtectedPathRefusal(findingsJSON) {
+	if HasProtectedPathRefusal(findingsJSON) || HasSafetyRefusal(findingsJSON) {
 		return false, nil
 	}
 	timeout := e.gateReconcileTimeout
@@ -2376,13 +2391,29 @@ func shouldTrackStepTelemetry(eventType ipc.EventType, status string) bool {
 }
 
 func (e *Executor) emitLogChunk(run *db.Run, repo *db.Repo, stepName types.StepName, content string) {
-	e.onEvent(ipc.Event{
-		Type:     ipc.EventLogChunk,
-		RunID:    run.ID,
-		RepoID:   repo.ID,
-		StepName: &stepName,
-		Content:  &content,
-	})
+	for {
+		end := min(len(content), 32*1024)
+		if end < len(content) {
+			for end > 0 && !utf8.RuneStart(content[end]) {
+				end--
+			}
+			if end == 0 {
+				end = 32 * 1024
+			}
+		}
+		chunk := content[:end]
+		e.onEvent(ipc.Event{
+			Type:     ipc.EventLogChunk,
+			RunID:    run.ID,
+			RepoID:   repo.ID,
+			StepName: &stepName,
+			Content:  &chunk,
+		})
+		if end == len(content) {
+			break
+		}
+		content = content[end:]
+	}
 }
 
 func (e *Executor) telemetryAgentName() string {

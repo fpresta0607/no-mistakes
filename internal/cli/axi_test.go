@@ -425,6 +425,12 @@ func TestRenderDriveResult_ProtectedPathGateHelp(t *testing.T) {
 				absent: []string{"--action approve", "do not edit files yourself"},
 			},
 			{
+				name:     "native_safety",
+				findings: findingsJSON(t, []types.Finding{{ID: "agent-safety-refusal", Severity: "error", Action: types.ActionAskUser, Description: "This content was flagged for possible cybersecurity risk."}}, "Native safety refusal"),
+				want:     []string{"safety refusal stopped automatic execution", "Approve is rejected", "operator inspect the refusal and preserved work"},
+				absent:   []string{"--action approve", "--action fix", "do not edit files yourself"},
+			},
+			{
 				name:     "ordinary",
 				findings: findingsJSON(t, []types.Finding{{ID: "doc-1", Action: types.ActionAskUser, Description: "clarify documentation"}}, "Documentation decision"),
 				want:     []string{"no-mistakes axi respond --action approve", "--action fix --findings <ids>", "do not edit files yourself"},

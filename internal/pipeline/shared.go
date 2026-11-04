@@ -26,8 +26,8 @@ type RunShared struct {
 	// The fields below serve global side_by_side and stay zero without it.
 
 	// sideLanes is the steps package's record of work started beside the
-	// review. It is opaque here: the steps own what it holds.
-	sideLanes any
+	// review. The steps own what it holds.
+	sideLanes SideLanes
 	// closers run once when the run's executor is done with this value, so
 	// work started beside the review is stopped and its copies removed however
 	// the run ended.
@@ -44,8 +44,18 @@ type RunShared struct {
 	pushGuardRestarts int
 }
 
+// SideLanes is the steps package's record of work started beside the review
+// under global side_by_side.
+type SideLanes interface {
+	// Stop stops and removes every lane no step has taken yet, logging to
+	// sctx what each one did. The executor calls it when it parks sctx's step
+	// on a native agent safety refusal, so no lane starts an agent while the
+	// operator decides.
+	Stop(sctx *StepContext)
+}
+
 // SideLanes returns what SetSideLanes stored, or nil.
-func (s *RunShared) SideLanes() any {
+func (s *RunShared) SideLanes() SideLanes {
 	if s == nil {
 		return nil
 	}
@@ -56,7 +66,7 @@ func (s *RunShared) SideLanes() any {
 
 // SetSideLanes stores the steps package's record of work started beside the
 // review.
-func (s *RunShared) SetSideLanes(lanes any) {
+func (s *RunShared) SetSideLanes(lanes SideLanes) {
 	if s == nil {
 		return
 	}

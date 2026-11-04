@@ -138,7 +138,7 @@ func (a *fallbackAgent) Close() error {
 }
 
 func isAgentUnavailableError(err error) bool {
-	if err == nil {
+	if err == nil || IsSafetyRefusal(err) {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
