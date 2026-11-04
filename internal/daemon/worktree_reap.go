@@ -5,11 +5,10 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
-	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/procreap"
 )
 
@@ -43,37 +42,60 @@ func worktreeReapPolicyFor(global *config.GlobalConfig) worktreeReapPolicy {
 // reapWorktrees bounds leftover run-worktree directories under the default
 // <NM_HOME>/worktrees tree (issue #1093).
 //
-// A run's own worktree is already removed the instant its pipeline finishes
-// (RunManager.removeRunWorktree), so on the common path there is nothing here
-// to reap. This exists for the uncommon path: a `git worktree remove` failure
-// (e.g. a vendored/nested .git under a large node_modules tree) or a
-// protected-path refusal that later became removable both leave a directory
-// that immediate removal never retries. cleanupOrphanWorktrees already
-// reclaims every such leftover unconditionally, but only once, at the next
-// daemon startup - on a long-lived install that can be weeks away, which is
-// exactly the "long-running host" accumulation the issue reports. Calling
-// this after every run's own cleanup (see RunManager.cleanupRunEvidence)
-// converges a live daemon on the same budget without waiting for a restart.
+// RunManager.removeRunWorktree attempts cleanup when a pipeline finishes,
+// subject to the source and refusal retention rules documented in
+// docs/src/content/docs/concepts/daemon.md. This reaper bounds eligible
+// leftovers after immediate cleanup, including failed removals, without
+// waiting for a daemon restart. It runs after every run's own cleanup
+// (see RunManager.cleanupRunEvidence) and at startup.
 //
 // It reuses defaultTreeOrphanWorktrees for directory discovery and
-// eligibility (never a directory whose run is still pending/running, still
-// protected, or unpushed after a CI-monitor interruption - see
-// skipWorktreeCleanup and protectedPathCleanupReason), then applies the same
-// two-rule bound reapEvidence applies to evidence: an eligible directory
-// older than the retention window is removed, and whatever survives is
-// trimmed to the run ceiling, oldest first. Unlike evidence, an eligible
-// worktree is never removed merely for being "empty" - a real checkout is
+// eligibility (see skipWorktreeCleanup and protectedPathCleanupReason), then
+// applies the same two-rule bound reapEvidence applies to evidence: an
+// eligible directory older than the retention window is removed, and whatever
+// survives is trimmed to the run ceiling, oldest first. Unlike evidence, an
+// eligible worktree is never removed merely for being "empty" - a real checkout is
 // never empty, so there is nothing analogous to reapEvidence's empty-run
 // case. Only the default tree is scanned: an operator-configured
 // worktree_roots placement is the operator's own directory, and startup
-// cleanup already reclaims it exactly once per crash, which is this
-// function's counterpart for the tree no-mistakes owns outright.
-func reapWorktrees(d *db.DB, p *paths.Paths, policy worktreeReapPolicy, now time.Time) {
+// cleanup considers only recorded eligible leftovers there.
+func (m *RunManager) reapWorktrees(policy worktreeReapPolicy, now time.Time) {
+	d, p := m.db, m.paths
 	removable, _ := defaultTreeOrphanWorktrees(d, p)
 	if len(removable) == 0 {
 		return
 	}
 	toRemove := worktreeReapCandidates(removable, policy, now)
+	if len(toRemove) == 0 {
+		return
+	}
+	branchLocks := make(map[*sync.Mutex]bool)
+	revalidated := toRemove[:0]
+	for _, wt := range toRemove {
+		run, err := d.GetRun(wt.runID)
+		if err != nil {
+			slog.Warn("preserving run worktree: cannot read run", "run_id", wt.runID, "error", err)
+			continue
+		}
+		if run != nil {
+			branchMutex := m.branchMutex(run.RepoID, run.Branch)
+			isLocked, hasAttempt := branchLocks[branchMutex]
+			if !hasAttempt {
+				isLocked = branchMutex.TryLock()
+				branchLocks[branchMutex] = isLocked
+				if isLocked {
+					defer branchMutex.Unlock()
+				}
+			}
+			if !isLocked {
+				continue
+			}
+		}
+		if removableOrphanWorktree(d, wt) {
+			revalidated = append(revalidated, wt)
+		}
+	}
+	toRemove = revalidated
 	if len(toRemove) == 0 {
 		return
 	}
@@ -89,7 +111,7 @@ func reapWorktrees(d *db.DB, p *paths.Paths, policy worktreeReapPolicy, now time
 
 	removed := 0
 	for _, wt := range toRemove {
-		if removeOrphanWorktree(context.Background(), wt) {
+		if removeOrphanWorktree(context.Background(), d, wt) {
 			removed++
 		}
 	}

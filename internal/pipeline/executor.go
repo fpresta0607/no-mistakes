@@ -58,9 +58,11 @@ type Executor struct {
 
 	// sessions manages this run's durable review-loop agent sessions; shared
 	// carries run-scoped step-to-step results. Both are created per Execute.
-	sessions *RunSessions
-	shared   *RunShared
-	workDir  string
+	sessions       *RunSessions
+	shared         *RunShared
+	workDir        string
+	runID          string
+	validationOnly bool
 	// stepRecords are this Execute's step rows by name. They let the review
 	// step be offered a context for another step's early work (side_by_side).
 	// Nil on a recovered run, which therefore starts nothing early.
@@ -71,6 +73,9 @@ type Executor struct {
 	waiting                bool                  // true when blocked on approval
 	waitingStep            types.StepName        // which step is currently awaiting approval
 	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
+	ciHandbackCh           chan ciHandbackRequest
+	ciHandbackPending      bool
+	ciHandbackReleased     bool
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -117,6 +122,7 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 		steps:                 steps,
 		onEvent:               onEvent,
 		approvalCh:            make(chan approvalResponse, 1),
+		ciHandbackCh:          make(chan ciHandbackRequest),
 		gateReconcileInterval: defaultGateReconcileInterval,
 		gateReconcileTimeout:  defaultGateReconcileTimeout,
 	}
@@ -196,6 +202,10 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		return fmt.Errorf("unrecognized approval action %q (valid: approve, fix, skip, abort, answer)", action)
 	}
 	e.mu.Lock()
+	if e.ciHandbackPending || e.ciHandbackReleased {
+		e.mu.Unlock()
+		return fmt.Errorf("CI handback owns this gate; submit the additive follow-up with axi handback --resume")
+	}
 	if !e.waiting {
 		e.mu.Unlock()
 		return fmt.Errorf("no step awaiting approval")
@@ -203,6 +213,10 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 	if step != e.waitingStep {
 		e.mu.Unlock()
 		return fmt.Errorf("step mismatch: responding to %q but %q is awaiting approval", step, e.waitingStep)
+	}
+	if err := e.refuseValidationRepair(action); err != nil {
+		e.mu.Unlock()
+		return err
 	}
 	if action == types.ActionApprove && e.waitingApprovalRefusal != "" {
 		refusal := e.waitingApprovalRefusal
@@ -229,6 +243,9 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
 	e.workDir = workDir
 	ctx = e.runContext(ctx)
+	if err := e.initializeValidationAuthority(run); err != nil {
+		return e.failRun(run, repo, err, ctx)
+	}
 	// Mark run as running. Route write failures through failRun so the
 	// in-memory lifecycle and subscriber stream still become terminal instead
 	// of leaving a silent pending run.
@@ -367,6 +384,7 @@ type stepExecutionState struct {
 	// what skipFixExecution above is for.
 	answering              bool
 	previousFindings       string
+	previousReviewedPaths  []string
 	deferredFindings       string
 	roundNum               int
 	autoFixAttempts        int
@@ -418,8 +436,17 @@ type recoveredGate struct {
 }
 
 func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
-	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil {
+	if run == nil || run.Status != types.RunRunning {
 		return fmt.Errorf("run is not a recoverable parked run")
+	}
+	if index, err := CIHandbackReviewRestart(database, run, steps); err != nil || index >= 0 {
+		return err
+	}
+	if run.AwaitingAgentSince == nil {
+		return fmt.Errorf("run is not a recoverable parked run")
+	}
+	if _, err := validationOnlyAuthority(database, run.ID); err != nil {
+		return err
 	}
 	_, err := (&Executor{db: database, steps: steps}).recoveredGate(run.ID)
 	return err
@@ -431,13 +458,16 @@ func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
 func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
 	e.workDir = workDir
 	ctx = e.runContext(ctx)
+	if err := e.initializeValidationAuthority(run); err != nil {
+		return err
+	}
 	if repo == nil {
 		return fmt.Errorf("recovered run has no repository")
 	}
 	if err := ValidateRecoveredRun(e.db, run, e.steps); err != nil {
 		return err
 	}
-	gate, err := e.recoveredGate(run.ID)
+	restartIndex, err := CIHandbackReviewRestart(e.db, run, e.steps)
 	if err != nil {
 		return err
 	}
@@ -450,7 +480,31 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	e.initializeRunScopes(run.ID)
 	defer e.shared.Close()
-
+	if restartIndex >= 0 {
+		if err := e.db.ResetStepsFrom(run.ID, types.StepReview.Order()); err != nil {
+			return err
+		}
+		if run.AwaitingAgentSince != nil {
+			if err := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(time.Unix(*run.AwaitingAgentSince, 0)).Milliseconds()); err != nil {
+				return err
+			}
+			run.AwaitingAgentSince = nil
+		}
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, true)
+	}
+	gate, err := e.recoveredGate(run.ID)
+	if err != nil {
+		return err
+	}
+	if gate.step.Name() == types.StepCI {
+		isOpen, err := e.ciHandbackOpen(run.ID)
+		if err != nil {
+			return err
+		}
+		e.mu.Lock()
+		e.ciHandbackReleased = isOpen
+		e.mu.Unlock()
+	}
 	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
 	duration := recoveredStepDuration(gate.stepResult)
 	completeRecoveredGate := func() error {
@@ -536,6 +590,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	)
 
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
+	if errors.Is(err, ErrCIHandbackSuspended) {
+		return err
+	}
 	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
 	}
@@ -548,6 +605,16 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	if reconciled {
 		return completeReconciledGate()
+	}
+	if err := e.refuseValidationRepair(response.action); err != nil {
+		return e.failRun(run, repo, err, ctx)
+	}
+	if response.action == actionCIFollowup {
+		index, err := e.prepareRestart(run.ID, types.StepReview, gate.index)
+		if err != nil {
+			return e.failRun(run, repo, err, ctx)
+		}
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, index, true)
 	}
 
 	approvalFields := telemetry.Fields{
@@ -667,7 +734,10 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFixing), "", "", nil)
 			state.fixing = true
 			state.previousFindings = merged
-			state.deferredFindings = removeMatchingFindingsJSON(gate.findings, selected)
+			if recorded, err := types.ParseFindingsJSON(gate.findings); err == nil {
+				state.previousReviewedPaths = recorded.ReviewedPaths
+			}
+			state.deferredFindings = RemoveMatchingFindingsJSON(gate.findings, selected)
 			state.outstandingFindings = outstandingFindings
 			state.selectedOutstandingIDs = selectedOutstandingIDs
 		}
@@ -762,6 +832,15 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 	}
 	if gate == nil {
 		return nil, fmt.Errorf("recovered run has no approval gate")
+	}
+	if gate.step.Name() == types.StepCI {
+		receipt, err := e.db.LatestCIHandback(runID)
+		if err != nil {
+			return nil, err
+		}
+		if receipt != nil && receipt.AcceptedHead != nil && receipt.RoundID == gate.lastRoundID {
+			return nil, fmt.Errorf("accepted CI follow-up requires fresh validation; its old conflict gate cannot be recovered")
+		}
 	}
 	return gate, nil
 }
@@ -925,7 +1004,7 @@ func (e *Executor) sideLaneContext(ctx context.Context, run *db.Run, repo *db.Re
 }
 
 func (e *Executor) autoFixLimit(stepName types.StepName) int {
-	if e.config == nil {
+	if e.validationOnly || e.config == nil {
 		return 0
 	}
 	return e.config.AutoFixLimit(stepName)
@@ -935,6 +1014,12 @@ func (e *Executor) autoFixLimit(stepName types.StepName) int {
 // Returns whether to skip the remainder, an optional earlier restart step,
 // and any execution error.
 func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult, run *db.Run, repo *db.Repo, workDir, logDir string, state stepExecutionState) (bool, types.StepName, error) {
+	if _, err := validationOnlyAuthority(e.db, run.ID); err != nil {
+		return false, "", err
+	}
+	if e.validationOnly && state.fixing {
+		return false, "", fmt.Errorf("validation-only authored admission cannot dispatch a fix round")
+	}
 	stepName := step.Name()
 	logPath := filepath.Join(logDir, string(stepName)+".log")
 	finalExitCode := 0
@@ -1122,29 +1207,30 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		return nil
 	}
 	sctx := &StepContext{
-		Ctx:               ctx,
-		Run:               run,
-		Repo:              repo,
-		WorkDir:           workDir,
-		GateDir:           e.paths.RepoDir(repo.ID),
-		Agent:             stepAgent,
-		Config:            e.config,
-		ForgeContext:      e.forge,
-		DB:                e.db,
-		StepResultID:      sr.ID,
-		UserIntent:        userIntent,
-		IntentSource:      userIntentSource,
-		Sessions:          e.sessions,
-		Shared:            e.shared,
-		EvidenceDir:       e.runEvidenceDir(run.ID),
-		Fixing:            state.fixing,
-		SkipFixExecution:  state.skipFixExecution,
-		FinalizingAnswers: state.answering,
-		CarriedFindings:   answerRoundCarriedFindings(state.answering, outstandingFindings),
-		PreviousFindings:  state.previousFindings,
-		DeferredFindings:  state.deferredFindings,
-		Log:               writeLog,
-		LogChunk:          writeLogChunk,
+		Ctx:                   ctx,
+		Run:                   run,
+		Repo:                  repo,
+		WorkDir:               workDir,
+		GateDir:               e.paths.RepoDir(repo.ID),
+		Agent:                 stepAgent,
+		Config:                e.config,
+		ForgeContext:          e.forge,
+		DB:                    e.db,
+		StepResultID:          sr.ID,
+		UserIntent:            userIntent,
+		IntentSource:          userIntentSource,
+		Sessions:              e.sessions,
+		Shared:                e.shared,
+		EvidenceDir:           e.runEvidenceDir(run.ID),
+		Fixing:                state.fixing,
+		SkipFixExecution:      state.skipFixExecution,
+		FinalizingAnswers:     state.answering,
+		CarriedFindings:       answerRoundCarriedFindings(state.answering, outstandingFindings),
+		PreviousFindings:      state.previousFindings,
+		DeferredFindings:      state.deferredFindings,
+		PreviousReviewedPaths: state.previousReviewedPaths,
+		Log:                   writeLog,
+		LogChunk:              writeLogChunk,
 		LogFile: func(text string) {
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)
@@ -1198,9 +1284,21 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// Execute with possible fix loop
 rounds:
 	for {
+		if _, err := validationOnlyAuthority(e.db, run.ID); err != nil {
+			return false, "", err
+		}
+		if e.validationOnly && sctx.Fixing {
+			return false, "", fmt.Errorf("validation-only authored admission cannot dispatch a fixer")
+		}
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
+		if err := sctx.AssertValidationSource(); err != nil {
+			return false, "", err
+		}
 		outcome, err := step.Execute(sctx)
+		if sourceErr := sctx.AssertValidationSource(); sourceErr != nil {
+			err = errors.Join(err, sourceErr)
+		}
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
@@ -1224,6 +1322,9 @@ rounds:
 			return false, "", fmt.Errorf("step %s failed: %s", stepName, redactedErr)
 		}
 		restartFrom = outcome.RestartFrom
+		if e.validationOnly && (outcome.Skipped || outcome.SkipRemaining) {
+			return false, "", fmt.Errorf("validation-only authored admission requires fresh stage %s; automatic skipping is refused", stepName)
+		}
 
 		if stepName == types.StepReview {
 			reviewApprovedHeadSHA = outcome.ReviewApprovedHeadSHA
@@ -1330,7 +1431,11 @@ rounds:
 		// Only auto-fix findings whose action is "auto-fix".
 		// This runs before the NeedsApproval check so that all severity
 		// levels (including "info") get a chance at automatic fixing.
-		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit {
+		familyRemaining, terminalFamily, budgetErr := e.db.TerminalPhaseRemaining(run.ID, stepName, autoFixLimit)
+		if budgetErr != nil {
+			return false, "", fmt.Errorf("terminal repair ledger: %w", budgetErr)
+		}
+		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit && (!terminalFamily || familyRemaining.Remaining > 0) {
 			fixableFindings := autoFixableFindingsJSON(roundFindings)
 			if carryFindings {
 				fixableFindings = remapFindingIDsJSON(effectiveFindings, fixableFindings)
@@ -1358,7 +1463,8 @@ rounds:
 				sctx.FinalizingAnswers = false
 				sctx.SkipFixExecution = false
 				sctx.PreviousFindings = fixableFindings
-				sctx.DeferredFindings = removeMatchingFindingsJSON(effectiveFindings, fixableFindings)
+				sctx.PreviousReviewedPaths = outcome.ReviewedPaths
+				sctx.DeferredFindings = RemoveMatchingFindingsJSON(effectiveFindings, fixableFindings)
 				if carryFindings {
 					pendingVerificationIDs = combineFindingIDLists(pendingVerificationIDs, findingIDList(fixableFindings))
 					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, findingIDList(fixableFindings))
@@ -1421,6 +1527,9 @@ rounds:
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), effectiveFindings, "", &executionMS)
 
 			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true)
+			if errors.Is(err, ErrCIHandbackSuspended) {
+				return false, "", err
+			}
 			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
 			}
@@ -1434,6 +1543,9 @@ rounds:
 			if reconciled {
 				phaseStart = time.Now()
 				goto done
+			}
+			if response.action == actionCIFollowup {
+				return false, types.StepReview, nil
 			}
 
 			approvalFields := telemetry.Fields{
@@ -1478,6 +1590,9 @@ rounds:
 				return false, "", fmt.Errorf("step %s: aborted by user", stepName)
 
 			case types.ActionFix:
+				if err := e.refuseValidationRepair(response.action); err != nil {
+					return false, "", err
+				}
 				telemetry.Track("fix", e.fixTelemetryFields("user", stepName, selectedFindingCount(effectiveFindings, response.findingIDs), 0))
 				// Fix - mark step as fixing, resume execution timer, re-execute.
 				phaseStart = time.Now()
@@ -1494,7 +1609,8 @@ rounds:
 				selectedFindings := filterFindingsJSON(effectiveFindings, response.findingIDs)
 				mergedFindings := mergeUserOverridesJSON(selectedFindings, response.instructions, response.addedFindings)
 				sctx.PreviousFindings = mergedFindings
-				sctx.DeferredFindings = removeMatchingFindingsJSON(effectiveFindings, selectedFindings)
+				sctx.PreviousReviewedPaths = outcome.ReviewedPaths
+				sctx.DeferredFindings = RemoveMatchingFindingsJSON(effectiveFindings, selectedFindings)
 				selectedForPersistence := mergedFindings
 				if carryFindings {
 					// APPEND-ONLY: the selection is additionally handed to the fixer
@@ -1833,7 +1949,7 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 		case response := <-e.approvalCh:
 			return response, false, nil
 		case <-ctx.Done():
-			return approvalResponse{}, false, context.Cause(ctx)
+			return approvalResponse{}, false, e.approvalWaitError(ctx, sctx.Run.ID, step.Name())
 		}
 	}
 
@@ -1845,11 +1961,49 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 	defer timer.Stop()
 	for {
 		select {
+		case request := <-e.ciHandbackCh:
+			handler, ok := step.(CIHandbackStep)
+			if !ok || step.Name() != types.StepCI || e.autoFixLimit(types.StepCI) != 0 {
+				request.reply <- ciHandbackReply{err: fmt.Errorf("handback requires a published CI gate with automatic CI repair disabled")}
+				continue
+			}
+			// A validation-only run reports zero CI repairs as disabled repair,
+			// so the handback precondition alone would release its source.
+			if err := e.refuseValidationRepair(actionCIFollowup); err != nil {
+				request.reply <- ciHandbackReply{err: err}
+				continue
+			}
+			copyContext := *sctx
+			operationContext, cancel := context.WithCancel(request.ctx)
+			stop := context.AfterFunc(ctx, cancel)
+			copyContext.Ctx = operationContext
+			result, err := handler.HandbackCI(&copyContext, request.params)
+			stop()
+			cancel()
+			if err == nil {
+				e.mu.Lock()
+				e.ciHandbackReleased = !request.params.Resume
+				if request.params.Resume {
+					e.waiting = false
+				}
+				e.mu.Unlock()
+			}
+			request.reply <- ciHandbackReply{result: result, err: err}
+			if err == nil && request.params.Resume {
+				return approvalResponse{action: actionCIFollowup}, false, nil
+			}
 		case response := <-e.approvalCh:
 			return response, false, nil
 		case <-ctx.Done():
-			return approvalResponse{}, false, context.Cause(ctx)
+			return approvalResponse{}, false, e.approvalWaitError(ctx, sctx.Run.ID, step.Name())
 		case <-timer.C:
+			e.mu.Lock()
+			isReleased := e.ciHandbackReleased
+			e.mu.Unlock()
+			if isReleased {
+				timer.Reset(e.gateReconcileInterval)
+				continue
+			}
 			// A resumer runs first and returns a RESPONSE rather than a
 			// completion, so the gate re-enters its step exactly as it would
 			// for an operator's own action. Claiming the gate here is the same
@@ -1924,6 +2078,12 @@ func (e *Executor) resumeApprovalGate(ctx context.Context, step Step, sctx *Step
 }
 
 func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *StepContext, findingsJSON string) (bool, error) {
+	if step.Name() == types.StepCI {
+		isOpen, err := e.ciHandbackOpen(sctx.Run.ID)
+		if err != nil || isOpen {
+			return false, err
+		}
+	}
 	reconciler, ok := step.(ApprovalGateReconciler)
 	if !ok {
 		return false, nil
@@ -1946,6 +2106,9 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 // It accepts an optional context; if the context was cancelled with a cause,
 // the cause message is used as the run's error (more informative than "context canceled").
 func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
+	if errors.Is(err, ErrCIHandbackSuspended) {
+		return err
+	}
 	errMsg := err.Error()
 	for _, ctx := range ctxs {
 		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {
@@ -2043,8 +2206,13 @@ func (e *Executor) preserveUnpublishedTerminalHead(ctx context.Context, run *db.
 		published = *run.LastPushedSHA
 	}
 	if published == "" {
-		if run.SubmittedHeadSHA != nil {
-			published = *run.SubmittedHeadSHA
+		submitted, err := e.db.CustodySubmittedHead(run)
+		if err != nil {
+			slog.Warn("failed to read custody before anchoring terminal head", "run", run.ID, "error", err)
+			return false
+		}
+		if submitted != nil {
+			published = *submitted
 		}
 	}
 	if head == published {

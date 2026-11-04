@@ -79,10 +79,10 @@ func writeOmitIntentScenario(t *testing.T) string {
 // controls through the real binary, daemon, gate hook, and a fork-routed PR
 // creation captured by the gh stub:
 //
-//   - a plain `axi run --intent` publishes the `## Intent` section (baseline);
+//   - a trusted opt-in lets `axi run --intent` publish the `## Intent` section;
 //   - `axi run --intent --no-publish-intent` keeps the section and the intent
-//     text out of the PR body while the review and PR-drafting prompts still
-//     receive the full intent;
+//     text out of the PR body and drafting prompts while review still receives
+//     the full intent;
 //   - a bare `rerun` after an omitting run inherits the omission;
 //   - `intent.publish_intent: false` in global config omits the section for a
 //     run started without the flag;
@@ -90,6 +90,7 @@ func writeOmitIntentScenario(t *testing.T) string {
 //     is refused rather than silently discarded.
 func TestOmitIntentJourney(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: writeOmitIntentScenario(t)})
+	commitTrustedRepoConfig(t, h, "pr:\n  publish_intent: true\n")
 	ctx := context.Background()
 
 	parentURL := "https://github.com/parent-owner/no-mistakes.git"
@@ -162,7 +163,7 @@ func TestOmitIntentJourney(t *testing.T) {
 		}
 	}
 
-	// Baseline: publication is the default.
+	// Baseline: the trusted repository opted into publication.
 	const publishedIntent = "publish this baseline intent on the PR body"
 	h.CommitChange("feature/omit-baseline", "feature.txt", "baseline\n", "add baseline feature")
 	baselineWT := h.AddWorktree("feature/omit-baseline")
@@ -181,7 +182,7 @@ func TestOmitIntentJourney(t *testing.T) {
 		t.Fatalf("baseline PR body must publish the Intent section:\n%s", baselineBody)
 	}
 
-	// Per-run flag: section gone, prompts unchanged.
+	// Per-run flag: publication withheld, review retains the intent.
 	const secretIntent = "SECRET-INTENT keep this contributor context off the public PR"
 	h.CommitChange("feature/omit-flag", "feature.txt", "flag\n", "add flag feature")
 	flagWT := h.AddWorktree("feature/omit-flag")

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -50,7 +51,13 @@ func OpenReadOnly(path string) (*DB, error) {
 	if _, err := os.Stat(path); err != nil {
 		return nil, err
 	}
-	sqlDB, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)")
+	connectionString := "file:" + path + "?mode=ro&_pragma=busy_timeout(5000)"
+	if runtime.GOOS == "windows" {
+		// A dead process can leave a mapped WAL index after releasing its locks.
+		// Let SQLite reconstruct the index without truncating that mapping.
+		connectionString += "&readonly_shm=1"
+	}
+	sqlDB, err := sql.Open("sqlite", connectionString)
 	if err != nil {
 		return nil, fmt.Errorf("open db read-only: %w", err)
 	}

@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"path/filepath"
@@ -20,7 +21,12 @@ func declareCommandOverrides(sctx *pipeline.StepContext, name string) {
 	if declaration := commandOverrideDeclaration(name, sctx.Config.CommandOverrides[name]); declaration != "" {
 		sctx.Log(declaration)
 	}
-	if words := commandWrapperWords(sctx, name); len(words) > 0 {
+	words, err := commandWrapperWords(sctx, name)
+	if err != nil {
+		sctx.Log(err.Error())
+		return
+	}
+	if len(words) > 0 {
 		quoted := make([]string, len(words))
 		for i, word := range words {
 			quoted[i] = fmt.Sprintf("%q", word)
@@ -38,29 +44,48 @@ func declareStepCommandOverrides(sctx *pipeline.StepContext, name string) {
 }
 
 func executeRepositoryCommand(sctx *pipeline.StepContext, name, command string) (string, int, error) {
-	return runShellCommandBehind(sctx.Ctx, sctx.WorkDir, stepEnvironment(sctx), command, sctx.Config.CommandOverrides[name].Nice, commandWrapperWords(sctx, name))
+	if err := sctx.AssertValidationSource(); err != nil {
+		return "", 0, err
+	}
+	isValidationOnly, err := sctx.IsValidationOnly()
+	if err != nil {
+		return "", 0, err
+	}
+	if isValidationOnly && name == "format" {
+		return "", 0, fmt.Errorf("validation-only authored admission cannot invoke a formatter repair")
+	}
+	words, err := commandWrapperWords(sctx, name)
+	if err != nil {
+		return "", 0, err
+	}
+	output, exitCode, err := runShellCommandBehind(sctx.Ctx, sctx.WorkDir, stepEnvironment(sctx), command, sctx.Config.CommandOverrides[name].Nice, words)
+	return output, exitCode, errors.Join(err, sctx.AssertValidationSource())
 }
 
 // commandWrapperWords returns the words of the machine-local wrapper that
 // name's command starts behind, or nil. Only the Test baseline has one
 // (global test_command_wrapper): prepare, lint, format and repository gates
 // start as they always have.
-func commandWrapperWords(sctx *pipeline.StepContext, name string) []string {
+func commandWrapperWords(sctx *pipeline.StepContext, name string) ([]string, error) {
 	if name != "test" || !sctx.Config.TestCommandWrapper.Enabled() {
-		return nil
+		return nil, nil
 	}
-	words := sctx.Config.TestCommandWrapper.Words(config.CommandWrapperValues{
-		Repo:   wrapperRepoName(sctx),
-		Branch: strings.TrimPrefix(sctx.Run.Branch, "refs/heads/"),
-		Run:    sctx.Run.ID,
+	words, err := sctx.Config.TestCommandWrapper.Words(config.CommandWrapperValues{
+		Repo:              wrapperRepoName(sctx),
+		Branch:            strings.TrimPrefix(sctx.Run.Branch, "refs/heads/"),
+		Run:               sctx.Run.ID,
+		TestComparisonSHA: sctx.TestComparisonSHA,
 	})
+	if err != nil {
+		return nil, err
+	}
 	// Like stepCmd, resolve a bare program name on the step's own PATH.
 	if len(sctx.Env) > 0 && !hasExecutablePathSeparator(words[0]) {
 		if candidate := findInCustomPath(sctx.WorkDir, sctx.Env, words[0]); candidate != "" {
 			words[0] = candidate
 		}
 	}
-	return words
+	return words, nil
 }
 
 // wrapperRepoName is the short name a wrapper shows for the run's repository:
@@ -86,7 +111,7 @@ func wrapperRepoName(sctx *pipeline.StepContext) string {
 // its own last output line with exit code 1; with a wrapper configured that
 // line is about the wrapper, since the wrapper is what the helper starts.
 func commandWrapperStartFailure(sctx *pipeline.StepContext, name, output string, exitCode int, err error) string {
-	if sctx.Ctx.Err() != nil || len(commandWrapperWords(sctx, name)) == 0 {
+	if sctx.Ctx.Err() != nil || name != "test" || !sctx.Config.TestCommandWrapper.Enabled() {
 		return ""
 	}
 	if err != nil {
@@ -113,7 +138,7 @@ func lastOutputLine(output string) string {
 // code is the command's own.
 func commandWrapperRefusal(sctx *pipeline.StepContext, name, output string, exitCode int) string {
 	prefix := sctx.Config.TestCommandWrapper.RefusalPrefix
-	if (exitCode != 125 && exitCode != 126) || prefix == "" || len(commandWrapperWords(sctx, name)) == 0 {
+	if (exitCode != 125 && exitCode != 126) || prefix == "" || name != "test" || !sctx.Config.TestCommandWrapper.Enabled() {
 		return ""
 	}
 	lines := strings.Split(strings.TrimRight(output, "\r\n\t "), "\n")
@@ -198,6 +223,9 @@ func runConfiguredChecks(sctx *pipeline.StepContext, name, command string) (stri
 		}
 		out, code, err := executeRepositoryCommand(sctx, name, checks[i].Command)
 		output.WriteString(out)
+		if sourceErr := sctx.AssertValidationSource(); sourceErr != nil {
+			return output.String(), checks[:i], sourceErr
+		}
 		if reason := commandWrapperStartFailure(sctx, name, out, code, err); reason != "" {
 			// A wrapper that cannot be started gave this check no turn. That is
 			// the machine's state, not the run's, so it parks like a refusal

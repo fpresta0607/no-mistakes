@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/authoredvalidation"
 	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
@@ -28,6 +29,7 @@ const (
 	MethodRerun                     = "rerun"
 	MethodSubscribe                 = "subscribe"
 	MethodRespond                   = "respond"
+	MethodCIHandback                = "ci_handback"
 	MethodAnswerReview              = "answer_review_question"
 	MethodCancelRun                 = "cancel_run"
 	MethodGateContext               = "gate_context"
@@ -71,6 +73,41 @@ type RPCError struct {
 func (e *RPCError) Error() string { return e.Message }
 
 // --- Method parameters ---
+
+type CIHandbackParams struct {
+	RepoID         string             `json:"repo_id"`
+	RunID          string             `json:"run_id"`
+	Branch         string             `json:"branch"`
+	CallerDir      string             `json:"caller_dir"`
+	HeadSHA        string             `json:"head_sha"`
+	Resume         bool               `json:"resume"`
+	PublishedHead  string             `json:"published_head"`
+	PushGeneration int64              `json:"push_generation"`
+	RoundID        string             `json:"round_id"`
+	ReceiptID      string             `json:"receipt_id"`
+	Expect         *CIHandbackBinding `json:"expect,omitempty"`
+}
+
+type CIHandbackBinding struct {
+	RepoID         string `json:"repo_id"`
+	RunID          string `json:"run_id"`
+	Branch         string `json:"branch"`
+	CallerDir      string `json:"caller_dir"`
+	CallerHead     string `json:"caller_head"`
+	CurrentHead    string `json:"current_head"`
+	PublishedHead  string `json:"published_head"`
+	PushGeneration int64  `json:"push_generation"`
+}
+
+type CIHandbackResult struct {
+	RunID        string            `json:"run_id"`
+	PRURL        string            `json:"pr_url"`
+	ReleasedHead string            `json:"released_head"`
+	AcceptedHead string            `json:"accepted_head,omitempty"`
+	ReceiptID    string            `json:"receipt_id"`
+	RoundID      string            `json:"round_id"`
+	Binding      CIHandbackBinding `json:"binding"`
+}
 
 // PushReceivedParams are sent by the post-receive hook when a push arrives.
 //
@@ -449,8 +486,10 @@ type ShutdownResult struct {
 
 // RunInfo is the IPC representation of a pipeline run.
 type RunInfo struct {
-	VerificationPlan *verificationplan.Snapshot `json:"verification_plan"`
-	PiProfile        *agentcfg.PiProfile        `json:"pi_profile,omitempty"`
+	AuthoredValidation      *authoredvalidation.Family `json:"authored_validation,omitempty"`
+	AuthoredValidationError string                     `json:"authored_validation_error,omitempty"`
+	VerificationPlan        *verificationplan.Snapshot `json:"verification_plan"`
+	PiProfile               *agentcfg.PiProfile        `json:"pi_profile,omitempty"`
 
 	ID               string          `json:"id"`
 	RepoID           string          `json:"repo_id"`

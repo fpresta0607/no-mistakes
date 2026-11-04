@@ -120,6 +120,9 @@ func (s *TestStep) execute(sctx *pipeline.StepContext, desktop string) (*pipelin
 	if err != nil {
 		return nil, err
 	}
+	previousComparison := sctx.TestComparisonSHA
+	sctx.TestComparisonSHA = baseSHA
+	defer func() { sctx.TestComparisonSHA = previousComparison }()
 	evidenceDir := testEvidenceDir(sctx)
 	if evidenceDir == "" {
 		return nil, fmt.Errorf("test evidence dir is not configured for this run")
@@ -293,7 +296,7 @@ Previous test findings to address:
 	}
 	// The commit the baseline ran on, and whether it passed there, is what the
 	// Push step under side_by_side compares the head it is about to push with.
-	sctx.Shared.RecordBaseline(sctx.Run.HeadSHA, !baselineNoTurn && len(failedChecks(baselineResults)) == 0)
+	sctx.Shared.RecordBaseline(sctx.Run.HeadSHA, baseSHA, !baselineNoTurn && len(failedChecks(baselineResults)) == 0)
 	if repairCut != nil {
 		return testAgentTimeoutOutcome(sctx, repairCut, startHead, baselineFindings, baselineSummary, baselineExitCode), nil
 	}

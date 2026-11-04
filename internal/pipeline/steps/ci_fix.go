@@ -159,6 +159,13 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 // The result reports whether the recorded head advanced and whether the repair
 // must revalidate; a zero result means the agent produced no changes.
 func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, targets ciFixTargets) (ciRepairResult, error) {
+	isValidationOnly, err := sctx.IsValidationOnly()
+	if err != nil {
+		return ciRepairResult{}, err
+	}
+	if isValidationOnly {
+		return ciRepairResult{}, fmt.Errorf("validation-only authored admission cannot invoke a CI repair")
+	}
 	ctx := sctx.Ctx
 	failingNames := targets.checkNames()
 	mergeConflict := targets.MergeConflict
@@ -583,6 +590,9 @@ func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext) (ciRepairR
 // lists the untracked files the worktree held before producer started, which
 // stay out of the commit (see stagePipelineChanges).
 func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, producer *agent.Result, before []string) (ciRepairResult, error) {
+	if err := sctx.AssertValidationSource(); err != nil {
+		return ciRepairResult{}, err
+	}
 	status, err := stepGitRun(sctx, "status", "--porcelain")
 	if err != nil {
 		return ciRepairResult{}, fmt.Errorf("check CI changes: %w", err)

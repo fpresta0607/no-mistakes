@@ -525,8 +525,7 @@ This is an idle timeout, not an absolute deadline: every time the base branch ad
 So an actively-updated green PR keeps its monitor no matter how long it stays open.
 If it later develops an actual GitHub, GitLab, Forgejo, or Azure DevOps merge conflict, the CI auto-fix path rebases it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and publishes it through Push, while a clean behind PR needs no command.
 A genuinely idle/abandoned PR still parks at an approval gate after the timeout elapses.
-While that CI gate is parked, the daemon continues bounded read-only PR-state checks.
-If the PR is merged or closed externally, the stale gate completes automatically; an open, unknown, or temporarily unreachable PR remains parked for a user decision.
+[Daemon & Worktrees](/no-mistakes/concepts/daemon/#crash-recovery) owns automatic parked-gate reconciliation and its refusal and handback exceptions.
 
 Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or any non-positive duration to monitor until the PR is merged, closed, or the run is aborted with `no-mistakes axi abort --run <id>`.
 
@@ -743,7 +742,11 @@ test_command_wrapper:
 The words are started with no shell in front of them, followed by exactly the program and arguments the command would have been started with: `sh -c <command>`, or `cmd.exe /c <command>` on Windows, with the shell as its resolved path.
 The command string therefore stays one argument, so `a && b` stands behind the wrapper whole.
 The working directory and the environment are those the command has without a wrapper.
-A word may name a run fact, filled in once: `{repo}` (the last element of the upstream URL), `{branch}`, `{run}` (the run id), and `{run_short}` (its first 8 characters).
+A word may name a run fact, filled in once: `{repo}` (the last element of the upstream URL), `{branch}`, `{run}` (the run id), `{run_short}` (its first 8 characters), and `{test_comparison_sha}` (the exact comparison already resolved by Test).
+`{test_comparison_sha}` is the full nonzero Git object ID (40 or 64 lowercase hexadecimal characters) used for Test's comparison, usually the merge-base with the fetched effective PR base branch, rather than the previous published ref stored in `runs.base_sha`.
+Head baseline commands, additional checks, and the base attribution invocation receive the same value, even though the attribution command runs in the base checkout.
+See [`side_by_side`](#side_by_side) for comparison reuse and pre-push proof requirements.
+A wrapper requesting this value never starts with an empty, zero, abbreviated, or unresolved comparison.
 Use the full path of the wrapper program unless it is on the daemon's own `PATH`.
 
 The wrapper is trusted to start what follows its words and to pass that program's output and exit code through.
@@ -809,15 +812,18 @@ A fix round never takes work started early.
 Nothing starts beside the review when a harness other than `claude` or `codex` is configured, since those are the harnesses known to serve two calls at once, or when the repository has submodules or Git LFS files, which a plain clone would not hold.
 The review's log says which.
 
+Taking a Test lane also takes its resolved comparison, and a pre-push baseline re-run keeps that comparison even if the default branch tip has moved.
+
 What is pushed is the hard part.
 The baseline ran on the commit the review started on, and the documentation pass, the Lint step and the formatter can each add a commit after it.
 So before anything is pushed, the Push step compares the head to push with the commit the baseline last ran on:
 
+- With a baseline configured, missing or malformed in-memory Test comparison proof refuses push until normal Test runs again.
+  This applies even to the tested commit itself or documentation-only changes, and after a daemon restart.
 - The tested commit itself is pushed as it is.
 - Otherwise every commit after the tested one is named in an informational note on the Push step.
 - When those commits change only paths the repository counts as documentation, by [`test.documentation_paths`](/no-mistakes/reference/repo-config/#testdocumentation_paths), the head is pushed without the baseline running again.
 - When they change anything else, the baseline runs again on the head to push. A pass pushes. A failure pushes nothing and sends the run back to the Test step, which owns failing tests and their fix rounds. A second such failure in one run fails the run with nothing pushed.
-- A tested commit the daemon no longer knows, as after a restart, counts as untested, so the baseline runs again.
 - With no baseline configured, or a failing baseline a person approved the Test step over, the commits are named and nothing runs again.
 
 This holds whether or not early work was taken.
@@ -995,10 +1001,10 @@ Retention for leftover run-worktree directories under the default `<NM_HOME>/wor
 
 | Field                | Type     | Default          | Description                                                                    |
 | -------------------- | -------- | ---------------- | ------------------------------------------------------------------------------ |
-| `worktree.retention` | `string` | `24h`            | How long a leftover run worktree survives; `unlimited`/`none`/`off`/`never` or a non-positive duration disables the bound |
-| `worktree.max_runs`  | `int`    | `20`             | How many leftover worktree directories survive regardless of age; `0` disables the bound |
+| `worktree.retention` | `string` | `24h`            | How long an eligible leftover run worktree survives; `unlimited`/`none`/`off`/`never` or a non-positive duration disables the bound |
+| `worktree.max_runs`  | `int`    | `20`             | How many eligible leftover worktree directories survive regardless of age; `0` disables the bound |
 
-A run's own worktree is already removed the instant its pipeline finishes, so this budget is a safety net rather than the normal path: it only ever governs the directory left behind by a `git worktree remove` failure (for example a vendored `.git` nested somewhere under a large `node_modules` tree) or a [protected-path](/no-mistakes/reference/repo-config/#protected_paths) refusal that later became removable. Without it, a leftover like that survived indefinitely on a long-running daemon that never restarts, since the crash-recovery sweep that also reclaims it (see the daemon's [worktree cleanup](/no-mistakes/concepts/daemon/#what-it-does)) runs only at startup.
+This budget is a safety net for eligible leftovers after run-finish cleanup; the daemon's [source and refusal retention rules](/no-mistakes/concepts/daemon/#what-it-does) determine which worktrees may be removed.
 
 This reap runs after every finished run and again at daemon startup, the same cadence `test.evidence.retention` uses. Only the default `<NM_HOME>/worktrees` tree is bounded; a checkout you placed with [`worktree_roots`](#worktree_roots) is your own directory, and only the directories no-mistakes' own run records name there are ever touched, per that section's rules.
 
@@ -1268,7 +1274,8 @@ The file is private local evidence, restricted to owner-only permissions on POSI
 ### intent
 
 Transcript-based user-intent extraction settings.
-When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, and pass that summary to rebase, review, test, document, lint, CI auto-fix, repository gate repair, and PR prompts. For publication of the generated Intent section, see [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
+When enabled and no intent was supplied directly for the run, no-mistakes can read recent local agent transcripts, match the session that produced the change, summarize the author's intent, and pass that summary to rebase, review, test, document, lint, CI auto-fix, and repository gate repair prompts.
+For PR-drafting context and publication, see [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
 
 |      |          |
 | ---- | -------- |
@@ -1280,11 +1287,14 @@ When enabled and no intent was supplied directly for the run, no-mistakes can re
 | `intent.threshold`        | `float`    | `0.2`   | Minimum raw match score for selecting a transcript session |
 | `intent.slack_days`       | `int`      | `3`     | Extra days to look back before the change window           |
 | `intent.disabled_readers` | `string[]` | Empty   | Transcript readers to disable                              |
-| `intent.publish_intent`   | `bool`     | `true`  | Publish the generated Intent section on PR bodies by default |
+| `intent.publish_intent`   | `bool`     | `true`  | Permit intent publication when the trusted repository opts in |
 
 Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `pi`, and `copilot`.
 
-`intent.publish_intent: false` is a global, operator-side default that keeps the generated `## Intent` section out of the PR body for runs started without an explicit override. It is the caller-side counterpart of the repository's trusted [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent): both are tighten-only, the repository's trusted policy remains the ceiling a caller can never exceed, and review, test, document, lint, and CI auto-fix prompts keep the full intent. Under the caller-side omission the PR-drafting turns receive no intent text at all and draft from the diff and commit messages only; the intent is withheld from them, never scanned out of their output. A run records the folded decision (the `axi run --no-publish-intent` flag OR this global default) at start; reruns inherit it, and a mid-run config change never re-publishes. This field is global-only: a pushed branch's `.no-mistakes.yaml` cannot express it.
+`intent.publish_intent: false` records a caller-side omission of intent from the generated `## Intent` section and PR-drafting context.
+The default `true` leaves publication to the repository's trusted [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
+A run records the folded decision (the `axi run --no-publish-intent` flag OR this global default) at start; reruns inherit it, and a mid-run config change never re-publishes.
+This field is global-only: a pushed branch's `.no-mistakes.yaml` cannot express it.
 
 The match score is the share of matching files mentioned in a transcript session; deleted files are ignored when the diff also contains non-deleted changes.
 All-deletion diffs still match against the deleted changed files.
@@ -1331,11 +1341,13 @@ Enabling this pushes a branch to your remote, so pick a `branch` name your CI wo
 Evidence lives under the app root rather than the system temp directory. On Linux the daemon runs from a service unit that does not export `TMPDIR`, so the old temp-directory default resolved to the shared `/tmp`, which current Ubuntu mounts as a RAM-backed `tmpfs`. The app root is disk backed on macOS, Linux, and Windows alike.
 
 no-mistakes reaps its recorded run directories itself rather than relying on an operating-system temp cleaner. Unrecognized directories under a custom `local_root` are left untouched.
+The daemon's [source retention rules](/no-mistakes/concepts/daemon/#what-it-does) keep worktrees, not evidence: a dirty or unreadable retained checkout does not hold its run's evidence back.
 
 - A finished run that produced no artifacts leaves nothing behind.
 - Recorded run directories older than `retention` are removed.
 - Whatever recorded run evidence survives is trimmed to `max_runs`, oldest first.
 - A run that is still pending or running is never touched.
+- A `ci_monitor_interrupted` run keeps its evidence while its checkout's head is unreadable or differs from the run's recorded head, since that checkout may still hold an unpushed CI auto-fix commit.
 
 Reaping runs after each finished run and again at daemon startup. An upgraded daemon also drains the pre-relocation directory in the system temp directory under the same rules; nothing is migrated, because absolute paths recorded in older pull request bodies name the old location.
 
@@ -1343,7 +1355,7 @@ Reaping runs after each finished run and again at daemon startup. An upgraded da
 
 The publication fields are global defaults. Repo config can override `store_in_repo`, `attach_media`, and `dir`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
 
-`test.evidence.retention` and `test.evidence.max_runs` also bound `<NM_HOME>/logs/<run-id>` (per-run step logs), reaped on the same cadence rather than through a second config surface for the same kind of per-run diagnostic artifact.
+`test.evidence.retention` and `test.evidence.max_runs` also bound `<NM_HOME>/logs/<run-id>` directories (per-run step logs), reaped on the same cadence under the same active-run and interrupted-CI guards rather than through a second config surface for the same kind of per-run diagnostic artifact.
 
 ### eval
 

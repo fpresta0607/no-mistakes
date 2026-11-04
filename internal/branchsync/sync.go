@@ -19,6 +19,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -401,6 +402,7 @@ func (s *Service) Refresh(ctx context.Context) State {
 	}
 
 	s.classifyRelation(ctx, &state, bound, run.BaseSHA, true)
+	s.classifyCIHandback(ctx, &state, freshRun, s.workDir())
 	return state
 }
 
@@ -687,6 +689,9 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	if state.State == StateUserOwned {
 		state.Recovered = true
 		state.Changed = false
+		return state
+	}
+	if state.Safety == "blocked_custody_unreadable" {
 		return state
 	}
 	if state.State != StatePipelineOwned || run == nil {
@@ -1043,6 +1048,9 @@ func (s *Service) recoverKeepLocalFromArchive(ctx context.Context, run *db.Run, 
 		s.beforeGateReset()
 	}
 	freshRun, err := s.DB.GetRun(run.ID)
+	if err == nil && freshRun != nil {
+		freshRun, err = s.custodyView(freshRun)
+	}
 	if err != nil || freshRun == nil {
 		blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the terminal run could not be reloaded while archived custody was being returned; no files or refs were changed")
 		blocked.Recovery = state.Recovery
@@ -1509,6 +1517,9 @@ func (s *Service) preserveKeepLocalCandidates(ctx context.Context, runIDs, candi
 	}
 	for i, runID := range runIDs {
 		candidate, err := s.DB.GetRun(runID)
+		if err == nil && candidate != nil {
+			candidate, err = s.custodyView(candidate)
+		}
 		if err != nil || candidate == nil || candidate.HeadSHA != candidateHeads[i] || candidate.TerminalHeadVerifiedAt == nil || !terminalRunStatus(candidate.Status) || !unpublishedPipelineHead(candidate) {
 			return fmt.Errorf("run %s changed after preflight", runID)
 		}
@@ -1721,11 +1732,21 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 		if candidate.Branch != branch {
 			continue
 		}
+		candidate, err = s.custodyView(candidate)
+		if err != nil {
+			// Skipping a run whose custody cannot be read would hand the branch
+			// to an older binding, so the branch stays held instead.
+			state.State = StatePipelineOwned
+			state.Safety = "blocked_custody_unreadable"
+			state.Error = "a pipeline run's custody provenance cannot be read; no files or refs were changed"
+			state.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "no-mistakes axi status"}
+			return state, nil, false
+		}
 		if candidate.Status == types.RunPending || candidate.Status == types.RunRunning || unpublishedPipelineHead(candidate) {
 			// A terminal unpublished run can be superseded only by a newer
 			// exact binding whose pushed head is proven, in the local gate, to
 			// contain the preserved head. Active ownership remains absolute.
-			if unpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, branch) {
+			if unpublishedPipelineHead(candidate) && (s.supersededUnpublishedRun(ctx, candidate, newerPushed, branch) || s.handedToTerminalSuccessor(candidate)) {
 				continue
 			}
 			run = candidate
@@ -1849,7 +1870,74 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 	}
 
 	s.classifyRelation(ctx, &state, ptr(run.LastPushedSHA), run.BaseSHA, false)
+	if s.classifyCIHandback(ctx, &state, run, root) {
+		return state, run, false
+	}
 	return state, run, true
+}
+
+func (s *Service) classifyCIHandback(ctx context.Context, state *State, run *db.Run, root string) bool {
+	if run.Status != types.RunRunning {
+		return false
+	}
+	receipt, err := s.DB.LatestCIHandback(run.ID)
+	if err != nil {
+		state.Safety = "blocked_ci_handback_unreadable"
+		state.Error = "CI handback history cannot be read; inspect no-mistakes axi status"
+		state.NextAction = nil
+		return true
+	}
+	if receipt != nil && receipt.Source != nil && receipt.AcceptedHead == nil {
+		state.Safety = "blocked_ci_handback_binding"
+		state.NextAction = &NextAction{Code: "inspect_ci_handback", Command: "no-mistakes axi status"}
+		if !samePath(root, receipt.CallerDir) || run.HeadSHA != receipt.ReleasedHead || value(run.PushGeneration) != receipt.PushGeneration || ptr(run.LastPushedSHA) != receipt.ReleasedHead || ptr(run.PushRef) != receipt.PushRef || ptr(run.PushTargetFingerprint) != receipt.TargetFingerprint {
+			return true
+		}
+		anchor := fmt.Sprintf("refs/no-mistakes/ci-handback/%s/%d", run.ID, receipt.PushGeneration)
+		for _, source := range []struct{ ref, head string }{{anchor + "/published", receipt.ReleasedHead}, {anchor + "/author", receipt.Source.CallerHead}} {
+			observed, err := git.Run(ctx, root, "for-each-ref", "--format=%(objectname) %(objecttype) %(symref)", source.ref)
+			if err != nil || observed != source.head+" commit" {
+				return true
+			}
+		}
+		state.Pipeline.Phase = "author_followup"
+		state.Error = ""
+		state.Safety = "ci_handback_released"
+		state.NextAction = &NextAction{Code: "resume_ci_handback", Command: "no-mistakes axi handback --resume --receipt " + receipt.ID}
+		if !isAncestor(ctx, root, receipt.ReleasedHead, state.Local.Head) {
+			state.NextAction = &NextAction{Code: "integrate_ci_handback", Command: "git merge --no-ff --no-edit " + anchor + "/published"}
+		}
+		return true
+	}
+	if (receipt != nil && receipt.AcceptedHead == nil) || run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != run.HeadSHA || (state.State != StateSynchronized && state.State != StateDiverged) {
+		return false
+	}
+	if scm.DetectProviderContext(ctx, s.Repo.UpstreamURL) != scm.ProviderGitHub {
+		return false
+	}
+	results, err := s.DB.GetStepsByRun(run.ID)
+	if err != nil {
+		return false
+	}
+	for _, result := range results {
+		if result.StepName != types.StepCI {
+			continue
+		}
+		if result.Status != types.StepStatusAwaitingApproval || result.AutoFixLimit != nil || result.FindingsJSON == nil {
+			return false
+		}
+		findings, err := types.ParseFindingsJSON(*result.FindingsJSON)
+		if err != nil || len(findings.Items) == 0 {
+			return false
+		}
+		for _, finding := range findings.Items {
+			if finding.Category != types.FindingCategoryCICheck || finding.Severity != types.FindingSeverityError || finding.ActionOrDefault() != types.ActionAutoFix || finding.Check == "" {
+				return false
+			}
+		}
+		state.NextAction = &NextAction{Code: "handback_ci", Command: "no-mistakes axi handback"}
+	}
+	return false
 }
 
 func (s *Service) classifyRelation(ctx context.Context, state *State, pushed, base string, live bool) {
@@ -1996,6 +2084,16 @@ func refreshable(state State) bool {
 }
 
 func worktreeClean(ctx context.Context, dir string) (bool, string) {
+	return worktreeCleanBy(ctx, dir, git.HasUncommittedChanges)
+}
+
+// terminalSourceClean also counts untracked files the status configuration
+// hides, because adopted terminal source must be complete.
+func terminalSourceClean(ctx context.Context, dir string) (bool, string) {
+	return worktreeCleanBy(ctx, dir, git.HasUncommittedChangesIncludingHidden)
+}
+
+func worktreeCleanBy(ctx context.Context, dir string, hasChanges func(context.Context, string) (bool, error)) (bool, string) {
 	markers := []struct{ path, reason string }{
 		{"MERGE_HEAD", "merge_in_progress"}, {"rebase-merge", "rebase_in_progress"}, {"rebase-apply", "rebase_in_progress"},
 		{"CHERRY_PICK_HEAD", "cherry_pick_in_progress"}, {"REVERT_HEAD", "revert_in_progress"}, {"BISECT_LOG", "bisect_in_progress"}, {"sequencer", "sequencer_in_progress"},
@@ -2011,7 +2109,7 @@ func worktreeClean(ctx context.Context, dir string) (bool, string) {
 			}
 		}
 	}
-	dirty, err := git.HasUncommittedChanges(ctx, dir)
+	dirty, err := hasChanges(ctx, dir)
 	if err != nil {
 		return false, "status_unavailable"
 	}
@@ -2071,6 +2169,29 @@ func (s *Service) supersededUnpublishedRun(ctx context.Context, older, newer *db
 		return false
 	}
 	return isAncestor(ctx, s.GateDir, older.HeadSHA, pushed)
+}
+
+// handedToTerminalSuccessor reports a terminal run whose source an explicit
+// continuation adopted: custody of its unpublished head moved to the successor
+// and its own history is immutable. A read failure keeps the run authoritative.
+func (s *Service) handedToTerminalSuccessor(run *db.Run) bool {
+	adoption, err := s.DB.GetTerminalAdoption(run.ID)
+	return err == nil && adoption != nil
+}
+
+// custodyView is the run as branch custody judges it: submitted at the head it
+// owes the operator (db.CustodySubmittedHead).
+func (s *Service) custodyView(run *db.Run) (*db.Run, error) {
+	submitted, err := s.DB.CustodySubmittedHead(run)
+	if err != nil {
+		return nil, fmt.Errorf("read custody of run %s: %w", run.ID, err)
+	}
+	if submitted == run.SubmittedHeadSHA {
+		return run, nil
+	}
+	view := *run
+	view.SubmittedHeadSHA = submitted
+	return &view, nil
 }
 
 func samePushTargetBinding(older, newer *db.Run) bool {
@@ -2197,7 +2318,11 @@ func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, ru
 		if candidate.Branch != state.Local.Branch {
 			continue
 		}
-		if unpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, state.Local.Branch) {
+		candidate, err = s.custodyView(candidate)
+		if err != nil {
+			return nil, nil, false, false
+		}
+		if unpublishedPipelineHead(candidate) && (s.supersededUnpublishedRun(ctx, candidate, newerPushed, state.Local.Branch) || s.handedToTerminalSuccessor(candidate)) {
 			continue
 		}
 		if newerPushed == nil && exactPushedBinding(s.Repo, candidate, state.Local.Branch) {

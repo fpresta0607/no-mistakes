@@ -44,6 +44,9 @@ jobs:
       - name: Proven partition of pipeline/steps tests for the Windows shards
         run: go run ./tools/testshard -verify
 
+      - name: Proven partition of git-heavy tests for the Windows shards
+        run: go run ./tools/testshard -parts 2 -packages ./internal/git,./internal/branchsync,./internal/gate,./internal/evidence,./internal/daemon,./internal/eval -verify
+
   test:
     name: ${{ matrix.name }}
     strategy:
@@ -58,8 +61,13 @@ jobs:
             name: test (windows-core)
             shard: core
           - os: windows-latest
-            name: test (windows-git)
+            name: test (windows-git 1/2)
             shard: git
+            git_part: 1
+          - os: windows-latest
+            name: test (windows-git 2/2)
+            shard: git
+            git_part: 2
           - os: windows-latest
             name: test (windows-steps 1/3)
             shard: steps
@@ -131,9 +139,16 @@ jobs:
       # overlap. pipeline/steps is its own shard (~10 min) so it runs in
       # parallel with the remaining git-heavy packages instead of setting a
       # ~21 min serial floor.
-      - name: Test on Windows (git-heavy)
+      # branchsync and daemon also exceed a single package budget as the suite
+      # grows. Reuse the proven partition without changing either timeout.
+      - name: Test on Windows (git-heavy, part ${{ matrix.git_part }}/2)
         if: runner.os == 'Windows' && matrix.shard == 'git'
-        run: go test -v -timeout=15m ./internal/git ./internal/branchsync ./internal/gate ./internal/evidence ./internal/daemon ./internal/eval
+        shell: pwsh
+        run: |
+          $run = (go run ./tools/testshard -parts 2 -part ${{ matrix.git_part }} -packages ./internal/git,./internal/branchsync,./internal/gate,./internal/evidence,./internal/daemon,./internal/eval).Trim()
+          if (-not $run) { throw "tools/testshard printed no -run pattern for part ${{ matrix.git_part }}" }
+          Write-Host "git-heavy part ${{ matrix.git_part }}/2: -run pattern is $($run.Length) characters"
+          go test -v -timeout=15m -run $run ./internal/git ./internal/branchsync ./internal/gate ./internal/evidence ./internal/daemon ./internal/eval
 
       # One part of the package's top-level tests per job, from the real
       # `go test -list '^Test'` output. -timeout and this job's cap are unchanged,

@@ -40,7 +40,10 @@ func TestRunViewFromDBAwaitingStep(t *testing.T) {
 		{StepName: types.StepReview, Status: types.StepStatusCompleted},
 		{StepName: types.StepTest, Status: types.StepStatusAwaitingApproval, FindingsJSON: strptr(`{"findings":[],"summary":"x"}`)},
 	}
-	rv := runViewFromDB(run, steps, nil)
+	rv, err := runViewFromDB(run, steps, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	gate, ok := rv.awaitingStep()
 	if !ok {
 		t.Fatal("expected an awaiting step")
@@ -61,7 +64,10 @@ func TestRunViewFromDBCarriesCIOverrideReason(t *testing.T) {
 		{StepName: types.StepTest, Status: types.StepStatusCompleted, OverrideReason: strptr("configured test command failed")},
 		{StepName: types.StepCI, Status: types.StepStatusCompleted, OverrideReason: strptr("live checks still failing: required-check")},
 	}
-	rv := runViewFromDB(run, steps, nil)
+	rv, err := runViewFromDB(run, steps, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if rv.CIOverrideReason != "live checks still failing: required-check" {
 		t.Errorf("CIOverrideReason = %q, want the step's override reason", rv.CIOverrideReason)
 	}
@@ -303,7 +309,10 @@ func TestStatusRendersCurrentAutoFixAttemptWithPersistedLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load steps: %v", err)
 	}
-	rv := runViewFromDB(run, steps, database)
+	rv, err := runViewFromDB(run, steps, database)
+	if err != nil {
+		t.Fatal(err)
+	}
 	reviewLimit := 9
 	annotateRunView(&axiEnv{
 		d: database,
@@ -1384,6 +1393,20 @@ func TestAxiHomeLeadsWithAnsweringWhenTheGateHasAnOpenQuestion(t *testing.T) {
 			finding: types.Finding{
 				ID: "question-q1", Severity: types.FindingSeverityWarning, Action: types.ActionAskUser,
 				Description: "not actually a review question",
+			},
+		},
+		{
+			name: "ordinary protected-path refusal",
+			finding: types.Finding{
+				ID: "protected-path-refusal", Severity: types.FindingSeverityError, Action: types.ActionAskUser,
+				Description: "protected path edited",
+			},
+		},
+		{
+			name: "ordinary unvalidated-work refusal",
+			finding: types.Finding{
+				ID: types.FindingIDTestAgentUnvalidatedWork, Severity: types.FindingSeverityError, Action: types.ActionAskUser,
+				Description: "unvalidated work in the worktree",
 			},
 		},
 	} {
