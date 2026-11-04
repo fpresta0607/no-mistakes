@@ -140,10 +140,10 @@ func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
 	_, err := d.sql.Exec(`
 		UPDATE step_results
 		SET status = ?, exit_code = NULL, duration_ms = NULL, log_path = NULL,
-			findings_json = CASE WHEN status = ? THEN findings_json ELSE NULL END, error = NULL, started_at = NULL,
+			findings_json = NULL, error = NULL, started_at = NULL,
 			round_started_at = NULL, completed_at = NULL, last_activity_at = NULL, last_activity = NULL,
 			agent_pid = NULL, auto_fix_limit = NULL, override_reason = NULL, approval_reason = NULL
-		WHERE run_id = ? AND step_order >= ? AND status != ?`, types.StepStatusPending, types.StepStatusPending, runID, stepOrder, types.StepStatusSkipped)
+		WHERE run_id = ? AND step_order >= ? AND status != ?`, types.StepStatusPending, runID, stepOrder, types.StepStatusSkipped)
 	if err != nil {
 		return fmt.Errorf("reset steps for revalidation: %w", err)
 	}
@@ -169,24 +169,11 @@ func (d *DB) UpdateStepStatusWithDuration(id string, status types.StepStatus, du
 }
 
 func (d *DB) ParkStepForApproval(runID, stepID string, status types.StepStatus, exitCode int, durationMS int64, findingsJSON *string) error {
-	return d.parkStepForApproval(runID, stepID, status, exitCode, durationMS, findingsJSON, false)
-}
-
-func (d *DB) ParkSafetyRefusal(runID, stepID string, status types.StepStatus, exitCode int, durationMS int64, findingsJSON *string) error {
-	return d.parkStepForApproval(runID, stepID, status, exitCode, durationMS, findingsJSON, true)
-}
-
-func (d *DB) parkStepForApproval(runID, stepID string, status types.StepStatus, exitCode int, durationMS int64, findingsJSON *string, clearSessions bool) error {
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return fmt.Errorf("begin approval park: %w", err)
 	}
 	defer tx.Rollback()
-	if clearSessions {
-		if _, err := tx.Exec(`DELETE FROM run_agent_sessions WHERE run_id = ?`, runID); err != nil {
-			return fmt.Errorf("invalidate refused agent sessions: %w", err)
-		}
-	}
 
 	ts := now()
 	stepResult, err := tx.Exec(

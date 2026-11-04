@@ -504,9 +504,7 @@ Instructions:
 		OnChunk:    sctx.LogChunk,
 	})
 	if err != nil {
-		if !agent.IsSafetyRefusal(err) {
-			_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
-		}
+		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
 		return fmt.Errorf("agent resolve conflicts: %w", err)
 	}
 
@@ -649,9 +647,7 @@ Instructions:
 		OnChunk:    sctx.LogChunk,
 	})
 	if err != nil {
-		if !agent.IsSafetyRefusal(err) {
-			_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
-		}
+		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
 		return fmt.Errorf("agent resolve conflicts: %w", err)
 	}
 

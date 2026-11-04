@@ -416,37 +416,6 @@ func TestParkStepForApproval_FindingsFailureRollsBackGate(t *testing.T) {
 	}
 }
 
-func TestParkSafetyRefusalFailsClosedWhenSessionCannotBeDeleted(t *testing.T) {
-	d := openTestDB(t)
-	repo, _ := d.InsertRepo("/tmp/session-atomic", "https://example.com/repo.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
-	step, _ := d.InsertStepResult(run.ID, types.StepReview)
-	if err := d.UpsertRunAgentSession(run.ID, "review-fixer", "codex", "refused"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := d.sql.Exec(`CREATE TRIGGER refuse_session_delete BEFORE DELETE ON run_agent_sessions BEGIN SELECT RAISE(FAIL, 'cannot delete'); END`); err != nil {
-		t.Fatal(err)
-	}
-	findings := `{"findings":[{"id":"agent-safety-refusal"}]}`
-	if err := d.ParkSafetyRefusal(run.ID, step.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err == nil {
-		t.Fatal("parked while refused session was reusable")
-	}
-	got, err := d.GetStepResult(step.ID)
-	if err != nil || got.Status != types.StepStatusPending {
-		t.Fatalf("step = %+v, %v", got, err)
-	}
-	if _, err := d.sql.Exec(`DROP TRIGGER refuse_session_delete`); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.ParkSafetyRefusal(run.ID, step.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
-		t.Fatal(err)
-	}
-	sessions, err := d.GetRunAgentSessions(run.ID)
-	if err != nil || len(sessions) != 0 {
-		t.Fatalf("sessions = %+v, %v", sessions, err)
-	}
-}
-
 func TestCompleteReviewStepIsAtomic(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/tmp/review-atomic", "https://example.com/repo.git", "main")

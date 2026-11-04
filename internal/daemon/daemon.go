@@ -1154,13 +1154,7 @@ func protectedPathCleanupReason(d *db.DB, run *db.Run) string {
 		return fmt.Sprintf("cannot read protected-path refusals for run %s: %v", run.ID, err)
 	}
 	for _, step := range results {
-		if step.FindingsJSON == nil || step.Status == types.StepStatusCompleted {
-			continue
-		}
-		refusal := "protected-path"
-		if pipeline.HasSafetyRefusal(*step.FindingsJSON) {
-			refusal = "native agent safety"
-		} else if !pipeline.HasProtectedPathRefusal(*step.FindingsJSON) {
+		if step.FindingsJSON == nil || !pipeline.HasProtectedPathRefusal(*step.FindingsJSON) || step.Status == types.StepStatusCompleted {
 			continue
 		}
 		if step.Status == types.StepStatusSkipped && (step.Error == nil || *step.Error != types.RunCIMonitorInterruptedReason) {
@@ -1169,23 +1163,7 @@ func protectedPathCleanupReason(d *db.DB, run *db.Run) string {
 		if step.Error != nil && *step.Error == "aborted by user" {
 			continue
 		}
-		return fmt.Sprintf("run %s has an unresolved %s refusal; preserving index and worktree", run.ID, refusal)
-	}
-	return ""
-}
-
-func safetyRefusalCleanupReason(d *db.DB, run *db.Run) string {
-	if run == nil || (run.Status == types.RunCancelled && run.Error != nil && *run.Error == types.RunCancelReasonAbortedByUser) {
-		return ""
-	}
-	steps, err := d.GetStepsByRun(run.ID)
-	if err != nil {
-		return fmt.Sprintf("cannot read safety refusals for run %s: %v", run.ID, err)
-	}
-	for _, step := range steps {
-		if step.Status != types.StepStatusCompleted && step.FindingsJSON != nil && pipeline.HasSafetyRefusal(*step.FindingsJSON) && (step.Error == nil || *step.Error != "aborted by user") {
-			return fmt.Sprintf("run %s has an unresolved native safety refusal", run.ID)
-		}
+		return fmt.Sprintf("run %s has an unresolved protected-path refusal; preserving index and worktree", run.ID)
 	}
 	return ""
 }

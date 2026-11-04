@@ -100,7 +100,7 @@ func reportLeftUntracked(sctx *pipeline.StepContext, before []string, outcome *p
 	return outcome, nil
 }
 
-func (s *TestStep) execute(sctx *pipeline.StepContext, desktop string) (outcome *pipeline.StepOutcome, retErr error) {
+func (s *TestStep) execute(sctx *pipeline.StepContext, desktop string) (*pipeline.StepOutcome, error) {
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
@@ -132,9 +132,6 @@ func (s *TestStep) execute(sctx *pipeline.StepContext, desktop string) (outcome 
 		return nil, fmt.Errorf("create test scratch dir: %w", err)
 	}
 	defer func() {
-		if agent.IsSafetyRefusal(retErr) {
-			return
-		}
 		if err := os.RemoveAll(scratchDir); err != nil {
 			sctx.Log(fmt.Sprintf("warning: failed to remove test scratch dir %s: %v", scratchDir, err))
 		}
@@ -534,7 +531,7 @@ func runTestAnalyzer(ctx context.Context, sctx *pipeline.StepContext, prompt, de
 			OnChunk:    sctx.LogChunk,
 		})
 		runErr := testAgentError(timeout, "agent run tests", err)
-		if runErr != nil && (agent.IsSafetyRefusal(runErr) || errors.Is(runErr, errTestAgentTimeout) || ctx.Err() != nil || !agent.IsStructuredOutputRejected(runErr)) {
+		if runErr != nil && (errors.Is(runErr, errTestAgentTimeout) || ctx.Err() != nil || !agent.IsStructuredOutputRejected(runErr)) {
 			return Findings{}, runErr
 		}
 
@@ -552,6 +549,7 @@ func runTestAnalyzer(ctx context.Context, sctx *pipeline.StepContext, prompt, de
 			}
 		}
 		if agent.IsSafetyRefusal(valErr) {
+			// A refusal given as the answer is not a schema slip to correct.
 			return Findings{}, valErr
 		}
 		lastErr = valErr

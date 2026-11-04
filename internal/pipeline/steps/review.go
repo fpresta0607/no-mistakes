@@ -497,10 +497,11 @@ Risk assessment (after listing all findings):
 			if err == nil {
 				break
 			}
-		} else if agent.IsSafetyRefusal(err) || !agent.IsStructuredOutputRejected(err) || sctx.Ctx.Err() != nil || errors.Is(err, errReviewAgentTimeout) {
+		} else if !agent.IsStructuredOutputRejected(err) || sctx.Ctx.Err() != nil || errors.Is(err, errReviewAgentTimeout) {
 			return nil, err
 		}
 		if agent.IsSafetyRefusal(err) {
+			// A refusal given as the answer is not a schema slip to rerun.
 			return nil, err
 		}
 		validationErrors = append(validationErrors, err)

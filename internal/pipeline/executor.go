@@ -73,7 +73,7 @@ type Executor struct {
 	waiting                bool                  // true when blocked on approval
 	waitingStep            types.StepName        // which step is currently awaiting approval
 	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
-	waitingSafetyRefusal   bool
+	waitingSafetyRefusal   bool                  // true: an answer must not release the waiting gate
 	ciHandbackCh           chan ciHandbackRequest
 	ciHandbackPending      bool
 	ciHandbackReleased     bool
@@ -226,7 +226,7 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 	}
 	if action == types.ActionAnswer && e.waitingSafetyRefusal {
 		e.mu.Unlock()
-		return errors.New("a safety refusal requires an explicit decision")
+		return errors.New("an answer cannot release a native agent safety refusal: it needs an explicit decision")
 	}
 	e.waiting = false
 	e.mu.Unlock()
@@ -975,15 +975,14 @@ func (e *Executor) sideLaneContext(ctx context.Context, run *db.Run, repo *db.Re
 		return nil, false
 	}
 	runCopy := *run
-	var sctx *StepContext
 	stepAgent := e.agent
 	if stepAgent != nil {
 		stepAgent = &timeoutAgent{inner: stepAgent, timeout: AgentTimeout(e.config), working: AgentWorkingTimeout(e.config)}
-		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: name, logRefusal: func(text string) { sctx.LogFile(text) }}
+		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: name}
 		stepAgent = &perfRecordingAgent{inner: stepAgent, db: e.db, runID: run.ID, stepName: name, round: func() int { return 1 }}
 		stepAgent = &roundStampingAgent{inner: stepAgent, round: func() int { return 1 }}
 	}
-	sctx = &StepContext{
+	sctx := &StepContext{
 		Ctx:          ctx,
 		Run:          &runCopy,
 		Repo:         repo,
@@ -993,7 +992,6 @@ func (e *Executor) sideLaneContext(ctx context.Context, run *db.Run, repo *db.Re
 		ForgeContext: e.forge,
 		DB:           e.db,
 		StepResultID: sr.ID,
-		StepLogPath:  filepath.Join(e.paths.RunLogDir(run.ID), string(name)+".log"),
 		Shared:       &RunShared{},
 		EvidenceDir:  e.runEvidenceDir(run.ID),
 		SideLane:     true,
@@ -1177,7 +1175,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// Innermost: default-by-construction invocation deadline so a step
 		// that calls Agent.Run directly cannot hang the run.
 		stepAgent = &timeoutAgent{inner: stepAgent, timeout: AgentTimeout(e.config), working: AgentWorkingTimeout(e.config)}
-		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: stepName, logRefusal: writeLog}
+		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: stepName}
 		stepAgent = &lifecycleAgent{inner: stepAgent, onLifecycle: onAgentLifecycle}
 		stepAgent = &perfRecordingAgent{
 			inner:    stepAgent,
@@ -1225,7 +1223,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		ForgeContext:          e.forge,
 		DB:                    e.db,
 		StepResultID:          sr.ID,
-		StepLogPath:           logPath,
 		UserIntent:            userIntent,
 		IntentSource:          userIntentSource,
 		Sessions:              e.sessions,
@@ -1311,7 +1308,7 @@ rounds:
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
-		if refusal := SafetyRefusalOutcome(err); refusal != nil {
+		if refusal := safetyRefusalOutcome(err); refusal != nil {
 			writeLog(safeurl.RedactText(err.Error()))
 			if lanes := sctx.Shared.SideLanes(); lanes != nil {
 				lanes.Stop(sctx)
@@ -1534,11 +1531,7 @@ rounds:
 			// tell in one `axi status` read that the run is waiting for the agent
 			// to drive this gate (versus actively running/fixing/ci). Observability
 			// only: it does not change the wait below. Cleared once the wait ends.
-			park := e.db.ParkStepForApproval
-			if HasSafetyRefusal(effectiveFindings) {
-				park = e.db.ParkSafetyRefusal
-			}
-			if dbErr := park(run.ID, sr.ID, approvalStatus, finalExitCode, executionMS, findingsPtr); dbErr != nil {
+			if dbErr := e.db.ParkStepForApproval(run.ID, sr.ID, approvalStatus, finalExitCode, executionMS, findingsPtr); dbErr != nil {
 				e.mu.Lock()
 				e.waiting = false
 				e.waitingStep = ""
@@ -1832,35 +1825,15 @@ func roundInsertID(_ string, inserted *db.StepRound, err error) string {
 }
 
 type gateStepBoundaryAgent struct {
-	inner      agent.Agent
-	phase      types.StepName
-	logRefusal func(string)
+	inner agent.Agent
+	phase types.StepName
 }
 
 func (a *gateStepBoundaryAgent) Name() string { return a.inner.Name() }
 
 func (a *gateStepBoundaryAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	opts.Prompt = gateguidance.PromptBoundary(string(a.phase)) + opts.Prompt
-	result, err := a.inner.Run(ctx, opts)
-	if agent.IsSafetyRefusal(err) && a.logRefusal != nil {
-		provider, id := a.inner.Name(), ""
-		if result != nil {
-			if result.Provider != "" {
-				provider = result.Provider
-			}
-			id = result.SessionID
-		}
-		if id == "" && opts.Session != nil {
-			id = opts.Session.ID
-			if opts.Session.Agent != "" {
-				provider = opts.Session.Agent
-			}
-		}
-		if id != "" {
-			a.logRefusal(safeurl.RedactText(fmt.Sprintf("refused agent session: provider=%s id=%s", provider, id)))
-		}
-	}
-	return result, err
+	return a.inner.Run(ctx, opts)
 }
 
 func (a *gateStepBoundaryAgent) Close() error { return a.inner.Close() }

@@ -179,8 +179,11 @@ func disambiguateMatch(ctx context.Context, p ExtractParams, fallback *Match, lo
 	}
 	choice, err := p.Disambiguator.Disambiguate(ctx, p.DiffFiles, candidates)
 	if err != nil {
-		if errors.Is(err, ErrDisambiguatorCleanup) || agent.IsSafetyRefusal(err) {
+		if errors.Is(err, ErrDisambiguatorCleanup) {
 			return nil, fmt.Errorf("intent: disambiguator cleanup: %w", err)
+		}
+		if agent.IsSafetyRefusal(err) {
+			return nil, fmt.Errorf("intent: disambiguator: %w", err)
 		}
 		if p.Logf != nil {
 			p.Logf("disambiguator failed: %v", err)

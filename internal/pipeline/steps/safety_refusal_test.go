@@ -9,12 +9,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
-	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -116,11 +117,11 @@ func TestReviewLoop_NativeSafetyRefusalPreservesWorkAndParks(t *testing.T) {
 		t.Errorf("refusal changed the index: got %q, want %q", staged, originalFeature)
 	}
 	sessions, err := database.GetRunAgentSessions(run.ID)
-	if err != nil || len(sessions) != 0 {
-		t.Errorf("refused fixer session remains reusable: %+v, %v", sessions, err)
+	if err != nil || len(sessions) != 1 || sessions[0].SessionID != "original-fixer" {
+		t.Errorf("original fixer session was lost: %+v, %v", sessions, err)
 	}
 	log, err := os.ReadFile(filepath.Join(appPaths.RunLogDir(run.ID), "review.log"))
-	if err != nil || !strings.Contains(string(log), refusal) || !strings.Contains(string(log), "original-fixer") || strings.Contains(string(log), "starting a fresh") {
+	if err != nil || !strings.Contains(string(log), refusal) || strings.Contains(string(log), "starting a fresh") {
 		t.Errorf("refusal log was lost or announced a retry: %s, %v", log, err)
 	}
 }
@@ -206,18 +207,35 @@ func TestReviewStep_SafetyRefusedCoverageCompletionIsNotACoverageGap(t *testing.
 }
 
 // Work refused beside the review is never thrown away for its step to run
-// again, which would repeat the refused request. The step returns the refusal
-// at its turn, whether or not the head moved since.
-func TestSideBySide_RefusedLaneIsNotRunAgain(t *testing.T) {
-	for _, headMoved := range []bool{false, true} {
-		t.Run(fmt.Sprintf("head moved %v", headMoved), func(t *testing.T) {
+// again, which would repeat the refused request. However the lane is reached,
+// its step returns the refusal at its turn and the lane's copy, with its
+// edits, is kept for the operator.
+func TestSideBySide_RefusedLaneIsKeptAndNotRunAgain(t *testing.T) {
+	for _, exit := range []string{"taken", "head moved", "stopped", "refused while stopping"} {
+		t.Run(exit, func(t *testing.T) {
 			f := newSideBySideFixture(t, config.Commands{})
-			f.agent.evidenceF = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			started := make(chan string, 1)
+			f.agent.evidenceF = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				if err := os.WriteFile(filepath.Join(opts.CWD, "refused.txt"), []byte("kept"), 0o644); err != nil {
+					return nil, err
+				}
+				started <- opts.CWD
+				if exit == "refused while stopping" {
+					<-ctx.Done()
+				}
 				return nil, errors.New(nativeSafetyRefusal)
 			}
 			startSideLanes(f.review, f.baseSHA)
-			f.lanesDone()
-			if headMoved {
+			var laneDir string
+			select {
+			case laneDir = <-started:
+			case <-time.After(sideBySideWait):
+				t.Fatal("the live check did not start beside the review")
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(laneDir)) })
+			switch exit {
+			case "head moved":
+				f.lanesDone()
 				if err := os.WriteFile(filepath.Join(f.dir, "fixed.go"), []byte("package fixed\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}
@@ -226,6 +244,13 @@ func TestSideBySide_RefusedLaneIsNotRunAgain(t *testing.T) {
 				if err := recordAgentFixHead(f.review, types.StepReview, gitCmd(t, f.dir, "rev-parse", "HEAD")); err != nil {
 					t.Fatal(err)
 				}
+			case "stopped":
+				f.lanesDone()
+				f.review.Shared.SideLanes().Stop(f.review)
+			case "refused while stopping":
+				f.review.Shared.SideLanes().Stop(f.review)
+			default:
+				f.lanesDone()
 			}
 
 			_, err := (&TestStep{}).Execute(f.turn())
@@ -236,7 +261,84 @@ func TestSideBySide_RefusedLaneIsNotRunAgain(t *testing.T) {
 			if calls := f.agent.evidenceCalls(); len(calls) != 1 {
 				t.Fatalf("live checks = %q, want the refused one alone", calls)
 			}
+			if data, err := os.ReadFile(filepath.Join(laneDir, "refused.txt")); err != nil || string(data) != "kept" {
+				t.Fatalf("the refused lane's edit = %q, %v; want it kept", data, err)
+			}
 		})
+	}
+}
+
+// A refusal stops every lane, but a lane that refused on its own keeps that
+// refusal for its step rather than letting the step start the work again.
+func TestSideBySide_RefusedDocumentLaneSurvivesStop(t *testing.T) {
+	f := newSideBySideFixture(t, config.Commands{Lint: "true"})
+	started := make(chan string, 1)
+	f.agent.documentF = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		started <- opts.CWD
+		return nil, errors.New(nativeSafetyRefusal)
+	}
+	startSideLanes(f.review, f.baseSHA)
+	var laneDir string
+	select {
+	case laneDir = <-started:
+	case <-time.After(sideBySideWait):
+		t.Fatal("the documentation pass did not start beside the review")
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(laneDir)) })
+	f.lanesDone()
+	f.review.Shared.SideLanes().Stop(f.review)
+
+	_, err := (&DocumentStep{}).Execute(f.turn())
+
+	if !agent.IsSafetyRefusal(err) {
+		t.Fatalf("Execute() error = %v, want the lane's refusal", err)
+	}
+	if calls := f.agent.documentCalls(); len(calls) != 1 {
+		t.Fatalf("documentation passes = %q, want the refused one alone", calls)
+	}
+}
+
+// Stop cancels every lane before it waits for any, so no lane goes on
+// starting work while another winds down.
+func TestSideBySide_StopCancelsEveryLaneBeforeWaiting(t *testing.T) {
+	f := newSideBySideFixture(t, config.Commands{Lint: "true"})
+	var mu sync.Mutex
+	contexts := map[string]context.Context{}
+	started := make(chan struct{}, 2)
+	var otherStillRunning atomic.Bool
+	block := func(name, other string) func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			mu.Lock()
+			contexts[name] = ctx
+			mu.Unlock()
+			started <- struct{}{}
+			<-ctx.Done()
+			mu.Lock()
+			otherCtx := contexts[other]
+			mu.Unlock()
+			select {
+			case <-otherCtx.Done():
+			case <-time.After(2 * time.Second):
+				otherStillRunning.Store(true)
+			}
+			return nil, ctx.Err()
+		}
+	}
+	f.agent.evidenceF = block("test", "document")
+	f.agent.documentF = block("document", "test")
+	startSideLanes(f.review, f.baseSHA)
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(sideBySideWait):
+			t.Fatal("both lanes did not start beside the review")
+		}
+	}
+
+	f.review.Shared.SideLanes().Stop(f.review)
+
+	if otherStillRunning.Load() {
+		t.Fatal("Stop waited for one lane while another was still running")
 	}
 }
 
@@ -270,240 +372,8 @@ func TestSideBySide_StopEndsTheLanesAndKeepsTheirLogs(t *testing.T) {
 	}
 }
 
-func TestSideBySide_RefusalPreservesLaneAtEveryExit(t *testing.T) {
-	for _, mode := range []string{"take", "stale", "stop", "stop while running"} {
-		t.Run(mode, func(t *testing.T) {
-			f := newSideBySideFixture(t, config.Commands{})
-			started := make(chan string, 1)
-			scratch := make(chan string, 1)
-			f.agent.evidenceF = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-				if err := os.WriteFile(filepath.Join(opts.CWD, "refused.txt"), []byte("preserved"), 0o644); err != nil {
-					return nil, err
-				}
-				for _, entry := range opts.Env {
-					if path, ok := strings.CutPrefix(entry, "TMP="); ok {
-						if err := os.WriteFile(filepath.Join(path, "refused-scratch.txt"), []byte("preserved"), 0o644); err != nil {
-							return nil, err
-						}
-						scratch <- path
-						break
-					}
-				}
-				started <- opts.CWD
-				if mode == "stop while running" {
-					<-ctx.Done()
-				}
-				return nil, errors.New(nativeSafetyRefusal)
-			}
-			startSideLanes(f.review, f.baseSHA)
-			var dir string
-			select {
-			case dir = <-started:
-			case <-time.After(sideBySideWait):
-				t.Fatal("lane did not start")
-			}
-			t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(dir)) })
-			if mode != "stop while running" {
-				f.lanesDone()
-			}
-			switch mode {
-			case "stale":
-				stopStaleSideLanes(f.review, "new-head")
-			case "stop", "stop while running":
-				f.review.Shared.SideLanes().Stop(f.review)
-			}
-			_, err := (&TestStep{}).Execute(f.turn())
-			if !agent.IsSafetyRefusal(err) {
-				t.Fatalf("step error = %v", err)
-			}
-			data, err := os.ReadFile(filepath.Join(dir, "refused.txt"))
-			if err != nil || string(data) != "preserved" {
-				t.Fatalf("lane edits = %q, %v", data, err)
-			}
-			select {
-			case path := <-scratch:
-				data, err = os.ReadFile(filepath.Join(path, "refused-scratch.txt"))
-				if err != nil || string(data) != "preserved" {
-					t.Fatalf("scratch edits = %q, %v", data, err)
-				}
-			default:
-				t.Fatal("agent did not receive scratch directory")
-			}
-			if len(f.agent.evidenceCalls()) != 1 {
-				t.Fatal("refused work ran again")
-			}
-		})
-	}
-}
-
-func TestSideBySide_RefusedDocumentLaneSurvivesStop(t *testing.T) {
-	f := newSideBySideFixture(t, config.Commands{Lint: "true"})
-	started := make(chan string, 1)
-	f.agent.documentF = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-		if err := os.WriteFile(filepath.Join(opts.CWD, "refused-doc.txt"), []byte("preserved"), 0o644); err != nil {
-			return nil, err
-		}
-		started <- opts.CWD
-		return nil, errors.New(nativeSafetyRefusal)
-	}
-	startSideLanes(f.review, f.baseSHA)
-	var dir string
-	select {
-	case dir = <-started:
-	case <-time.After(sideBySideWait):
-		t.Fatal("document lane did not start")
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(dir)) })
-	f.lanesDone()
-	f.review.Shared.SideLanes().Stop(f.review)
-	_, err := (&DocumentStep{}).Execute(f.turn())
-	if !agent.IsSafetyRefusal(err) {
-		t.Fatalf("document error = %v", err)
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "refused-doc.txt"))
-	if err != nil || string(data) != "preserved" {
-		t.Fatalf("document edits = %q, %v", data, err)
-	}
-	if len(f.agent.documentCalls()) != 1 {
-		t.Fatal("refused document work ran again")
-	}
-}
-
-func TestSideBySide_RefusalSurvivesRecovery(t *testing.T) {
-	for _, name := range []types.StepName{types.StepTest, types.StepDocument} {
-		t.Run(string(name), func(t *testing.T) {
-			f := newSideBySideFixture(t, config.Commands{Lint: "true"})
-			started := make(chan string, 1)
-			refuse := func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-				if err := os.WriteFile(filepath.Join(opts.CWD, "refused.txt"), []byte("preserved"), 0o644); err != nil {
-					return nil, err
-				}
-				started <- opts.CWD
-				return nil, errors.New(nativeSafetyRefusal)
-			}
-			if name == types.StepTest {
-				f.agent.evidenceF = refuse
-			} else {
-				f.agent.documentF = refuse
-			}
-			startSideLanes(f.review, f.baseSHA)
-			var dir string
-			select {
-			case dir = <-started:
-			case <-time.After(sideBySideWait):
-				t.Fatal("lane did not start")
-			}
-			t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(dir)) })
-			f.lanesDone()
-			if err := f.review.DB.ResetStepsFrom(f.review.Run.ID, types.StepReview.Order()); err != nil {
-				t.Fatal(err)
-			}
-			f.review.Shared.Close()
-			f.review.Shared = &pipeline.RunShared{}
-			startSideLanes(f.review, f.baseSHA)
-			turn := f.turn()
-			results, err := f.review.DB.GetStepsByRun(f.review.Run.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, result := range results {
-				if result.StepName == name {
-					turn.StepResultID = result.ID
-				}
-			}
-			if name == types.StepTest {
-				_, err = (&TestStep{}).Execute(turn)
-			} else {
-				_, err = (&DocumentStep{}).Execute(turn)
-			}
-			if !agent.IsSafetyRefusal(err) {
-				t.Fatalf("recovered step error = %v", err)
-			}
-			data, err := os.ReadFile(filepath.Join(dir, "refused.txt"))
-			if err != nil || string(data) != "preserved" {
-				t.Fatalf("edits = %q, %v", data, err)
-			}
-			if name == types.StepTest && len(f.agent.evidenceCalls()) != 1 || name == types.StepDocument && len(f.agent.documentCalls()) != 1 {
-				t.Fatal("recovery restarted the refused lane")
-			}
-			f.review.Shared.Close()
-		})
-	}
-}
-
-func TestSideBySide_RecoversRefusalWhenFindingWriteFails(t *testing.T) {
-	f := newSideBySideFixture(t, config.Commands{})
-	path := filepath.Join(t.TempDir(), "state.sqlite")
-	database, err := db.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { database.Close() })
-	repo, err := database.InsertRepo(f.dir, "https://example.com/repo", "main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	run, err := database.InsertRun(repo.ID, "feature", f.headSHA, f.baseSHA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	step, err := database.InsertStepResult(run.ID, types.StepTest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	readOnly, err := db.OpenReadOnly(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { readOnly.Close() })
-	f.review.DB, f.review.Run, f.review.Repo = database, run, repo
-	logPath := filepath.Join(t.TempDir(), "test.log")
-	original := f.review.SideLaneContext
-	f.review.SideLaneContext = func(name types.StepName) (*pipeline.StepContext, bool) {
-		ctx, ok := original(name)
-		if !ok {
-			return nil, false
-		}
-		ctx.DB, ctx.StepResultID, ctx.StepLogPath = readOnly, step.ID, logPath
-		ctx.LogFile = func(text string) {
-			file, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-			if err == nil {
-				_, _ = fmt.Fprintln(file, text)
-				_ = file.Close()
-			}
-		}
-		return ctx, true
-	}
-	started := make(chan string, 1)
-	f.agent.evidenceF = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-		started <- opts.CWD
-		return nil, errors.New(nativeSafetyRefusal)
-	}
-	startSideLanes(f.review, f.baseSHA)
-	var dir string
-	select {
-	case dir = <-started:
-	case <-time.After(sideBySideWait):
-		t.Fatal("lane did not start")
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(dir)) })
-	f.lanesDone()
-	stored, err := database.GetStepResult(step.ID)
-	if err != nil || stored.FindingsJSON != nil {
-		t.Fatalf("finding unexpectedly persisted: %+v, %v", stored, err)
-	}
-	f.review.Shared.Close()
-	f.review.Shared = &pipeline.RunShared{}
-	startSideLanes(f.review, f.baseSHA)
-	turn := f.turn()
-	turn.StepResultID, turn.StepLogPath = step.ID, logPath
-	_, err = (&TestStep{}).Execute(turn)
-	if !agent.IsSafetyRefusal(err) || len(f.agent.evidenceCalls()) != 1 {
-		t.Fatalf("recovered error = %v, calls = %d", err, len(f.agent.evidenceCalls()))
-	}
-	f.review.Shared.Close()
-}
-
+// A refusal given as the analyzer's answer is not a schema slip: neither the
+// review nor the test analyzer asks again.
 func TestAnalyzersDoNotRetryStructuredSafetyRefusals(t *testing.T) {
 	for _, name := range []string{"review", "test"} {
 		t.Run(name, func(t *testing.T) {
@@ -521,76 +391,22 @@ func TestAnalyzersDoNotRetryStructuredSafetyRefusals(t *testing.T) {
 				_, err = runTestAnalyzer(sctx.Ctx, sctx, "test", "")
 			}
 			if !agent.IsSafetyRefusal(err) || calls != 1 {
-				t.Fatalf("error = %v, calls = %d", err, calls)
+				t.Fatalf("error = %v, calls = %d; want the refusal from one call", err, calls)
 			}
 		})
 	}
 }
 
+// A refused intent extraction stops the run instead of being skipped.
 func TestIntentStepPropagatesSafetyRefusal(t *testing.T) {
 	sctx := newIntentStepContext(t)
 	step := &IntentStep{runIntent: func(context.Context, *pipeline.StepContext) (*intent.Result, error) {
 		return nil, errors.New(nativeSafetyRefusal)
 	}}
-	_, err := step.Execute(sctx)
-	if !agent.IsSafetyRefusal(err) {
-		t.Fatalf("error = %v", err)
-	}
-}
 
-func TestConflictResolverPreservesRefusedEdits(t *testing.T) {
-	for _, strategy := range []string{"rebase", "merge"} {
-		t.Run(strategy, func(t *testing.T) {
-			dir := t.TempDir()
-			gitCmd(t, dir, "init")
-			gitCmd(t, dir, "config", "user.name", "test")
-			gitCmd(t, dir, "config", "user.email", "test@example.com")
-			gitCmd(t, dir, "checkout", "-b", "base")
-			path := filepath.Join(dir, "conflict.txt")
-			if err := os.WriteFile(path, []byte("base\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			gitCmd(t, dir, "add", "-A")
-			gitCmd(t, dir, "commit", "-m", "base")
-			base := gitCmd(t, dir, "rev-parse", "HEAD")
-			gitCmd(t, dir, "checkout", "-b", "feature")
-			if err := os.WriteFile(path, []byte("feature\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			gitCmd(t, dir, "add", "-A")
-			gitCmd(t, dir, "commit", "-m", "feature")
-			head := gitCmd(t, dir, "rev-parse", "HEAD")
-			gitCmd(t, dir, "checkout", "base")
-			if err := os.WriteFile(path, []byte("upstream\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			gitCmd(t, dir, "add", "-A")
-			gitCmd(t, dir, "commit", "-m", "upstream")
-			gitCmd(t, dir, "checkout", "feature")
-			ag := &mockAgent{name: "codex", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-				if err := os.WriteFile(path, []byte("resolver edit\n"), 0o644); err != nil {
-					return nil, err
-				}
-				gitCmd(t, opts.CWD, "add", "conflict.txt")
-				return nil, errors.New(nativeSafetyRefusal)
-			}}
-			sctx := newTestContext(t, ag, dir, base, head, config.Commands{})
-			var err error
-			if strategy == "merge" {
-				err = mergeWithAgent(sctx.Ctx, sctx, "base")
-			} else {
-				err = rebaseWithAgent(sctx.Ctx, sctx, "base")
-			}
-			if !agent.IsSafetyRefusal(err) {
-				t.Fatalf("error = %v", err)
-			}
-			if got := gitCmd(t, dir, "show", ":conflict.txt"); got != "resolver edit" {
-				t.Fatalf("staged edit = %q", got)
-			}
-			data, err := os.ReadFile(path)
-			if err != nil || string(data) != "resolver edit\n" {
-				t.Fatalf("worktree edit = %q, %v", data, err)
-			}
-		})
+	_, err := step.Execute(sctx)
+
+	if !agent.IsSafetyRefusal(err) {
+		t.Fatalf("Execute() error = %v, want the refusal", err)
 	}
 }

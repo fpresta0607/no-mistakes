@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 
@@ -16,32 +15,6 @@ func (a *promptCaptureAgent) Name() string { return "capture" }
 func (a *promptCaptureAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	a.prompt = opts.Prompt
 	return &agent.Result{}, nil
-}
-
-func TestGateStepBoundaryLogsRefusedSessionForDirectAndManagedCalls(t *testing.T) {
-	for _, resumed := range []bool{false, true} {
-		t.Run(map[bool]string{false: "fresh", true: "resumed"}[resumed], func(t *testing.T) {
-			refusal := errors.New("This content was flagged for possible cybersecurity risk.")
-			fake := &hangingAgent{name: "codex", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-				if resumed {
-					return nil, refusal
-				}
-				return &agent.Result{Provider: "codex", SessionID: "fresh-thread"}, refusal
-			}}
-			var logs []string
-			wrapped := &gateStepBoundaryAgent{inner: &timeoutAgent{inner: fake}, phase: types.StepIntent, logRefusal: func(s string) { logs = append(logs, s) }}
-			opts := agent.RunOpts{}
-			want := "fresh-thread"
-			if resumed {
-				opts.Session = &agent.SessionRef{ID: "old-thread", Agent: "codex"}
-				want = "old-thread"
-			}
-			_, err := wrapped.Run(context.Background(), opts)
-			if !agent.IsSafetyRefusal(err) || len(logs) != 1 || !strings.Contains(logs[0], want) || !strings.Contains(logs[0], "codex") {
-				t.Fatalf("logs = %q, error = %v", logs, err)
-			}
-		})
-	}
 }
 func (a *promptCaptureAgent) Close() error { return nil }
 

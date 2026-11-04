@@ -28,8 +28,6 @@ type fakeSessionAgent struct {
 	nextID       int
 	failResumes  map[string]error // session id -> error returned when resumed
 	failNext     error            // error returned on the next call regardless
-	failResult   *agent.Result
-	failFresh    error
 	supportsFlag bool
 }
 
@@ -56,7 +54,7 @@ func (f *fakeSessionAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Re
 	if f.failNext != nil {
 		err := f.failNext
 		f.failNext = nil
-		return f.failResult, err
+		return nil, err
 	}
 
 	if opts.Session == nil {
@@ -68,52 +66,8 @@ func (f *fakeSessionAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Re
 		}
 		return &agent.Result{Text: "resumed", SessionID: opts.Session.ID, Resumed: true}, nil
 	}
-	if f.failFresh != nil {
-		return f.failResult, f.failFresh
-	}
 	f.nextID++
 	return &agent.Result{Text: "started", SessionID: fmt.Sprintf("sess-%d", f.nextID)}, nil
-}
-
-func TestRunSessions_RefusedSessionIsNeverReusable(t *testing.T) {
-	for _, mode := range []string{"fresh", "resumed", "fallback"} {
-		t.Run(mode, func(t *testing.T) {
-			d, run := sessionTestDB(t)
-			fake := newFakeSessionAgent()
-			refusal := errors.New("This content was flagged for possible cybersecurity risk.")
-			fake.failResult = &agent.Result{SessionID: "refused-thread"}
-			if mode != "fresh" {
-				if err := d.UpsertRunAgentSession(run.ID, string(SessionRoleFixer), "fake", "old-thread"); err != nil {
-					t.Fatal(err)
-				}
-				if mode == "resumed" {
-					fake.failResumes["old-thread"] = refusal
-				} else {
-					fake.failResumes["old-thread"] = errors.New("session unavailable")
-				}
-			}
-			if mode != "resumed" {
-				fake.failFresh = refusal
-			}
-			rs := NewRunSessions(d, run.ID, fake, true)
-			_, err := rs.Run(context.Background(), fake, SessionRoleFixer, agent.RunOpts{}, nil)
-			if !agent.IsSafetyRefusal(err) {
-				t.Fatalf("error = %v", err)
-			}
-			stored, err := d.GetRunAgentSessions(run.ID)
-			if err != nil || len(stored) != 0 {
-				t.Fatalf("reusable sessions = %+v, %v", stored, err)
-			}
-			fake.failFresh = nil
-			rs = NewRunSessions(d, run.ID, fake, true)
-			if _, err := rs.Run(context.Background(), fake, SessionRoleFixer, agent.RunOpts{}, nil); err != nil {
-				t.Fatal(err)
-			}
-			if last := fake.calls[len(fake.calls)-1]; last.session == nil || last.session.ID != "" {
-				t.Fatalf("refused session resumed: %+v", last.session)
-			}
-		})
-	}
 }
 
 func sessionTestDB(t *testing.T) (*db.DB, *db.Run) {
@@ -287,8 +241,8 @@ func TestRunSessions_SafetyRefusalPreservesSessionWithoutFallback(t *testing.T) 
 		t.Errorf("refusal started or announced a fallback: calls=%d logs=%v", len(fake.calls), logs)
 	}
 	stored, err := database.GetRunAgentSessions(run.ID)
-	if err != nil || len(stored) != 0 {
-		t.Fatalf("refused session remains reusable: %+v, %v", stored, err)
+	if err != nil || len(stored) != 1 || stored[0].SessionID != "sess-1" {
+		t.Fatalf("refusal lost the original session: %+v, %v", stored, err)
 	}
 }
 

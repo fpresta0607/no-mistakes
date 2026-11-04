@@ -73,16 +73,6 @@ func TestFallbackAgentSafetyRefusalDoesNotStartAnotherProvider(t *testing.T) {
 	}
 }
 
-func TestFallbackAgentPreservesRefusedSessionIdentity(t *testing.T) {
-	refusal := errors.New("This content was flagged for possible cybersecurity risk.")
-	first := &fallbackTestAgent{name: "codex", run: func() (*Result, error) { return &Result{SessionID: "thread"}, refusal }}
-	second := &fallbackTestAgent{name: "claude", run: func() (*Result, error) { return &Result{}, nil }}
-	result, err := NewFallback([]Agent{first, second}).Run(context.Background(), RunOpts{})
-	if !errors.Is(err, refusal) || result == nil || result.SessionID != "thread" || result.Provider != "codex" || second.calls != 0 {
-		t.Fatalf("result = %+v, error = %v, second calls = %d", result, err, second.calls)
-	}
-}
-
 func TestFallbackAgentDoesNotFallBackOnFindingsResult(t *testing.T) {
 	first := &fallbackTestAgent{
 		name: "codex",

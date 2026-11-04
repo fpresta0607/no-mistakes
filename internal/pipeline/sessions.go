@@ -94,13 +94,7 @@ func (rs *RunSessions) Run(ctx context.Context, a agent.Agent, role SessionRole,
 		rs.remember(role, result.SessionID, sessionProvider(a, result))
 		return result, nil
 	}
-	if agent.IsSafetyRefusal(err) {
-		if storedID != "" {
-			rs.forget(role)
-		}
-		return result, err
-	}
-	if storedID == "" || ctx.Err() != nil {
+	if storedID == "" || ctx.Err() != nil || agent.IsSafetyRefusal(err) {
 		return nil, err
 	}
 
@@ -122,9 +116,6 @@ func (rs *RunSessions) Run(ctx context.Context, a agent.Agent, role SessionRole,
 	}
 	result, err = a.Run(ctx, opts)
 	if err != nil {
-		if agent.IsSafetyRefusal(err) {
-			return result, err
-		}
 		return nil, err
 	}
 	rs.remember(role, result.SessionID, sessionProvider(a, result))
