@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -127,7 +128,11 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		return res
 	}
 	if err := parseCodexEvents(ctx, started.stdout, opts.OnChunk, &usage, &lastMessage, &codexErr, &threadID, metrics); err != nil {
-		err = started.waitAfterParseError(err)
+		started.terminate()
+		_ = started.stdout.Close()
+		if waitErr := started.wait(); errors.Is(waitErr, exec.ErrWaitDelay) {
+			err = waitErr
+		}
 		stderrWG.Wait()
 		retErr := fmt.Errorf("codex parse events: %w", err)
 		if detail := strings.TrimSpace(strings.Join([]string{codexErr, string(stderrBuf)}, "\n")); detail != "" {
@@ -307,12 +312,6 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), us
 	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024*1024)
 
 	for scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
@@ -321,6 +320,9 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), us
 		var event codexEvent
 		if err := json.Unmarshal(line, &event); err != nil {
 			continue // skip malformed lines
+		}
+		if ctx.Err() != nil && event.Type != "error" {
+			continue
 		}
 
 		switch event.Type {
@@ -360,7 +362,10 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), us
 		}
 	}
 
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 func codexOutputSchema(schema json.RawMessage) ([]byte, error) {
