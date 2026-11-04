@@ -991,36 +991,46 @@ func TestDriveRun_YesLeavesAnUnreadableQuestionHistoryAwaitingAHuman(t *testing.
 	}
 	defer client.Close()
 
-	findings := `{"findings":[` +
+	unreadableFindings := `{"findings":[` +
 		`{"id":"review-questions-unreadable","severity":"warning","description":"The reviewer's question history could not be read in full. Decide this gate yourself.","action":"ask-user"},` +
 		`{"id":"f1","severity":"warning","description":"ordinary finding","action":"auto-fix"}` +
 		`],"summary":"unreadable question history"}`
-	for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
-		t.Run(string(status), func(t *testing.T) {
-			parked := &ipc.RunInfo{
-				ID: "run-1", Status: types.RunRunning,
-				Steps: []ipc.StepResultInfo{{StepName: types.StepReview, Status: status, FindingsJSON: &findings}},
-			}
-			source := &scriptedRunStateSource{
-				subscriptions: []scriptedSubscription{{events: make(chan ipc.Event)}},
-				runs:          []*ipc.RunInfo{parked},
-			}
-			reconciler := newRunReconciler(source, parked.ID)
-			defer reconciler.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			var progress bytes.Buffer
-			run, ciReady, err := driveRunWithReconciler(ctx, &progress, client, reconciler, parked.ID, true)
-			if err != nil || run != parked || ciReady || responses.Load() != 0 {
-				t.Fatalf("--yes resolved a gate parked on an unreadable question history: run=%+v ciReady=%v responses=%d err=%v", run, ciReady, responses.Load(), err)
-			}
-			// It must NOT be sold as an answer: the daemon refuses one here.
-			if strings.Contains(progress.String(), "axi answer") {
-				t.Fatalf("progress told the operator to answer a conversation the daemon refuses: %s", progress.String())
-			}
-			if !strings.Contains(progress.String(), "could not be read in full") {
-				t.Fatalf("progress does not name the cause: %s", progress.String())
-			}
-		})
+	for _, refusal := range []struct {
+		name     string
+		findings string
+		progress string
+	}{
+		{"unreadable_history", unreadableFindings, "could not be read in full"},
+		{"safety_refusal", `{"findings":[{"id":"agent-safety-refusal","severity":"error","description":"Native safety refusal","action":"ask-user"},{"id":"f1","severity":"warning","description":"ordinary finding","action":"auto-fix"}]}`, "native agent safety refusal"},
+	} {
+		for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
+			t.Run(refusal.name+"/"+string(status), func(t *testing.T) {
+				findings := refusal.findings
+				parked := &ipc.RunInfo{
+					ID: "run-1", Status: types.RunRunning,
+					Steps: []ipc.StepResultInfo{{StepName: types.StepReview, Status: status, FindingsJSON: &findings}},
+				}
+				source := &scriptedRunStateSource{
+					subscriptions: []scriptedSubscription{{events: make(chan ipc.Event)}},
+					runs:          []*ipc.RunInfo{parked},
+				}
+				reconciler := newRunReconciler(source, parked.ID)
+				defer reconciler.Close()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				var progress bytes.Buffer
+				run, ciReady, err := driveRunWithReconciler(ctx, &progress, client, reconciler, parked.ID, true)
+				if err != nil || run != parked || ciReady || responses.Load() != 0 {
+					t.Fatalf("--yes resolved a gate parked on an unreadable question history: run=%+v ciReady=%v responses=%d err=%v", run, ciReady, responses.Load(), err)
+				}
+				// It must NOT be sold as an answer: the daemon refuses one here.
+				if strings.Contains(progress.String(), "axi answer") {
+					t.Fatalf("progress told the operator to answer a conversation the daemon refuses: %s", progress.String())
+				}
+				if !strings.Contains(progress.String(), refusal.progress) {
+					t.Fatalf("progress does not name the cause: %s", progress.String())
+				}
+			})
+		}
 	}
 }

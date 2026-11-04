@@ -1163,6 +1163,10 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 				fmt.Fprintf(progress, "%s: protected-path refusal requires an explicit response; --yes leaves this gate awaiting a response\n", gate.Name)
 				return run, false, nil
 			}
+			if pipeline.HasSafetyRefusal(gate.FindingsJSON) {
+				fmt.Fprintf(progress, "%s: native agent safety refusal requires an explicit operator decision; --yes leaves this gate awaiting a response\n", gate.Name)
+				return run, false, nil
+			}
 			// An open review question is resolved by an answer, so --yes has no
 			// standing consent to give. Without this it had: the question is an
 			// ask-user finding on the ordinary channel, so gateResolution

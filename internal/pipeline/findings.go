@@ -65,7 +65,9 @@ func marshalFindingIDs(ids []string) string {
 }
 
 func findingKey(item types.Finding) types.Finding {
-	item.ID = ""
+	if item.ID != safetyRefusalFindingID {
+		item.ID = ""
+	}
 	item.Action = ""
 	item.Source = ""
 	item.UserInstructions = ""
@@ -94,7 +96,7 @@ func hasFindingMatch(item types.Finding, exact map[types.Finding]bool, itemCount
 	return itemCounts[fingerprint] == 1 && candidateCounts[fingerprint] == 1
 }
 
-func normalizeFindingsJSON(raw string, prefix string) string {
+func normalizeFindingsJSON(raw string, prefix string, isSafetyRefusal bool) string {
 	if raw == "" {
 		return ""
 	}
@@ -103,6 +105,24 @@ func normalizeFindingsJSON(raw string, prefix string) string {
 		return raw
 	}
 	normalized := types.NormalizeFindings(findings, prefix)
+	if !isSafetyRefusal {
+		used := make(map[string]bool, len(normalized.Items))
+		for _, item := range normalized.Items {
+			used[item.ID] = true
+		}
+		for i := range normalized.Items {
+			if normalized.Items[i].ID == safetyRefusalFindingID {
+				for suffix := 1; ; suffix++ {
+					id := safetyRefusalFindingID + "-" + strconv.Itoa(suffix)
+					if !used[id] {
+						normalized.Items[i].ID = id
+						used[id] = true
+						break
+					}
+				}
+			}
+		}
+	}
 	normalizedRaw, err := types.MarshalFindingsJSON(normalized)
 	if err != nil {
 		return raw
@@ -720,6 +740,12 @@ func mergeUserOverridesJSON(raw string, instructions map[string]string, added []
 	base, err := types.ParseFindingsJSON(raw)
 	if err != nil {
 		base = types.Findings{}
+	}
+	added = append([]types.Finding(nil), added...)
+	for i := range added {
+		if added[i].ID == safetyRefusalFindingID {
+			added[i].ID = ""
+		}
 	}
 	merged := types.MergeUserOverrides(base, instructions, added)
 	encoded, err := types.MarshalFindingsJSON(merged)

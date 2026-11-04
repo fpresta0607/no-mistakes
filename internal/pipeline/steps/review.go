@@ -500,6 +500,10 @@ Risk assessment (after listing all findings):
 		} else if !agent.IsStructuredOutputRejected(err) || sctx.Ctx.Err() != nil || errors.Is(err, errReviewAgentTimeout) {
 			return nil, err
 		}
+		if agent.IsSafetyRefusal(err) {
+			// A refusal given as the answer is not a schema slip to rerun.
+			return nil, err
+		}
 		validationErrors = append(validationErrors, err)
 		if errors.As(err, new(*agent.NoTextOutputError)) {
 			noAnswers++
@@ -760,6 +764,10 @@ func (s *ReviewStep) completeCoverageGaps(sctx *pipeline.StepContext, basePrompt
 	completionOpts.Prompt = basePrompt + reviewCoverageCompletionSection(missing)
 	completionOpts.Purpose = "review-coverage"
 	result, err := s.runReviewAgent(sctx, "agent review coverage", role, completionOpts)
+	if agent.IsSafetyRefusal(err) {
+		// Not an ordinary coverage gap, which an approval could clear.
+		return findings, err
+	}
 	if err != nil {
 		sctx.Log(fmt.Sprintf("focused coverage pass failed (%s); parking on the incomplete coverage record", strings.ReplaceAll(err.Error(), "\n", "; ")))
 		return findings, nil

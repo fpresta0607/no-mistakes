@@ -223,6 +223,29 @@ func TestRunSessions_FreshSessionFailurePropagates(t *testing.T) {
 	}
 }
 
+func TestRunSessions_SafetyRefusalPreservesSessionWithoutFallback(t *testing.T) {
+	database, run := sessionTestDB(t)
+	fake := newFakeSessionAgent()
+	sessions := NewRunSessions(database, run.ID, fake, true)
+	if _, err := sessions.Run(context.Background(), fake, SessionRoleFixer, agent.RunOpts{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	refusal := errors.Join(agent.ErrSafetyRefusal, errors.New("codex exited: exit status 1: This content was flagged for possible cybersecurity risk."))
+	fake.failResumes["sess-1"] = refusal
+	var logs []string
+	_, err := sessions.Run(context.Background(), fake, SessionRoleFixer, agent.RunOpts{}, func(line string) { logs = append(logs, line) })
+	if !errors.Is(err, refusal) {
+		t.Errorf("refusal must reach the operator unchanged, got %v", err)
+	}
+	if len(fake.calls) != 2 || len(logs) != 0 {
+		t.Errorf("refusal started or announced a fallback: calls=%d logs=%v", len(fake.calls), logs)
+	}
+	stored, err := database.GetRunAgentSessions(run.ID)
+	if err != nil || len(stored) != 1 || stored[0].SessionID != "sess-1" {
+		t.Fatalf("refusal lost the original session: %+v, %v", stored, err)
+	}
+}
+
 // TestRunSessions_CancelledContextDoesNotRetry proves cancellation is not
 // treated as a resume failure worth a fallback invocation.
 func TestRunSessions_CancelledContextDoesNotRetry(t *testing.T) {
