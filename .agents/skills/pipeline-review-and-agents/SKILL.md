@@ -74,7 +74,7 @@ metadata:
 **Local Test Is Targeted Validation (`internal/pipeline/steps/test.go`)**
 
 - Local Test (normal evidence agent and Test-repair agent) validates the requested intent with the smallest relevant checks and end-user-aligned evidence; it is never a repository-wide regression-suite walk.
-  Broad regression belongs to remote CI (`go test -race ./...` in `.github/workflows/ci.yml`) and remains mandatory before a PR is ready.
+  Broad regression belongs to remote CI (the full race suite in `.github/workflows/ci.yml`) and remains mandatory before a PR is ready.
   `commands.test` is the same contract when set: targeted baseline, not CI-parity complete-suite configuration; docs owner is `docs/src/content/docs/reference/repo-config.md` (`commands.test`), step behavior owner is `docs/src/content/docs/reference/pipeline-steps.md` (Test).
   This repository dogfoods an empty `commands.test` so the agent-driven targeted path is the default; do not reintroduce `go test -race ./...` as a local Test override.
   Trusted `test.prepare` is the explicit eager opt-in for calling the shared `ensurePrepared` lifecycle before the first agent-only Test turn when `commands.test` is empty. A successful worktree receipt is reused after recovery and by later configured commands; failures and restoration failures stop before the agent, while evidence remains fresh and verdict policy remains unchanged. Trust selection is owned by the `repository-routing-security` skill; user semantics are owned by `docs/src/content/docs/reference/repo-config.md` (`test.prepare`) and `docs/src/content/docs/reference/pipeline-steps.md` (Test). Regressions: `TestAgentOnlyPreparation_*`, `TestTestPrepareTrustAndMerge`.

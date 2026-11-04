@@ -62,6 +62,36 @@ func TestOpenReadOnlyRequiresExistingDBAndDoesNotMigrate(t *testing.T) {
 	}
 }
 
+func TestOpenReadOnlyRejectsCorruptDB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	if err := os.WriteFile(path, []byte("not a SQLite registry"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if database, err := OpenReadOnly(path); err == nil {
+		database.Close()
+		t.Fatal("read-only inspection accepted a corrupt registry")
+	}
+}
+
+func TestOpenReadOnlyRejectsLockedDB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	writer, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	writer.SetMaxOpenConns(1)
+	if _, err := writer.Exec("CREATE TABLE registry (id TEXT); BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Exec("ROLLBACK")
+
+	if database, err := OpenReadOnly(path); err == nil {
+		database.Close()
+		t.Fatal("read-only inspection accepted an exclusively locked registry")
+	}
+}
+
 func TestOpenCreatesSchema(t *testing.T) {
 	d := openTestDB(t)
 	// verify tables exist by querying them
