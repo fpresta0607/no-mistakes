@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,7 +9,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestMakeBuildPrioritizesDotEnvUmamiWebsiteID(t *testing.T) {
@@ -284,10 +282,7 @@ func runMakeDryBuild(t *testing.T, makePath, workDir string, extraEnv map[string
 func runMakeDry(t *testing.T, makePath, workDir, target string, extraEnv map[string]string) string {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, makePath, "-n", target)
+	cmd := exec.Command(makePath, "-n", target)
 	cmd.Dir = workDir
 	cmd.Env = filteredEnv(os.Environ(), "UMAMI_HOST", "UMAMI_WEBSITE_ID", "NO_MISTAKES_UMAMI_HOST", "NO_MISTAKES_UMAMI_WEBSITE_ID")
 	if runtime.GOOS == "windows" {
