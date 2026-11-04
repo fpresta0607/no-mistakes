@@ -1304,6 +1304,9 @@ rounds:
 		}
 		if refusal := safetyRefusalOutcome(err); refusal != nil {
 			writeLog(safeurl.RedactText(err.Error()))
+			if lanes := sctx.Shared.SideLanes(); lanes != nil {
+				lanes.Stop(sctx)
+			}
 			outcome, err = refusal, nil
 		}
 		roundNum++

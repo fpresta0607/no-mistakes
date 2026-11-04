@@ -106,8 +106,8 @@ func (s *TestStep) execute(sctx *pipeline.StepContext, desktop string) (*pipelin
 	}
 	// Under global side_by_side this step's work may have started beside the
 	// review. It is taken only when it is still what the step would do now.
-	if outcome, ok := takeSideLane(sctx, s.Name()); ok {
-		return outcome, nil
+	if outcome, ok, err := takeSideLane(sctx, s.Name()); ok || err != nil {
+		return outcome, err
 	}
 	planSection, err := verificationPlanPromptSection(sctx)
 	if err != nil {

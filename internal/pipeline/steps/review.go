@@ -760,6 +760,10 @@ func (s *ReviewStep) completeCoverageGaps(sctx *pipeline.StepContext, basePrompt
 	completionOpts.Prompt = basePrompt + reviewCoverageCompletionSection(missing)
 	completionOpts.Purpose = "review-coverage"
 	result, err := s.runReviewAgent(sctx, "agent review coverage", role, completionOpts)
+	if agent.IsSafetyRefusal(err) {
+		// Not an ordinary coverage gap, which an approval could clear.
+		return findings, err
+	}
 	if err != nil {
 		sctx.Log(fmt.Sprintf("focused coverage pass failed (%s); parking on the incomplete coverage record", strings.ReplaceAll(err.Error(), "\n", "; ")))
 		return findings, nil
