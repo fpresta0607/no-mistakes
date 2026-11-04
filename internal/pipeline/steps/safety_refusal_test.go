@@ -215,7 +215,11 @@ func TestSideBySide_RefusedLaneIsKeptAndNotRunAgain(t *testing.T) {
 		t.Run(exit, func(t *testing.T) {
 			f := newSideBySideFixture(t, config.Commands{})
 			started := make(chan string, 1)
+			var calls atomic.Int32
 			f.agent.evidenceF = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				if calls.Add(1) > 1 {
+					return nil, errors.New("the refused work ran again")
+				}
 				if err := os.WriteFile(filepath.Join(opts.CWD, "refused.txt"), []byte("kept"), 0o644); err != nil {
 					return nil, err
 				}
