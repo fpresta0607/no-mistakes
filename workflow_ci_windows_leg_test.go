@@ -473,6 +473,6 @@ func goTestTimeout(t *testing.T, command workflowCommand) time.Duration {
 		}
 		return duration
 	}
-	t.Fatalf("Windows test command must pass an explicit -timeout, got %#v", command.args)
+	t.Fatalf("go test command must pass an explicit -timeout, got %#v", command.args)
 	return 0
 }

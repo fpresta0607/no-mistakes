@@ -2898,45 +2898,48 @@ func TestAdoptPublishedFetchHonorsTheRemoteTimeout(t *testing.T) {
 }
 
 // TestAdoptPublishedFetchSucceedsWithinItsOwnBudget guards the other side: the
-// bound must be a real per-operation budget, not a cap that makes an ordinary
-// adoption fail. Both ls-remote calls burn most of a generous timeout, and the
-// fetch still gets its own fresh budget and completes.
+// bound must be a real per-operation budget, not one deadline shared by the
+// whole adoption, and an ordinary adoption must complete under it.
 //
-// The budget has to clear the cost of the one real network operation left in
-// the path: FetchRemoteRef spawns `git fetch` and then `git rev-parse`. That
-// pair costs ~50ms on Linux and macOS but roughly 10x that on the Windows leg,
-// which is process-spawn bound rather than compute bound (see
-// .agents/skills/testing-conventions/SKILL.md). A
-// sub-second budget sits on top of the Windows cost with no margin and fails
-// there as soon as anything perturbs spawn latency, so the budget is kept a
-// whole multiple of the slowest platform's cost.
+// The witness is the deadline each ls-remote receives, never how long the real
+// fetch between them takes. Per-operation budgets start each call with nearly
+// all of RemoteTimeout left, and the second call's deadline lies later than the
+// first by at least that fetch. One shared deadline hands both calls the same
+// instant, which fails here on every platform however fast git is.
 //
-// The stub honors its own context rather than sleeping through it, which is
-// what gives this test teeth on every platform. A stub that always succeeds can
-// only report a shared deadline by way of the fetch being starved, and how much
-// of the budget is left for that fetch has to be read against a per-platform
-// spawn cost - so such a stub silently stops detecting the regression wherever
-// the fetch happens to be quick enough to squeeze in. Honoring the context
-// instead makes the SECOND ls-remote the witness: on one shared deadline the
-// first call consumes most of it and the second is left with far less than it
-// needs, failing the adoption regardless of how fast git is on the platform.
+// The budget is generous because FetchRemoteRef really spawns `git fetch` and
+// then `git rev-parse`, and that pair costs roughly 10x its Linux time on the
+// process-spawn-bound Windows leg (see
+// .agents/skills/testing-conventions/SKILL.md). A window sized to that cost
+// failed an ordinary adoption on a loaded runner (issue #73), so the fetch's
+// speed must never decide this test.
 func TestAdoptPublishedFetchSucceedsWithinItsOwnBudget(t *testing.T) {
 	f := newRecoverFixture(t, types.RunCancelled)
 	rebased := publishedRebaseAfterCustody(t, f)
 
-	f.service.RemoteTimeout = 3 * time.Second
+	const remoteTimeout = time.Minute
+	f.service.RemoteTimeout = remoteTimeout
+	var deadlines []time.Time
 	f.service.lsRemote = func(ctx context.Context, dir, remote, ref string) (string, error) {
-		select {
-		case <-time.After(2500 * time.Millisecond):
-			return rebased, nil
-		case <-ctx.Done():
-			return "", ctx.Err()
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Errorf("ls-remote %d ran without a deadline", len(deadlines)+1)
+		} else if left := time.Until(deadline); left < remoteTimeout/2 {
+			t.Errorf("ls-remote %d started with %v of its %v budget left, want its own budget", len(deadlines)+1, left, remoteTimeout)
 		}
+		deadlines = append(deadlines, deadline)
+		return rebased, nil
 	}
 
 	state := f.service.AdoptPublished(f.ctx)
 	if !state.Changed || state.Safety != "gate_ready" {
 		t.Fatalf("adoption did not complete on its own fetch budget: %#v", state)
+	}
+	if len(deadlines) != 2 {
+		t.Fatalf("ls-remote ran %d times, want the check before and after the fetch", len(deadlines))
+	}
+	if !deadlines[1].After(deadlines[0]) {
+		t.Fatalf("second ls-remote deadline %v is not after the first %v: the adoption shares one deadline across its remote operations", deadlines[1], deadlines[0])
 	}
 	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != rebased {
 		t.Fatalf("gate lane = %s, want the published rebased head %s", got, rebased)
