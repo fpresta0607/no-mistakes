@@ -49,8 +49,9 @@ func TestCIWorkflowUsesRaceTestsOnUnixRunners(t *testing.T) {
 // The Unix legs ran on go test's implicit 10m per-package budget until
 // internal/pipeline/steps, internal/daemon and internal/cli outran it on a slow
 // macos-latest runner with no test hung (issue #73). The budget has to stay
-// above that default and still fire before the job cap, so a real hang lands as
-// a goroutine dump rather than a cancelled job.
+// above that default and still fire before the job cap for the package that
+// starts last, so a real hang lands as a goroutine dump rather than a cancelled
+// job.
 func TestCIWorkflow_UnixPackageBudgetExceedsGoDefaultAndFiresBeforeJobCap(t *testing.T) {
 	job := ciTestJob(t)
 	commands := workflowCommandsMatching(job.Steps, func(step wfStep) bool {
@@ -70,7 +71,10 @@ func TestCIWorkflow_UnixPackageBudgetExceedsGoDefaultAndFiresBeforeJobCap(t *tes
 	if budgets[0] <= goDefaultPackageBudget {
 		t.Errorf("Unix go test -timeout is %s; it must exceed go test's %s default that the suite outgrew on macOS", budgets[0], goDefaultPackageBudget)
 	}
-	if jobCap := time.Duration(job.TimeoutMinutes) * time.Minute; budgets[0] >= jobCap {
-		t.Errorf("Unix go test -timeout is %s and the job cap is %s; the Go timeout must fire first so a hang produces a goroutine dump", budgets[0], jobCap)
+	// internal/pipeline/steps started this far into the Unix test step on the
+	// slow PR #44 macos-latest run 41793873984.
+	const latestMeasuredPackageStart = 12 * time.Minute
+	if jobCap := time.Duration(job.TimeoutMinutes) * time.Minute; budgets[0]+latestMeasuredPackageStart >= jobCap {
+		t.Errorf("Unix go test -timeout %s plus the %s latest measured package start reaches the %s job cap; the Go timeout must fire first so a hang in the last package to start produces a goroutine dump", budgets[0], latestMeasuredPackageStart, jobCap)
 	}
 }
