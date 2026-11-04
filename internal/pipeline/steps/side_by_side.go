@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -50,6 +51,7 @@ import (
 // to be pushed.
 
 const (
+	sideLaneRefusalLogPrefix = "side by side safety refusal: "
 	// sideLaneDirName is the folder of a run's evidence directory that holds
 	// what side lanes wrote there. A discarded lane's folder is removed.
 	sideLaneDirName = "side-lane"
@@ -239,6 +241,9 @@ func startSideLanes(sctx *pipeline.StepContext, baseSHA string) {
 		if err != nil || (stored != nil && stored.FindingsJSON != nil && pipeline.HasSafetyRefusal(*stored.FindingsJSON)) {
 			continue
 		}
+		if refusal, err := sideLaneRefusalFromLog(laneCtx); err != nil || refusal != nil {
+			continue
+		}
 		ctx, cancel := context.WithCancelCause(laneCtx.Ctx)
 		laneCtx.Ctx = ctx
 		laneCtx.Env = sctx.Env
@@ -338,15 +343,74 @@ func (lane *sideLane) run(sctx *pipeline.StepContext, runWorkDir, baseSHA string
 	lane.outcome, lane.err = lane.execute(sctx, runWorkDir, baseSHA)
 	if agent.IsSafetyRefusal(lane.err) {
 		err := fmt.Errorf("%w; side lane preserved at %s", lane.err, lane.checkout)
-		if writeRefusalLog != nil {
-			writeRefusalLog(fmt.Sprintf("side by side: %v\n%s", err, lane.log.String()))
+		refusal := pipeline.SafetyRefusalOutcome(err)
+		text := sideLaneRefusalLogPrefix + refusal.Findings + "\n" + lane.log.String()
+		if sctx.StepLogPath != "" {
+			file, logErr := os.OpenFile(sctx.StepLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if logErr == nil {
+				_, logErr = fmt.Fprintln(file, text)
+				logErr = errors.Join(logErr, file.Close())
+			}
+			if logErr != nil {
+				lane.err = errors.Join(lane.err, fmt.Errorf("persist side lane log: %w", logErr))
+			}
+		} else if writeRefusalLog != nil {
+			writeRefusalLog(text)
 		}
-		if refusal := pipeline.SafetyRefusalOutcome(err); refusal != nil {
-			if persistErr := sctx.DB.SetStepFindings(sctx.StepResultID, refusal.Findings); persistErr != nil {
-				lane.err = errors.Join(lane.err, fmt.Errorf("persist side lane refusal: %w", persistErr))
+		if persistErr := sctx.DB.SetStepFindings(sctx.StepResultID, refusal.Findings); persistErr != nil {
+			lane.err = errors.Join(lane.err, fmt.Errorf("persist side lane refusal: %w", persistErr))
+		}
+	}
+}
+
+func sideLaneRefusalFromLog(sctx *pipeline.StepContext) (error, error) {
+	if sctx.StepLogPath == "" {
+		return nil, nil
+	}
+	file, err := os.Open(sctx.StepLogPath)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read side lane log: %w", err)
+	}
+	defer file.Close()
+	var refusal error
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 4096), 2<<20)
+	for scanner.Scan() {
+		raw, ok := strings.CutPrefix(scanner.Text(), sideLaneRefusalLogPrefix)
+		if !ok {
+			continue
+		}
+		if !pipeline.HasSafetyRefusal(raw) {
+			return nil, errors.New("side lane refusal log is incomplete")
+		}
+		findings, err := types.ParseFindingsJSON(raw)
+		if err != nil {
+			return nil, err
+		}
+		for _, finding := range findings.Items {
+			if finding.ID == pipeline.SafetyRefusalFindingID {
+				refusal = errors.New(finding.Description)
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read side lane log: %w", err)
+	}
+	if refusal != nil {
+		rounds, err := sctx.DB.GetRoundsByStep(sctx.StepResultID)
+		if err != nil {
+			return nil, err
+		}
+		for _, round := range rounds {
+			if round.FindingsJSON != nil && pipeline.HasSafetyRefusal(*round.FindingsJSON) {
+				return nil, nil
+			}
+		}
+	}
+	return refusal, nil
 }
 
 func (lane *sideLane) execute(sctx *pipeline.StepContext, runWorkDir, baseSHA string) (*pipeline.StepOutcome, error) {
@@ -478,6 +542,13 @@ func takeSideLane(sctx *pipeline.StepContext, name types.StepName) (*pipeline.St
 						return nil, false, errors.New(finding.Description)
 					}
 				}
+			}
+			refusal, err := sideLaneRefusalFromLog(sctx)
+			if err != nil {
+				return nil, false, err
+			}
+			if refusal != nil {
+				return nil, false, refusal
 			}
 		}
 		return nil, false, nil

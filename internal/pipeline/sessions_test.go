@@ -287,8 +287,8 @@ func TestRunSessions_SafetyRefusalPreservesSessionWithoutFallback(t *testing.T) 
 		t.Errorf("refusal started or announced a fallback: calls=%d logs=%v", len(fake.calls), logs)
 	}
 	stored, err := database.GetRunAgentSessions(run.ID)
-	if err != nil || len(stored) != 1 || stored[0].SessionID != "sess-1" {
-		t.Fatalf("refusal lost the original session: %+v, %v", stored, err)
+	if err != nil || len(stored) != 0 {
+		t.Fatalf("refused session remains reusable: %+v, %v", stored, err)
 	}
 }
 

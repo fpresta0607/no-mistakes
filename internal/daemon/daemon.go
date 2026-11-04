@@ -1143,6 +1143,8 @@ func terminalWorktreeSourceReason(ctx context.Context, database *db.DB, runID, w
 	return ""
 }
 
+// protectedPathCleanupReason protects only the index and working files. It must
+// not be used as a process-liveness or test-evidence retention predicate.
 func protectedPathCleanupReason(d *db.DB, run *db.Run) string {
 	if run == nil || (run.Status == types.RunCancelled && run.Error != nil && *run.Error == types.RunCancelReasonAbortedByUser) {
 		return ""
@@ -1168,6 +1170,22 @@ func protectedPathCleanupReason(d *db.DB, run *db.Run) string {
 			continue
 		}
 		return fmt.Sprintf("run %s has an unresolved %s refusal; preserving index and worktree", run.ID, refusal)
+	}
+	return ""
+}
+
+func safetyRefusalCleanupReason(d *db.DB, run *db.Run) string {
+	if run == nil || (run.Status == types.RunCancelled && run.Error != nil && *run.Error == types.RunCancelReasonAbortedByUser) {
+		return ""
+	}
+	steps, err := d.GetStepsByRun(run.ID)
+	if err != nil {
+		return fmt.Sprintf("cannot read safety refusals for run %s: %v", run.ID, err)
+	}
+	for _, step := range steps {
+		if step.Status != types.StepStatusCompleted && step.FindingsJSON != nil && pipeline.HasSafetyRefusal(*step.FindingsJSON) && (step.Error == nil || *step.Error != "aborted by user") {
+			return fmt.Sprintf("run %s has an unresolved native safety refusal", run.ID)
+		}
 	}
 	return ""
 }

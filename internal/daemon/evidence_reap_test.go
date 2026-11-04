@@ -117,6 +117,7 @@ func TestDiagnosticReapersPreserveUnresolvedSafetyRefusal(t *testing.T) {
 			f := newEvidenceFixture(t)
 			refused := f.seed("refused", types.RunFailed, 3*time.Hour, map[string]string{"output.txt": "refusal evidence"})
 			ordinary := f.seed("ordinary", types.RunFailed, 2*time.Hour, map[string]string{"output.txt": "ordinary evidence"})
+			protected := f.seed("protected", types.RunFailed, 2*time.Hour, map[string]string{"output.txt": "protected path evidence"})
 			fresh := f.seed("fresh", types.RunCompleted, 0, map[string]string{"output.txt": "fresh"})
 			step, err := f.db.InsertStepResult(refused, types.StepReview)
 			if err != nil {
@@ -128,8 +129,18 @@ func TestDiagnosticReapersPreserveUnresolvedSafetyRefusal(t *testing.T) {
 			if err := f.db.UpdateStepStatus(step.ID, types.StepStatusFixReview); err != nil {
 				t.Fatal(err)
 			}
+			protectedStep, err := f.db.InsertStepResult(protected, types.StepReview)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.SetStepFindings(protectedStep.ID, `{"findings":[{"id":"protected-path-refusal","severity":"error","description":"protected","action":"ask-user"}]}`); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.UpdateStepStatus(protectedStep.ID, types.StepStatusFixReview); err != nil {
+				t.Fatal(err)
+			}
 			logRoot := t.TempDir()
-			for i, id := range []string{refused, ordinary, fresh} {
+			for i, id := range []string{refused, ordinary, protected, fresh} {
 				dir := filepath.Join(logRoot, id)
 				if err := os.MkdirAll(dir, 0o755); err != nil {
 					t.Fatal(err)
@@ -138,7 +149,7 @@ func TestDiagnosticReapersPreserveUnresolvedSafetyRefusal(t *testing.T) {
 				if err := os.WriteFile(path, []byte("session evidence"), 0o644); err != nil {
 					t.Fatal(err)
 				}
-				when := time.Now().Add(-time.Duration(3-i) * time.Hour)
+				when := time.Now().Add(-time.Duration(4-i) * time.Hour)
 				if err := os.Chtimes(dir, when, when); err != nil {
 					t.Fatal(err)
 				}
@@ -160,6 +171,12 @@ func TestDiagnosticReapersPreserveUnresolvedSafetyRefusal(t *testing.T) {
 			}
 			if f.exists(ordinary) {
 				t.Fatal("ordinary evidence was retained")
+			}
+			if f.exists(protected) {
+				t.Fatal("protected-path evidence was retained")
+			}
+			if _, err := os.Stat(filepath.Join(logRoot, protected)); !os.IsNotExist(err) {
+				t.Fatalf("protected-path log survived: %v", err)
 			}
 			if _, err := os.Stat(filepath.Join(logRoot, ordinary)); !os.IsNotExist(err) {
 				t.Fatalf("ordinary log survived: %v", err)

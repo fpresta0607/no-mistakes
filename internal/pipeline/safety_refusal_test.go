@@ -24,6 +24,55 @@ func TestSafetyRefusalGateDoesNotResume(t *testing.T) {
 	}
 }
 
+func TestRecoveredSafetyRefusalRejectsAnswer(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	step, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"agent-safety-refusal","severity":"error","description":"refused","action":"ask-user"}]}`
+	if _, err := database.InsertReviewStepRound(step.ID, 1, "initial", &findings, nil, "", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var called atomic.Bool
+	review := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) { called.Store(true); return &StepOutcome{}, nil }}
+	executor := NewExecutor(database, p, &config.Config{}, nil, []Step{review}, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- executor.Resume(ctx, run, repo, t.TempDir()) }()
+	t.Cleanup(func() { cancel(); <-done })
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		err := executor.Respond(types.StepTest, types.ActionApprove, nil)
+		if err != nil && strings.Contains(err.Error(), "step mismatch") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("recovered gate did not park: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := executor.Respond(types.StepReview, types.ActionAnswer, nil); err == nil {
+		t.Fatal("answer released safety refusal")
+	}
+	if called.Load() {
+		t.Fatal("recovered review restarted")
+	}
+}
+
 // stopCountingSideLanes stands in for the work a review started beside it.
 type stopCountingSideLanes struct{ stops atomic.Int32 }
 

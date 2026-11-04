@@ -73,6 +73,7 @@ type Executor struct {
 	waiting                bool                  // true when blocked on approval
 	waitingStep            types.StepName        // which step is currently awaiting approval
 	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
+	waitingSafetyRefusal   bool
 	ciHandbackCh           chan ciHandbackRequest
 	ciHandbackPending      bool
 	ciHandbackReleased     bool
@@ -222,6 +223,10 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		refusal := e.waitingApprovalRefusal
 		e.mu.Unlock()
 		return errors.New(refusal)
+	}
+	if action == types.ActionAnswer && e.waitingSafetyRefusal {
+		e.mu.Unlock()
+		return errors.New("a safety refusal requires an explicit decision")
 	}
 	e.waiting = false
 	e.mu.Unlock()
@@ -577,6 +582,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
 	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
+	e.waitingSafetyRefusal = HasSafetyRefusal(gate.findings)
 	e.mu.Unlock()
 	e.emitStepEventWithFindingsAndError(
 		ipc.EventStepCompleted,
@@ -987,21 +993,13 @@ func (e *Executor) sideLaneContext(ctx context.Context, run *db.Run, repo *db.Re
 		ForgeContext: e.forge,
 		DB:           e.db,
 		StepResultID: sr.ID,
+		StepLogPath:  filepath.Join(e.paths.RunLogDir(run.ID), string(name)+".log"),
 		Shared:       &RunShared{},
 		EvidenceDir:  e.runEvidenceDir(run.ID),
 		SideLane:     true,
 		Log:          func(string) {},
 		LogChunk:     func(string) {},
-		LogFile: func(text string) {
-			path := filepath.Join(e.paths.RunLogDir(run.ID), string(name)+".log")
-			f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-			if err != nil {
-				slog.Warn("cannot preserve side lane log", "step", name, "error", err)
-				return
-			}
-			defer f.Close()
-			fmt.Fprintln(f, text)
-		},
+		LogFile:      func(string) {},
 	}
 	if run.Intent != nil {
 		sctx.UserIntent = *run.Intent
@@ -1227,6 +1225,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		ForgeContext:          e.forge,
 		DB:                    e.db,
 		StepResultID:          sr.ID,
+		StepLogPath:           logPath,
 		UserIntent:            userIntent,
 		IntentSource:          userIntentSource,
 		Sessions:              e.sessions,
@@ -1523,6 +1522,7 @@ rounds:
 			e.waiting = true
 			e.waitingStep = stepName
 			e.waitingApprovalRefusal = approvalRefusal(stepName, effectiveFindings)
+			e.waitingSafetyRefusal = HasSafetyRefusal(effectiveFindings)
 			e.mu.Unlock()
 
 			// Parking starts before the gate becomes observable. This includes the
@@ -1534,7 +1534,11 @@ rounds:
 			// tell in one `axi status` read that the run is waiting for the agent
 			// to drive this gate (versus actively running/fixing/ci). Observability
 			// only: it does not change the wait below. Cleared once the wait ends.
-			if dbErr := e.db.ParkStepForApproval(run.ID, sr.ID, approvalStatus, finalExitCode, executionMS, findingsPtr); dbErr != nil {
+			park := e.db.ParkStepForApproval
+			if HasSafetyRefusal(effectiveFindings) {
+				park = e.db.ParkSafetyRefusal
+			}
+			if dbErr := park(run.ID, sr.ID, approvalStatus, finalExitCode, executionMS, findingsPtr); dbErr != nil {
 				e.mu.Lock()
 				e.waiting = false
 				e.waitingStep = ""

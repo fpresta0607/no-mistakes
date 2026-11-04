@@ -61,7 +61,7 @@ func reapRunLogs(d *db.DB, root string, policy evidenceReapPolicy, now time.Time
 			slog.Debug("skipping run log cleanup", "run_id", runID, "reason", reason)
 			continue
 		}
-		if reason := protectedPathCleanupReason(d, run); reason != "" {
+		if reason := safetyRefusalCleanupReason(d, run); reason != "" {
 			slog.Debug("skipping run log cleanup", "run_id", runID, "reason", reason)
 			continue
 		}

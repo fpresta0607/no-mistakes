@@ -14,6 +14,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -428,6 +429,79 @@ func TestSideBySide_RefusalSurvivesRecovery(t *testing.T) {
 			f.review.Shared.Close()
 		})
 	}
+}
+
+func TestSideBySide_RecoversRefusalWhenFindingWriteFails(t *testing.T) {
+	f := newSideBySideFixture(t, config.Commands{})
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	database, err := db.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	repo, err := database.InsertRepo(f.dir, "https://example.com/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature", f.headSHA, f.baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := database.InsertStepResult(run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readOnly, err := db.OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { readOnly.Close() })
+	f.review.DB, f.review.Run, f.review.Repo = database, run, repo
+	logPath := filepath.Join(t.TempDir(), "test.log")
+	original := f.review.SideLaneContext
+	f.review.SideLaneContext = func(name types.StepName) (*pipeline.StepContext, bool) {
+		ctx, ok := original(name)
+		if !ok {
+			return nil, false
+		}
+		ctx.DB, ctx.StepResultID, ctx.StepLogPath = readOnly, step.ID, logPath
+		ctx.LogFile = func(text string) {
+			file, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if err == nil {
+				_, _ = fmt.Fprintln(file, text)
+				_ = file.Close()
+			}
+		}
+		return ctx, true
+	}
+	started := make(chan string, 1)
+	f.agent.evidenceF = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		started <- opts.CWD
+		return nil, errors.New(nativeSafetyRefusal)
+	}
+	startSideLanes(f.review, f.baseSHA)
+	var dir string
+	select {
+	case dir = <-started:
+	case <-time.After(sideBySideWait):
+		t.Fatal("lane did not start")
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(dir)) })
+	f.lanesDone()
+	stored, err := database.GetStepResult(step.ID)
+	if err != nil || stored.FindingsJSON != nil {
+		t.Fatalf("finding unexpectedly persisted: %+v, %v", stored, err)
+	}
+	f.review.Shared.Close()
+	f.review.Shared = &pipeline.RunShared{}
+	startSideLanes(f.review, f.baseSHA)
+	turn := f.turn()
+	turn.StepResultID, turn.StepLogPath = step.ID, logPath
+	_, err = (&TestStep{}).Execute(turn)
+	if !agent.IsSafetyRefusal(err) || len(f.agent.evidenceCalls()) != 1 {
+		t.Fatalf("recovered error = %v, calls = %d", err, len(f.agent.evidenceCalls()))
+	}
+	f.review.Shared.Close()
 }
 
 func TestAnalyzersDoNotRetryStructuredSafetyRefusals(t *testing.T) {

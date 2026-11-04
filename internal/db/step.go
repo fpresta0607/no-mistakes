@@ -169,11 +169,24 @@ func (d *DB) UpdateStepStatusWithDuration(id string, status types.StepStatus, du
 }
 
 func (d *DB) ParkStepForApproval(runID, stepID string, status types.StepStatus, exitCode int, durationMS int64, findingsJSON *string) error {
+	return d.parkStepForApproval(runID, stepID, status, exitCode, durationMS, findingsJSON, false)
+}
+
+func (d *DB) ParkSafetyRefusal(runID, stepID string, status types.StepStatus, exitCode int, durationMS int64, findingsJSON *string) error {
+	return d.parkStepForApproval(runID, stepID, status, exitCode, durationMS, findingsJSON, true)
+}
+
+func (d *DB) parkStepForApproval(runID, stepID string, status types.StepStatus, exitCode int, durationMS int64, findingsJSON *string, clearSessions bool) error {
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return fmt.Errorf("begin approval park: %w", err)
 	}
 	defer tx.Rollback()
+	if clearSessions {
+		if _, err := tx.Exec(`DELETE FROM run_agent_sessions WHERE run_id = ?`, runID); err != nil {
+			return fmt.Errorf("invalidate refused agent sessions: %w", err)
+		}
+	}
 
 	ts := now()
 	stepResult, err := tx.Exec(
