@@ -131,7 +131,7 @@ const nativeSafetyRefusal = "codex exited: exit status 1: This content was flagg
 func refusingAgent(calls *int) *mockAgent {
 	return &mockAgent{name: "codex", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 		*calls++
-		return nil, errors.New(nativeSafetyRefusal)
+		return nil, errors.Join(agent.ErrSafetyRefusal, errors.New(nativeSafetyRefusal))
 	}}
 }
 
@@ -193,7 +193,7 @@ func TestReviewStep_SafetyRefusedCoverageCompletionIsNotACoverageGap(t *testing.
 	dir, baseSHA, headSHA := twoFileRepo(t)
 	ag := &mockAgent{name: "codex", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		if strings.Contains(opts.Prompt, coverageCompletionMarker) {
-			return nil, errors.New(nativeSafetyRefusal)
+			return nil, errors.Join(agent.ErrSafetyRefusal, errors.New(nativeSafetyRefusal))
 		}
 		return &agent.Result{Output: json.RawMessage(coverageFindingJSON([]string{"feature.txt"}))}, nil
 	}}
@@ -227,7 +227,7 @@ func TestSideBySide_RefusedLaneIsKeptAndNotRunAgain(t *testing.T) {
 				if exit == "refused while stopping" {
 					<-ctx.Done()
 				}
-				return nil, errors.New(nativeSafetyRefusal)
+				return nil, errors.Join(agent.ErrSafetyRefusal, errors.New(nativeSafetyRefusal))
 			}
 			startSideLanes(f.review, f.baseSHA)
 			var laneDir string
@@ -279,7 +279,7 @@ func TestSideBySide_RefusedDocumentLaneSurvivesStop(t *testing.T) {
 	started := make(chan string, 1)
 	f.agent.documentF = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		started <- opts.CWD
-		return nil, errors.New(nativeSafetyRefusal)
+		return nil, errors.Join(agent.ErrSafetyRefusal, errors.New(nativeSafetyRefusal))
 	}
 	startSideLanes(f.review, f.baseSHA)
 	var laneDir string
@@ -376,8 +376,8 @@ func TestSideBySide_StopEndsTheLanesAndKeepsTheirLogs(t *testing.T) {
 	if !strings.Contains(f.logText(), "log of the stopped test work") || !strings.Contains(f.logText(), "a native agent safety refusal stopped automatic execution") {
 		t.Fatalf("log = %q, want the lane's log and the reason it stopped", f.logText())
 	}
-	if !strings.Contains(f.logText(), longLog) {
-		t.Fatal("the parked step did not retain the complete lane log")
+	if strings.Contains(f.logText(), "beginning of lane log") || !strings.Contains(f.logText(), "end of lane log") || !strings.Contains(f.logText(), "[earlier lane log truncated]") {
+		t.Fatal("the parked step did not report the truncated lane log tail")
 	}
 }
 
@@ -390,7 +390,7 @@ func TestAnalyzersDoNotRetryStructuredSafetyRefusals(t *testing.T) {
 			calls := 0
 			ag := &mockAgent{name: "codex", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 				calls++
-				return nil, rejectedStructuredOutputError{message: nativeSafetyRefusal}
+				return nil, errors.Join(agent.ErrSafetyRefusal, rejectedStructuredOutputError{message: nativeSafetyRefusal})
 			}}
 			sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
 			var err error
@@ -410,7 +410,7 @@ func TestAnalyzersDoNotRetryStructuredSafetyRefusals(t *testing.T) {
 func TestIntentStepPropagatesSafetyRefusal(t *testing.T) {
 	sctx := newIntentStepContext(t)
 	step := &IntentStep{runIntent: func(context.Context, *pipeline.StepContext) (*intent.Result, error) {
-		return nil, errors.New(nativeSafetyRefusal)
+		return nil, errors.Join(agent.ErrSafetyRefusal, errors.New(nativeSafetyRefusal))
 	}}
 
 	_, err := step.Execute(sctx)

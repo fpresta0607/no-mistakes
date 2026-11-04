@@ -33,7 +33,7 @@ func TestAgentDisambiguatorPreservesWorkAfterSafetyRefusal(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		return nil, errors.New("This content was flagged for possible cybersecurity risk")
+		return nil, errors.Join(agent.ErrSafetyRefusal, errors.New("This content was flagged for possible cybersecurity risk"))
 	}}, repo)
 
 	_, err := d.Disambiguate(context.Background(), []string{"conflict.txt"}, []*Match{{Session: &Session{SessionID: "s1", AgentName: "test"}}})

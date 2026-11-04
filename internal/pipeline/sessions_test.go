@@ -230,7 +230,7 @@ func TestRunSessions_SafetyRefusalPreservesSessionWithoutFallback(t *testing.T) 
 	if _, err := sessions.Run(context.Background(), fake, SessionRoleFixer, agent.RunOpts{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	refusal := errors.New("codex exited: exit status 1: This content was flagged for possible cybersecurity risk.")
+	refusal := errors.Join(agent.ErrSafetyRefusal, errors.New("codex exited: exit status 1: This content was flagged for possible cybersecurity risk."))
 	fake.failResumes["sess-1"] = refusal
 	var logs []string
 	_, err := sessions.Run(context.Background(), fake, SessionRoleFixer, agent.RunOpts{}, func(line string) { logs = append(logs, line) })

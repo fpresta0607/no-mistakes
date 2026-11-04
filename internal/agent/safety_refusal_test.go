@@ -13,8 +13,9 @@ func TestIsSafetyRefusal(t *testing.T) {
 		want bool
 	}{
 		{name: "no error"},
-		{name: "native refusal", err: errors.New("This content was flagged for possible cybersecurity risk."), want: true},
-		{name: "wrapped refusal", err: fmt.Errorf("agent fix: %w", errors.New("THIS CONTENT WAS FLAGGED FOR POSSIBLE CYBERSECURITY RISK.")), want: true},
+		{name: "native refusal", err: ErrSafetyRefusal, want: true},
+		{name: "wrapped refusal", err: fmt.Errorf("agent fix: %w", ErrSafetyRefusal), want: true},
+		{name: "quoted task data", err: errors.New(`invalid JSON (output snippet: "This content was flagged for possible cybersecurity risk.")`)},
 		{name: "connection refused", err: errors.New("dial tcp: connection refused")},
 		{name: "missing session", err: errors.New("session not found")},
 		{name: "tool permission", err: errors.New("tool execution refused: permission denied")},
@@ -24,5 +25,12 @@ func TestIsSafetyRefusal(t *testing.T) {
 				t.Fatalf("IsSafetyRefusal(%v) = %v, want %v", test.err, got, test.want)
 			}
 		})
+	}
+}
+
+func TestStructuredOutputQuotingRefusalIsNotSafetyRefusal(t *testing.T) {
+	_, err := finalizeTextResult("codex", `{"finding":"This content was flagged for possible cybersecurity risk."`, []byte(`{"type":"object"}`), TokenUsage{})
+	if err == nil || !IsStructuredOutputRejected(err) || IsSafetyRefusal(err) {
+		t.Fatalf("error = %v, want an ordinary structured output rejection", err)
 	}
 }

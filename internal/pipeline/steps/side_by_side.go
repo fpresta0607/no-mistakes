@@ -55,7 +55,8 @@ const (
 	sideLaneDirName = "side-lane"
 	// sideLaneBranch names a lane's commit inside its clone so the run's
 	// worktree can fetch it.
-	sideLaneBranch = "no-mistakes-side-lane"
+	sideLaneBranch   = "no-mistakes-side-lane"
+	sideLaneLogLimit = 1 << 20
 	// pushGuardCommitLimit bounds how many commits a note names.
 	pushGuardCommitLimit = 20
 )
@@ -71,13 +72,24 @@ var errSideLaneStopped = errors.New("side lane stopped")
 
 // sideLaneLog keeps what a lane's step logged.
 type sideLaneLog struct {
-	mu   sync.Mutex
-	text []byte
+	mu        sync.Mutex
+	text      []byte
+	truncated bool
 }
 
 func (l *sideLaneLog) write(text string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if len(text) >= sideLaneLogLimit {
+		l.truncated = l.truncated || len(l.text) > 0 || len(text) > sideLaneLogLimit
+		l.text = append(l.text[:0], text[len(text)-sideLaneLogLimit:]...)
+		return
+	}
+	if over := len(l.text) + len(text) - sideLaneLogLimit; over > 0 {
+		copy(l.text, l.text[over:])
+		l.text = l.text[:len(l.text)-over]
+		l.truncated = true
+	}
 	l.text = append(l.text, text...)
 }
 
@@ -86,6 +98,9 @@ func (l *sideLaneLog) line(text string) { l.write(strings.TrimRight(text, "\n") 
 func (l *sideLaneLog) String() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.truncated {
+		return "[earlier lane log truncated]\n" + string(l.text)
+	}
 	return string(l.text)
 }
 

@@ -337,6 +337,53 @@ printf '%s\n' '{"type":"turn.completed"}'
 	}
 }
 
+func TestCodexAgent_SuccessfulExitDoesNotHideNativeRefusal(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' '{"type":"error","message":"This content was flagged for possible cybersecurity risk."}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"valid output"}}'
+`, strings.Join([]string{
+		"@echo off",
+		"echo {\"type\":\"error\",\"message\":\"This content was flagged for possible cybersecurity risk.\"}",
+		"echo {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"valid output\"}}",
+		"exit /b 0",
+	}, "\r\n"))
+	result, err := (&codexAgent{bin: bin}).Run(context.Background(), RunOpts{CWD: dir})
+	if !IsSafetyRefusal(err) || result != nil {
+		t.Fatalf("Run = %+v, %v, want the native refusal", result, err)
+	}
+}
+
+func TestCodexAgent_QuotedRefusalInNativeErrorIsOrdinaryFailure(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' '{"type":"error","message":"invalid response: This content was flagged for possible cybersecurity risk."}'
+printf '%s\n' 'invalid response: This content was flagged for possible cybersecurity risk.' >&2
+exit 1
+`, strings.Join([]string{
+		"@echo off",
+		"echo {\"type\":\"error\",\"message\":\"invalid response: This content was flagged for possible cybersecurity risk.\"}",
+		"echo invalid response: This content was flagged for possible cybersecurity risk. 1>&2",
+		"exit /b 1",
+	}, "\r\n"))
+	_, err := (&codexAgent{bin: bin}).Run(context.Background(), RunOpts{CWD: dir})
+	if err == nil || IsSafetyRefusal(err) {
+		t.Fatalf("Run error = %v, want an ordinary failure", err)
+	}
+}
+
+func TestCodexAgent_StderrSafetyRefusalStopsAfterFailedExit(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' 'This content was flagged for possible cybersecurity risk.' >&2
+exit 1
+`, "@echo off\r\necho This content was flagged for possible cybersecurity risk. 1>&2\r\nexit /b 1\r\n")
+	_, err := (&codexAgent{bin: bin}).Run(context.Background(), RunOpts{CWD: dir})
+	if !IsSafetyRefusal(err) {
+		t.Fatalf("Run error = %v, want the native stderr refusal", err)
+	}
+}
+
 func TestCodexAgent_ProgressWithoutTerminalCompletionIsRejected(t *testing.T) {
 	dir := t.TempDir()
 	progress := `{"findings":[],"risk_level":"low"}`

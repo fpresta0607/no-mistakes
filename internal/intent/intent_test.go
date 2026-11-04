@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 )
 
 // staticReader is a minimal Reader for tests.
@@ -355,7 +357,7 @@ func TestExtract_RefusedDisambiguatorDoesNotStartSummarizer(t *testing.T) {
 		{SessionID: "s2", LastActivity: head.Add(-time.Minute), Messages: []Message{{Role: RoleUser, FilePaths: []string{"foo.go"}}}},
 	}}
 	summary := &fixedSummarizer{summary: "fallback"}
-	refusal := errors.New("This content was flagged for possible cybersecurity risk.")
+	refusal := errors.Join(agent.ErrSafetyRefusal, errors.New("This content was flagged for possible cybersecurity risk."))
 	_, err := Extract(context.Background(), ExtractParams{OriginCWD: "/tmp/repo", DiffFiles: []string{"foo.go"}, HeadTime: head, BaseTime: head.Add(-time.Hour), Threshold: 0.2, Readers: []Reader{r}, Summarizer: summary, Disambiguator: &fixedDisambiguator{err: refusal}})
 	if !errors.Is(err, refusal) || summary.calls != 0 {
 		t.Fatalf("error = %v, summary calls = %d", err, summary.calls)

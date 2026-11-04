@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -29,7 +30,7 @@ func TestProtectedPathRefusalRequiresDecisionAcrossRecovery(t *testing.T) {
 		err  error
 	}{
 		{name: "protected_path"},
-		{name: "native_safety", err: errors.New("This content was flagged for possible cybersecurity risk.")},
+		{name: "native_safety", err: errors.Join(agent.ErrSafetyRefusal, errors.New("This content was flagged for possible cybersecurity risk."))},
 	} {
 		for _, recovered := range []bool{false, true} {
 			name := "live"

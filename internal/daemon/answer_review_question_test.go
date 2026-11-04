@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -274,7 +275,7 @@ func (s *parkingReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepO
 	default:
 	}
 	if s.refuse {
-		return nil, fmt.Errorf("This content was flagged for possible cybersecurity risk.")
+		return nil, fmt.Errorf("%w: This content was flagged for possible cybersecurity risk.", agent.ErrSafetyRefusal)
 	}
 	return &pipeline.StepOutcome{
 		Findings: `{"findings":[{"id":"review-1","severity":"warning","description":"needs an operator decision","action":"ask-user"}],"summary":"one issue"}`,

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -134,16 +133,17 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		if detail := strings.TrimSpace(strings.Join([]string{codexErr, string(stderrBuf)}, "\n")); detail != "" {
 			retErr = fmt.Errorf("%w: %s", retErr, detail)
 		}
+		if isNativeSafetyRefusal(codexErr) || isNativeSafetyRefusal(string(stderrBuf)) {
+			retErr = fmt.Errorf("%w: %w", ErrSafetyRefusal, retErr)
+		}
 		emitAgentExited(opts, "codex", pid, retErr)
 		return partialResult(), retErr
 	}
 
 	waitErr := started.wait()
 	stderrWG.Wait()
-	if waitErr != nil || (ctx.Err() != nil && IsSafetyRefusal(errors.New(codexErr+"\n"+string(stderrBuf)))) {
-		if waitErr == nil {
-			waitErr = ctx.Err()
-		}
+	isRefusal := isNativeSafetyRefusal(codexErr) || isNativeSafetyRefusal(string(stderrBuf))
+	if waitErr != nil || isRefusal {
 		detail := strings.TrimSpace(codexErr)
 		stderr := strings.TrimSpace(string(stderrBuf))
 		if detail != "" && stderr != "" {
@@ -151,7 +151,15 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		} else if detail == "" {
 			detail = stderr
 		}
-		retErr := fmt.Errorf("codex exited: %w: %s", waitErr, detail)
+		var retErr error
+		if waitErr != nil {
+			retErr = fmt.Errorf("codex exited: %w: %s", waitErr, detail)
+		} else {
+			retErr = fmt.Errorf("codex reported: %s", detail)
+		}
+		if isRefusal {
+			retErr = fmt.Errorf("%w: %w", ErrSafetyRefusal, retErr)
+		}
 		emitAgentExited(opts, "codex", pid, retErr)
 		return partialResult(), retErr
 	}
@@ -317,7 +325,7 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), us
 
 		switch event.Type {
 		case "error":
-			if event.Message != "" && codexErr != nil && !IsSafetyRefusal(errors.New(*codexErr)) {
+			if event.Message != "" && codexErr != nil && !isNativeSafetyRefusal(*codexErr) {
 				*codexErr = event.Message
 			}
 

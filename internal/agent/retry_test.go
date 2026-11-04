@@ -106,7 +106,7 @@ func TestClassifyTransient_Positive(t *testing.T) {
 }
 
 func TestRunWithRetrySafetyRefusalOverridesTransientDetail(t *testing.T) {
-	refusal := errors.New("codex exited: exit status 1: This content was flagged for possible cybersecurity risk.; HTTP 503")
+	refusal := errors.Join(ErrSafetyRefusal, errors.New("codex exited: exit status 1: This content was flagged for possible cybersecurity risk.; HTTP 503"))
 	calls := 0
 	_, err := runWithRetry(context.Background(), "codex", RunOpts{}, 1, classifyTransient, nil, func() (*Result, error) {
 		calls++

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -90,7 +91,7 @@ func TestSafetyRefusalParkStopsSideLanes(t *testing.T) {
 		err       error
 		wantStops int32
 	}{
-		{name: "native refusal", err: errors.New("codex exited: exit status 1: This content was flagged for possible cybersecurity risk."), wantStops: 1},
+		{name: "native refusal", err: errors.Join(agent.ErrSafetyRefusal, errors.New("codex exited: exit status 1: This content was flagged for possible cybersecurity risk.")), wantStops: 1},
 		{name: "ordinary park"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
