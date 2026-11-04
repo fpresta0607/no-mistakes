@@ -3,8 +3,8 @@
 // the `e2e` build tag so they are excluded from `go test ./...` and only
 // run via `make e2e` (or `go test -tags=e2e ./internal/e2e/...`).
 //
-// The fake agent (cmd/fakeagent) is symlinked under each agent's binary
-// name (claude, codex, grok, opencode, antigravity; Antigravity is also linked
+// The fake agent (cmd/fakeagent) is hard-linked under each agent's binary
+// name (claude, codex, grok, opencode, pi, antigravity; Antigravity is also linked
 // as agy for binary probing) into a temp PATH directory, and replies
 // with deterministic canned responses defined by Scenario YAML or by the
 // built-in "everything is clean" default. Every invocation is appended to
