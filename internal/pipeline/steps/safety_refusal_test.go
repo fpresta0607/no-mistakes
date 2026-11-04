@@ -115,11 +115,11 @@ func TestReviewLoop_NativeSafetyRefusalPreservesWorkAndParks(t *testing.T) {
 		t.Errorf("refusal changed the index: got %q, want %q", staged, originalFeature)
 	}
 	sessions, err := database.GetRunAgentSessions(run.ID)
-	if err != nil || len(sessions) != 1 || sessions[0].SessionID != "original-fixer" {
-		t.Errorf("original fixer session was lost: %+v, %v", sessions, err)
+	if err != nil || len(sessions) != 0 {
+		t.Errorf("refused fixer session remains reusable: %+v, %v", sessions, err)
 	}
 	log, err := os.ReadFile(filepath.Join(appPaths.RunLogDir(run.ID), "review.log"))
-	if err != nil || !strings.Contains(string(log), refusal) || strings.Contains(string(log), "starting a fresh") {
+	if err != nil || !strings.Contains(string(log), refusal) || !strings.Contains(string(log), "original-fixer") || strings.Contains(string(log), "starting a fresh") {
 		t.Errorf("refusal log was lost or announced a retry: %s, %v", log, err)
 	}
 }
@@ -365,6 +365,68 @@ func TestSideBySide_RefusedDocumentLaneSurvivesStop(t *testing.T) {
 	}
 	if len(f.agent.documentCalls()) != 1 {
 		t.Fatal("refused document work ran again")
+	}
+}
+
+func TestSideBySide_RefusalSurvivesRecovery(t *testing.T) {
+	for _, name := range []types.StepName{types.StepTest, types.StepDocument} {
+		t.Run(string(name), func(t *testing.T) {
+			f := newSideBySideFixture(t, config.Commands{Lint: "true"})
+			started := make(chan string, 1)
+			refuse := func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				if err := os.WriteFile(filepath.Join(opts.CWD, "refused.txt"), []byte("preserved"), 0o644); err != nil {
+					return nil, err
+				}
+				started <- opts.CWD
+				return nil, errors.New(nativeSafetyRefusal)
+			}
+			if name == types.StepTest {
+				f.agent.evidenceF = refuse
+			} else {
+				f.agent.documentF = refuse
+			}
+			startSideLanes(f.review, f.baseSHA)
+			var dir string
+			select {
+			case dir = <-started:
+			case <-time.After(sideBySideWait):
+				t.Fatal("lane did not start")
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(dir)) })
+			f.lanesDone()
+			if err := f.review.DB.ResetStepsFrom(f.review.Run.ID, types.StepReview.Order()); err != nil {
+				t.Fatal(err)
+			}
+			f.review.Shared.Close()
+			f.review.Shared = &pipeline.RunShared{}
+			startSideLanes(f.review, f.baseSHA)
+			turn := f.turn()
+			results, err := f.review.DB.GetStepsByRun(f.review.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, result := range results {
+				if result.StepName == name {
+					turn.StepResultID = result.ID
+				}
+			}
+			if name == types.StepTest {
+				_, err = (&TestStep{}).Execute(turn)
+			} else {
+				_, err = (&DocumentStep{}).Execute(turn)
+			}
+			if !agent.IsSafetyRefusal(err) {
+				t.Fatalf("recovered step error = %v", err)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, "refused.txt"))
+			if err != nil || string(data) != "preserved" {
+				t.Fatalf("edits = %q, %v", data, err)
+			}
+			if name == types.StepTest && len(f.agent.evidenceCalls()) != 1 || name == types.StepDocument && len(f.agent.documentCalls()) != 1 {
+				t.Fatal("recovery restarted the refused lane")
+			}
+			f.review.Shared.Close()
+		})
 	}
 }
 

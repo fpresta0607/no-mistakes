@@ -809,6 +809,7 @@ Each step takes that work at its own turn, in its usual order, only when it is s
 
 Anything else discards the work, the step log says why, and the step runs as it does without the setting.
 Work that ended in a native agent safety refusal is the exception: its clone and evidence are preserved, it is never run again even after the head moved, and the step stops on that refusal at its turn.
+The refusal and its lane log survive daemon recovery, so the step still stops on it after a restart.
 When the run stops on a native agent safety refusal, work still going beside the review is stopped and its log is kept in the stopped step's log.
 Work that itself refused is preserved for its own step; other stopped work is removed.
 A fix round never takes work started early.

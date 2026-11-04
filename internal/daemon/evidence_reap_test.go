@@ -111,6 +111,63 @@ func TestReapEvidenceHonorsRetentionAndSparesActiveRuns(t *testing.T) {
 	}
 }
 
+func TestDiagnosticReapersPreserveUnresolvedSafetyRefusal(t *testing.T) {
+	for _, mode := range []string{"age", "count"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newEvidenceFixture(t)
+			refused := f.seed("refused", types.RunFailed, 3*time.Hour, map[string]string{"output.txt": "refusal evidence"})
+			ordinary := f.seed("ordinary", types.RunFailed, 2*time.Hour, map[string]string{"output.txt": "ordinary evidence"})
+			fresh := f.seed("fresh", types.RunCompleted, 0, map[string]string{"output.txt": "fresh"})
+			step, err := f.db.InsertStepResult(refused, types.StepReview)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.SetStepFindings(step.ID, `{"findings":[{"id":"agent-safety-refusal","severity":"error","description":"refused","action":"ask-user"}]}`); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.UpdateStepStatus(step.ID, types.StepStatusFixReview); err != nil {
+				t.Fatal(err)
+			}
+			logRoot := t.TempDir()
+			for i, id := range []string{refused, ordinary, fresh} {
+				dir := filepath.Join(logRoot, id)
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(dir, "review.log")
+				if err := os.WriteFile(path, []byte("session evidence"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				when := time.Now().Add(-time.Duration(3-i) * time.Hour)
+				if err := os.Chtimes(dir, when, when); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(path, when, when); err != nil {
+					t.Fatal(err)
+				}
+			}
+			policy := evidenceReapPolicy{Retention: time.Hour}
+			if mode == "count" {
+				policy = evidenceReapPolicy{MaxRuns: 1}
+			}
+			reapEvidence(f.db, f.root, policy, time.Now())
+			reapRunLogs(f.db, logRoot, policy, time.Now())
+			if !f.exists(refused) {
+				t.Fatal("refused evidence was deleted")
+			}
+			if _, err := os.Stat(filepath.Join(logRoot, refused, "review.log")); err != nil {
+				t.Fatalf("refused log was deleted: %v", err)
+			}
+			if f.exists(ordinary) {
+				t.Fatal("ordinary evidence was retained")
+			}
+			if _, err := os.Stat(filepath.Join(logRoot, ordinary)); !os.IsNotExist(err) {
+				t.Fatalf("ordinary log survived: %v", err)
+			}
+		})
+	}
+}
+
 func TestDiagnosticReapersSeparateSourceRetentionFromInterruptedCI(t *testing.T) {
 	f := newEvidenceFixture(t)
 	repo, head := setupTestGitRepo(t, f.p, f.db, "diagnostic-source")

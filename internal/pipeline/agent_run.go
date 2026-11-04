@@ -137,6 +137,9 @@ func invokeAgent(parent context.Context, timeout, working time.Duration, cause e
 	cancel()
 	activity.finish()
 	if runErr != nil {
+		if agent.IsSafetyRefusal(runErr) {
+			return result, runErr
+		}
 		return nil, runErr
 	}
 	return result, nil
@@ -676,6 +679,9 @@ func (a *timeoutAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Resu
 			return result, err
 		case err != nil:
 			// The adapter's own account beats restating the cause.
+			if agent.IsSafetyRefusal(err) {
+				return result, err
+			}
 			return nil, err
 		default:
 			return nil, cause

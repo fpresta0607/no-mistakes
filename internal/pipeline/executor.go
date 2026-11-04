@@ -969,14 +969,15 @@ func (e *Executor) sideLaneContext(ctx context.Context, run *db.Run, repo *db.Re
 		return nil, false
 	}
 	runCopy := *run
+	var sctx *StepContext
 	stepAgent := e.agent
 	if stepAgent != nil {
 		stepAgent = &timeoutAgent{inner: stepAgent, timeout: AgentTimeout(e.config), working: AgentWorkingTimeout(e.config)}
-		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: name}
+		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: name, logRefusal: func(text string) { sctx.LogFile(text) }}
 		stepAgent = &perfRecordingAgent{inner: stepAgent, db: e.db, runID: run.ID, stepName: name, round: func() int { return 1 }}
 		stepAgent = &roundStampingAgent{inner: stepAgent, round: func() int { return 1 }}
 	}
-	sctx := &StepContext{
+	sctx = &StepContext{
 		Ctx:          ctx,
 		Run:          &runCopy,
 		Repo:         repo,
@@ -991,7 +992,16 @@ func (e *Executor) sideLaneContext(ctx context.Context, run *db.Run, repo *db.Re
 		SideLane:     true,
 		Log:          func(string) {},
 		LogChunk:     func(string) {},
-		LogFile:      func(string) {},
+		LogFile: func(text string) {
+			path := filepath.Join(e.paths.RunLogDir(run.ID), string(name)+".log")
+			f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+			if err != nil {
+				slog.Warn("cannot preserve side lane log", "step", name, "error", err)
+				return
+			}
+			defer f.Close()
+			fmt.Fprintln(f, text)
+		},
 	}
 	if run.Intent != nil {
 		sctx.UserIntent = *run.Intent
@@ -1169,7 +1179,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// Innermost: default-by-construction invocation deadline so a step
 		// that calls Agent.Run directly cannot hang the run.
 		stepAgent = &timeoutAgent{inner: stepAgent, timeout: AgentTimeout(e.config), working: AgentWorkingTimeout(e.config)}
-		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: stepName}
+		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: stepName, logRefusal: writeLog}
 		stepAgent = &lifecycleAgent{inner: stepAgent, onLifecycle: onAgentLifecycle}
 		stepAgent = &perfRecordingAgent{
 			inner:    stepAgent,
@@ -1302,7 +1312,7 @@ rounds:
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
-		if refusal := safetyRefusalOutcome(err); refusal != nil {
+		if refusal := SafetyRefusalOutcome(err); refusal != nil {
 			writeLog(safeurl.RedactText(err.Error()))
 			if lanes := sctx.Shared.SideLanes(); lanes != nil {
 				lanes.Stop(sctx)
@@ -1818,15 +1828,35 @@ func roundInsertID(_ string, inserted *db.StepRound, err error) string {
 }
 
 type gateStepBoundaryAgent struct {
-	inner agent.Agent
-	phase types.StepName
+	inner      agent.Agent
+	phase      types.StepName
+	logRefusal func(string)
 }
 
 func (a *gateStepBoundaryAgent) Name() string { return a.inner.Name() }
 
 func (a *gateStepBoundaryAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	opts.Prompt = gateguidance.PromptBoundary(string(a.phase)) + opts.Prompt
-	return a.inner.Run(ctx, opts)
+	result, err := a.inner.Run(ctx, opts)
+	if agent.IsSafetyRefusal(err) && a.logRefusal != nil {
+		provider, id := a.inner.Name(), ""
+		if result != nil {
+			if result.Provider != "" {
+				provider = result.Provider
+			}
+			id = result.SessionID
+		}
+		if id == "" && opts.Session != nil {
+			id = opts.Session.ID
+			if opts.Session.Agent != "" {
+				provider = opts.Session.Agent
+			}
+		}
+		if id != "" {
+			a.logRefusal(safeurl.RedactText(fmt.Sprintf("refused agent session: provider=%s id=%s", provider, id)))
+		}
+	}
+	return result, err
 }
 
 func (a *gateStepBoundaryAgent) Close() error { return a.inner.Close() }

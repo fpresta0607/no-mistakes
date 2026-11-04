@@ -736,8 +736,11 @@ func (m *RunManager) cleanupRunEvidence(cfg *config.Config, runID string) {
 		}
 	}
 	root := m.paths.EvidenceRoot(configured)
-	if err := os.Remove(filepath.Join(root, runID)); err != nil && !os.IsNotExist(err) {
-		slog.Debug("run evidence kept", "run_id", runID, "reason", err)
+	run, runErr := m.db.GetRun(runID)
+	if runErr == nil && protectedPathCleanupReason(m.db, run) == "" {
+		if err := os.Remove(filepath.Join(root, runID)); err != nil && !os.IsNotExist(err) {
+			slog.Debug("run evidence kept", "run_id", runID, "reason", err)
+		}
 	}
 	now := time.Now()
 	reapEvidence(m.db, root, policy, now)

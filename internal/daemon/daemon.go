@@ -1143,8 +1143,6 @@ func terminalWorktreeSourceReason(ctx context.Context, database *db.DB, runID, w
 	return ""
 }
 
-// protectedPathCleanupReason protects only the index and working files. It must
-// not be used as a process-liveness or test-evidence retention predicate.
 func protectedPathCleanupReason(d *db.DB, run *db.Run) string {
 	if run == nil || (run.Status == types.RunCancelled && run.Error != nil && *run.Error == types.RunCancelReasonAbortedByUser) {
 		return ""

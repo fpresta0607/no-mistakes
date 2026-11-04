@@ -110,6 +110,10 @@ func reapEvidence(d *db.DB, root string, policy evidenceReapPolicy, now time.Tim
 			slog.Debug("skipping evidence cleanup", "run_id", runID, "reason", reason)
 			continue
 		}
+		if reason := protectedPathCleanupReason(d, run); reason != "" {
+			slog.Debug("skipping evidence cleanup", "run_id", runID, "reason", reason)
+			continue
+		}
 		path := filepath.Join(root, runID)
 		info, err := entry.Info()
 		if err != nil {

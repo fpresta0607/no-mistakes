@@ -235,6 +235,10 @@ func startSideLanes(sctx *pipeline.StepContext, baseSHA string) {
 		if !ok {
 			continue
 		}
+		stored, err := laneCtx.DB.GetStepResult(laneCtx.StepResultID)
+		if err != nil || (stored != nil && stored.FindingsJSON != nil && pipeline.HasSafetyRefusal(*stored.FindingsJSON)) {
+			continue
+		}
 		ctx, cancel := context.WithCancelCause(laneCtx.Ctx)
 		laneCtx.Ctx = ctx
 		laneCtx.Env = sctx.Env
@@ -329,8 +333,20 @@ func (lane *sideLane) run(sctx *pipeline.StepContext, runWorkDir, baseSHA string
 			lane.outcome, lane.err = nil, fmt.Errorf("side lane panicked: %v", recovered)
 		}
 	}()
+	writeRefusalLog := sctx.LogFile
 	lane.shared = sctx.Shared
 	lane.outcome, lane.err = lane.execute(sctx, runWorkDir, baseSHA)
+	if agent.IsSafetyRefusal(lane.err) {
+		err := fmt.Errorf("%w; side lane preserved at %s", lane.err, lane.checkout)
+		if writeRefusalLog != nil {
+			writeRefusalLog(fmt.Sprintf("side by side: %v\n%s", err, lane.log.String()))
+		}
+		if refusal := pipeline.SafetyRefusalOutcome(err); refusal != nil {
+			if persistErr := sctx.DB.SetStepFindings(sctx.StepResultID, refusal.Findings); persistErr != nil {
+				lane.err = errors.Join(lane.err, fmt.Errorf("persist side lane refusal: %w", persistErr))
+			}
+		}
+	}
 }
 
 func (lane *sideLane) execute(sctx *pipeline.StepContext, runWorkDir, baseSHA string) (*pipeline.StepOutcome, error) {
@@ -437,15 +453,33 @@ func (lane *sideLane) removeClone() {
 // always has. Work that ended in a native agent safety refusal is never run
 // again: its refusal is returned as the step's error.
 func takeSideLane(sctx *pipeline.StepContext, name types.StepName) (*pipeline.StepOutcome, bool, error) {
-	if sctx.SideLane || sctx.Shared == nil {
+	if sctx.SideLane {
 		return nil, false, nil
 	}
-	lanes, _ := sctx.Shared.SideLanes().(*sideLanes)
-	if lanes == nil {
-		return nil, false, nil
+	var lane *sideLane
+	if sctx.Shared != nil {
+		if lanes, ok := sctx.Shared.SideLanes().(*sideLanes); ok && lanes != nil {
+			lane = lanes.claim(name)
+		}
 	}
-	lane := lanes.claim(name)
 	if lane == nil {
+		if !sctx.Fixing && sctx.DB != nil && sctx.StepResultID != "" {
+			stored, err := sctx.DB.GetStepResult(sctx.StepResultID)
+			if err != nil {
+				return nil, false, fmt.Errorf("read side lane refusal: %w", err)
+			}
+			if stored != nil && stored.FindingsJSON != nil && pipeline.HasSafetyRefusal(*stored.FindingsJSON) {
+				findings, err := types.ParseFindingsJSON(*stored.FindingsJSON)
+				if err != nil {
+					return nil, false, err
+				}
+				for _, finding := range findings.Items {
+					if finding.ID == pipeline.SafetyRefusalFindingID {
+						return nil, false, errors.New(finding.Description)
+					}
+				}
+			}
+		}
 		return nil, false, nil
 	}
 	on := shortObjectID(lane.head)

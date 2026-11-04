@@ -6,21 +6,21 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const safetyRefusalFindingID = "agent-safety-refusal"
+const SafetyRefusalFindingID = "agent-safety-refusal"
 
 // HasSafetyRefusal identifies a native refusal requiring an explicit decision.
 func HasSafetyRefusal(findingsJSON string) bool {
-	return hasFindingID(findingsJSON, safetyRefusalFindingID)
+	return hasFindingID(findingsJSON, SafetyRefusalFindingID)
 }
 
-func safetyRefusalOutcome(err error) *StepOutcome {
+func SafetyRefusalOutcome(err error) *StepOutcome {
 	if !agent.IsSafetyRefusal(err) {
 		return nil
 	}
 	findings, _ := types.MarshalFindingsJSON(types.Findings{
 		Summary: "Native agent safety refusal; automatic execution stopped",
 		Items: []types.Finding{{
-			ID:          safetyRefusalFindingID,
+			ID:          SafetyRefusalFindingID,
 			Severity:    "error",
 			Description: safeurl.RedactText(err.Error()),
 			Action:      types.ActionAskUser,

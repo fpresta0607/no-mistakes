@@ -29,6 +29,7 @@ type fakeSessionAgent struct {
 	failResumes  map[string]error // session id -> error returned when resumed
 	failNext     error            // error returned on the next call regardless
 	failResult   *agent.Result
+	failFresh    error
 	supportsFlag bool
 }
 
@@ -67,23 +68,51 @@ func (f *fakeSessionAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Re
 		}
 		return &agent.Result{Text: "resumed", SessionID: opts.Session.ID, Resumed: true}, nil
 	}
+	if f.failFresh != nil {
+		return f.failResult, f.failFresh
+	}
 	f.nextID++
 	return &agent.Result{Text: "started", SessionID: fmt.Sprintf("sess-%d", f.nextID)}, nil
 }
 
-func TestRunSessions_PersistsFreshRefusedSession(t *testing.T) {
-	d, run := sessionTestDB(t)
-	fake := newFakeSessionAgent()
-	fake.failNext = errors.New("This content was flagged for possible cybersecurity risk.")
-	fake.failResult = &agent.Result{SessionID: "refused-thread"}
-	rs := NewRunSessions(d, run.ID, fake, true)
-	_, err := rs.Run(context.Background(), fake, SessionRoleFixer, agent.RunOpts{}, nil)
-	if !agent.IsSafetyRefusal(err) || len(fake.calls) != 1 {
-		t.Fatalf("error = %v, calls = %d", err, len(fake.calls))
-	}
-	stored, err := d.GetRunAgentSessions(run.ID)
-	if err != nil || len(stored) != 1 || stored[0].SessionID != "refused-thread" {
-		t.Fatalf("sessions = %+v, %v", stored, err)
+func TestRunSessions_RefusedSessionIsNeverReusable(t *testing.T) {
+	for _, mode := range []string{"fresh", "resumed", "fallback"} {
+		t.Run(mode, func(t *testing.T) {
+			d, run := sessionTestDB(t)
+			fake := newFakeSessionAgent()
+			refusal := errors.New("This content was flagged for possible cybersecurity risk.")
+			fake.failResult = &agent.Result{SessionID: "refused-thread"}
+			if mode != "fresh" {
+				if err := d.UpsertRunAgentSession(run.ID, string(SessionRoleFixer), "fake", "old-thread"); err != nil {
+					t.Fatal(err)
+				}
+				if mode == "resumed" {
+					fake.failResumes["old-thread"] = refusal
+				} else {
+					fake.failResumes["old-thread"] = errors.New("session unavailable")
+				}
+			}
+			if mode != "resumed" {
+				fake.failFresh = refusal
+			}
+			rs := NewRunSessions(d, run.ID, fake, true)
+			_, err := rs.Run(context.Background(), fake, SessionRoleFixer, agent.RunOpts{}, nil)
+			if !agent.IsSafetyRefusal(err) {
+				t.Fatalf("error = %v", err)
+			}
+			stored, err := d.GetRunAgentSessions(run.ID)
+			if err != nil || len(stored) != 0 {
+				t.Fatalf("reusable sessions = %+v, %v", stored, err)
+			}
+			fake.failFresh = nil
+			rs = NewRunSessions(d, run.ID, fake, true)
+			if _, err := rs.Run(context.Background(), fake, SessionRoleFixer, agent.RunOpts{}, nil); err != nil {
+				t.Fatal(err)
+			}
+			if last := fake.calls[len(fake.calls)-1]; last.session == nil || last.session.ID != "" {
+				t.Fatalf("refused session resumed: %+v", last.session)
+			}
+		})
 	}
 }
 

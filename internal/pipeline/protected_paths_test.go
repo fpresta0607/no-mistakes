@@ -54,7 +54,7 @@ func TestProtectedPathRefusalRequiresDecisionAcrossRecovery(t *testing.T) {
 					_, refusal := step.Execute(nil)
 					outcome := ProtectedPathOutcome(refusal)
 					if outcome == nil {
-						outcome = safetyRefusalOutcome(refusal)
+						outcome = SafetyRefusalOutcome(refusal)
 					}
 					if _, err := database.InsertStepRound(sr.ID, 1, "initial", &outcome.Findings, nil, 1); err != nil {
 						t.Fatal(err)
