@@ -315,7 +315,7 @@ func TestCIHandbackGuidanceUsesUpstreamProvider(t *testing.T) {
 							if state.NextAction != nil {
 								t.Fatalf("unsupported synchronized provider next action = %#v", state.NextAction)
 							}
-						} else if state.NextAction == nil || state.NextAction.Code != "inspect_and_reconcile_manually" || state.NextAction.Command != "git log --oneline --left-right HEAD..."+f.pushed {
+						} else if state.NextAction == nil || state.NextAction.Code != "inspect_and_reconcile_manually" || state.NextAction.Command != "git checkout --detach "+f.pushed {
 							t.Fatalf("unsupported diverged provider next action = %#v", state.NextAction)
 						}
 					})
