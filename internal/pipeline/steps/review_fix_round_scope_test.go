@@ -326,6 +326,9 @@ func TestReviewLoop_DeferredFindingKeepsPendingFindingUnverified(t *testing.T) {
 	if !strings.Contains(held, "- feature.txt\n") || strings.Contains(carried, "- feature.txt\n") {
 		t.Fatalf("deferred finding's file must be held for review, not carried: %s", reviews[2].Prompt)
 	}
+	if !strings.Contains(reviews[2].Prompt, "f-1: feature.txt:1: original bug") {
+		t.Fatalf("a round that can clear an earlier finding must be asked to check it: %s", reviews[2].Prompt)
+	}
 	if parked.FindingsJSON == nil || !strings.Contains(*parked.FindingsJSON, "original bug") {
 		t.Fatalf("unverified original finding disappeared: %+v", parked.FindingsJSON)
 	}

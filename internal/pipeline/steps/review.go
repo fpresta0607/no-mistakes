@@ -684,14 +684,18 @@ func reviewCoverageSection(paths []string) string {
 // prompt input. It rides the FULL review prompt (the same context the first
 // turn saw, plus any finalize-turn answers), so a cold or resumed completion
 // turn can act on it without any other memory of the pass.
-func reviewCoverageCompletionSection(missing []string) string {
+func reviewCoverageCompletionSection(missing []string, isRepairRound bool) string {
 	var b strings.Builder
 	b.WriteString("\n\nFocused coverage completion:\n")
 	b.WriteString("- The review pass you just completed returned no blocking findings, but its reviewed_paths did not cover every changed file this review is held to. The files still unverified are:\n")
 	for _, p := range missing {
 		fmt.Fprintf(&b, "  - %s\n", coveragePathLine(p))
 	}
-	b.WriteString("- Review ONLY the files listed above in this turn: read each one's change in the branch diff, trace it, and judge it under the same rules as the rest of this review.\n")
+	reading := "read each one's change in the branch diff"
+	if isRepairRound {
+		reading = "read in each one what the repair round scope above holds this round to"
+	}
+	fmt.Fprintf(&b, "- Review ONLY the files listed above in this turn: %s, trace it, and judge it under the same rules as the rest of this review.\n", reading)
 	b.WriteString("- Return the complete review JSON again. List in reviewed_paths exactly the files you examined in THIS turn; the pipeline merges your record with the earlier pass. Never list a file you did not examine.\n")
 	b.WriteString("- Report any defect you find in those files as a finding in the same JSON. If they are clean, return an empty findings array.\n")
 	return b.String()
@@ -791,7 +795,7 @@ func (s *ReviewStep) completeCoverageGaps(sctx *pipeline.StepContext, basePrompt
 	}
 	sctx.Log(fmt.Sprintf("review coverage incomplete; running one focused review pass over %d unverified file(s): %s", len(missing), strings.Join(missing, ", ")))
 	completionOpts := opts
-	completionOpts.Prompt = basePrompt + reviewCoverageCompletionSection(missing)
+	completionOpts.Prompt = basePrompt + reviewCoverageCompletionSection(missing, repair != nil)
 	completionOpts.Purpose = "review-coverage"
 	result, err := s.runReviewAgent(sctx, "agent review coverage", role, completionOpts)
 	if agent.IsSafetyRefusal(err) {

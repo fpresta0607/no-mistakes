@@ -83,7 +83,7 @@ func TestRepairRoundCanNarrow(t *testing.T) {
 
 func TestRepairRoundScopeSplit(t *testing.T) {
 	t.Parallel()
-	const selectedDefect = "the selected defect"
+	const selectedDefect = "the selected  defect\nsecond line"
 	outside := Finding{File: "other.go", Line: 3, Description: "a new thought", Action: types.ActionAutoFix}
 	withFile := func(finding Finding, file string, line int) Finding {
 		finding.File, finding.Line = file, line
@@ -96,6 +96,13 @@ func TestRepairRoundScopeSplit(t *testing.T) {
 		wantFollowUp bool
 	}{
 		{name: "a file the repair never touched", finding: outside, wantFollowUp: true},
+		{name: "a spelling that still names a tracked file", finding: withFile(outside, "./internal/repaired.go", 30), wantFollowUp: true},
+		{name: "a backslash path cannot be placed", finding: withFile(outside, `internal\repaired.go`, 15)},
+		{name: "an absolute path cannot be placed", finding: withFile(outside, "/work/repo/internal/repaired.go", 15)},
+		{name: "a drive path cannot be placed", finding: withFile(outside, `D:\work\repo\internal\repaired.go`, 15)},
+		{name: "a diff prefix cannot be placed", finding: withFile(outside, "b/internal/repaired.go", 15)},
+		{name: "another case cannot be placed", finding: withFile(outside, "Internal/Repaired.go", 15)},
+		{name: "a file the repository does not have", finding: withFile(outside, "absent.go", 3)},
 		{name: "an unchanged line of a repaired file", finding: withFile(outside, "repaired.go", 30), wantFollowUp: true},
 		{name: "the line just past a hunk", finding: withFile(outside, "repaired.go", 21), wantFollowUp: true},
 		{name: "the last line of a hunk", finding: withFile(outside, "repaired.go", 20)},
@@ -120,26 +127,30 @@ func TestRepairRoundScopeSplit(t *testing.T) {
 		},
 		{name: "an ask-user finding is a person's decision", finding: Finding{File: "other.go", Line: 3, Description: "d", Action: types.ActionAskUser}},
 		{name: "an unclassified finding fails closed to ask-user", finding: Finding{File: "other.go", Line: 3, Description: "d"}},
-		{name: "beside a selected finding not named closed", finding: withFile(outside, "selected.go", 90)},
-		{name: "beside a selected finding named closed", finding: withFile(outside, "selected.go", 90), closed: []string{"f-1"}, wantFollowUp: true},
-		{
-			name:    "a selected finding named closed and reported again",
-			finding: Finding{File: "selected.go", Line: 90, Description: selectedDefect, Action: types.ActionAutoFix},
-			closed:  []string{"f-1"},
-		},
+		{name: "beside a selected finding not named closed", finding: withFile(outside, "selected.go", 90), closed: []string{}},
+		{name: "in another file while a selected finding has no verdict", finding: outside, closed: []string{}},
+		{name: "beside a selected finding named closed", finding: withFile(outside, "selected.go", 90), wantFollowUp: true},
+		{name: "a selected finding named closed and reported again", finding: Finding{File: "selected.go", Line: 90, Description: selectedDefect, Action: types.ActionAutoFix}},
+		{name: "repeated as the prompt showed it", finding: Finding{File: "selected.go", Line: 90, Description: sanitizePromptText(selectedDefect), Action: types.ActionAutoFix}},
+		{name: "repeated in another file", finding: Finding{File: "other.go", Line: 3, Description: selectedDefect, Action: types.ActionAutoFix}},
 		{name: "beside a finding left out of the repair", finding: withFile(outside, "deferred.go", 90)},
-		{name: "a deferred finding cannot be named closed", finding: withFile(outside, "deferred.go", 90), closed: []string{"f-2"}},
+		{name: "a deferred finding cannot be named closed", finding: withFile(outside, "deferred.go", 90), closed: []string{"f-1", "f-2"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			scope := &repairRoundScope{
-				changed:   map[string][]lineSpan{"repaired.go": {{10, 20}}, "binary.dat": nil, "selected.go": {{1, 5}}},
+				changed:   map[string][]lineSpan{"repaired.go": {{10, 20}}, "internal/repaired.go": {{10, 20}}, "binary.dat": nil, "selected.go": {{1, 5}}},
+				tracked:   map[string]bool{"other.go": true, "repaired.go": true, "internal/repaired.go": true, "binary.dat": true, "selected.go": true, "first-look.go": true, "deferred.go": true},
 				firstLook: []string{"first-look.go"},
 				selected:  []Finding{{ID: "f-1", File: "selected.go", Line: 40, Description: selectedDefect}},
 				deferred:  []Finding{{ID: "f-2", File: "deferred.go", Line: 7, Description: "left for later"}},
 			}
-			findings := Findings{Items: []Finding{tc.finding}, ClosedFindings: tc.closed}
+			closed := tc.closed
+			if closed == nil {
+				closed = []string{"f-1"}
+			}
+			findings := Findings{Items: []Finding{tc.finding}, ClosedFindings: closed}
 
 			scope.split(func(string) {}, &findings)
 
@@ -148,6 +159,34 @@ func TestRepairRoundScopeSplit(t *testing.T) {
 			}
 			if got := len(findings.Items) == 1; got == tc.wantFollowUp {
 				t.Fatalf("still blocking = %v, want %v (findings %+v)", got, !tc.wantFollowUp, findings)
+			}
+		})
+	}
+}
+
+func TestRepairRoundScopeSplitRestatesTheSummaryOfWhatItMoved(t *testing.T) {
+	t.Parallel()
+	scope := &repairRoundScope{tracked: map[string]bool{"a.go": true}}
+	moved := Finding{File: "a.go", Line: 3, Description: "d", Action: types.ActionAutoFix}
+	blocked := Finding{Description: "no anchor", Action: types.ActionAutoFix}
+	cases := []struct {
+		name  string
+		items []Finding
+		want  string
+	}{
+		{"everything moved", []Finding{moved}, "no review findings remain"},
+		{"something still blocks", []Finding{moved, blocked}, "1 review finding remains"},
+		{"nothing moved keeps the reviewer's words", []Finding{blocked}, "1 error: must not merge"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			findings := Findings{Items: tc.items, Summary: "1 error: must not merge"}
+
+			scope.split(func(string) {}, &findings)
+
+			if findings.Summary != tc.want {
+				t.Fatalf("summary = %q, want %q", findings.Summary, tc.want)
 			}
 		})
 	}
@@ -201,6 +240,9 @@ func TestNewRepairRoundScopeReadsTheRepairFromTheWorktree(t *testing.T) {
 		{"long.txt", 24, true},
 		{bracketed, 30, false},
 		{bracketed, 10, true},
+		{"./long.txt", 30, true},
+		{filepath.ToSlash(filepath.Join(dir, "long.txt")), 30, false},
+		{"absent.txt", 30, false},
 	}
 	for _, tc := range cases {
 		if got := scope.isFollowUp(Finding{File: tc.file, Line: tc.line, Description: "d", Action: types.ActionAutoFix}); got != tc.outside {
@@ -564,5 +606,10 @@ func TestReviewLoop_ACoverageCompletionFollowUpDoesNotPark(t *testing.T) {
 	_, _, record := lastReviewRound(t, database, run)
 	if len(record.Items) != 0 || len(record.FollowUps) != 1 {
 		t.Fatalf("record = %+v, want the completion turn's finding recorded as a follow-up", record)
+	}
+	for _, call := range mock.snapshot() {
+		if call.Purpose == "review-coverage" && (strings.Contains(call.Prompt, "change in the branch diff") || !strings.Contains(call.Prompt, "the repair round scope above")) {
+			t.Fatalf("the completion turn must keep to the repair's scope:\n%s", call.Prompt)
+		}
 	}
 }
