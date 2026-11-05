@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -87,6 +89,19 @@ func childLaunchFactory(calls *atomic.Int32, evidence *atomic.Value) StepFactory
 	}
 }
 
+// pinIntentCheck records the policy snapshot startRun gives every real run, so
+// a fixture's parent has the same row a real parent does.
+func pinIntentCheck(t *testing.T, database *db.DB, runID string) {
+	t.Helper()
+	policy, err := json.Marshal(config.IntentCheck{Mode: config.IntentCheckOff})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunIntentCheck(runID, string(policy)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func authoredChildLaunch(t *testing.T, configure launchConfigurer) childLaunchFixture {
 	t.Helper()
 	calls, evidence := &atomic.Int32{}, &atomic.Value{}
@@ -116,6 +131,7 @@ func terminalChildLaunch(t *testing.T, configure launchConfigurer) childLaunchFi
 	if err != nil {
 		t.Fatal(err)
 	}
+	pinIntentCheck(t, database, run.ID)
 	managed := p.WorktreeDir(repo.ID, run.ID)
 	if err := git.WorktreeAdd(context.Background(), gate, managed, head); err != nil {
 		t.Fatal(err)

@@ -87,7 +87,7 @@ type Run struct {
 	ParkedMS        int64
 	Intent          *string
 	IntentSource    *string
-	IntentCheckJSON *string `json:"-"`
+	IntentCheckJSON *string
 	IntentSessionID *string
 	IntentScore     *float64
 	// LaunchNonce, LaunchValidationGeneration, and LaunchIntentDigest are

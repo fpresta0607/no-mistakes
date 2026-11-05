@@ -407,6 +407,7 @@ func authoredAdmissionFixtureFor(t *testing.T, factory StepFactory, configure la
 	if err != nil {
 		t.Fatal(err)
 	}
+	pinIntentCheck(t, database, parent.ID)
 	if err := database.UpdateRunErrorStatus(parent.ID, types.RunCancelReasonAbortedByUser, types.RunCancelled); err != nil {
 		t.Fatal(err)
 	}
