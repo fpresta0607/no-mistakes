@@ -48,7 +48,7 @@ func TestReplayRoundContextPreservesDeferredFindings(t *testing.T) {
 			c := Case{Dir: root}
 			c.DefaultBranch = "main"
 			c.Branch = "feature"
-			database, _, fixing, previous, deferred, reviewed, err := replayRoundContext(paths.WithRoot(t.TempDir()), c, root)
+			database, _, fixing, previous, deferred, reviewed, _, err := replayRoundContext(paths.WithRoot(t.TempDir()), c, root)
 			if err != nil {
 				t.Fatal(err)
 			}

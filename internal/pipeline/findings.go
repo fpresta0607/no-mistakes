@@ -447,6 +447,24 @@ func selectedFindingIdentities(rounds []*db.StepRound) map[string]types.Finding 
 	return identity
 }
 
+// SelectedOutstandingFindingIDs reads from a step's recorded rounds the findings
+// a fixer was sent to close that are still outstanding. They are what a later
+// round can clear on its coverage, in a recovered run and in an eval replay alike.
+func SelectedOutstandingFindingIDs(rounds []*db.StepRound) []string {
+	var selected []string
+	latest := ""
+	for _, round := range rounds {
+		latest = ""
+		if round.FindingsJSON != nil {
+			latest = *round.FindingsJSON
+		}
+		if round.SelectedFindingIDs != nil {
+			selected = combineFindingIDLists(selected, findingIDsFromSelectionJSON(*round.SelectedFindingIDs))
+		}
+	}
+	return retainFindingIDsByIdentity(latest, selected, selectedFindingIdentities(rounds))
+}
+
 // retainFindingIDsByIdentity is retainFindingIDs plus a content-identity
 // check: an ID only survives into the retained set when the finding it
 // currently names in latestRaw has the SAME content (findingKey) as the

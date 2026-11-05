@@ -795,12 +795,8 @@ func (e *Executor) durableExecutionState(stepResultID string) (stepExecutionStat
 		} else {
 			state.outstandingFindings = ""
 		}
-		if round.SelectedFindingIDs != nil {
-			state.selectedOutstandingIDs = combineFindingIDLists(state.selectedOutstandingIDs, findingIDsFromSelectionJSON(*round.SelectedFindingIDs))
-		}
 	}
-	identity := selectedFindingIdentities(rounds)
-	state.selectedOutstandingIDs = retainFindingIDsByIdentity(state.outstandingFindings, state.selectedOutstandingIDs, identity)
+	state.selectedOutstandingIDs = SelectedOutstandingFindingIDs(rounds)
 	return state, nil
 }
 
