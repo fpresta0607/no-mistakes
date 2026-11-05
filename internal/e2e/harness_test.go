@@ -83,12 +83,21 @@ func TestHarnessFixtureCheckoutIgnoresSystemGitConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("GIT_CONFIG_SYSTEM", systemConfig)
-	h := NewHarness(t, SetupOpts{})
-	const content = "seed for review-agents routing\n"
-	h.CommitChange("feature/line-endings", "feature.txt", content, "seed feature")
+	h := NewHarness(t, SetupOpts{Agent: "pi", Scenario: writeReviewAgentsRoutingScenario(t)})
+	if out, err := h.Run("init"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	const (
+		branch  = "feature/line-endings"
+		content = "seed for review-agents routing\n"
+	)
+	h.CommitChange(branch, "feature.txt", content, "seed feature")
+	h.PushToGate(branch)
+	parked := waitForStepStatus(t, h, branch, types.StepReview, types.StepStatusAwaitingApproval, 90*time.Second)
 
-	worktree := h.AddWorktree("feature/line-endings")
-
+	// Scripted agent edits run in the daemon's run worktree, not in a checkout
+	// the harness makes itself, so that is the one whose bytes must hold.
+	worktree := paths.WithRoot(h.NMHome).WorktreeDir(h.repoID(), parked.ID)
 	checkedOut, err := os.ReadFile(filepath.Join(worktree, "feature.txt"))
 	if err != nil {
 		t.Fatal(err)
