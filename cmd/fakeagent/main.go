@@ -71,7 +71,7 @@ func run(argv []string) int {
 // returns non-zero (so SCM detection treats GitHub as unauthenticated)
 // and any other subcommand prints a clear error.
 func runGhStub(args []string) int {
-	switch os.Getenv("FAKEAGENT_GH_STUB") {
+	switch os.Getenv("FAKEAGENT_GH_MODE") {
 	case "fork-pr":
 		return runGhForkPRStub(args)
 	case "stateful-pr":
