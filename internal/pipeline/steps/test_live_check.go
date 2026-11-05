@@ -94,10 +94,12 @@ func liveSurfaceUntouched(sctx *pipeline.StepContext, baseSHA string) (bool, err
 // own rule skipped. It carries no verdict and no scenario: nothing was driven
 // live, so the pull request's attestation omits live_validation instead of
 // claiming one.
-func liveSurfaceSkipFindings(sctx *pipeline.StepContext, ranBaseline bool) Findings {
+func liveSurfaceSkipFindings(sctx *pipeline.StepContext, baseline testBaseline) Findings {
 	rule := "test.surface_paths: " + strings.Join(sctx.Config.Test.SurfacePaths, ", ")
 	ran := "no test command is configured, so the Test step ran nothing for this change"
-	if ranBaseline {
+	if baseline.focused != nil {
+		ran = "the repair's focused check ran, not the configured test command"
+	} else if len(baseline.results) > 0 {
 		ran = "the configured test command still ran"
 	}
 	sctx.Log(fmt.Sprintf("live check skipped: this change touches none of the repository's surface paths (%s); %s", rule, ran))
@@ -125,7 +127,7 @@ func liveCheckLedgerPath(evidenceDir string) string {
 func liveCheckPromptSections(sctx *pipeline.StepContext, evidenceDir string) string {
 	var b strings.Builder
 	if environment := strings.TrimSpace(sctx.Config.Test.Environment); environment != "" {
-		b.WriteString("\n\nPrepared environment (trusted, from the default branch; this replaces the instruction above to build a disposable environment yourself):\n")
+		b.WriteString("\n\nPrepared environment (trusted, from the default branch):\n")
 		b.WriteString(sanitizePromptMultilineText(environment))
 		b.WriteString(`
 - Use this prepared environment for everything a scenario needs: the product instance, its data, its accounts, and its services.

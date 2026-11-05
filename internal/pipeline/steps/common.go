@@ -274,7 +274,7 @@ var testFindingsSchema = json.RawMessage(`{
 		},
 		"scenarios": {
 			"type": "array",
-			"description": "every scenario this change must satisfy, derived from the user intent and the change itself, with the result of driving it",
+			"description": "every scenario this change must satisfy, derived from the user intent and the change itself, with the result of driving it; on a focused re-check after a repair, only the scenarios driven in this turn",
 			"items": {
 				"type": "object",
 				"properties": {
@@ -282,7 +282,7 @@ var testFindingsSchema = json.RawMessage(`{
 					"result": {"type": "string", "enum": ["pass", "fail", "untested"]},
 					"live": {"type": "boolean", "description": "true ONLY when this scenario was driven against the real running product in this run; live describes execution, not tenant or production liveness: an actually executed local product or real SDK against a localhost emulator with synthetic inputs counts as live for that local scenario, not as tenant, mailbox, Graph, or production validation; a unit test, stub, mock, recorded fixture, or code reading is not live; pass and fail require live=true"},
 					"evidence": {"type": "string", "description": "the command, artifact label, or evidence file that shows this result"},
-					"reason": {"type": "string", "description": "required for untested: what was tried to drive this scenario live and why live validation is impossible, naming the specific tool, credential, permission, or authority out of reach and how to provide it; under no-surface, why there is no live-validatable surface"}
+					"reason": {"type": "string", "description": "required for untested: what is missing to drive this scenario live, naming the specific environment, tool, credential, permission, or authority and how to provide it; under no-surface, why there is no live-validatable surface"}
 				},
 				"required": ["name", "result", "live", "evidence", "reason"]
 			}

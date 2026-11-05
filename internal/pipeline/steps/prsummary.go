@@ -51,6 +51,10 @@ type pipelineAttestation struct {
 	// omitted entirely for a run whose test step recorded no verdict (every
 	// run from before the contract), which is itself the answer: unknown.
 	LiveValidation *pipelineAttestationLiveValidation `json:"live_validation,omitempty"`
+	// FocusedCheck says a repair on this head was re-checked by the repository's
+	// commands.test_focused, so commands.test itself did not run on it. Omitted
+	// when no focused check ran on this head.
+	FocusedCheck *pipelineAttestationFocusedCheck `json:"focused_check,omitempty"`
 	// AllowTestCommandOverride is the trusted repo-config reason that opts
 	// this repository into letting require-no-mistakes accept a Test step
 	// approved over a failing configured commands.test. Omitted when the repo
@@ -79,6 +83,14 @@ type pipelineAttestationLiveValidation struct {
 // withheldArtifactContent stands in for artifact content that carries a captured
 // agent prompt, so the PR says something was held back instead of dropping it.
 const withheldArtifactContent = "Withheld from this pull request: the content carries a captured agent prompt."
+
+// pipelineAttestationFocusedCheck reports a focused check's result and how many
+// failures and repaired paths it was given.
+type pipelineAttestationFocusedCheck struct {
+	ExitCode int `json:"exit_code"`
+	Tests    int `json:"tests"`
+	Paths    int `json:"paths"`
+}
 
 type testingSummaryOptions struct {
 	flavor               prBodyFlavor
@@ -225,6 +237,7 @@ func newPipelineAttestation(steps []*db.StepResult, rounds map[string][]*db.Step
 		return false
 	})
 	attestation.LiveValidation = attestedLiveValidation(steps, rounds, headSHA)
+	attestation.FocusedCheck = attestedFocusedCheck(steps, rounds, headSHA)
 	return attestation
 }
 
@@ -232,6 +245,34 @@ func newPipelineAttestation(steps []*db.StepResult, rounds map[string][]*db.Step
 // step's recorded findings. It returns nil - and the field is then omitted -
 // whenever no verdict was recorded or the verdict belongs to another head.
 func attestedLiveValidation(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string) *pipelineAttestationLiveValidation {
+	findings, ok := attestedTestFindings(steps, rounds)
+	if !ok || !types.IsKnownTestVerdict(findings.Verdict) || findings.TestedHeadSHA != headSHA {
+		return nil
+	}
+	live, total := types.LiveScenarioCounts(findings.Scenarios)
+	return &pipelineAttestationLiveValidation{
+		Verdict: findings.Verdict,
+		Live:    live,
+		Total:   total,
+	}
+}
+
+// attestedFocusedCheck derives the focused-check payload the same way, and for
+// the same reason returns nil when the check ran on another head.
+func attestedFocusedCheck(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string) *pipelineAttestationFocusedCheck {
+	findings, ok := attestedTestFindings(steps, rounds)
+	if !ok || findings.FocusedCheck == nil || findings.FocusedCheck.HeadSHA != headSHA {
+		return nil
+	}
+	return &pipelineAttestationFocusedCheck{
+		ExitCode: findings.FocusedCheck.ExitCode,
+		Tests:    findings.FocusedCheck.Tests,
+		Paths:    findings.FocusedCheck.Paths,
+	}
+}
+
+// attestedTestFindings returns the test step's latest recorded evidence.
+func attestedTestFindings(steps []*db.StepResult, rounds map[string][]*db.StepRound) (types.Findings, bool) {
 	for _, sr := range steps {
 		if sr == nil || sr.StepName != types.StepTest {
 			continue
@@ -241,19 +282,11 @@ func attestedLiveValidation(steps []*db.StepResult, rounds map[string][]*db.Step
 				continue
 			}
 			findings, err := types.ParseFindingsJSON(*raw)
-			if err != nil || !types.IsKnownTestVerdict(findings.Verdict) || findings.TestedHeadSHA != headSHA {
-				return nil
-			}
-			live, total := types.LiveScenarioCounts(findings.Scenarios)
-			return &pipelineAttestationLiveValidation{
-				Verdict: findings.Verdict,
-				Live:    live,
-				Total:   total,
-			}
+			return findings, err == nil
 		}
-		return nil
+		return types.Findings{}, false
 	}
-	return nil
+	return types.Findings{}, false
 }
 
 // rebindPipelineAttestationHead rewrites the first live v1 attestation

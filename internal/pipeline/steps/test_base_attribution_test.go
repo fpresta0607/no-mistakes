@@ -66,7 +66,7 @@ func lastPrompt(ag *mockAgent) string {
 // without attribution.
 func TestTestStep_BaseAttributionSeparatesIntroducedFromPreexisting(t *testing.T) {
 	t.Parallel()
-	sctx, ag, dir := attributionRepo(t, "TestFlakyOnMain\n", "TestFlakyOnMain\nTestBrokenByChange\n", true)
+	sctx, _, dir := attributionRepo(t, "TestFlakyOnMain\n", "TestFlakyOnMain\nTestBrokenByChange\n", true)
 
 	outcome, err := (&TestStep{}).Execute(sctx)
 	if err != nil {
@@ -85,8 +85,8 @@ func TestTestStep_BaseAttributionSeparatesIntroducedFromPreexisting(t *testing.T
 		if !strings.Contains(findings.Summary, want) {
 			t.Fatalf("summary missing %q:\n%s", want, findings.Summary)
 		}
-		if !strings.Contains(lastPrompt(ag), want) {
-			t.Fatalf("evidence prompt missing %q:\n%s", want, lastPrompt(ag))
+		if findings.BaselineFailure == nil || !strings.Contains(findings.BaselineFailure.Attribution, want) {
+			t.Fatalf("baseline failure record missing %q: %+v", want, findings.BaselineFailure)
 		}
 	}
 	if strings.Contains(findings.Summary, "Introduced by this change (1):\n- example.com/suite: --- FAIL: TestFlakyOnMain") {

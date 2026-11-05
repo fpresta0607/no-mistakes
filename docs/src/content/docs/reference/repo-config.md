@@ -433,8 +433,46 @@ no-mistakes does not guess whether an arbitrary shell string is "too broad" - th
 
 When set, the test step runs this exact command first as the baseline and checks the exit code.
 Machine-local [`repository_overrides.commands`](/no-mistakes/reference/global-config/#machine-local-commands) can add checks and lower its scheduling priority without replacing this command.
-Whether the baseline passes, fails, or is absent, the agent then derives targeted end-user scenarios and drives the product itself under the same targeted-validation contract.
-A non-zero exit parks the Test step. Approving that gate records an explicit override on the step and on the PR attestation; the [`require-no-mistakes`](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) check treats that as non-compliant unless [`test.allow_approve_over_failure`](#testallow_approve_over_failure) is set.
+When the baseline passes or is absent, the agent then derives targeted end-user scenarios and drives the product itself under the same targeted-validation contract.
+A non-zero exit parks the Test step for repair with no live check. Approving that gate completes the step with no live check on that head, so its attestation carries no `live_validation`, and records an explicit override on the step and on the PR attestation; the [`require-no-mistakes`](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) check treats that as non-compliant unless [`test.allow_approve_over_failure`](#testallow_approve_over_failure) is set.
+
+### commands.test_focused
+
+Optional command that stands in for [`commands.test`](#commandstest) on the re-run after a Test repair. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /c` on Windows.
+
+| | |
+| --- | --- |
+| Type | `string` |
+| Default | Empty (the re-run after a repair runs `commands.test` whole) |
+
+```yaml
+commands:
+  test: make test
+  test_focused: ./scripts/test-focused.sh
+```
+
+`commands.test` is an opaque command, so only the repository can narrow it.
+After a repair, the step writes what the failure and the repair touch to a file and names that file in the `NO_MISTAKES_TEST_FOCUS` environment variable, which only this command and the checks beside it see.
+Each line of the file is one of:
+
+- `test <failure>`: a failure recognized in the failed command's output, such as `test --- FAIL: TestParse`. It is the line as the [`test.base_attribution`](#testbase_attribution) parser reads it, with the package first for `go test`.
+- `path <path>`: a file the repair changed, relative to the repository root. A newline, tab, or control character in a path is written as an escape.
+
+The command reads that file, runs what it names, and exits non-zero on a failure.
+
+It stands in only when `commands.test` is set and took its turn, a repair turn ran, the failed output named every failure, and there is a failure or a changed path to give it.
+Otherwise `commands.test` runs whole, which is also what happens with this key unset, because a failed baseline never clears with nothing re-run.
+The step reads the common runners' output and cannot prove an arbitrary runner named everything, so the command should also run what the `path` lines point at.
+
+A focused pass is never a full baseline:
+
+- The step's `focused_check` record and its testing summary name the command and say the Test step did not run `commands.test` on that head.
+- The PR attestation carries [`focused_check`](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) for that head, and it is gone once the head moves.
+- Under [`side_by_side`](/no-mistakes/reference/global-config/#side_by_side) the Push step counts that head as untested and runs `commands.test` on it before anything is pushed, whether the focused check passed or a person approved over its failure.
+
+A failing focused check parks the step the way a failing `commands.test` does, with a finding that names it, machine-local additional checks still run after it, and [`test_command_wrapper`](/no-mistakes/reference/global-config/#test_command_wrapper) starts it like the baseline.
+[`test.base_attribution`](#testbase_attribution) compares `commands.test` on both commits, so it does not run for a focused check.
+The trust rules are those of every other `commands` entry.
 
 ### commands.lint
 
@@ -1259,7 +1297,7 @@ test:
 
 When a configured [`commands.test`](#commandstest) exits non-zero, re-runs the same command on the run's base commit (the merge base with the effective PR base branch) and diffs the two results, so failures that already exist on the base are not blamed on the change. The base run uses a disposable clone of that commit outside the run worktree, runs [`commands.prepare`](#commandsprepare) there first when one is configured (its output is logged as `Prepare (base)`, and its tracked and ordinary untracked changes are reset before the base suite runs, exactly as on the head, so only ignored materialization survives), and logs its output to the Test step log as `Test (base)`. Base preparation and the base command share one deadline, the Test budget [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout) (default 30 minutes); a base run that outlives it is stopped and reported as unavailable while the head's failure still parks. Both base commands keep the machine-local [`nice`](/no-mistakes/reference/global-config/#machine-local-commands) settings for `prepare` and `test`. Only the repository command's own output is attributed: machine-local `additional` test checks are never re-run on the base, and a failure in one of them alone triggers no base run.
 
-The attribution leads the Test findings summary (the failure output the PR and repair turns see) and is passed to the evidence agent:
+The attribution leads the Test findings summary (the failure output the PR and repair turns see) and is passed to the repair agent:
 
 - the command passes on the base: every failure is introduced by the change;
 - the command also fails on the base: recognized per-test failure lines are split into *introduced by this change* and *pre-existing on the base commit*. Per-test lines are recognized for common runners (`go test`, pytest, jest/vitest, TAP, cargo); package- or file-level summary lines are ignored, except that a `go test` failure is keyed by the package its block reports, and a pytest failure is keyed by its `path::test` id without the failure reason. Only those two carry a package or file identity; any other line that also fails on the base (jest/vitest, TAP, cargo, or `go test` output without a package line) may be a different test sharing the name, so it is listed as *ambiguous, could not attribute* instead of pre-existing. A `go test` package that fails with no per-test line (a build failure, or a `TestMain` or `init` panic) and did not fail that way on the base is listed under *failures without a per-test line (could not be attributed)*. When no per-test lines are recognized in the base output, or none are left to list from the change's output, the summary says the two could not be separated;
@@ -1302,7 +1340,7 @@ When the list is set and a change touches none of its paths, the Test step does 
 It logs one line that says so and names the rule, and the pull request's Testing section carries the same sentence.
 [`commands.test`](#commandstest) still runs, and its failure still parks the step.
 The record carries no verdict and no scenario, so the pull request's attestation omits `live_validation` instead of claiming one.
-With the list unset, the evidence agent runs on every change, as it always has.
+With the list unset, the evidence agent runs on every change whose baseline does not fail.
 
 Entries follow the [`ignore_patterns`](#ignore_patterns) match rules, and they are matched against every changed file, never the `ignore_patterns`-filtered set.
 A rename counts on both sides, so a file moved out of the surface is a change to it.
@@ -1331,7 +1369,7 @@ test:
     Stop it with scripts/live-env.ps1 -Stop.
 ```
 
-By default the evidence agent is told to build a disposable environment itself when none is provided, which is where a live check's time goes when the product needs a database or a sign-in.
+By default the evidence agent uses the repository's own tests and runs the product the way its docs run it, and a scenario that needs something absent, such as a database or a sign-in, is reported `untested` with what is missing.
 With this field set, the agent is told to use the prepared environment for everything a scenario needs and to build none of its own: no database, no service stand-in, no seed data, no second instance of the product.
 When the prepared environment does not start, or lacks what a scenario needs, the agent reports that scenario `untested` with what failed.
 With the field unset, the prompt is exactly what it was before the field existed.

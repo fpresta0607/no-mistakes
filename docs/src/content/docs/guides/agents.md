@@ -30,7 +30,7 @@ Testing prompts also ask agents to remove transient working-tree artifacts they 
 - Leave `agent: auto` if one good agent is already installed and you do not need repo-specific behavior.
 - Set a repo-level `agent` override when one codebase clearly works better with a different tool.
 - Use an ordered fallback list when you prefer one agent but want no-mistakes to try another if the first process is unavailable.
-- Set explicit `commands.lint` and a **targeted** `commands.test` if you want deterministic local baseline command execution regardless of agent choice. Test always follows its optional baseline with agent-driven end-user scenarios; remote CI owns broad regression. See [Test](/no-mistakes/reference/pipeline-steps/#test) for the live-validation contract.
+- Set explicit `commands.lint` and a **targeted** `commands.test` if you want deterministic local baseline command execution regardless of agent choice. Test follows a passing or absent baseline with agent-driven end-user scenarios, and a failing one parks for repair first; remote CI owns broad regression. See [Test](/no-mistakes/reference/pipeline-steps/#test) for the live-validation contract.
 
 That last point matters: explicit repo commands make the baseline predictable, while the agent establishes whether the requested behavior works in the real product.
 That testing invocation is expected to leave only intentional source or test-file changes in the worktree, while preserving requested evidence files under the dedicated evidence directory.
@@ -64,7 +64,7 @@ This refusal also applies when deterministic test or lint commands are configure
 | Start or rerun a validation gate | No | The run fails before any pipeline step starts. |
 | Review | No | Requires agent judgment and structured findings. |
 | Test with `commands.test` | No, as part of a full gate | The command is deterministic, but the gate refuses before steps start rather than presenting command-only validation as a complete pass. |
-| Test, with or without `commands.test` | No | The optional command is only a baseline; the agent must derive and drive end-user scenarios. |
+| Test, with or without `commands.test` | No | The optional command is only a baseline; once it passes, the agent must derive and drive end-user scenarios. |
 | Document | No | Requires the agent to discover and update documentation gaps. |
 | Lint with `commands.lint` | No, as part of a full gate | The command is deterministic, but the full gate still requires an agent. |
 | Lint without `commands.lint` and all fix rounds | No | The document step performs the initial combined housekeeping pass, and an agent is still needed for fallback assessment or code changes. |

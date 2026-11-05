@@ -747,7 +747,7 @@ func baselineBeforePush(sctx *pipeline.StepContext, head string) (note string, r
 
 	documentationOnly := false
 	if !recorded {
-		note = fmt.Sprintf("The commit the Test step ran on is not known to this daemon, so %s is treated as untested.", shortObjectID(head))
+		note = fmt.Sprintf("This daemon knows of no full baseline run on a commit the Test step tested, so %s is treated as untested.", shortObjectID(head))
 	} else {
 		commits, files, known := commitsAfter(sctx, tested, head)
 		if !known {

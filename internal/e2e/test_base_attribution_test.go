@@ -226,7 +226,7 @@ exit 0
 			logData := readStepLog(t, h, run.ID, string(types.StepTest))
 			cwds, _ := os.ReadFile(cwdLog)
 
-			var summary string
+			var summary, repairAttribution string
 			if tc.wantPark {
 				if step.FindingsJSON == nil {
 					t.Fatal("parked Test step has no findings")
@@ -236,6 +236,9 @@ exit 0
 					t.Fatalf("parse findings: %v", err)
 				}
 				summary = findings.Summary
+				if findings.BaselineFailure != nil {
+					repairAttribution = findings.BaselineFailure.Attribution
+				}
 				var commandFinding *types.Finding
 				for i := range findings.Items {
 					if findings.Items[i].Category == types.FindingCategoryTestCommand && !strings.HasPrefix(findings.Items[i].Description, "machine-local ") {
@@ -268,8 +271,8 @@ exit 0
 			if got := strings.Contains(logData, "re-running it on base commit"); got != (tc.wantBaseRun || tc.prepareScript != "") {
 				t.Errorf("step log base re-run present = %v, want %v:\n%s", got, tc.wantBaseRun, logData)
 			}
-			if tc.want != nil && tc.wantPark && !anyPromptContains(h, tc.want[0]) {
-				t.Errorf("no agent prompt carried the attribution %q", tc.want[0])
+			if tc.want != nil && tc.wantPark && !strings.Contains(repairAttribution, tc.want[0]) {
+				t.Errorf("the record for the repair prompt lacks the attribution %q: %q", tc.want[0], repairAttribution)
 			}
 			// Every base-side command ran in a disposable checkout outside
 			// the run worktree, which is removed afterwards.

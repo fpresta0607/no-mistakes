@@ -46,7 +46,7 @@ func TestTestStep_VerifyApprovalOverride_FailingConfiguredCommand(t *testing.T) 
 	if outcome.ExitCode != 7 || !outcome.NeedsApproval {
 		t.Fatalf("outcome = %+v, want a parked failing configured command", outcome)
 	}
-	if !containsLog(logs, "configured test command failed, asking agent to gather live evidence...") {
+	if !containsLog(logs, "configured test command failed, parking for repair with no live check...") {
 		t.Fatalf("missing configured-command failure log, got %q", logs)
 	}
 	if containsLog(logs, "baseline tests failed") {

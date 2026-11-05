@@ -127,8 +127,8 @@ func TestTestStep_LocalCheckFailureCannotBecomeAGreenBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	findings, err := types.ParseFindingsJSON(outcome.Findings)
-	if err != nil || !outcome.NeedsApproval || outcome.ExitCode != 9 || len(ag.calls) != 1 {
-		t.Fatalf("local failure must park even after live evidence: %+v, %v", outcome, err)
+	if err != nil || !outcome.NeedsApproval || outcome.ExitCode != 9 || len(ag.calls) != 0 {
+		t.Fatalf("local failure must park with no live check: %+v, %v, %d agent calls", outcome, err, len(ag.calls))
 	}
 	if len(findings.Items) == 0 || findings.Items[0].Category != types.FindingCategoryTestCommand {
 		t.Fatalf("failure did not retain configured-command gating: %+v", findings)
@@ -141,18 +141,15 @@ func TestTestStep_LocalCheckFailureCannotBecomeAGreenBaseline(t *testing.T) {
 			t.Fatalf("passing team command blamed for the local check: %+v", findings.Items)
 		}
 	}
+	if strings.Contains(findings.TestingSummary, "configured test command failed") {
+		t.Fatalf("testing summary blames the team command: %q", findings.TestingSummary)
+	}
 	if findings.Items[0].Description != "machine-local test check failed with exit code 9: exit 9" {
 		t.Fatalf("local failure not attributed to the check by name: %q", findings.Items[0].Description)
 	}
-	prompt := ag.calls[0].Prompt
-	if !strings.Contains(prompt, "Configured test command already ran successfully as baseline: `exit 0`") ||
-		!strings.Contains(prompt, "failed with exit code 9: `exit 9`") ||
-		strings.Contains(prompt, "Configured test command failed") {
-		t.Fatalf("prompt misattributes the baseline:\n%s", prompt)
-	}
 }
 
-func TestTestStep_LocalCheckFailureWithoutTeamCommandReachesTheAgentByName(t *testing.T) {
+func TestTestStep_LocalCheckFailureWithoutTeamCommandParksByName(t *testing.T) {
 	t.Parallel()
 	dir, base, head := setupGitRepo(t)
 	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
@@ -173,8 +170,8 @@ func TestTestStep_LocalCheckFailureWithoutTeamCommandReachesTheAgentByName(t *te
 	if findings.Items[0].Description != "machine-local test check failed with exit code 5: exit 5" {
 		t.Fatalf("finding = %q", findings.Items[0].Description)
 	}
-	if !strings.Contains(ag.calls[0].Prompt, "failed with exit code 5: `exit 5`") {
-		t.Fatalf("failed local check missing from the agent prompt:\n%s", ag.calls[0].Prompt)
+	if len(ag.calls) != 0 {
+		t.Fatalf("agent calls = %d, want no live check on a failed local check", len(ag.calls))
 	}
 	joined := strings.Join(logs, "\n")
 	if strings.Contains(joined, "no test command configured") || !strings.Contains(joined, "machine-local test check failed: exit 5") {
