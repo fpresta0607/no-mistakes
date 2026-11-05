@@ -12,8 +12,11 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -89,10 +92,12 @@ func TestRepairRoundScopeSplit(t *testing.T) {
 		finding.File, finding.Line = file, line
 		return finding
 	}
+	heldBack := []Finding{{ID: "f-2", File: "deferred.go", Line: 7, Description: "left for later"}}
 	cases := []struct {
 		name         string
 		finding      Finding
 		closed       []string
+		deferred     []Finding
 		wantFollowUp bool
 	}{
 		{name: "a file the repair never touched", finding: outside, wantFollowUp: true},
@@ -133,8 +138,9 @@ func TestRepairRoundScopeSplit(t *testing.T) {
 		{name: "a selected finding named closed and reported again", finding: Finding{File: "selected.go", Line: 90, Description: selectedDefect, Action: types.ActionAutoFix}},
 		{name: "repeated as the prompt showed it", finding: Finding{File: "selected.go", Line: 90, Description: sanitizePromptText(selectedDefect), Action: types.ActionAutoFix}},
 		{name: "repeated in another file", finding: Finding{File: "other.go", Line: 3, Description: selectedDefect, Action: types.ActionAutoFix}},
-		{name: "beside a finding left out of the repair", finding: withFile(outside, "deferred.go", 90)},
-		{name: "a deferred finding cannot be named closed", finding: withFile(outside, "deferred.go", 90), closed: []string{"f-1", "f-2"}},
+		{name: "beside a finding left out of the repair", finding: withFile(outside, "deferred.go", 90), deferred: heldBack},
+		{name: "in another file while a finding is left out of the repair", finding: outside, deferred: heldBack},
+		{name: "a deferred finding cannot be named closed", finding: withFile(outside, "deferred.go", 90), closed: []string{"f-1", "f-2"}, deferred: heldBack},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -144,7 +150,7 @@ func TestRepairRoundScopeSplit(t *testing.T) {
 				tracked:   map[string]bool{"other.go": true, "repaired.go": true, "internal/repaired.go": true, "binary.dat": true, "selected.go": true, "first-look.go": true, "deferred.go": true},
 				firstLook: []string{"first-look.go"},
 				selected:  []Finding{{ID: "f-1", File: "selected.go", Line: 40, Description: selectedDefect}},
-				deferred:  []Finding{{ID: "f-2", File: "deferred.go", Line: 7, Description: "left for later"}},
+				deferred:  tc.deferred,
 			}
 			closed := tc.closed
 			if closed == nil {
@@ -588,6 +594,103 @@ func TestReviewLoop_AFindingBesideASelectedOneNeedsAClosedVerdict(t *testing.T) 
 			t.Fatalf("parked items = %q, want both still outstanding", got)
 		}
 	})
+}
+
+// A question is resolved by its answer. The checklist tells the rereview to
+// report an open finding again, and a copy of a question's row has no category,
+// so the answer would leave the gate parked on it.
+func TestReviewLoop_AnOpenQuestionIsLeftToItsAnswer(t *testing.T) {
+	const questionRow = "  - question-q1: feature.txt:1: "
+	var conversationDir string
+	reviewTurn := 0
+	mock := &sessionMockAgent{}
+	mock.respond = func(opts agent.RunOpts) *agent.Result {
+		switch opts.Purpose {
+		case "review":
+			reviewTurn++
+			if reviewTurn == 1 {
+				if err := appendAgentQuestionLine(conversationDir, `{"id":"q1","kind":"question","question":"Should the legacy route keep answering?","options":["Keep","Remove"],"weight":"major","file":"feature.txt","line":1}`); err != nil {
+					t.Errorf("append question: %v", err)
+				}
+				return &agent.Result{Output: []byte(fmt.Sprintf(`{"findings":[{"id":"f-1","severity":"error","file":"feature2.txt","line":1,"description":"selected defect","action":"auto-fix"}],"reviewed_paths":["feature.txt","feature2.txt"],%s}`, cleanRereview))}
+			}
+			findings := "[]"
+			if _, listed, isListed := strings.Cut(opts.Prompt, questionRow); isListed {
+				description, _, _ := strings.Cut(listed, "\n")
+				row, err := json.Marshal([]map[string]any{{"id": "question-q1", "severity": "warning", "file": "feature.txt", "line": 1, "description": description, "action": "ask-user"}})
+				if err != nil {
+					t.Errorf("marshal the copied row: %v", err)
+				}
+				findings = string(row)
+			}
+			return &agent.Result{Output: []byte(fmt.Sprintf(`{"findings":%s,"closed_findings":["f-1"],"reviewed_paths":["feature.txt","feature2.txt"],%s}`, findings, cleanRereview))}
+		case "review-fix":
+			if err := os.WriteFile(filepath.Join(opts.CWD, "feature2.txt"), []byte("fixed two\n"), 0o644); err != nil {
+				t.Errorf("write fix: %v", err)
+			}
+			return &agent.Result{Output: []byte(`{"summary":"fix"}`)}
+		default:
+			t.Errorf("unexpected agent purpose %q", opts.Purpose)
+			return &agent.Result{Output: []byte(`{}`)}
+		}
+	}
+	workDir, baseSHA, headSHA := twoFileRepo(t)
+	ensureHermeticOrigin(t, workDir)
+	database, err := db.Open(filepath.Join(t.TempDir(), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	repo, err := database.InsertRepo(workDir, "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "refs/heads/feature", headSHA, baseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Agent: types.AgentClaude, AutoFix: config.AutoFix{Review: 3}}
+	enableReviewConversation(cfg)
+	exec := pipeline.NewExecutor(database, paths.WithRoot(t.TempDir()), cfg, mock, []pipeline.Step{&ReviewStep{}}, nil)
+	conversationDir = exec.ReviewConversationDir(run.ID)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+	go func() { done <- exec.Execute(ctx, run, repo, workDir) }()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		steps, err := database.GetStepsByRun(run.ID)
+		if err == nil && len(steps) == 1 && (steps[0].Status == types.StepStatusFixReview || steps[0].Status == types.StepStatusAwaitingApproval) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the review did not park on the open question")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := reviewqa.AppendAnswer(conversationDir, reviewqa.Answer{ID: "q1", Answer: "Keep", AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
+		t.Fatalf("append answer: %v", err)
+	}
+	// The gate's own resumer may take the answer first, as it does in a real run.
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil && !strings.Contains(err.Error(), "no step awaiting approval") {
+		t.Fatalf("respond with the answer: %v", err)
+	}
+
+	deadline = time.Now().Add(30 * time.Second)
+	for {
+		steps, err := database.GetStepsByRun(run.ID)
+		if err == nil && len(steps) == 1 && steps[0].Status == types.StepStatusCompleted {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the answer did not end the wait: steps = %+v", steps)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestReviewLoop_ACoverageCompletionFollowUpDoesNotPark(t *testing.T) {

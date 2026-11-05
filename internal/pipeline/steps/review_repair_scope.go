@@ -90,8 +90,8 @@ func newRepairRoundScope(ctx context.Context, workDir, startHead string, changed
 		changed:      make(map[string][]lineSpan, len(changedSinceStart)),
 		tracked:      tracked,
 		firstLook:    uncoveredReviewablePaths(previouslyReviewed, reviewable),
-		selected:     selected.Items,
-		deferred:     deferred,
+		selected:     withoutReviewQuestions(selected.Items),
+		deferred:     withoutReviewQuestions(deferred),
 		previousRisk: selected.RiskLevel,
 	}
 	for _, changed := range changedSinceStart {
@@ -102,6 +102,19 @@ func newRepairRoundScope(ctx context.Context, workDir, startHead string, changed
 		scope.changed[normalizeReviewedPath(changed)] = repairHunks(diff)
 	}
 	return scope, nil
+}
+
+// withoutReviewQuestions leaves out what only an answer resolves. Every review
+// turn emits the open questions again, and a reviewer told to report one back
+// would add a row with no category, which no answer can clear.
+func withoutReviewQuestions(findings []Finding) []Finding {
+	var kept []Finding
+	for _, finding := range findings {
+		if finding.Category != types.FindingCategoryReviewQuestion {
+			kept = append(kept, finding)
+		}
+	}
+	return kept
 }
 
 // repairHunks returns the current-file line spans of a diff's hunks, or nil
@@ -222,11 +235,11 @@ func (r *repairRoundScope) split(log func(string), findings *Findings) {
 // Any finding may be a selected defect moved, reworded or reported where it
 // still reaches, and taking it out would clear that selected finding on
 // silence (pipeline.resolveVerifiedFindingsJSON). A finding repeating a selected
-// description still contradicts the verdict. A finding beside a deferred one
-// stays for the same reason, since a deferred finding cannot be named closed.
+// description still contradicts the verdict. A deferred finding cannot be named
+// closed, so nothing leaves while one is open; such a round parks on it anyway.
 func (r *repairRoundScope) isFollowUp(finding Finding) bool {
 	file := normalizeReviewedPath(finding.File)
-	if !r.tracked[file] || finding.Line <= 0 || finding.ActionOrDefault() == types.ActionAskUser {
+	if !r.tracked[file] || finding.Line <= 0 || finding.ActionOrDefault() == types.ActionAskUser || len(r.deferred) > 0 {
 		return false
 	}
 	if strings.TrimSpace(finding.FailingInput) != "" && strings.TrimSpace(finding.WrongResult) != "" {
@@ -249,11 +262,6 @@ func (r *repairRoundScope) isFollowUp(finding Finding) bool {
 	}
 	for _, open := range r.selected {
 		if !r.closed[open.ID] || sanitizePromptText(open.Description) == sanitizePromptText(finding.Description) {
-			return false
-		}
-	}
-	for _, open := range r.deferred {
-		if normalizeReviewedPath(open.File) == file {
 			return false
 		}
 	}
