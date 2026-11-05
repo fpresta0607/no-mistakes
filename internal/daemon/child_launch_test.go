@@ -290,7 +290,10 @@ func TestChildRunKeepsEvidenceUnderEvidenceDir(t *testing.T) {
 	for name, build := range childLaunches {
 		t.Run(name, func(t *testing.T) {
 			fixture := build(t, assertedLaunch)
-			root := t.TempDir()
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
 			appendGlobalConfig(t, fixture.manager, "evidence_dir: "+filepath.ToSlash(root)+"\n")
 
 			runID, isStarted, err := fixture.launch()
