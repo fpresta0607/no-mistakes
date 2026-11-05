@@ -879,7 +879,7 @@ It is global-only.
 
 ### test_command_wrapper
 
-Optional wrapper program in front of every run's baseline test command, so one program can make the test runs on this machine take turns without any repository naming it.
+Optional wrapper program in front of every run's baseline test command, including a repository's [`commands.test_focused`](/no-mistakes/reference/repo-config/#commandstest_focused) on its re-run after a repair, so one program can make the test runs on this machine take turns without any repository naming it.
 Unset, the command starts exactly as it always has.
 
 ```yaml
@@ -985,6 +985,7 @@ So before anything is pushed, the Push step compares the head to push with the c
 - When those commits change only paths the repository counts as documentation, by [`test.documentation_paths`](/no-mistakes/reference/repo-config/#testdocumentation_paths), the head is pushed without the baseline running again.
 - When they change anything else, the baseline runs again on the head to push. A pass pushes. A failure pushes nothing and sends the run back to the Test step, which owns failing tests and their fix rounds. A second such failure in one run fails the run with nothing pushed.
 - With no baseline configured, or a failing baseline a person approved the Test step over, the commits are named and nothing runs again.
+- A head where [`commands.test_focused`](/no-mistakes/reference/repo-config/#commandstest_focused) stood in for the baseline has had no full baseline, so it counts as untested and the baseline runs on the head to push.
 
 This holds whether or not early work was taken.
 With the setting on, a commit made after the Test step is pushed without the baseline running on it only when it is documentation.

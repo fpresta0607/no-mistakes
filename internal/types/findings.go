@@ -251,6 +251,37 @@ type TestScenario struct {
 	Live     bool   `json:"live"`
 	Evidence string `json:"evidence"`
 	Reason   string `json:"reason"`
+	// StillFailing is step-owned: the scenario failed live before a focused
+	// re-check and no live pass has shown that failure gone, whatever its Result
+	// says now. An undriven scenario can only read untested, so this is what
+	// stops a later re-check's "go" standing over it.
+	StillFailing bool `json:"still_failing,omitempty"`
+}
+
+// TestBaselineFailure is what a failed configured test command named. It rides
+// the findings' metadata, not the summary, because a fix selection of part of a
+// gate replaces the summary, and no evidence turn follows a failed baseline to
+// find the failures again.
+type TestBaselineFailure struct {
+	// Tests holds the failures recognized in the repository command's output.
+	Tests []string `json:"tests,omitempty"`
+	// Attribution is the rendered test.base_attribution result, when there is one.
+	Attribution string `json:"attribution,omitempty"`
+	// Incomplete is true when Tests may leave a failure out, so a focused check
+	// built from it could pass without re-running what failed.
+	Incomplete bool `json:"incomplete,omitempty"`
+}
+
+// TestFocusedCheck records that a repair was re-checked by trusted
+// commands.test_focused in place of commands.test. It is never a full baseline:
+// commands.test did not run on HeadSHA.
+type TestFocusedCheck struct {
+	Command  string `json:"command"`
+	ExitCode int    `json:"exit_code"`
+	HeadSHA  string `json:"head_sha"`
+	// Tests and Paths count the failures and repaired paths the check was given.
+	Tests int `json:"tests"`
+	Paths int `json:"paths"`
 }
 
 // LiveScenarioCounts returns how many of scenarios were driven live against
@@ -362,9 +393,13 @@ type Findings struct {
 	// unvalidated-work check measured from, carried so a repeated cut before any
 	// evidence turn completes re-measures from that same head.
 	UnvalidatedSinceSHA string `json:"unvalidated_since_sha,omitempty"`
-	RiskLevel           string `json:"risk_level"`
-	RiskRationale       string `json:"risk_rationale"`
-	RiskScope           string `json:"risk_scope,omitempty"`
+	// BaselineFailure and FocusedCheck are step-owned Test records, set only on
+	// the execution that ran the configured checks.
+	BaselineFailure *TestBaselineFailure `json:"baseline_failure,omitempty"`
+	FocusedCheck    *TestFocusedCheck    `json:"focused_check,omitempty"`
+	RiskLevel       string               `json:"risk_level"`
+	RiskRationale   string               `json:"risk_rationale"`
+	RiskScope       string               `json:"risk_scope,omitempty"`
 }
 
 type findingsWire struct {
@@ -381,6 +416,8 @@ type findingsWire struct {
 	Verdict             string               `json:"verdict"`
 	TestedHeadSHA       string               `json:"tested_head_sha"`
 	UnvalidatedSinceSHA string               `json:"unvalidated_since_sha"`
+	BaselineFailure     *TestBaselineFailure `json:"baseline_failure"`
+	FocusedCheck        *TestFocusedCheck    `json:"focused_check"`
 	RiskLevel           string               `json:"risk_level"`
 	RiskRationale       string               `json:"risk_rationale"`
 	RiskScope           string               `json:"risk_scope"`
@@ -410,6 +447,8 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		Verdict:             wire.Verdict,
 		TestedHeadSHA:       wire.TestedHeadSHA,
 		UnvalidatedSinceSHA: wire.UnvalidatedSinceSHA,
+		BaselineFailure:     wire.BaselineFailure,
+		FocusedCheck:        wire.FocusedCheck,
 		RiskLevel:           wire.RiskLevel,
 		RiskRationale:       wire.RiskRationale,
 		RiskScope:           wire.RiskScope,

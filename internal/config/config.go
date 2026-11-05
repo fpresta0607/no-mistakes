@@ -815,7 +815,9 @@ type Commands struct {
 	Prepare string `yaml:"prepare"`
 	Lint    string `yaml:"lint"`
 	Test    string `yaml:"test"`
-	Format  string `yaml:"format"`
+	// TestFocused stands in for Test on the re-run after a Test repair.
+	TestFocused string `yaml:"test_focused"`
+	Format      string `yaml:"format"`
 }
 
 // AutoFixRaw is the YAML representation of auto-fix config.

@@ -219,12 +219,8 @@ exit 0
 		if !found {
 			t.Errorf("no finding names the failing machine-local check")
 		}
-		prompts := testStepPrompts(h)
-		if len(prompts) == 0 {
-			t.Fatal("test step never invoked the agent")
-		}
-		if !strings.Contains(prompts[0], "Machine-local test check (the operator's addition, not the repository's command) failed with exit code 3: `nm-local-fail`") {
-			t.Errorf("test prompt does not name the failing machine-local check")
+		if prompts := testStepPrompts(h); len(prompts) != 0 {
+			t.Errorf("test step invoked the agent %d times, want no live check on a failed local check", len(prompts))
 		}
 		testLog := readStepLog(t, h, run.ID, string(types.StepTest))
 		t.Logf("test step log:\n%s", testLog)

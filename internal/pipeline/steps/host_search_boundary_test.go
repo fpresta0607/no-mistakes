@@ -48,19 +48,26 @@ func assertRoleNeutralHostSearchBoundary(t *testing.T, prompt string) {
 
 // assertTestScenarioUntestedFallback checks the Test-only half of the missing
 // tool rule. The Test prompt owns it because only the Test result schema has
-// scenarios and an "untested" state.
+// scenarios and an "untested" state. A missing tool is reported at once: the
+// evidence turn neither hunts for it nor sets it up for itself.
 func assertTestScenarioUntestedFallback(t *testing.T, prompt string) {
 	t.Helper()
 	normalized := strings.Join(strings.Fields(prompt), " ")
 	for _, want := range []string{
 		"not on PATH and has no repository-local path",
-		"do not search the host machine for it or install it system-wide or globally",
-		"Try another available route or obtain, install, or build the tool inside the disposable workspace and use it there",
-		`Only if no workspace-local route can drive the scenario live, report the affected scenario as "untested"`,
-		"with what you tried and why it could not work",
+		"do not search the host machine for it and do not install it",
+		`Report the affected scenario as "untested", naming the tool`,
 	} {
 		if !strings.Contains(normalized, want) {
 			t.Errorf("emitted test prompt missing scenario untested fallback %q:\n%s", want, prompt)
+		}
+	}
+	for _, gone := range []string{
+		"obtain, install, or build the tool",
+		"no workspace-local route",
+	} {
+		if strings.Contains(normalized, gone) {
+			t.Errorf("emitted test prompt still sends the agent to set up a missing tool, %q:\n%s", gone, prompt)
 		}
 	}
 }
@@ -98,12 +105,9 @@ func TestReviewPromptCarriesBoundedHostSearchBoundary(t *testing.T) {
 		t.Fatalf("review prompt does not lead with the workspace-boundary preamble from agent.WorktreeSteering:\n%s", prompt)
 	}
 	assertRoleNeutralHostSearchBoundary(t, prompt)
-	// Review has no scenarios or disposable-tool cleanup duty. The Test-only
-	// permission to install a tool must not leak into its delivered prompt.
-	if strings.Contains(prompt, "obtain, install, or build the tool inside the disposable workspace") {
-		t.Errorf("review prompt carries the Test-only tool setup permission:\n%s", prompt)
-	}
-	if strings.Contains(prompt, `report the affected scenario as "untested"`) {
+	// Review has no scenarios, so the Test-only fallback must not leak into its
+	// delivered prompt.
+	if strings.Contains(prompt, `Report the affected scenario as "untested"`) {
 		t.Errorf("review prompt carries the Test-only scenario untested fallback:\n%s", prompt)
 	}
 }

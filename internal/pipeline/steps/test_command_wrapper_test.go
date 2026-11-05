@@ -178,8 +178,8 @@ func TestTestStep_WrapperPassesTheCommandsExitCodeThrough(t *testing.T) {
 	if len(findings.Items) == 0 || findings.Items[0].Category != types.FindingCategoryTestCommand || !strings.Contains(findings.Items[0].Description, "exit code 3") {
 		t.Fatalf("findings = %#v, want the configured test command's failure with its exit code", findings.Items)
 	}
-	if len(f.agent.calls) != 1 {
-		t.Fatalf("agent calls = %d, want the live check after a failing baseline, as with no wrapper", len(f.agent.calls))
+	if len(f.agent.calls) != 0 {
+		t.Fatalf("agent calls = %d, want no live check on a failing baseline, as with no wrapper", len(f.agent.calls))
 	}
 }
 

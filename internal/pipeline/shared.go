@@ -120,9 +120,23 @@ func (s *RunShared) RecordBaseline(headSHA, comparisonSHA string, passed bool) {
 	s.baselineComparison = comparisonSHA
 }
 
+// RecordFocusedCheck records that a focused check stood in for the baseline on
+// the current head. Whatever it returned, it is never a full baseline, so the
+// head stays untested: Baseline then reports nothing recorded, and only the
+// comparison survives.
+func (s *RunShared) RecordFocusedCheck(comparisonSHA string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.baselineHead, s.baselinePassed, s.baselineRecorded = "", false, false
+	s.baselineComparison = comparisonSHA
+}
+
 // Baseline returns what RecordBaseline last recorded. recorded is false when
-// nothing was, as after a daemon restart, and a caller must then treat the
-// head as untested.
+// nothing was, as after a daemon restart or a focused check, and a caller must
+// then treat the head as untested.
 func (s *RunShared) Baseline() (headSHA, comparisonSHA string, passed, recorded bool) {
 	if s == nil {
 		return "", "", false, false

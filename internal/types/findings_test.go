@@ -3,6 +3,7 @@ package types
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -570,5 +571,27 @@ func TestNormalizeFindingsAvoidsIDCollisions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Findings fields are copied explicitly on parse, so a new one must be listed
+// or it drops on every read.
+func TestParseFindingsJSON_KeepsTheTestStepRecords(t *testing.T) {
+	want := Findings{
+		BaselineFailure: &TestBaselineFailure{Tests: []string{"--- FAIL: TestBroken"}, Attribution: "attributed", Incomplete: true},
+		FocusedCheck:    &TestFocusedCheck{Command: "make focused", ExitCode: 3, HeadSHA: "abc", Tests: 2, Paths: 1},
+	}
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ParseFindingsJSON(string(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(got.BaselineFailure, want.BaselineFailure) || !reflect.DeepEqual(got.FocusedCheck, want.FocusedCheck) {
+		t.Fatalf("round trip = %+v, %+v", got.BaselineFailure, got.FocusedCheck)
 	}
 }

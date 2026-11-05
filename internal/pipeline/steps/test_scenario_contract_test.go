@@ -66,12 +66,11 @@ func TestTestStep_PromptBoundsCompletionAndStatesBudget(t *testing.T) {
 
 // TestTestStep_PromptDerivesScenariosAndMarksLive pins the live-validation
 // prompt contract: the step asks for named scenarios driven against the real
-// product, agent-owned workarounds (disposable, isolated setups it builds
-// itself) to get each scenario live, an explicit live marking that a unit test
-// cannot claim, untested reserved for scenarios that are truly impossible to
-// drive live with a reason saying what was tried, and a verdict. The
-// pre-contract framing that let a green unit-test run stand in for driving the
-// product must be gone.
+// product with what already exists, an explicit live marking that a unit test
+// cannot claim, untested for a scenario that needs something absent with a
+// reason naming what is missing, and a verdict. The pre-contract framing that
+// let a green unit-test run stand in for driving the product must be gone, and
+// so must the duty to build what is missing.
 func TestTestStep_PromptDerivesScenariosAndMarksLive(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -109,22 +108,17 @@ func TestTestStep_PromptDerivesScenariosAndMarksLive(t *testing.T) {
 		`An unexecuted tenant or production scenario stays "untested" with "live": false and a reason`,
 		`Both "pass" and "fail" require "live": true and evidence`,
 		"A unit test, a stub, a mock, a recorded fixture, or reading the code is NOT live",
-		// The agent owns workarounds to get each scenario live, and whatever
-		// it builds for that stays disposable and isolated.
-		"Getting every scenario live is your responsibility",
-		"build a disposable one yourself",
-		"point the real product at it through whatever isolation the product supports",
-		"A missing environment is a problem to solve, not a reason to skip the scenario",
-		"a fixture that stands in for the product itself is not",
-		"Everything you build must stay disposable and isolated",
+		// The agent uses what exists, and what it runs stays isolated.
+		"Use what already exists: the repository's own tests, any prepared environment named below, and the product run the way its own docs run it",
+		"Building what is missing is not part of this turn",
+		"do not build or install it",
+		`Report that scenario "untested" at once, naming what is missing and how to provide it`,
+		"A fixture that stands in for the product itself is never live",
 		"never read or write the operator's real data, real configuration, or shared services",
-		// Untested is reserved for the truly impossible and says what was tried.
-		`Return a scenario with result "untested" only when live validation is truly impossible here`,
-		"state what you tried in order to drive it live and why each attempt cannot work",
-		"naming the specific tool, credential, permission, or authority that is out of reach and how to provide it",
-		`"No environment was provided" is not such a reason while you could have built a disposable one`,
+		// An untested scenario says what is missing.
+		"must name the specific environment, tool, credential, permission, or authority that is missing and how to provide it",
 		"Never guess a pass",
-		"an honest \"untested\" after exhausting your workarounds costs nothing and a guessed \"pass\" costs everything",
+		"an honest \"untested\" costs nothing and a guessed \"pass\" costs everything",
 		"reported as an untested scenario with its reason, NOT as a finding",
 		// The verdict and what it does.
 		`Return a "verdict"`,
@@ -147,6 +141,15 @@ func TestTestStep_PromptDerivesScenariosAndMarksLive(t *testing.T) {
 		"Look for existing tests that would generate sufficient evidence",
 		// The old contract let any missing capability justify untested.
 		"When a scenario cannot be driven live here",
+		// The duty to build what is missing is gone.
+		"Getting every scenario live is your responsibility",
+		"build a disposable one yourself",
+		"find a workaround",
+		"A missing environment is a problem to solve",
+		"No environment was provided",
+		"Everything you build",
+		"obtain, install, or build the tool",
+		"downloaded or built tools",
 	} {
 		if strings.Contains(prompt, forbidden) {
 			t.Errorf("evidence prompt still carries pre-contract framing %q", forbidden)
@@ -191,7 +194,7 @@ func TestTestStep_PromptDerivesScenariosAndMarksLive(t *testing.T) {
 	}
 	reason := schema.Properties.Scenarios.Items.Properties.Reason.Description
 	for _, want := range []string{
-		"what was tried to drive this scenario live and why live validation is impossible",
+		"what is missing to drive this scenario live",
 		"why there is no live-validatable surface",
 	} {
 		if !strings.Contains(reason, want) {
@@ -289,14 +292,10 @@ func TestTestStep_MachineLocalRunbookPrecedesTrustedAndPushedStaysOut(t *testing
 	}
 }
 
-func TestTestStep_FailingBaselineStillRunsEvidenceTurn(t *testing.T) {
+func TestTestStep_FailedBaselineParksForRepairWithNoEvidenceTurn(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	calls := 0
-	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-		calls++
-		return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
-	}}
+	ag := &mockAgent{name: "test"}
 	testCmd := "printf 'baseline broke'; exit 7"
 	if runtime.GOOS == "windows" {
 		testCmd = "echo baseline broke && exit /b 7"
@@ -307,8 +306,9 @@ func TestTestStep_FailingBaselineStillRunsEvidenceTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 {
-		t.Fatalf("evidence agent calls = %d, want 1", calls)
+
+	if len(ag.calls) != 0 {
+		t.Fatalf("agent calls = %d, want no evidence turn on a failed baseline", len(ag.calls))
 	}
 	findings, err := types.ParseFindingsJSON(outcome.Findings)
 	if err != nil {
@@ -317,17 +317,20 @@ func TestTestStep_FailingBaselineStillRunsEvidenceTurn(t *testing.T) {
 	if !outcome.NeedsApproval || !outcome.AutoFixable || outcome.ExitCode != 7 {
 		t.Fatalf("outcome = %+v, want blocking auto-fixable baseline failure", outcome)
 	}
-	if findings.Verdict != types.TestVerdictGo || len(findings.Scenarios) != 1 {
-		t.Fatalf("evidence contract was not retained: %+v", findings)
+	if findings.Verdict != "" || len(findings.Scenarios) != 0 {
+		t.Fatalf("a live check that never ran left a claim: %+v", findings)
 	}
-	if len(findings.Tested) < 2 || findings.Tested[0] != testCmd {
-		t.Fatalf("tested = %+v, want baseline followed by evidence checks", findings.Tested)
+	if !strings.Contains(findings.TestingSummary, "no live check ran") {
+		t.Fatalf("testing summary = %q, want it to say no live check ran", findings.TestingSummary)
 	}
-	if len(findings.Items) == 0 || !strings.Contains(findings.Items[0].Description, "configured test command failed with exit code 7") {
+	if len(findings.Tested) != 1 || findings.Tested[0] != testCmd {
+		t.Fatalf("tested = %+v, want only the baseline", findings.Tested)
+	}
+	if len(findings.Items) != 1 || !strings.Contains(findings.Items[0].Description, "configured test command failed with exit code 7") {
 		t.Fatalf("baseline finding missing from %+v", findings.Items)
 	}
-	if findings.Items[0].Category != types.FindingCategoryTestCommand {
-		t.Fatalf("finding category = %q, want %s", findings.Items[0].Category, types.FindingCategoryTestCommand)
+	if findings.Items[0].Category != types.FindingCategoryTestCommand || findings.Items[0].Action != types.ActionAutoFix {
+		t.Fatalf("finding = %+v, want an auto-fixable test-command finding", findings.Items[0])
 	}
 }
 

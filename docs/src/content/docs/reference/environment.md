@@ -118,6 +118,12 @@ This is a command-child variable, not a daemon setting. no-mistakes creates a fr
 
 See the [gate contract](/no-mistakes/reference/repo-config/#structured-findings) for the report schema, limits, verdicts, and approval behavior.
 
+## `NO_MISTAKES_TEST_FOCUS`
+
+Absolute path to the file that tells [`commands.test_focused`](/no-mistakes/reference/repo-config/#commandstest_focused) what a Test repair touched.
+
+This is a command-child variable, not a daemon setting. no-mistakes sets it only around the configured checks of a focused re-run, in the step's scratch directory outside the worktree, and agent turns never see it. See that key for the file's format.
+
 ## `NO_MISTAKES_BITBUCKET_EMAIL`
 
 Bitbucket Cloud account email used for PR creation and CI monitoring.
