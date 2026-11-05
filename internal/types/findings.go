@@ -251,6 +251,11 @@ type TestScenario struct {
 	Live     bool   `json:"live"`
 	Evidence string `json:"evidence"`
 	Reason   string `json:"reason"`
+	// StillFailing is step-owned: the scenario failed live on an earlier head of
+	// this run and no live pass has shown that failure gone, whatever its Result
+	// says now. An undriven scenario can only read untested, so this is what
+	// stops a later "go" standing over it.
+	StillFailing bool `json:"still_failing,omitempty"`
 }
 
 // TestBaselineFailure is what a failed configured test command named. It rides

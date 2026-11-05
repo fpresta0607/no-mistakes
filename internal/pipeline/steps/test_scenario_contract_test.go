@@ -194,7 +194,7 @@ func TestTestStep_PromptDerivesScenariosAndMarksLive(t *testing.T) {
 	}
 	reason := schema.Properties.Scenarios.Items.Properties.Reason.Description
 	for _, want := range []string{
-		"what was tried to drive this scenario live and why live validation is impossible",
+		"what is missing to drive this scenario live",
 		"why there is no live-validatable surface",
 	} {
 		if !strings.Contains(reason, want) {

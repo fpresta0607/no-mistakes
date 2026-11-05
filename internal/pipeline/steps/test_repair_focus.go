@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -32,6 +33,12 @@ const (
 	maxRepairDecisions     = 10
 	maxRepairDecisionBytes = 2000
 )
+
+// unnamedFailureLine matches a failure the attribution parser lists nothing for:
+// pytest's ERROR lines and a jest or vitest suite that failed to run. Output
+// holding one cannot have named every failure. The match is broad on purpose,
+// since a false match only costs a whole run of commands.test.
+var unnamedFailureLine = regexp.MustCompile(`(?m)^\s*(?:ERROR\s|.*Test suite failed to run)`)
 
 // testFixSchema is the Test repair turn's result: commitSummarySchema plus the
 // failures it left for a human. A failed baseline has no evidence turn after
@@ -92,10 +99,12 @@ func namedBaselineFailure(failed []checkResult, attribution string) *types.TestB
 	if index < 0 {
 		return nil
 	}
-	lines, _, unattributed := testFailureLines(failed[index].Output)
+	output := failed[index].Output
+	lines, _, unattributed := testFailureLines(output)
 	failure := &types.TestBaselineFailure{
 		Attribution: attribution,
-		Incomplete:  len(lines) == 0 || len(unattributed) > 0 || len(lines) > baseAttributionMaxListed,
+		Incomplete: len(lines) == 0 || len(unattributed) > 0 || len(lines) > baseAttributionMaxListed ||
+			unnamedFailureLine.MatchString(ansiEscape.ReplaceAllString(output, "")),
 	}
 	for _, line := range lines[:min(len(lines), baseAttributionMaxListed)] {
 		if runes := []rune(line); len(runes) > baseAttributionMaxLineRunes {
@@ -135,13 +144,30 @@ func (f *testRepairFocus) record(headSHA string, exitCode int) *types.TestFocuse
 	}
 }
 
+// answeredNoTurn reports whether the gate held a test command that was given no
+// turn, in the selection or beside it. That command has no result to narrow.
+func answeredNoTurn(sctx *pipeline.StepContext) bool {
+	for _, raw := range []string{sctx.PreviousFindings, sctx.DeferredFindings} {
+		findings, err := types.ParseFindingsJSON(raw)
+		if err == nil && slices.ContainsFunc(findings.Items, func(item Finding) bool { return item.ID == types.FindingIDTestCommandNoTurn }) {
+			return true
+		}
+	}
+	return false
+}
+
 // repairFocus returns the focus for the re-run after a repair, written to the
 // step's scratch directory, or nil when commands.test must run whole: no repair
-// ran, the repository provides no focused command, or the failure it answers was
-// not fully named, so narrowing could pass without re-running what failed.
+// ran, the repository provides no focused command, the command never ran, or the
+// failure it answers was not fully named, so narrowing could pass without
+// re-running what failed.
 func repairFocus(sctx *pipeline.StepContext, scratchDir string, repaired bool, paths []string) (*testRepairFocus, error) {
 	command := strings.TrimSpace(sctx.Config.Commands.TestFocused)
 	if !repaired || command == "" || strings.TrimSpace(sctx.Config.Commands.Test) == "" {
+		return nil, nil
+	}
+	if answeredNoTurn(sctx) {
+		sctx.Log("the test command was given no turn, so it runs whole now")
 		return nil, nil
 	}
 	answered, err := types.ParseFindingsJSON(sctx.PreviousFindings)
@@ -178,7 +204,7 @@ func repairFocus(sctx *pipeline.StepContext, scratchDir string, repaired bool, p
 // focusedCheckSentence is the plain record of a focused check for the testing
 // summary, which never reads as a full baseline.
 func focusedCheckSentence(check *types.TestFocusedCheck) string {
-	return fmt.Sprintf("After the repair, the focused check `%s` ran in place of the configured test command and exited %d on %s; the configured test command did not run on this head.", check.Command, check.ExitCode, shortObjectID(check.HeadSHA))
+	return fmt.Sprintf("After the repair, the focused check `%s` ran in place of the configured test command and exited %d on %s; the Test step did not run the configured test command on this head.", check.Command, check.ExitCode, shortObjectID(check.HeadSHA))
 }
 
 // lastLiveCheck is the last completed live check of the gate a repair answered,
@@ -202,7 +228,11 @@ func focusedRecheckSection(last Findings, repairedPaths []string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n\nFocused re-check after a repair (this replaces deriving a new scenario list above):\nThe last live check ran at %s and recorded these scenarios:\n", shortObjectID(last.TestedHeadSHA))
 	for _, scenario := range last.Scenarios {
-		line := fmt.Sprintf("- %s: %s", sanitizePromptText(scenario.Result), sanitizePromptText(scenario.Name))
+		result := scenario.Result
+		if scenario.StillFailing {
+			result = types.ScenarioResultFail
+		}
+		line := fmt.Sprintf("- %s: %s", sanitizePromptText(result), sanitizePromptText(scenario.Name))
 		if reason := sanitizePromptText(scenario.Reason); reason != "" {
 			line += " (" + reason + ")"
 		}
@@ -218,6 +248,7 @@ func focusedRecheckSection(last Findings, repairedPaths []string) string {
 	}
 	fmt.Fprintf(&b, "The repair changed: %s.\n", changed)
 	b.WriteString(`- Drive again only: every scenario recorded as failed, any scenario whose behavior the repair's change touches, and one new scenario for a repaired finding no recorded scenario covers.
+- Drive at least one scenario: when nothing above applies, drive the recorded scenario closest to the repair's change.
 - Drive nothing else and do not widen the list. Leave every other scenario out of your result: the step keeps each on the record as not driven on this head.
 - Report only the scenarios you drove or tried to drive in this turn, and base the verdict on those.`)
 	return b.String()
@@ -226,14 +257,17 @@ func focusedRecheckSection(last Findings, repairedPaths []string) string {
 // keepUndrivenScenarios completes a focused re-check's result with the scenarios
 // of the last live check it left out. None of them was driven on this head, so
 // each is recorded as untested with where it last ran, and live_validation never
-// counts it. A failure left out was never shown gone, so a "go" cannot stand.
+// counts it. A failure stays marked until a live pass shows it gone, however many
+// rounds that takes, and a "go" cannot stand while one is open.
 func keepUndrivenScenarios(focused, last Findings) Findings {
-	reported := make(map[string]bool, len(focused.Scenarios))
-	for _, scenario := range focused.Scenarios {
-		reported[strings.TrimSpace(scenario.Name)] = true
+	reported := make(map[string]int, len(focused.Scenarios))
+	for i, scenario := range focused.Scenarios {
+		reported[strings.TrimSpace(scenario.Name)] = i
 	}
 	for _, scenario := range last.Scenarios {
-		if reported[strings.TrimSpace(scenario.Name)] {
+		wasFailing := scenario.Result == types.ScenarioResultFail || scenario.StillFailing
+		if i, ok := reported[strings.TrimSpace(scenario.Name)]; ok {
+			focused.Scenarios[i].StillFailing = wasFailing && focused.Scenarios[i].Result == types.ScenarioResultUntested
 			continue
 		}
 		switch scenario.Result {
@@ -241,12 +275,12 @@ func keepUndrivenScenarios(focused, last Findings) Findings {
 			scenario.Reason = fmt.Sprintf("passed live at %s before the repair and was not driven again on this head", shortObjectID(last.TestedHeadSHA))
 		case types.ScenarioResultFail:
 			scenario.Reason = fmt.Sprintf("failed live at %s and was not driven again after the repair", shortObjectID(last.TestedHeadSHA))
-			if focused.Verdict == types.TestVerdictGo {
-				focused.Verdict = types.TestVerdictInconclusive
-			}
 		}
-		scenario.Result, scenario.Live, scenario.Evidence = types.ScenarioResultUntested, false, ""
+		scenario.Result, scenario.Live, scenario.Evidence, scenario.StillFailing = types.ScenarioResultUntested, false, "", wasFailing
 		focused.Scenarios = append(focused.Scenarios, scenario)
+	}
+	if focused.Verdict == types.TestVerdictGo && slices.ContainsFunc(focused.Scenarios, func(scenario types.TestScenario) bool { return scenario.StillFailing }) {
+		focused.Verdict = types.TestVerdictInconclusive
 	}
 	return focused
 }

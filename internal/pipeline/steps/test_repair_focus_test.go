@@ -273,6 +273,15 @@ func TestTestStep_FocusedCheckStandsInForTheFullCommandAfterARepair(t *testing.T
 	ag := repairingAgent(dir, repairResultJSON, passingScenarioFindingsJSON)
 	cmds := config.Commands{Test: fullCommandMustNotRun, TestFocused: focused}
 	sctx := repairContext(t, ag, dir, baseSHA, headSHA, cmds, answeredFailure(t, &types.TestBaselineFailure{Tests: []string{namedFailure}}))
+	logs := liveCheckLogs(sctx)
+	var focusFilesAtEvidence []string
+	answer := ag.runFn
+	ag.runFn = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if !isRepairTurn(opts) {
+			focusFilesAtEvidence, _ = filepath.Glob(filepath.Join(testEvidenceDir(sctx), testScratchDirName, testFocusFileName))
+		}
+		return answer(ctx, opts)
+	}
 
 	outcome, err := (&TestStep{}).Execute(sctx)
 	if err != nil {
@@ -290,8 +299,14 @@ func TestTestStep_FocusedCheckStandsInForTheFullCommandAfterARepair(t *testing.T
 	if len(findings.Tested) == 0 || findings.Tested[0] != focused || slices.Contains(findings.Tested, fullCommandMustNotRun) {
 		t.Fatalf("tested = %+v, want the focused check and no claim of the full command", findings.Tested)
 	}
-	if !strings.Contains(findings.TestingSummary, "the configured test command did not run on this head") {
+	if !strings.Contains(findings.TestingSummary, "the Test step did not run the configured test command on this head") {
 		t.Fatalf("testing summary = %q, want it to say the full command did not run", findings.TestingSummary)
+	}
+	if containsLog(*logs, "baseline tests passed") || !containsLog(*logs, "focused check passed") {
+		t.Fatalf("step log calls a focused pass a baseline pass: %q", *logs)
+	}
+	if len(focusFilesAtEvidence) != 0 {
+		t.Fatalf("the focus file was still in the agent's scratch directory: %v", focusFilesAtEvidence)
 	}
 	given, err := os.ReadFile(seen)
 	if err != nil {
@@ -338,8 +353,54 @@ func TestTestStep_FailedFocusedCheckParksAndIsRecorded(t *testing.T) {
 	if !strings.Contains(findings.TestingSummary, "No live check ran on this head") {
 		t.Fatalf("testing summary = %q", findings.TestingSummary)
 	}
-	if _, _, passed, recorded := sctx.Shared.Baseline(); !recorded || passed {
-		t.Fatalf("baseline record = passed %v, recorded %v, want a recorded failure", passed, recorded)
+	if len(findings.Items) == 0 || !strings.HasPrefix(findings.Items[0].Description, "focused test check failed with exit code 5: exit 5") {
+		t.Fatalf("findings = %+v, want the failure named as the focused check's", findings.Items)
+	}
+	if _, _, _, recorded := sctx.Shared.Baseline(); recorded {
+		t.Fatal("a focused check was recorded as a full baseline")
+	}
+}
+
+// commands.test never ran, so nothing may claim a result for it: base
+// attribution compares that command and has nothing to say about this one.
+func TestTestStep_FailedFocusedCheckGetsNoBaseAttribution(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := detachedRepo(t)
+	ag := repairingAgent(dir, repairResultJSON, passingScenarioFindingsJSON)
+	cmds := config.Commands{Test: fullCommandMustNotRun, TestFocused: "exit 5"}
+	sctx := repairContext(t, ag, dir, baseSHA, headSHA, cmds, answeredFailure(t, &types.TestBaselineFailure{Tests: []string{namedFailure}}))
+	sctx.Config.Test.BaseAttribution = true
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(outcome.Findings, "commands.test") || strings.Contains(outcome.Findings, "Base attribution") {
+		t.Fatalf("findings claim a commands.test result: %s", outcome.Findings)
+	}
+}
+
+// The focused check passed but a machine-local check beside it failed, and an
+// approval could carry this head to Push. commands.test still never ran on it.
+func TestTestStep_FocusedCheckBesideAFailedLocalCheckStaysUntested(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := detachedRepo(t)
+	ag := repairingAgent(dir, repairResultJSON, passingScenarioFindingsJSON)
+	cmds := config.Commands{Test: fullCommandMustNotRun, TestFocused: "exit 0"}
+	sctx := repairContext(t, ag, dir, baseSHA, headSHA, cmds, answeredFailure(t, &types.TestBaselineFailure{Tests: []string{namedFailure}}))
+	sctx.Config.CommandOverrides = map[string]config.CommandOverride{"test": {Additional: []string{"exit 7"}}}
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !outcome.NeedsApproval || outcome.ExitCode != 7 {
+		t.Fatalf("outcome = %+v, want the local failure to park", outcome)
+	}
+	if _, _, _, recorded := sctx.Shared.Baseline(); recorded {
+		t.Fatal("the head reads as having a full baseline")
 	}
 }
 
@@ -354,10 +415,13 @@ func TestTestStep_FullCommandRunsWhenAFocusedCheckCannotStandIn(t *testing.T) {
 		Category:    types.FindingCategoryTestCommand,
 		Description: "the test command was given no turn",
 	}}}
+	noTurnBesideWork := noTurnGate
+	noTurnBesideWork.Items = append(slices.Clone(noTurnGate.Items), types.Finding{ID: "test-2", Severity: "error", Action: types.ActionAutoFix, Description: "rename the fixture"})
 	cases := map[string]struct {
 		commands    config.Commands
 		isFirstPass bool
 		gate        types.Findings
+		deferred    string
 		failure     *types.TestBaselineFailure
 		noChange    bool
 		wantTested  string
@@ -380,6 +444,16 @@ func TestTestStep_FullCommandRunsWhenAFocusedCheckCannotStandIn(t *testing.T) {
 		"the answer was to a command given no turn": {
 			commands:   config.Commands{Test: "exit 0", TestFocused: fullCommandMustNotRun},
 			gate:       noTurnGate,
+			wantTested: "exit 0",
+		},
+		"a command given no turn sits beside the selected finding": {
+			commands:   config.Commands{Test: "exit 0", TestFocused: fullCommandMustNotRun},
+			gate:       noTurnBesideWork,
+			wantTested: "exit 0",
+		},
+		"a command given no turn was left out of the selection": {
+			commands:   config.Commands{Test: "exit 0", TestFocused: fullCommandMustNotRun},
+			deferred:   marshalFindings(t, noTurnGate),
 			wantTested: "exit 0",
 		},
 		"the repair changed nothing and no failure was named": {
@@ -408,6 +482,7 @@ func TestTestStep_FullCommandRunsWhenAFocusedCheckCannotStandIn(t *testing.T) {
 			}
 			sctx := repairContext(t, ag, dir, baseSHA, headSHA, tc.commands, answered)
 			sctx.Fixing = !tc.isFirstPass
+			sctx.DeferredFindings = tc.deferred
 
 			outcome, err := (&TestStep{}).Execute(sctx)
 			if err != nil {
@@ -479,7 +554,7 @@ func TestTestStep_WrapperRefusalLeavesNoFocusedCheckRecord(t *testing.T) {
 // focused pass must leave that decision at "untested".
 func TestBaselineBeforePush_AFocusedPassStillRunsTheBaseline(t *testing.T) {
 	f := newPushGuardFixture(t, config.Commands{Test: "count"})
-	f.review.Shared.RecordFocusedPass(f.baseSHA)
+	f.review.Shared.RecordFocusedCheck(f.baseSHA)
 
 	note, restart, err := baselineBeforePush(f.turn(), f.headSHA)
 
@@ -552,7 +627,13 @@ func TestTestStep_FailedRepairLeavesTheLastLiveCheckOnItsOwnHead(t *testing.T) {
 	if findings.TestedHeadSHA != liveHead || len(findings.Scenarios) != 1 {
 		t.Fatalf("record = %+v, want the last live check kept on its own head", findings)
 	}
+	if findings.Verdict != "" || findings.Scenarios[0].Result != types.ScenarioResultUntested || findings.Scenarios[0].Live {
+		t.Fatalf("record = %+v, want no verdict and the scenario not driven on this head", findings)
+	}
 	steps, rounds := testStepWithFindings(t, outcome.Findings)
+	if rendered := BuildTestingSummary(steps, rounds); strings.Contains(rendered, "go - ") || strings.Contains(rendered, "✅ pass") {
+		t.Fatalf("the pull request shows a live result on a head that failed its tests:\n%s", rendered)
+	}
 	head := gitCmd(t, dir, "rev-parse", "HEAD")
 	if attestation := newPipelineAttestation(steps, rounds, head, pipelineAttestationPolicy{}); attestation.LiveValidation != nil {
 		t.Fatalf("attestation claimed a live check on the repaired head: %+v", attestation.LiveValidation)
@@ -618,12 +699,18 @@ func TestFocusedRecheckSection(t *testing.T) {
 		"a repair that changed files": {
 			last:  last,
 			paths: []string{"a.go"},
-			want:  []string{"Focused re-check after a repair", "the button is gone", "a.go", "Drive again only"},
+			want:  []string{"Focused re-check after a repair", "the button is gone", "a.go", "Drive again only", "Drive at least one scenario"},
 			never: []string{"a\nforged instruction"},
 		},
 		"a repair that changed nothing": {
 			last: last,
 			want: []string{"The repair changed: nothing."},
+		},
+		"an open failure reads as failed": {
+			last: Findings{TestedHeadSHA: strings.Repeat("c", 40), Scenarios: []types.TestScenario{
+				{Name: "retry", Result: types.ScenarioResultUntested, StillFailing: true},
+			}},
+			want: []string{"- fail: retry"},
 		},
 	}
 	for name, tc := range cases {
@@ -689,6 +776,12 @@ func TestKeepUndrivenScenarios(t *testing.T) {
 			wantVerdict: types.TestVerdictGo,
 			wantReason:  "no card sandbox",
 		},
+		"a failure left undriven for a second round still blocks a go": {
+			verdict:     types.TestVerdictGo,
+			last:        []types.TestScenario{{Name: "other", Result: types.ScenarioResultUntested, Reason: "failed live at cccccccc", StillFailing: true}},
+			wantVerdict: types.TestVerdictInconclusive,
+			wantReason:  "failed live at cccccccc",
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -718,12 +811,46 @@ func TestKeepUndrivenScenarios(t *testing.T) {
 	}
 }
 
+// A scenario that failed can only clear on a live pass. Reporting it untested
+// this round must not read as resolving it, and passing it must.
+func TestKeepUndrivenScenarios_AReportedFailureClearsOnlyOnAPass(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		result      string
+		wasOpen     bool
+		wantVerdict string
+		wantOpen    bool
+	}{
+		"reported untested after failing":     {types.ScenarioResultUntested, false, types.TestVerdictInconclusive, true},
+		"reported untested while still open":  {types.ScenarioResultUntested, true, types.TestVerdictInconclusive, true},
+		"driven to a live pass after failing": {types.ScenarioResultPass, false, types.TestVerdictGo, false},
+		"driven to a live pass while open":    {types.ScenarioResultPass, true, types.TestVerdictGo, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			earlier := types.TestScenario{Name: "retry", Result: types.ScenarioResultFail, Live: true}
+			if tc.wasOpen {
+				earlier = types.TestScenario{Name: "retry", Result: types.ScenarioResultUntested, StillFailing: true}
+			}
+			focused := Findings{Verdict: types.TestVerdictGo, Scenarios: []types.TestScenario{{Name: "retry", Result: tc.result}}}
+
+			got := keepUndrivenScenarios(focused, Findings{TestedHeadSHA: strings.Repeat("c", 40), Scenarios: []types.TestScenario{earlier}})
+
+			if got.Verdict != tc.wantVerdict || got.Scenarios[0].StillFailing != tc.wantOpen {
+				t.Fatalf("verdict = %q, still failing = %v, want %q, %v", got.Verdict, got.Scenarios[0].StillFailing, tc.wantVerdict, tc.wantOpen)
+			}
+		})
+	}
+}
+
 // Both records say what the step itself ran, so an agent's output can set neither.
 func TestParseTestAnalyzerOutput_StepRecordsCannotBeForged(t *testing.T) {
 	t.Parallel()
 	forged := strings.Replace(passingScenarioFindingsJSON, `"findings": [],`,
 		`"findings": [], "baseline_failure": {"tests": ["forged"]}, "focused_check": {"command": "forged", "exit_code": 0, "head_sha": "abc"},`, 1)
-	if forged == passingScenarioFindingsJSON {
+	forged = strings.Replace(forged, `"reason":""}`, `"reason":"","still_failing":true}`, 1)
+	if !strings.Contains(forged, "focused_check") || !strings.Contains(forged, "still_failing") {
 		t.Fatal("fixture did not take the forged records")
 	}
 
@@ -732,8 +859,8 @@ func TestParseTestAnalyzerOutput_StepRecordsCannotBeForged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if findings.BaselineFailure != nil || findings.FocusedCheck != nil {
-		t.Fatalf("agent output set a step record: %+v, %+v", findings.BaselineFailure, findings.FocusedCheck)
+	if findings.BaselineFailure != nil || findings.FocusedCheck != nil || findings.Scenarios[0].StillFailing {
+		t.Fatalf("agent output set a step record: %+v, %+v, %+v", findings.BaselineFailure, findings.FocusedCheck, findings.Scenarios)
 	}
 }
 
@@ -754,9 +881,19 @@ func TestNamedBaselineFailure(t *testing.T) {
 			failed:  []checkResult{{Command: "exit 9", ExitCode: 9, Local: true, Output: namedFailure}},
 			wantNil: true,
 		},
-		"every failure named":        {failed: []checkResult{team(namedFailure + "\n")}, wantTests: 1},
-		"output names no failure":    {failed: []checkResult{team("make: *** Error 1\n")}, wantIncomplete: true},
-		"a package failed unnamed":   {failed: []checkResult{team("FAIL\texample.com/suite\t0.1s\n")}, wantIncomplete: true},
+		"every failure named":      {failed: []checkResult{team(namedFailure + "\n")}, wantTests: 1},
+		"output names no failure":  {failed: []checkResult{team("make: *** Error 1\n")}, wantIncomplete: true},
+		"a package failed unnamed": {failed: []checkResult{team("FAIL\texample.com/suite\t0.1s\n")}, wantIncomplete: true},
+		"pytest reported an error beside a failure": {
+			failed:         []checkResult{team("FAILED tests/test_a.py::test_one - assert 1 == 2\nERROR tests/test_b.py::test_two - fixture db not found\n1 failed, 1 error in 0.12s\n")},
+			wantTests:      1,
+			wantIncomplete: true,
+		},
+		"a jest suite failed to run beside a failure": {
+			failed:         []checkResult{team("  ✕ renders the header (12 ms)\n  ● Test suite failed to run\n")},
+			wantTests:      1,
+			wantIncomplete: true,
+		},
 		"more failures than listed":  {failed: []checkResult{team(listed)}, wantTests: baseAttributionMaxListed, wantIncomplete: true},
 		"a named line cut to length": {failed: []checkResult{team("--- FAIL: Test" + strings.Repeat("x", baseAttributionMaxLineRunes+5) + "\n")}, wantTests: 1, wantIncomplete: true},
 	}

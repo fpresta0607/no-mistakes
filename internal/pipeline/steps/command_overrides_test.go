@@ -141,6 +141,9 @@ func TestTestStep_LocalCheckFailureCannotBecomeAGreenBaseline(t *testing.T) {
 			t.Fatalf("passing team command blamed for the local check: %+v", findings.Items)
 		}
 	}
+	if strings.Contains(findings.TestingSummary, "configured test command failed") {
+		t.Fatalf("testing summary blames the team command: %q", findings.TestingSummary)
+	}
 	if findings.Items[0].Description != "machine-local test check failed with exit code 9: exit 9" {
 		t.Fatalf("local failure not attributed to the check by name: %q", findings.Items[0].Description)
 	}

@@ -460,16 +460,18 @@ Each line of the file is one of:
 
 The command reads that file, runs what it names, and exits non-zero on a failure.
 
-It stands in only when `commands.test` is set, a repair turn ran, the failed output named every failure, and there is a failure or a changed path to give it.
+It stands in only when `commands.test` is set and took its turn, a repair turn ran, the failed output named every failure, and there is a failure or a changed path to give it.
 Otherwise `commands.test` runs whole, which is also what happens with this key unset, because a failed baseline never clears with nothing re-run.
+The step reads the common runners' output and cannot prove an arbitrary runner named everything, so the command should also run what the `path` lines point at.
 
 A focused pass is never a full baseline:
 
-- The step's `focused_check` record and its testing summary name the command and say `commands.test` did not run on that head.
+- The step's `focused_check` record and its testing summary name the command and say the Test step did not run `commands.test` on that head.
 - The PR attestation carries [`focused_check`](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) for that head, and it is gone once the head moves.
-- Under [`side_by_side`](/no-mistakes/reference/global-config/#side_by_side) the Push step counts that head as untested and runs `commands.test` on it before anything is pushed.
+- Under [`side_by_side`](/no-mistakes/reference/global-config/#side_by_side) the Push step counts that head as untested and runs `commands.test` on it before anything is pushed, whether the focused check passed or a person approved over its failure.
 
-A failing focused check parks the step the way a failing `commands.test` does, machine-local additional checks still run after it, and [`test_command_wrapper`](/no-mistakes/reference/global-config/#test_command_wrapper) starts it like the baseline.
+A failing focused check parks the step the way a failing `commands.test` does, with a finding that names it, machine-local additional checks still run after it, and [`test_command_wrapper`](/no-mistakes/reference/global-config/#test_command_wrapper) starts it like the baseline.
+[`test.base_attribution`](#testbase_attribution) compares `commands.test` on both commits, so it does not run for a focused check.
 The trust rules are those of every other `commands` entry.
 
 ### commands.lint
@@ -1338,7 +1340,7 @@ When the list is set and a change touches none of its paths, the Test step does 
 It logs one line that says so and names the rule, and the pull request's Testing section carries the same sentence.
 [`commands.test`](#commandstest) still runs, and its failure still parks the step.
 The record carries no verdict and no scenario, so the pull request's attestation omits `live_validation` instead of claiming one.
-With the list unset, the evidence agent runs on every change, as it always has.
+With the list unset, the evidence agent runs on every change whose baseline does not fail.
 
 Entries follow the [`ignore_patterns`](#ignore_patterns) match rules, and they are matched against every changed file, never the `ignore_patterns`-filtered set.
 A rename counts on both sides, so a file moved out of the surface is a change to it.

@@ -289,12 +289,11 @@ Previous test findings to address:
 	baseline.findings = append(baseline.findings, repairQuestions...)
 	// The commit the baseline ran on, and whether it passed there, is what the
 	// Push step under side_by_side compares the head it is about to push with.
-	// A focused pass is not that baseline, so that step runs it.
-	passed := !baseline.noTurn && len(failedChecks(baseline.results)) == 0
-	if passed && baseline.focused != nil {
-		sctx.Shared.RecordFocusedPass(baseSHA)
+	// A focused check, passed or not, is not that baseline, so that step runs it.
+	if baseline.focused != nil {
+		sctx.Shared.RecordFocusedCheck(baseSHA)
 	} else {
-		sctx.Shared.RecordBaseline(sctx.Run.HeadSHA, baseSHA, passed)
+		sctx.Shared.RecordBaseline(sctx.Run.HeadSHA, baseSHA, !baseline.noTurn && len(failedChecks(baseline.results)) == 0)
 	}
 	if repairCut != nil {
 		return testAgentTimeoutOutcome(sctx, repairCut, startHead, baseline), nil
@@ -335,9 +334,12 @@ Previous test findings to address:
 		return testStepOutcome(sctx, findings, baseline, fixSummary, newTestsFromFix), nil
 	}
 
-	if len(baseline.results) == 0 {
+	switch {
+	case len(baseline.results) == 0:
 		sctx.Log("no test command configured, asking agent to run tests...")
-	} else {
+	case baseline.focused != nil:
+		sctx.Log("focused check passed, asking agent to gather live evidence...")
+	default:
 		sctx.Log("baseline tests passed, asking agent to gather live evidence...")
 	}
 	reassessHistory := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + planSection + testguidance.Rule
@@ -497,7 +499,14 @@ func runTestBaseline(sctx *pipeline.StepContext, testCmd string, focus *testRepa
 		sctx.Log(fmt.Sprintf("running the focused check after the repair: %s (%d failed tests, %d repaired paths)", testCmd, len(focus.tests), len(focus.paths)))
 		env := sctx.Env
 		sctx.Env = append(slices.Clip(env), testFocusEnv+"="+focus.file)
-		defer func() { sctx.Env = env }()
+		defer func() {
+			sctx.Env = env
+			// The scratch directory is the agent's own, so the file goes before
+			// the next turn starts.
+			if err := os.Remove(focus.file); err != nil {
+				sctx.Log(fmt.Sprintf("warning: failed to remove the focused check's focus: %v", err))
+			}
+		}()
 	} else if testCmd != "" {
 		sctx.Log(fmt.Sprintf("running tests: %s", testCmd))
 	}
@@ -527,17 +536,23 @@ func runTestBaseline(sctx *pipeline.StepContext, testCmd string, focus *testRepa
 		return baseline, nil
 	}
 	for _, result := range failed {
+		description := result.description("test")
+		if focus != nil && !result.Local {
+			description = fmt.Sprintf("focused test check failed with exit code %d: %s", result.ExitCode, result.Command)
+		}
 		baseline.findings = append(baseline.findings, Finding{
 			Severity:    "error",
 			Action:      types.ActionAutoFix,
 			Category:    types.FindingCategoryTestCommand,
-			Description: result.description("test"),
+			Description: description,
 		})
 	}
 	baseline.summary = projectedOutput
 	baseline.exitCode = failed[0].ExitCode
+	// Attribution compares commands.test on both commits, so a focused check,
+	// which is not that command, gets none.
 	attributionSection := ""
-	if sctx.Config.Test.BaseAttribution && !failed[0].Local {
+	if sctx.Config.Test.BaseAttribution && !failed[0].Local && focus == nil {
 		attribution, err := attributeTestFailures(sctx, testCmd, baseSHA, failed[0].Output)
 		if err != nil {
 			return baseline, err
@@ -573,17 +588,20 @@ func testStepOutcome(sctx *pipeline.StepContext, findings Findings, baseline tes
 // failedBaselineOutcome parks a failed baseline with no evidence turn. Its
 // findings are auto-fixable, so the executor's fix loop and budget decide
 // whether the repair runs. A fix round keeps the gate it answered (see
-// answeredTestGate), because no live check ran to show any of it gone, and that
-// record's tested head stays the one its live check saw, so nothing claims this
-// head was driven.
+// answeredTestGate), because no live check ran to show any of it gone. Its
+// scenarios stay on the record as not driven and its verdict goes, and the
+// tested head stays the one that live check saw, so nothing claims this head
+// was driven.
 func failedBaselineOutcome(sctx *pipeline.StepContext, baseline testBaseline, fixSummary string, newTestsFromFix []string) *pipeline.StepOutcome {
 	findings := answeredTestGate(sctx)
+	findings.Verdict = ""
+	findings.Scenarios = keepUndrivenScenarios(Findings{}, lastLiveCheck(sctx)).Scenarios
 	findings.Tested = baseline.tested
 	findings.Items = append(baseline.findings, findings.Items...)
 	findings.Summary = baseline.summary
 	findings.BaselineFailure = baseline.failure
 	findings.FocusedCheck = baseline.focused
-	findings.TestingSummary = "The configured test command failed on this head, so no live check ran on it."
+	findings.TestingSummary = "A configured test check failed on this head, so no live check ran on it."
 	if check := baseline.focused; check != nil {
 		findings.TestingSummary = focusedCheckSentence(check) + " No live check ran on this head."
 	}
@@ -706,6 +724,9 @@ func parseTestAnalyzerOutput(result *agent.Result) (Findings, error) {
 	findings.UnvalidatedSinceSHA = ""
 	findings.BaselineFailure = nil
 	findings.FocusedCheck = nil
+	for i := range findings.Scenarios {
+		findings.Scenarios[i].StillFailing = false
+	}
 	return findings, nil
 }
 
