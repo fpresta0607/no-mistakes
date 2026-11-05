@@ -251,10 +251,10 @@ type TestScenario struct {
 	Live     bool   `json:"live"`
 	Evidence string `json:"evidence"`
 	Reason   string `json:"reason"`
-	// StillFailing is step-owned: the scenario failed live on an earlier head of
-	// this run and no live pass has shown that failure gone, whatever its Result
+	// StillFailing is step-owned: the scenario failed live before a focused
+	// re-check and no live pass has shown that failure gone, whatever its Result
 	// says now. An undriven scenario can only read untested, so this is what
-	// stops a later "go" standing over it.
+	// stops a later re-check's "go" standing over it.
 	StillFailing bool `json:"still_failing,omitempty"`
 }
 

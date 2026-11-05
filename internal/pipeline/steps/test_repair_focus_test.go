@@ -334,12 +334,16 @@ func TestTestStep_FailedFocusedCheckParksAndIsRecorded(t *testing.T) {
 	ag := repairingAgent(dir, repairResultJSON, passingScenarioFindingsJSON)
 	cmds := config.Commands{Test: fullCommandMustNotRun, TestFocused: "exit 5"}
 	sctx := repairContext(t, ag, dir, baseSHA, headSHA, cmds, answeredFailure(t, &types.TestBaselineFailure{Tests: []string{namedFailure}}))
+	logs := liveCheckLogs(sctx)
 
 	outcome, err := (&TestStep{}).Execute(sctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	if containsLog(*logs, "configured test command failed") || !containsLog(*logs, "focused check failed") {
+		t.Fatalf("step log = %q, want the failure named as the focused check's", *logs)
+	}
 	if !outcome.NeedsApproval || !outcome.AutoFixable || outcome.ExitCode != 5 {
 		t.Fatalf("outcome = %+v, want an auto-fixable park on the focused check's exit code", outcome)
 	}
@@ -530,6 +534,7 @@ func TestTestStep_WrapperRefusalLeavesNoFocusedCheckRecord(t *testing.T) {
 		"FAKE_CLI_WRAPPER_REFUSAL":      "turnline: this run takes no turn",
 		"FAKE_CLI_WRAPPER_REFUSAL_CODE": "125",
 	})
+	f.sctx.Shared = &pipeline.RunShared{}
 	f.sctx.Fixing = true
 	f.sctx.PreviousFindings = answeredFailure(t, &types.TestBaselineFailure{Tests: []string{namedFailure}})
 
@@ -547,6 +552,9 @@ func TestTestStep_WrapperRefusalLeavesNoFocusedCheckRecord(t *testing.T) {
 	}
 	if len(findings.Items) == 0 || findings.Items[0].ID != types.FindingIDTestCommandNoTurn {
 		t.Fatalf("findings = %+v, want the no-turn finding", findings.Items)
+	}
+	if _, _, _, recorded := f.sctx.Shared.Baseline(); recorded {
+		t.Fatal("a refused focused check was recorded as a baseline, so Push would skip commands.test")
 	}
 }
 

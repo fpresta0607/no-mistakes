@@ -258,7 +258,8 @@ func focusedRecheckSection(last Findings, repairedPaths []string) string {
 // of the last live check it left out. None of them was driven on this head, so
 // each is recorded as untested with where it last ran, and live_validation never
 // counts it. A failure stays marked until a live pass shows it gone, however many
-// rounds that takes, and a "go" cannot stand while one is open.
+// focused re-checks that takes, and a "go" cannot stand while one is open. A whole
+// live check derives its list again, so it has no names to match this against.
 func keepUndrivenScenarios(focused, last Findings) Findings {
 	reported := make(map[string]int, len(focused.Scenarios))
 	for i, scenario := range focused.Scenarios {

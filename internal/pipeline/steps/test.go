@@ -290,7 +290,7 @@ Previous test findings to address:
 	// The commit the baseline ran on, and whether it passed there, is what the
 	// Push step under side_by_side compares the head it is about to push with.
 	// A focused check, passed or not, is not that baseline, so that step runs it.
-	if baseline.focused != nil {
+	if baseline.isFocused {
 		sctx.Shared.RecordFocusedCheck(baseSHA)
 	} else {
 		sctx.Shared.RecordBaseline(sctx.Run.HeadSHA, baseSHA, !baseline.noTurn && len(failedChecks(baseline.results)) == 0)
@@ -316,9 +316,12 @@ Previous test findings to address:
 	// repair without an evidence turn.
 	if failed := failedChecks(baseline.results); len(failed) > 0 {
 		for _, result := range failed {
-			if result.Local {
+			switch {
+			case result.Local:
 				sctx.Log(fmt.Sprintf("machine-local test check failed: %s, parking for repair with no live check...", result.Command))
-			} else {
+			case baseline.isFocused:
+				sctx.Log("focused check failed, parking for repair with no live check...")
+			default:
 				sctx.Log("configured test command failed, parking for repair with no live check...")
 			}
 		}
@@ -485,15 +488,17 @@ type testBaseline struct {
 	noTurn bool
 	// failure is what a failed repository command named, for the repair turn.
 	failure *types.TestBaselineFailure
-	// focused is set when commands.test_focused stood in for commands.test.
-	focused *types.TestFocusedCheck
+	// isFocused is true when commands.test_focused stood in for commands.test,
+	// and focused is its record, set only when it took its turn.
+	isFocused bool
+	focused   *types.TestFocusedCheck
 }
 
 // runTestBaseline runs the configured checks: commands.test, or with a focus
 // commands.test_focused in its place, then the machine-local checks. Only these
 // commands see the focus: the agent turns that follow run on sctx.Env without it.
 func runTestBaseline(sctx *pipeline.StepContext, testCmd string, focus *testRepairFocus, baseSHA string) (testBaseline, error) {
-	baseline := testBaseline{tested: []string{}}
+	baseline := testBaseline{tested: []string{}, isFocused: focus != nil}
 	if focus != nil {
 		testCmd = focus.command
 		sctx.Log(fmt.Sprintf("running the focused check after the repair: %s (%d failed tests, %d repaired paths)", testCmd, len(focus.tests), len(focus.paths)))
