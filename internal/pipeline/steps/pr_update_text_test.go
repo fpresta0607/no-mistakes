@@ -163,6 +163,8 @@ func TestPRUpdateTextKeepCreateThenUpdatePublishesOneIntent(t *testing.T) {
 	sctx.Env = createEnv
 	sctx.Config.PR.UpdateText = config.PRUpdateTextKeep
 	sctx.UserIntent = "Ship the intent exactly once."
+	isPublished := true
+	sctx.Config.PR.PublishIntent = &isPublished
 	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
 	if err != nil {
 		t.Fatal(err)
@@ -404,6 +406,8 @@ func TestPRUpdateTextKeepOnCreatePublishesIntentOnEveryDraftPath(t *testing.T) {
 			sctx.Env = env
 			sctx.Config.PR.UpdateText = config.PRUpdateTextKeep
 			sctx.UserIntent = intent
+			isPublished := true
+			sctx.Config.PR.PublishIntent = &isPublished
 			sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
 			if err != nil {
 				t.Fatal(err)

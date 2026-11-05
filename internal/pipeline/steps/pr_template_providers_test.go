@@ -37,7 +37,7 @@ func TestPRTemplateProviderCompositionUpdateAndRestamp(t *testing.T) {
 			// Human edits survive a later template removal while the managed Intent
 			// appendix can switch to the configured brief across every forge skin.
 			sctx.UserIntent = "private source context is not the public Intent rendering"
-			sctx.Config.PR.Intent.Format = "brief"
+			publishBriefIntent(sctx)
 			sctx.Config.PR.Intent.Sections = []string{"why"}
 			sctx.PublicIntentBrief = "Preserve the author's review context\n\n### Why\n- Keep the author narrative stable"
 			sctx.Config.PR.Template = ""

@@ -267,6 +267,8 @@ func TestPRSuppliedBodyPublishesIntentUnderTheSameControls(t *testing.T) {
 			sctx.Run.PRTitle, sctx.Run.PRBody = &title, &body
 			sctx.Run.OmitIntent = omit
 			sctx.UserIntent = "Ship the supplied description."
+			isPublished := true
+			sctx.Config.PR.PublishIntent = &isPublished
 			got, err := (&PRStep{}).buildSuppliedPRContent(sctx, "feature", "main", base, "", scm.ProviderGitHub, 0)
 			if err != nil {
 				t.Fatal(err)

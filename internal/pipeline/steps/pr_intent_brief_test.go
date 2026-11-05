@@ -59,6 +59,14 @@ func hasPRIntentBriefSchema(t *testing.T, raw json.RawMessage) bool {
 		innerRequires["goal"] && innerRequires["why"] && innerRequires["scope"] && innerRequires["out_of_scope"]
 }
 
+// publishBriefIntent selects the brief format under the trusted opt-in that
+// publication needs: an unset pr.publish_intent keeps intent private.
+func publishBriefIntent(sctx *pipeline.StepContext) {
+	isPublished := true
+	sctx.Config.PR.PublishIntent = &isPublished
+	sctx.Config.PR.Intent.Format = "brief"
+}
+
 func TestRenderPRIntentBriefUsesConfiguredSectionsAndOrder(t *testing.T) {
 	got, err := renderPRIntentBrief(prIntentBrief{
 		Goal:       "Give reviewers a clear migration path",
@@ -99,7 +107,7 @@ func TestPRStep_BriefIsSeparateFromStoredIntent(t *testing.T) {
 		t.Fatal(err)
 	}
 	sctx.Repo, sctx.Run, sctx.UserIntent = repo, run, source
-	sctx.Config.PR.Intent.Format = "brief"
+	publishBriefIntent(sctx)
 	sctx.Config.PR.Intent.Sections = []string{"why", "scope", "out_of_scope"}
 	insertCompletedStep(t, sctx, types.StepReview, "", "")
 
@@ -138,7 +146,7 @@ func TestPRStep_TemplatePublishesTheSameStructuredBrief(t *testing.T) {
 	sctx, ag, _ := templateTestContext(t)
 	const source = "The internal task ID task-735 is not reviewer context."
 	sctx.UserIntent = source
-	sctx.Config.PR.Intent.Format = "brief"
+	publishBriefIntent(sctx)
 	sctx.Config.PR.Intent.Sections = []string{"scope", "why"}
 	ag.runFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		if !strings.Contains(opts.Prompt, source) || !strings.Contains(opts.Prompt, "intent_brief") || !hasPRIntentBriefSchema(t, opts.JSONSchema) {
@@ -174,10 +182,10 @@ func TestPRStep_TemplatePublishesTheSameStructuredBrief(t *testing.T) {
 func TestPRStep_BriefPublicationPolicySkipsGeneration(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	const source = "source text remains drafting context under repository publication policy"
+	const source = "source text stays out of drafting under repository publication policy"
 	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-		if !strings.Contains(opts.Prompt, source) || strings.Contains(opts.Prompt, "intent_brief") {
-			t.Fatalf("repository omission changed legacy prompt context or requested a brief: %s", opts.Prompt)
+		if strings.Contains(opts.Prompt, source) || strings.Contains(opts.Prompt, "intent_brief") {
+			t.Fatalf("repository omission reached the drafting prompt or requested a brief: %s", opts.Prompt)
 		}
 		return &agent.Result{Output: json.RawMessage(`{"title":"feat: add validation","body":"## What Changed\n\n- Add validation"}`)}, nil
 	}}
@@ -208,7 +216,7 @@ func TestPRStep_OwnedAppendixDraftsBriefWithoutReplacingAuthorNarrative(t *testi
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = source
-	sctx.Config.PR.Intent.Format = "brief"
+	publishBriefIntent(sctx)
 	sctx.Config.PR.Intent.Sections = []string{"why"}
 	insertCompletedStep(t, sctx, types.StepReview, "", "")
 	step := &PRStep{}
@@ -251,7 +259,7 @@ func TestPRStep_ExistingPRUpdateAddsBriefWithoutReplacingNarrative(t *testing.T)
 		t.Fatalf("created PR omitted narrative:\n%s", created)
 	}
 
-	sctx.Config.PR.Intent.Format = "brief"
+	publishBriefIntent(sctx)
 	updateEnv, _ := fakeGH(t, "https://github.com/test/repo/pull/42")
 	bodyFile := envEntry(updateEnv, "FAKE_CLI_PR_BODY_FILE")
 	if err := os.WriteFile(bodyFile, []byte(created), 0o600); err != nil {
@@ -291,7 +299,7 @@ func TestPRStep_ConfiguredTitleTurnAlsoReturnsBrief(t *testing.T) {
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = source
-	sctx.Config.PR.Intent.Format = "brief"
+	publishBriefIntent(sctx)
 	sctx.Config.PR.Intent.Sections = []string{"scope"}
 	sctx.Config.PR.TitleFormat = "{{.Title}}"
 
@@ -317,7 +325,7 @@ func TestPRStep_BriefOmissionSkipsGenerationAndPublication(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = source
 	sctx.Run.OmitIntent = true
-	sctx.Config.PR.Intent.Format = "brief"
+	publishBriefIntent(sctx)
 
 	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
@@ -337,14 +345,15 @@ func TestPRStep_BriefModeFailsClosedWithoutStructuredOutput(t *testing.T) {
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = source
-	sctx.Config.PR.Intent.Format = "brief"
+	publishBriefIntent(sctx)
 	if _, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0); err == nil || strings.Contains(err.Error(), source) {
 		t.Fatalf("buildPRContent error = %v, want non-disclosing fail-closed error", err)
 	}
 }
 
 func TestFallbackPRContentRefusesRawIntentInBriefMode(t *testing.T) {
-	sctx := &pipeline.StepContext{Config: &config.Config{PR: config.PR{Intent: config.PRIntent{Format: "brief"}}}, UserIntent: "private raw intent"}
+	sctx := &pipeline.StepContext{Config: &config.Config{}, UserIntent: "private raw intent"}
+	publishBriefIntent(sctx)
 	if _, err := (&PRStep{}).fallbackPRContent(sctx, "", "", "", "", "", 0, scm.ProviderGitHub); err == nil || strings.Contains(err.Error(), "private raw intent") {
 		t.Fatalf("fallback error = %v, want a non-disclosing fail-closed error", err)
 	}
@@ -358,7 +367,7 @@ func TestPRStep_SuppliedTextDraftsOnlyTheBrief(t *testing.T) {
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = "Keep the release check reliable."
-	sctx.Config.PR.Intent.Format = "brief"
+	publishBriefIntent(sctx)
 	sctx.Config.PR.Intent.Sections = []string{"why"}
 	insertCompletedStep(t, sctx, types.StepReview, "", "")
 	title, body := "Supplied title", "Supplied narrative."

@@ -42,10 +42,11 @@ func runOmitsIntent(sctx *pipeline.StepContext) bool {
 
 // prDraftIntentPromptSection is the intent section for the PR-drafting turns
 // (ordinary narrative, title-only fallback, and repository-template
-// narrative). It obeys the same publication gate as the generated section.
+// narrative). It obeys the same publication gate as the generated section, read
+// from the source because a brief does not exist until these turns draft it.
 // Every other step prompt keeps userIntentPromptSection unchanged.
 func prDraftIntentPromptSection(sctx *pipeline.StepContext) string {
-	if publicPRIntent(sctx) == "" {
+	if publicPRIntentSource(sctx) == "" {
 		return ""
 	}
 	return userIntentPromptSection(sctx)
