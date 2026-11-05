@@ -92,12 +92,12 @@ func TestRepairRoundScopeSplit(t *testing.T) {
 		finding.File, finding.Line = file, line
 		return finding
 	}
-	heldBack := []Finding{{ID: "f-2", File: "deferred.go", Line: 7, Description: "left for later"}}
+	unverified := []Finding{{ID: "f-3", File: "earlier.go", Line: 7, Severity: "info", Description: "an earlier selection"}}
 	cases := []struct {
 		name         string
 		finding      Finding
 		closed       []string
-		deferred     []Finding
+		unverified   []Finding
 		wantFollowUp bool
 	}{
 		{name: "a file the repair never touched", finding: outside, wantFollowUp: true},
@@ -138,22 +138,22 @@ func TestRepairRoundScopeSplit(t *testing.T) {
 		{name: "a selected finding named closed and reported again", finding: Finding{File: "selected.go", Line: 90, Description: selectedDefect, Action: types.ActionAutoFix}},
 		{name: "repeated as the prompt showed it", finding: Finding{File: "selected.go", Line: 90, Description: sanitizePromptText(selectedDefect), Action: types.ActionAutoFix}},
 		{name: "repeated in another file", finding: Finding{File: "other.go", Line: 3, Description: selectedDefect, Action: types.ActionAutoFix}},
-		{name: "beside a finding left out of the repair", finding: withFile(outside, "deferred.go", 90), deferred: heldBack},
-		{name: "in another file while a finding is left out of the repair", finding: outside, deferred: heldBack},
-		{name: "a deferred finding cannot be named closed", finding: withFile(outside, "deferred.go", 90), closed: []string{"f-1", "f-2"}, deferred: heldBack},
-		{name: "a deferred warning parks the run", finding: outside, deferred: []Finding{{ID: "f-3", Severity: "warning", File: "deferred.go", Line: 7, Action: types.ActionAutoFix}}},
-		{name: "a deferred ask-user note parks the run", finding: outside, deferred: []Finding{{ID: "f-3", Severity: "info", File: "deferred.go", Line: 7, Action: types.ActionAskUser}}},
-		{name: "a deferred note parks nothing", finding: outside, deferred: []Finding{{ID: "f-3", Severity: "info", File: "deferred.go", Line: 7, Action: types.ActionNoOp}}, wantFollowUp: true},
+		{name: "beside a deferred finding, which cannot clear here", finding: withFile(outside, "deferred.go", 90), wantFollowUp: true},
+		{name: "a deferred finding reported again is not new", finding: Finding{File: "deferred.go", Line: 7, Description: "left for later", Action: types.ActionAutoFix}},
+		{name: "a deferred finding repeated in another file", finding: Finding{File: "other.go", Line: 3, Description: "left for later", Action: types.ActionAutoFix}},
+		{name: "in another file while an earlier selection is unverified", finding: outside, unverified: unverified},
+		{name: "an earlier selection reported again", finding: Finding{File: "earlier.go", Line: 7, Description: "an earlier selection", Action: types.ActionAutoFix}, unverified: unverified},
+		{name: "an earlier selection named closed", finding: outside, closed: []string{"f-1", "f-3"}, unverified: unverified, wantFollowUp: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			scope := &repairRoundScope{
 				changed:   map[string][]lineSpan{"repaired.go": {{10, 20}}, "internal/repaired.go": {{10, 20}}, "binary.dat": nil, "selected.go": {{1, 5}}},
-				tracked:   map[string]bool{"other.go": true, "repaired.go": true, "internal/repaired.go": true, "binary.dat": true, "selected.go": true, "first-look.go": true, "deferred.go": true},
+				tracked:   map[string]bool{"other.go": true, "repaired.go": true, "internal/repaired.go": true, "binary.dat": true, "selected.go": true, "first-look.go": true, "deferred.go": true, "earlier.go": true},
 				firstLook: []string{"first-look.go"},
-				selected:  []Finding{{ID: "f-1", File: "selected.go", Line: 40, Description: selectedDefect}},
-				deferred:  tc.deferred,
+				verifying: append([]Finding{{ID: "f-1", File: "selected.go", Line: 40, Description: selectedDefect}}, tc.unverified...),
+				deferred:  []Finding{{ID: "f-2", File: "deferred.go", Line: 7, Description: "left for later"}},
 			}
 			closed := tc.closed
 			if closed == nil {
@@ -203,13 +203,51 @@ func TestRepairRoundScopeSplitRestatesTheSummaryOfWhatItMoved(t *testing.T) {
 
 func TestRepairRoundScopeRecordsOnlySelectedFindingsAsClosed(t *testing.T) {
 	t.Parallel()
-	scope := &repairRoundScope{selected: []Finding{{ID: "f-1", File: "a.go", Line: 1}}}
-	findings := Findings{ClosedFindings: []string{"f-1", "made-up"}}
+	scope := &repairRoundScope{
+		verifying: []Finding{{ID: "f-1", File: "a.go", Line: 1}},
+		deferred:  []Finding{{ID: "f-2", File: "b.go", Line: 1}},
+	}
+	findings := Findings{ClosedFindings: []string{"f-1", "f-2", "made-up"}}
 
 	scope.split(func(string) {}, &findings)
 
 	if !reflect.DeepEqual(findings.ClosedFindings, []string{"f-1"}) {
-		t.Fatalf("closed findings = %v, want only the selected id", findings.ClosedFindings)
+		t.Fatalf("closed findings = %v, want only the id awaiting verification", findings.ClosedFindings)
+	}
+}
+
+func TestNewRepairRoundScopeSortsOpenFindingsByWhatCanClear(t *testing.T) {
+	t.Parallel()
+	dir, _, _ := setupGitRepo(t)
+	head := gitCmd(t, dir, "rev-parse", "HEAD")
+	selected := Findings{Items: []Finding{
+		{ID: "f-1", File: "a.go", Line: 1, Description: "sent to this repair"},
+		{ID: "question-q1", File: "a.go", Line: 1, Description: "a selected question", Category: types.FindingCategoryReviewQuestion},
+	}}
+	deferred := []Finding{
+		{ID: "f-2", File: "b.go", Line: 1, Description: "sent to an earlier repair"},
+		{ID: "note", File: "c.go", Line: 1, Description: "never selected"},
+		{ID: "question-q2", File: "d.go", Line: 1, Description: "a deferred question", Category: types.FindingCategoryReviewQuestion},
+	}
+
+	scope, err := newRepairRoundScope(context.Background(), dir, head, nil, nil, []string{"a.go"}, selected, deferred, []string{"f-1", "f-2", "question-q2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	section := scope.promptSection()
+	for _, want := range []string{"f-1: a.go:1: sent to this repair", "f-2: b.go:1: sent to an earlier repair"} {
+		if !strings.Contains(section, want) {
+			t.Errorf("the checklist is missing %q:\n%s", want, section)
+		}
+	}
+	for _, unwanted := range []string{"never selected", "a selected question", "a deferred question"} {
+		if strings.Contains(section, unwanted) {
+			t.Errorf("the checklist must not list %q:\n%s", unwanted, section)
+		}
+	}
+	if len(scope.deferred) != 1 || scope.deferred[0].ID != "note" {
+		t.Fatalf("deferred = %+v, want only the finding that cannot clear", scope.deferred)
 	}
 }
 
@@ -233,7 +271,7 @@ func TestNewRepairRoundScopeReadsTheRepairFromTheWorktree(t *testing.T) {
 	gitCmd(t, dir, "commit", "-m", "the repair's commit")
 	writeFile(bracketed, strings.Replace(numberedLines(40), "line 30\n", "line thirty\n", 1))
 
-	scope, err := newRepairRoundScope(context.Background(), dir, startHead, []string{"long.txt", bracketed}, []string{"long.txt", bracketed}, []string{"long.txt", bracketed}, Findings{}, nil)
+	scope, err := newRepairRoundScope(context.Background(), dir, startHead, []string{"long.txt", bracketed}, []string{"long.txt", bracketed}, []string{"long.txt", bracketed}, Findings{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -261,7 +261,7 @@ Previous review findings to address:
 				open := append(sentToFix.Items, deferred.Items...)
 				carried = fixRoundCarriedPaths(reviewable, sctx.PreviousReviewedPaths, changed, open)
 				if repairRoundCanNarrow(reviewable, sctx.PreviousReviewedPaths, changed, open) {
-					repair, err = newRepairRoundScope(ctx, sctx.WorkDir, sctx.ReviewStartingHeadSHA, changed, reviewable, sctx.PreviousReviewedPaths, sentToFix, deferred.Items)
+					repair, err = newRepairRoundScope(ctx, sctx.WorkDir, sctx.ReviewStartingHeadSHA, changed, reviewable, sctx.PreviousReviewedPaths, sentToFix, deferred.Items, sctx.PendingVerificationIDs)
 					if err != nil {
 						return nil, err
 					}

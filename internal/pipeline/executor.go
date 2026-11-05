@@ -1784,6 +1784,7 @@ rounds:
 		}
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
+		sctx.PendingVerificationIDs = pendingVerificationIDs
 		if err := sctx.AssertValidationSource(); err != nil {
 			return false, "", err
 		}

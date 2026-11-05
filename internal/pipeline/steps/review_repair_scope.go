@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -21,7 +22,7 @@ var repairReviewSchema = json.RawMessage(strings.NewReplacer(
 					"wrong_result": {"type": "string", "description": "Repair rounds only: the wrong result that input produces"},
 					"review_scope":`,
 	`"tested":`,
-	`"closed_findings": {"type": "array", "items": {"type": "string"}, "description": "Repair rounds only: the id of each selected finding this repair closed"},
+	`"closed_findings": {"type": "array", "items": {"type": "string"}, "description": "Repair rounds only: the id of each finding awaiting verification that is closed"},
 		"tested":`,
 ).Replace(string(reviewFindingsSchema)))
 
@@ -36,9 +37,9 @@ type lineSpan struct {
 }
 
 // repairRoundScope is what a repair round's rereview is held to: the repair's
-// own change, the files no earlier round judged, and the findings the repair
-// was sent to close. Everything else on the branch was judged by the rounds
-// before it.
+// own change, the files no earlier round judged, and the findings awaiting
+// verification. Everything else on the branch was judged by the rounds before
+// it.
 type repairRoundScope struct {
 	startHead string
 	// changed maps each file the repair touched to its hunks, context lines
@@ -47,9 +48,12 @@ type repairRoundScope struct {
 	changed map[string][]lineSpan
 	// tracked is every path in the repository. A finding's file is the
 	// reviewer's own spelling, so one that names none of these cannot be placed.
-	tracked      map[string]bool
-	firstLook    []string
-	selected     []Finding
+	tracked   map[string]bool
+	firstLook []string
+	// verifying is what can clear on this round's coverage: the findings the
+	// repair was sent to close and any earlier selection still unverified.
+	verifying []Finding
+	// deferred is every other open finding. None of them can clear here.
 	deferred     []Finding
 	previousRisk string
 	closed       map[string]bool
@@ -75,7 +79,7 @@ func repairRoundCanNarrow(reviewable, previouslyReviewed, changedSinceStart []st
 		len(uncoveredReviewablePaths(judgedAgain, reviewable)) < len(reviewable)
 }
 
-func newRepairRoundScope(ctx context.Context, workDir, startHead string, changedSinceStart, reviewable, previouslyReviewed []string, selected Findings, deferred []Finding) (*repairRoundScope, error) {
+func newRepairRoundScope(ctx context.Context, workDir, startHead string, changedSinceStart, reviewable, previouslyReviewed []string, selected Findings, deferred []Finding, pendingIDs []string) (*repairRoundScope, error) {
 	listed, err := git.Run(ctx, workDir, "ls-files", "-z")
 	if err != nil {
 		return nil, fmt.Errorf("list tracked files: %w", err)
@@ -90,9 +94,15 @@ func newRepairRoundScope(ctx context.Context, workDir, startHead string, changed
 		changed:      make(map[string][]lineSpan, len(changedSinceStart)),
 		tracked:      tracked,
 		firstLook:    uncoveredReviewablePaths(previouslyReviewed, reviewable),
-		selected:     withoutReviewQuestions(selected.Items),
-		deferred:     withoutReviewQuestions(deferred),
+		verifying:    withoutReviewQuestions(selected.Items),
 		previousRisk: selected.RiskLevel,
+	}
+	for _, finding := range withoutReviewQuestions(deferred) {
+		if slices.Contains(pendingIDs, finding.ID) {
+			scope.verifying = append(scope.verifying, finding)
+		} else {
+			scope.deferred = append(scope.deferred, finding)
+		}
 	}
 	for _, changed := range changedSinceStart {
 		diff, err := git.Run(ctx, workDir, "diff", "--no-ext-diff", "--no-color", "--no-renames", "-U3", startHead, "--", ":(literal)"+changed)
@@ -161,14 +171,12 @@ func (r *repairRoundScope) promptSection() string {
 			fmt.Fprintf(&b, "  - %s\n", coveragePathLine(path))
 		}
 	}
-	if len(r.selected) > 0 {
-		b.WriteString("- The repair was sent to close these findings. Trace each one's failing sequence through the current code:\n")
-		writeRepairChecklist(&b, r.selected)
-		b.WriteString("- Name each finding the repair closed in closed_findings, by id. Report a finding the repair did not close again in findings. Until every one of them is named closed, the pipeline blocks on every finding you report.\n")
-	}
-	if len(r.deferred) > 0 {
-		b.WriteString("- These findings stay open from earlier rounds and this repair was not sent to close them. Check each one against the current code, and report it again if it still holds:\n")
-		writeRepairChecklist(&b, r.deferred)
+	if len(r.verifying) > 0 {
+		b.WriteString("- These findings await verification, because this repair or an earlier one was sent to close them. Trace each one's failing sequence through the current code:\n")
+		for _, finding := range r.verifying {
+			fmt.Fprintf(&b, "  - %s: %s:%d: %s\n", sanitizePromptText(finding.ID), sanitizePromptText(finding.File), finding.Line, sanitizePromptText(finding.Description))
+		}
+		b.WriteString("- Name each one that is closed in closed_findings, by id. Report one that is not closed again in findings. Until every one of them is named closed, the pipeline blocks on every finding you report.\n")
 	}
 	b.WriteString("- A defect outside the repair's change is a follow-up: report it, and the pipeline records it without blocking this run. It blocks only when you set failing_input to the concrete input or state that reaches it and wrong_result to the wrong result that input produces. Set them only for a failure you traced, and state both in the description too. An ask-user finding parks the run wherever it sits, so outside the repair's change keep it for a decision only a person can make.\n")
 	b.WriteString("- risk_level, risk_rationale and risk_scope still describe the whole branch, not this repair.")
@@ -179,23 +187,17 @@ func (r *repairRoundScope) promptSection() string {
 	return b.String()
 }
 
-func writeRepairChecklist(b *strings.Builder, findings []Finding) {
-	for _, finding := range findings {
-		fmt.Fprintf(b, "  - %s: %s:%d: %s\n", sanitizePromptText(finding.ID), sanitizePromptText(finding.File), finding.Line, sanitizePromptText(finding.Description))
-	}
-}
-
 // split moves each finding outside the repair from Items to FollowUps, where it
-// is on the record and blocks nothing, and keeps only selected ids in
-// ClosedFindings.
+// is on the record and blocks nothing, and keeps only the ids awaiting
+// verification in ClosedFindings.
 func (r *repairRoundScope) split(log func(string), findings *Findings) {
 	if r.closed == nil {
-		r.closed = make(map[string]bool, len(r.selected))
+		r.closed = make(map[string]bool, len(r.verifying))
 	}
 	var closed []string
 	for _, id := range findings.ClosedFindings {
-		for _, selected := range r.selected {
-			if selected.ID == id {
+		for _, open := range r.verifying {
+			if open.ID == id {
 				r.closed[id] = true
 				closed = append(closed, id)
 				break
@@ -231,19 +233,16 @@ func (r *repairRoundScope) split(log func(string), findings *Findings) {
 // finding is a person's decision, and the intent and access rules that raise
 // one are not the pipeline's to waive.
 //
-// Nothing leaves Items until the rereview names every selected finding closed.
-// Any finding may be a selected defect moved, reworded or reported where it
-// still reaches, and taking it out would clear that selected finding on
-// silence (pipeline.resolveVerifiedFindingsJSON). A finding repeating a selected
-// description still contradicts the verdict. A deferred finding cannot be named
-// closed, so nothing leaves while one that parks the run is open, which adds no
-// park. An informational note parks nothing and holds nothing back.
+// Nothing leaves Items until the rereview names closed every finding awaiting
+// verification. Any finding may be one of those moved, reworded or reported
+// where it still reaches, and taking it out would clear that one on silence
+// (pipeline.resolveVerifiedFindingsJSON). Any other deferred finding cannot
+// clear here, so it holds nothing back. A finding repeating an open finding is
+// not new: it contradicts a closed verdict, and a copy of a carried finding
+// belongs in Items, where it merges.
 func (r *repairRoundScope) isFollowUp(finding Finding) bool {
 	file := normalizeReviewedPath(finding.File)
 	if !r.tracked[file] || finding.Line <= 0 || finding.ActionOrDefault() == types.ActionAskUser {
-		return false
-	}
-	if hasBlockingFindings(r.deferred) || types.HasAskUserFindings(Findings{Items: r.deferred}) {
 		return false
 	}
 	if strings.TrimSpace(finding.FailingInput) != "" && strings.TrimSpace(finding.WrongResult) != "" {
@@ -264,10 +263,20 @@ func (r *repairRoundScope) isFollowUp(finding Finding) bool {
 			}
 		}
 	}
-	for _, open := range r.selected {
-		if !r.closed[open.ID] || sanitizePromptText(open.Description) == sanitizePromptText(finding.Description) {
+	for _, open := range r.verifying {
+		if !r.closed[open.ID] || repeatsFinding(open, finding) {
+			return false
+		}
+	}
+	for _, open := range r.deferred {
+		if repeatsFinding(open, finding) {
 			return false
 		}
 	}
 	return true
+}
+
+// repeatsFinding compares descriptions as the prompt showed them.
+func repeatsFinding(open, reported Finding) bool {
+	return sanitizePromptText(open.Description) == sanitizePromptText(reported.Description)
 }

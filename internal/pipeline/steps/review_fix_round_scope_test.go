@@ -136,25 +136,28 @@ func fixRoundScopeHarnessOn(t *testing.T, mock *sessionMockAgent, workDir, baseS
 }
 
 // executeWithoutAPark runs the executor and fails the test, aborting the run,
-// when the review parks for a decision instead of completing on its own.
+// when the review parks for a decision instead of completing on its own. Abort
+// is refused until a gate is waiting, so its acceptance is the park itself and a
+// slow machine reads as slow.
 func executeWithoutAPark(t *testing.T, exec *pipeline.Executor, run *db.Run, repo *db.Repo, workDir string) {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("execute: %v", err)
-		}
-	case <-time.After(60 * time.Second):
-		if err := exec.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
-			t.Errorf("abort the parked run: %v", err)
-		}
+	go func() { done <- exec.Execute(ctx, run, repo, workDir) }()
+	for {
 		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			return
+		case <-time.After(50 * time.Millisecond):
+			if exec.Respond(types.StepReview, types.ActionAbort, nil) == nil {
+				<-done
+				t.Fatal("the review parked for a decision instead of completing")
+			}
 		}
-		t.Fatal("the review parked for a decision instead of completing")
 	}
 }
 
@@ -327,7 +330,10 @@ func TestReviewLoop_DeferredFindingKeepsPendingFindingUnverified(t *testing.T) {
 		t.Fatalf("deferred finding's file must be held for review, not carried: %s", reviews[2].Prompt)
 	}
 	if !strings.Contains(reviews[2].Prompt, "f-1: feature.txt:1: original bug") {
-		t.Fatalf("a round that can clear an earlier finding must be asked to check it: %s", reviews[2].Prompt)
+		t.Fatalf("a round that can clear an earlier selection must be asked to check it: %s", reviews[2].Prompt)
+	}
+	if strings.Contains(reviews[2].Prompt, "note: feature.txt:1: still relevant") {
+		t.Fatalf("a finding no repair was sent to close is not a check for this round: %s", reviews[2].Prompt)
 	}
 	if parked.FindingsJSON == nil || !strings.Contains(*parked.FindingsJSON, "original bug") {
 		t.Fatalf("unverified original finding disappeared: %+v", parked.FindingsJSON)
