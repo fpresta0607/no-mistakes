@@ -147,20 +147,9 @@ func (m *RunManager) pinRunEvidenceDir(run *db.Run, global *config.GlobalConfig)
 	if m == nil || run == nil || global == nil || run.EvidencePath() != "" {
 		return nil
 	}
-	root, warning := m.paths.ResolveEvidenceRoot(global.EvidenceDir, config.Merge(global, &config.RepoConfig{}).Test.Evidence.LocalRoot)
-	worktreePaths, err := evidenceWorktreePaths(m.paths, global, m.db)
+	root, err := m.newRunEvidenceRoot(global)
 	if err != nil {
-		return fmt.Errorf("read worktree placements: %w", err)
-	}
-	if conflict := evidencePlacementConflict(root, worktreePaths); conflict != "" {
-		warning = fmt.Sprintf("evidence directory %q overlaps worktree placement %q; using %s", root, conflict, m.paths.EvidenceDir())
-		root = m.paths.EvidenceDir()
-	}
-	if warning != "" {
-		slog.Warn("evidence directory fallback", "run_id", run.ID, "detail", warning)
-	}
-	if conflict := evidencePlacementConflict(root, worktreePaths); conflict != "" {
-		return fmt.Errorf("default evidence directory %q overlaps worktree placement %q", root, conflict)
+		return err
 	}
 	dir := filepath.Join(root, run.ID)
 	if err := m.db.SetRunEvidenceDir(run.ID, dir); err != nil {
@@ -168,6 +157,28 @@ func (m *RunManager) pinRunEvidenceDir(run *db.Run, global *config.GlobalConfig)
 	}
 	run.EvidenceDir = &dir
 	return nil
+}
+
+// newRunEvidenceRoot resolves the directory a new run's evidence goes under.
+// Authored children and terminal successors record it in the transaction that
+// creates them, because their acceptance holds the row they were created with.
+func (m *RunManager) newRunEvidenceRoot(global *config.GlobalConfig) (string, error) {
+	root, warning := m.paths.ResolveEvidenceRoot(global.EvidenceDir, config.Merge(global, &config.RepoConfig{}).Test.Evidence.LocalRoot)
+	worktreePaths, err := evidenceWorktreePaths(m.paths, global, m.db)
+	if err != nil {
+		return "", fmt.Errorf("read worktree placements: %w", err)
+	}
+	if conflict := evidencePlacementConflict(root, worktreePaths); conflict != "" {
+		warning = fmt.Sprintf("evidence directory %q overlaps worktree placement %q; using %s", root, conflict, m.paths.EvidenceDir())
+		root = m.paths.EvidenceDir()
+	}
+	if warning != "" {
+		slog.Warn("evidence directory fallback", "detail", warning)
+	}
+	if conflict := evidencePlacementConflict(root, worktreePaths); conflict != "" {
+		return "", fmt.Errorf("default evidence directory %q overlaps worktree placement %q", root, conflict)
+	}
+	return root, nil
 }
 
 // recordedRunEvidenceDir returns the directory pinned on the run, or the

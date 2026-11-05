@@ -38,6 +38,18 @@ func (m *RunManager) slotFreeLocked(maxConc int) bool {
 	return maxConc <= 0 || len(m.executors) < maxConc
 }
 
+// runScheduledLocked reports whether a run holds an execution slot or waits in
+// the queue for one, so a replay of its launch only observes it. Callers must
+// hold m.mu.
+func (m *RunManager) runScheduledLocked(runID string) bool {
+	if m.executors[runID] != nil {
+		return true
+	}
+	return slices.ContainsFunc(m.runQueue, func(qe queuedRun) bool {
+		return qe.spawn != nil && qe.runID == runID
+	})
+}
+
 // executionCapLocked reloads the cap while m.mu is held. Read the file directly:
 // LoadGlobal treats a missing file as defaults, which would clear a loaded cap
 // during config replacement. The initial zero still means unlimited.

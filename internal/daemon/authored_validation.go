@@ -118,16 +118,20 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 			}
 			result = &ipc.ValidateAuthoredResult{Receipt: receipt, Family: family}
 			// A scheduled child stays pending until its executor starts, so a
-			// registered executor already owns it and a replay only observes.
+			// child that holds a slot or is queued for one is already owned and
+			// a replay only observes.
 			m.mu.Lock()
-			childExecutor := m.executors[child.ID]
+			isChildScheduled := m.runScheduledLocked(child.ID)
 			m.mu.Unlock()
-			if child.Status != types.RunPending || childExecutor != nil {
+			if child.Status != types.RunPending || isChildScheduled {
 				return child.ID, nil
 			}
 			if err := m.db.ValidatePendingAdmission(event); err != nil {
 				return "", err
 			}
+		}
+		if m.restartPending() {
+			return "", errRestartPending
 		}
 		global, err := config.LoadGlobal(m.paths.ConfigFile())
 		if err != nil {
@@ -251,16 +255,6 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil {
 			return "", err
 		}
-		ag, _, err := newResolvedPipelineAgent(ctx, cfg, roles, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), forgeEnvironment(forge), quotaRecord)
-		if err != nil {
-			return "", err
-		}
-		isScheduled := false
-		defer func() {
-			if !isScheduled {
-				_ = ag.Close()
-			}
-		}()
 		if err := proveAuthoredCheckout(ctx, params.CallerDir, &request, repo); err != nil {
 			return "", err
 		}
@@ -286,7 +280,11 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 				}
 			}
 			worktreeRoot := filepath.Dir(layout.Dir(repo.ID, repo.WorkingPath, "pending"))
-			event, _, err = m.db.AcceptValidationAdmission(ctx, db.ValidationAdmission{Request: request, Snapshot: *snapshot, AssertionProof: proof, WorktreeRoot: worktreeRoot, Plan: plan, Gates: gates, Steps: stepNames, Operator: strconv.Itoa(operator)})
+			evidenceRoot, err := m.newRunEvidenceRoot(global)
+			if err != nil {
+				return "", err
+			}
+			event, _, err = m.db.AcceptValidationAdmission(ctx, db.ValidationAdmission{Request: request, Snapshot: *snapshot, AssertionProof: proof, WorktreeRoot: worktreeRoot, EvidenceRoot: evidenceRoot, Plan: plan, Gates: gates, Steps: stepNames, Operator: strconv.Itoa(operator)})
 			if err != nil {
 				return "", err
 			}
@@ -329,8 +327,14 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if ctx.Err() != nil {
 			return child.ID, nil
 		}
+		// The agent is built only now, because the accepted child names the
+		// directory its evidence goes under.
+		ag, _, err := newResolvedPipelineAgent(ctx, cfg, roles, pipelineEvidenceRoot(m.paths, cfg, child), forgeEnvironment(forge), quotaRecord)
+		if err != nil {
+			return "", err
+		}
 		m.resumeRecoveredRun(recoveredRunPlan{run: child, repo: repo, workDir: workDir, gateDir: gateDir, cfg: cfg, agent: ag, steps: executionSteps, forge: forge, admission: event})
-		isScheduled, result.Started = true, true
+		result.Started = true
 		return child.ID, nil
 	})
 	return result, err
