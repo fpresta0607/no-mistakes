@@ -139,6 +139,27 @@ func TestReportTestWindowsNamesEachWindowWithoutChangingTheVerdict(t *testing.T)
 	}
 }
 
+// A crashed evidence agent on a failed baseline hands back only the exit code,
+// which is what keeps the failure from being retried as a crash.
+func TestReportTestWindowsKeepsAnExitCodeOutcomeThatHasNoFindings(t *testing.T) {
+	t.Parallel()
+	sctx := &pipeline.StepContext{Log: func(string) {}}
+	crash := errors.New("agent crashed")
+
+	got, err := reportTestWindows(sctx, &pipeline.StepOutcome{ExitCode: 7}, crash, []winproc.Window{{PID: 7}}, 0)
+
+	if !errors.Is(err, crash) {
+		t.Fatalf("err = %v, want the crash kept", err)
+	}
+	if got == nil || got.ExitCode != 7 {
+		t.Fatalf("outcome = %+v, want the baseline exit code kept", got)
+	}
+	findings, parseErr := types.ParseFindingsJSON(got.Findings)
+	if parseErr != nil || len(findings.Items) != 1 {
+		t.Fatalf("findings = %+v, %v; want the window named", findings, parseErr)
+	}
+}
+
 func TestReportTestWindowsLeavesAnOutcomeWithoutWindowsAlone(t *testing.T) {
 	t.Parallel()
 	var logged []string
