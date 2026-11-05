@@ -217,7 +217,7 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 		t.Fatalf("test job timeout-minutes = %d, want 40 so a wedged runner cannot burn a full six-hour budget", job.TimeoutMinutes)
 	}
 
-	wantWindowsShards := []string{"core", "daemon", "gate", "git", "steps"}
+	wantWindowsShards := []string{"branchsync", "core", "daemon", "gate", "git", "steps"}
 	var matrixShards []string
 	for _, row := range job.Strategy.Matrix.Include {
 		if row["os"] != "windows-latest" {
@@ -232,12 +232,12 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	slices.Sort(matrixShards)
 	matrixShards = slices.Compact(matrixShards)
 	if !slices.Equal(matrixShards, wantWindowsShards) {
-		t.Fatalf("windows matrix shards %v, want %v so daemon, gate, and pipeline/steps run in parallel with the other git-heavy packages", matrixShards, wantWindowsShards)
+		t.Fatalf("windows matrix shards %v, want %v so daemon, gate, branchsync, and pipeline/steps run in parallel with the other git-heavy packages", matrixShards, wantWindowsShards)
 	}
 
 	tests := windowsGoTestCommands(t)
-	if len(tests) < 5 {
-		t.Fatalf("Windows tests must be split across core, git, steps, daemon, and gate shards so one ./... job cannot exceed the cap without a binary hitting -timeout, got %d go test invocations", len(tests))
+	if len(tests) < 6 {
+		t.Fatalf("Windows tests must be split across core, git, steps, daemon, gate, and branchsync shards so one ./... job cannot exceed the cap without a binary hitting -timeout, got %d go test invocations", len(tests))
 	}
 
 	jobTimeout := time.Duration(job.TimeoutMinutes) * time.Minute
@@ -270,8 +270,8 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	if coreCommand.name == "" {
 		t.Fatal("Windows tests must keep a go-list remainder shard")
 	}
-	if len(explicit) != 4 {
-		t.Fatalf("Windows tests must list exactly four explicit package shards (git-heavy remainder, pipeline/steps, daemon, and gate), got %d", len(explicit))
+	if len(explicit) != 5 {
+		t.Fatalf("Windows tests must list exactly five explicit package shards (git-heavy remainder, pipeline/steps, daemon, gate, and branchsync), got %d", len(explicit))
 	}
 	for _, shard := range wantWindowsShards {
 		if _, ok := stepShards[shard]; !ok {
@@ -287,8 +287,9 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	stepsWant := goListPackages(t, "./internal/pipeline/steps/...")
 	daemonWant := goListPackages(t, "./internal/daemon")
 	gateWant := goListPackages(t, "./internal/gate")
-	var stepsCommand, gitCommand, daemonCommand, gateCommand workflowCommand
-	var stepsFromArgs, gitFromArgs, daemonFromArgs, gateFromArgs []string
+	branchsyncWant := goListPackages(t, "./internal/branchsync")
+	var stepsCommand, gitCommand, daemonCommand, gateCommand, branchsyncCommand workflowCommand
+	var stepsFromArgs, gitFromArgs, daemonFromArgs, gateFromArgs, branchsyncFromArgs []string
 	for _, command := range explicit {
 		pkgs := goListPackages(t, goTestPackagePatterns(command)...)
 		switch {
@@ -310,9 +311,15 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 			}
 			gateCommand = command
 			gateFromArgs = pkgs
+		case slices.Equal(pkgs, branchsyncWant):
+			if branchsyncCommand.name != "" {
+				t.Fatal("multiple Windows shards list only internal/branchsync")
+			}
+			branchsyncCommand = command
+			branchsyncFromArgs = pkgs
 		default:
 			if gitCommand.name != "" {
-				t.Fatalf("extra explicit Windows shard packages %v; want one git-heavy remainder besides steps, daemon, and gate", pkgs)
+				t.Fatalf("extra explicit Windows shard packages %v; want one git-heavy remainder besides steps, daemon, gate, and branchsync", pkgs)
 			}
 			gitCommand = command
 			gitFromArgs = pkgs
@@ -327,10 +334,13 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	if gateCommand.name == "" {
 		t.Fatal("Windows tests must run ./internal/gate on its own shard")
 	}
-	if gitCommand.name == "" {
-		t.Fatal("Windows tests must keep a git-heavy remainder shard besides steps, daemon, and gate")
+	if branchsyncCommand.name == "" {
+		t.Fatal("Windows tests must run ./internal/branchsync on its own shard")
 	}
-	explicitSets := [][]string{stepsFromArgs, daemonFromArgs, gateFromArgs, gitFromArgs}
+	if gitCommand.name == "" {
+		t.Fatal("Windows tests must keep a git-heavy remainder shard besides steps, daemon, gate, and branchsync")
+	}
+	explicitSets := [][]string{stepsFromArgs, daemonFromArgs, gateFromArgs, branchsyncFromArgs, gitFromArgs}
 	for i, a := range explicitSets {
 		for _, b := range explicitSets[i+1:] {
 			if overlap := packagesOverlap(a, b); len(overlap) > 0 {
@@ -346,9 +356,10 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	gitHeavyFromArgs := append(append([]string{}, gitFromArgs...), stepsFromArgs...)
 	gitHeavyFromArgs = append(gitHeavyFromArgs, daemonFromArgs...)
 	gitHeavyFromArgs = append(gitHeavyFromArgs, gateFromArgs...)
+	gitHeavyFromArgs = append(gitHeavyFromArgs, branchsyncFromArgs...)
 	slices.Sort(gitHeavyFromArgs)
 	if !slices.Equal(gitHeavyFromArgs, gitHeavyFromFilter) {
-		t.Fatalf("git+steps+daemon+gate shard packages %v do not match NM_CI_WINDOWS_GIT_EXCLUDE %q -> %v", gitHeavyFromArgs, exclude, gitHeavyFromFilter)
+		t.Fatalf("git+steps+daemon+gate+branchsync shard packages %v do not match NM_CI_WINDOWS_GIT_EXCLUDE %q -> %v", gitHeavyFromArgs, exclude, gitHeavyFromFilter)
 	}
 
 	requiredOn := []struct {
@@ -366,9 +377,11 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 		{"gate", []string{
 			"github.com/kunchenguid/no-mistakes/internal/gate",
 		}, gateFromArgs},
+		{"branchsync", []string{
+			"github.com/kunchenguid/no-mistakes/internal/branchsync",
+		}, branchsyncFromArgs},
 		{"git-heavy remainder", []string{
 			"github.com/kunchenguid/no-mistakes/internal/git",
-			"github.com/kunchenguid/no-mistakes/internal/branchsync",
 		}, gitFromArgs},
 	}
 	allOwned := map[string]string{}
@@ -391,6 +404,7 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 		{"steps", stepsFromArgs},
 		{"daemon", daemonFromArgs},
 		{"gate", gateFromArgs},
+		{"branchsync", branchsyncFromArgs},
 	}
 	for pkg, owner := range allOwned {
 		for _, set := range ownedSets {
@@ -408,6 +422,7 @@ func TestCIWorkflow_WindowsHangSurfacesAsGoTimeoutNotJobCancellation(t *testing.
 	union = append(union, stepsFromArgs...)
 	union = append(union, daemonFromArgs...)
 	union = append(union, gateFromArgs...)
+	union = append(union, branchsyncFromArgs...)
 	union = append(union, coreFromFilter...)
 	slices.Sort(union)
 	if !slices.Equal(union, all) {
@@ -546,6 +561,21 @@ func TestCIWorkflow_WindowsGateShardsRunEveryTestExactlyOnce(t *testing.T) {
 		skipKey: "gate_skip",
 		runEnv:  "NM_CI_WINDOWS_GATE_RUN",
 		skipEnv: "NM_CI_WINDOWS_GATE_SKIP",
+	})
+}
+
+// internal/branchsync timed out at 15m on 13 of 21 windows-git jobs while it
+// ran whole beside daemon and gate, with no test hung (issue #58). ci.yml's
+// comment on its step records why it is split rather than given one row.
+func TestCIWorkflow_WindowsBranchsyncShardsRunEveryTestExactlyOnce(t *testing.T) {
+	t.Parallel()
+	assertWindowsNamedShardsCoverEveryTest(t, windowsNamedShardSpec{
+		kind:    "branchsync",
+		dir:     filepath.Join("internal", "branchsync"),
+		runKey:  "branchsync_run",
+		skipKey: "branchsync_skip",
+		runEnv:  "NM_CI_WINDOWS_BRANCHSYNC_RUN",
+		skipEnv: "NM_CI_WINDOWS_BRANCHSYNC_SKIP",
 	})
 }
 
