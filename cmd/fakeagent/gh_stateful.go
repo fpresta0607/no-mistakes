@@ -186,7 +186,16 @@ func runGhStatefulPRStub(args []string) int {
 		"mergeable":   mergeable,
 		"headRefOid":  ghStatefulHeadOID(repo, pr.Head),
 	}
-	if jq := argAfter(args, "--jq"); strings.HasPrefix(jq, ".") {
+	jq := argAfter(args, "--jq")
+	if jq == `.mergeable + " " + .mergeStateStatus` {
+		mergeStateStatus := "CLEAN"
+		if mergeable == "CONFLICTING" {
+			mergeStateStatus = "DIRTY"
+		}
+		fmt.Println(mergeable + " " + mergeStateStatus)
+		return 0
+	}
+	if strings.HasPrefix(jq, ".") {
 		if value, ok := fields[strings.TrimPrefix(jq, ".")]; ok {
 			fmt.Println(value)
 			return 0
