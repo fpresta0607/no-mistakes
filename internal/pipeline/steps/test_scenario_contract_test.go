@@ -859,9 +859,7 @@ func TestTestStep_FinalizerRejectionCorrectsTheWholePayload(t *testing.T) {
 		bin += ".cmd"
 		script = "@echo off\r\nmore > nul\r\ntype \"" + events + "\"\r\n"
 	}
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeExecutable(t, bin, script)
 	pi, err := agent.New(types.AgentPi, bin, nil)
 	if err != nil {
 		t.Fatal(err)

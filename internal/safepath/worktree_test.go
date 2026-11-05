@@ -35,7 +35,6 @@ func TestRedactRunEvidence_RewritesEverySpellingOfTheDirectory(t *testing.T) {
 	evidence := filepath.Join(t.TempDir(), "evidence", "01RUN")
 	slashed := filepath.ToSlash(evidence)
 	backslashed := strings.ReplaceAll(slashed, "/", `\`)
-	doubled := strings.ReplaceAll(slashed, "/", `\\`)
 	for _, tc := range []struct {
 		name string
 		text string
@@ -44,7 +43,6 @@ func TestRedactRunEvidence_RewritesEverySpellingOfTheDirectory(t *testing.T) {
 		{name: "the directory itself", text: "kept in " + evidence, want: "kept in " + EvidencePlaceholder},
 		{name: "forward slashes", text: slashed + "/test-scratch/x.log", want: EvidencePlaceholder + "/test-scratch/x.log"},
 		{name: "backslashes", text: backslashed + `\x.log`, want: EvidencePlaceholder + `\x.log`},
-		{name: "doubled backslashes", text: doubled + `\\x.log`, want: EvidencePlaceholder + `\\x.log`},
 		{name: "every occurrence", text: slashed + " and " + slashed, want: EvidencePlaceholder + " and " + EvidencePlaceholder},
 		{name: "a sibling sharing the prefix", text: slashed + "-other/x.log", want: slashed + "-other/x.log"},
 	} {
@@ -53,6 +51,16 @@ func TestRedactRunEvidence_RewritesEverySpellingOfTheDirectory(t *testing.T) {
 				t.Errorf("RedactRunEvidence(%q) = %q, want %q", tc.text, got, tc.want)
 			}
 		})
+	}
+}
+
+// JSON escaping doubles the backslashes a Windows directory already has. A POSIX
+// directory has none to double, so the fixture is Windows on every platform.
+func TestRedactRunEvidence_RewritesTheJSONEscapedSpelling(t *testing.T) {
+	const text = `C:\\nm\\evidence\\01RUN\\x.log`
+	got := RedactRunEvidence(text, `C:\nm\evidence\01RUN`)
+	if want := EvidencePlaceholder + `\\x.log`; got != want {
+		t.Errorf("RedactRunEvidence(%q) = %q, want %q", text, got, want)
 	}
 }
 
