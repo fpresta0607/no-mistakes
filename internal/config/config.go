@@ -139,10 +139,10 @@ const (
 	DefaultEvalDiversifiedSize = 32
 	// DefaultEvidenceRetention is how long a run's on-disk evidence survives
 	// before the daemon reaps it. It is comfortably longer than typical PR
-	// review latency because a PR body references these artifacts by local path
-	// whenever publishing is off or the provider has no derivable links. This
-	// is no-mistakes' own budget: the point of owning it is that no OS temp
-	// timer decides when a user's screenshots disappear.
+	// review latency because a PR body cites an unpublished artifact only by its
+	// label and SHA-256 digest, which leaves the local file as the only copy to
+	// check it against. This is no-mistakes' own budget: the point of owning it
+	// is that no OS temp timer decides when a user's screenshots disappear.
 	DefaultEvidenceRetention = 14 * 24 * time.Hour
 	// DefaultEvidenceMaxRuns caps how many run directories survive regardless
 	// of age, so a burst of parallel runs that all land inside the retention
@@ -1435,7 +1435,8 @@ func (t Test) DocumentationPatterns() []string {
 // branch's history. Otherwise evidence stays on local disk under LocalRoot.
 // AttachMedia (default true) additionally uploads image and video artifacts to
 // GitHub user-attachments at PR render time so remote reviewers can open them
-// without an evidence branch. Text artifacts stay inlined or locally cited.
+// without an evidence branch. An evidence file published neither way renders as
+// its label and SHA-256 digest.
 type Evidence struct {
 	// Compact defaults true; false opts into inline PR evidence previews.
 	Compact     bool
@@ -2039,10 +2040,11 @@ intent:
 # gathers to demonstrate the change works). By default they are kept on local
 # disk under <NM_HOME>/evidence. attach_media (default true) uploads image and
 # video artifacts to GitHub user-attachments when the PR is rendered so remote
-# reviewers can open them; text artifacts stay inlined. Uploads need the raw
-# GitHub token from "gh auth token", read once per PR render; if your gh sits
-# behind a credential vault that prompts before it releases the token, set
-# attach_media to false so the PR step never asks, even with store_in_repo on.
+# reviewers can open them; any other evidence file renders in the PR as its
+# label and SHA-256 digest. Uploads need the raw GitHub token from
+# "gh auth token", read once per PR render; if your gh sits behind a credential
+# vault that prompts before it releases the token, set attach_media to false so
+# the PR step never asks, even with store_in_repo on.
 # Opt in to store_in_repo to also publish the full directory to an orphan
 # evidence branch in the same repository and link it from the PR body. The
 # evidence branch shares no history with your code branches, so artifacts never

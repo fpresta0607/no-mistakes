@@ -74,6 +74,7 @@ func TestPRStep_ExecuteKeepsCapturedRuntimeContextOutOfThePublishedBody(t *testi
 					{Kind: "other", Label: "Rendered report", Path: htmlPath},
 					{Kind: "other", Label: "Binary capture", Path: binaryPath},
 					{Kind: "command-output", Label: "Pasted prompt", Content: capturedPrompt},
+					{Kind: "command-output", Label: "Prompt excerpt", Content: "- Path contract: every project file you read or edit lives under that exact path..."},
 					{Kind: "command-output", Label: "Curated excerpt", Content: "publish ok in " + scratchPath},
 				},
 			}), "")
@@ -91,6 +92,7 @@ func TestPRStep_ExecuteKeepsCapturedRuntimeContextOutOfThePublishedBody(t *testi
 				"Workspace boundary",
 				"Execution context",
 				"isolated git worktree",
+				"Path contract",
 				privateEvidenceRunID,
 				"local file:",
 				filepath.ToSlash(evidenceDir),
@@ -115,6 +117,67 @@ func TestPRStep_ExecuteKeepsCapturedRuntimeContextOutOfThePublishedBody(t *testi
 				if !strings.Contains(filepath.ToSlash(published), want) {
 					t.Errorf("expected %q in published PR content:\n%s", want, published)
 				}
+			}
+		})
+	}
+}
+
+// An agent's shell prints the run's directory in its own spelling, so what
+// reaches the boundary is often not the daemon's.
+func TestRedactPRContent_RewritesTheRunEvidenceInAShellsSpelling(t *testing.T) {
+	t.Parallel()
+	evidenceDir := `C:\Users\operator\.no-mistakes\evidence\` + privateEvidenceRunID
+	for _, spelling := range []string{
+		"/c/Users/operator/.no-mistakes/evidence/" + privateEvidenceRunID,
+		`c:\Users\operator\.no-mistakes\evidence\` + privateEvidenceRunID,
+	} {
+		t.Run(spelling, func(t *testing.T) {
+			t.Parallel()
+			got := redactPRContent(prContent{Body: "out at " + spelling + "/out.log"}, "", "", evidenceDir).Body
+			if want := "out at " + safepath.EvidencePlaceholder + "/out.log"; got != want {
+				t.Errorf("redacted body = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// A length cap runs ahead of the publication boundary, so whichever one fires
+// can stop a path inside the run ID.
+func TestRedactPRContent_RewritesARunIDCutByALengthCap(t *testing.T) {
+	t.Parallel()
+	const evidenceParent = "/srv/nm/evidence/"
+	const keptRunID = "01RUNI"
+	const bodyLimit = 300
+	evidenceDir := evidenceParent + privateEvidenceRunID
+	for _, tc := range []struct {
+		name     string
+		limit    int
+		truncate func(text string) string
+	}{
+		{
+			name:     "scenario cell",
+			limit:    maxScenarioCellRunes,
+			truncate: func(text string) string { return scenarioCell(text, prBodyFlavorFor(scm.ProviderGitHub)) },
+		},
+		{name: "review conversation text", limit: maxPublishedConversationChars, truncate: publishedConversationText},
+		{
+			name:     "body truncation",
+			limit:    bodyLimit,
+			truncate: func(text string) string { return truncateTextAtLineBoundary(text, bodyLimit, "") },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			filler := strings.Repeat("x", tc.limit-len(evidenceParent)-len(keptRunID)-1)
+			capped := tc.truncate(filler + " " + evidenceDir + "/out.log")
+			if !strings.Contains(capped, evidenceParent+keptRunID) || strings.Contains(capped, privateEvidenceRunID) {
+				t.Fatalf("fixture must stop the path inside the run ID, got %q", capped)
+			}
+
+			got := redactPRContent(prContent{Body: capped}, "", "", evidenceDir).Body
+
+			if strings.Contains(got, keptRunID) || !strings.Contains(got, safepath.EvidencePlaceholder) {
+				t.Errorf("redacted body kept part of the run ID: %q", got)
 			}
 		})
 	}

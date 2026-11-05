@@ -6,7 +6,36 @@ import (
 	"strings"
 )
 
-const steeringHeading = "Workspace boundary (important):"
+// capturedPhraseWords is how many consecutive words of a prompt's fixed wording
+// mark text as a capture: more than ordinary prose shares with a prompt, and
+// few enough that an excerpt from the middle of a line still reaches it.
+const capturedPhraseWords = 8
+
+// capturedPromptPhrases holds every capturedPhraseWords-word run of the fixed
+// lines of the steering and execution-context blocks, and whole any fixed line
+// shorter than that. Rendering the blocks with a slot where each takes a path
+// keeps the wording in one place.
+var capturedPromptPhrases = fixedPromptPhrases()
+
+func fixedPromptPhrases() []string {
+	const pathSlot = "\x00"
+	var phrases []string
+	for _, block := range []string{WorktreeSteering(pathSlot), ExecutionContextPromptSection(pathSlot)} {
+		for _, line := range strings.Split(block, "\n") {
+			for _, fixed := range strings.Split(line, pathSlot) {
+				words := strings.Fields(fixed)
+				for len(words) > capturedPhraseWords {
+					phrases = append(phrases, strings.Join(words[:capturedPhraseWords], " "))
+					words = words[1:]
+				}
+				if len(words) > 0 {
+					phrases = append(phrases, strings.Join(words, " "))
+				}
+			}
+		}
+	}
+	return phrases
+}
 
 // WorktreeSteering renders the preamble prepended to every pipeline agent
 // prompt. It keeps the agent's writes inside the git worktree and steers it
@@ -46,7 +75,7 @@ func WorktreeSteering(evidenceRoot string) string {
 	if location == "" {
 		location = "the run's managed evidence directory"
 	}
-	return fmt.Sprintf(steeringHeading+`
+	return fmt.Sprintf(`Workspace boundary (important):
 - Confine source, project, user-data, and system file changes to the current working directory, which is a git worktree. Do not intentionally create, modify, move, or delete those files anywhere outside it.
 - Do not modify system state outside the worktree. In particular, do not install or upgrade system packages (for example brew install/upgrade, or other system package managers), do not modify applications under /Applications, and do not change global or user-level tool configuration.
 - This is prompt steering, not true enforcement: treat the worktree boundary as a soft boundary you must follow.
@@ -62,9 +91,16 @@ func WorktreeSteering(evidenceRoot string) string {
 
 // CarriesCapturedPrompt reports whether text holds a pipeline prompt's fixed
 // steering or execution-context wording, the mark of a prompt captured from a
-// run rather than text written for a reader.
+// run rather than text written for a reader. Any fixed line counts, whole or
+// excerpted, and wrapping does not hide it.
 func CarriesCapturedPrompt(text string) bool {
-	return strings.Contains(text, steeringHeading) || strings.Contains(text, executionContextOpening)
+	normalized := strings.Join(strings.Fields(text), " ")
+	for _, phrase := range capturedPromptPhrases {
+		if strings.Contains(normalized, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // steeredAgent wraps an Agent and prepends the steering preamble to each prompt.

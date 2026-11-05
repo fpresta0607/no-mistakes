@@ -695,7 +695,7 @@ func renderTestingArtifact(artifact types.TestArtifact, opts testingSummaryOptio
 	localPath := localArtifactPath(artifact.Path, opts)
 
 	var b strings.Builder
-	// Keep an inspectable source before any preview, which may be truncated.
+	// Keep an inspectable source before any preview.
 	link := artifact.URL
 	if link == "" {
 		link = artifactLinkTargetForPath(artifact, opts)

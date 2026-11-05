@@ -22,17 +22,12 @@ const (
 const EvidencePlaceholder = "{run-evidence}"
 
 // RedactWorktrees rewrites the run's worktree root, and as a fallback any path
-// into worktreesRoot, to the worktree placeholders. Call it before RedactText:
-// once the home prefix is "~", these roots no longer match. Either argument
-// may be empty.
+// into worktreesRoot, to the worktree placeholders. Either argument may be
+// empty.
 func RedactWorktrees(text, runWorktree, worktreesRoot string) string {
-	for _, root := range pathSpellings(runWorktree) {
-		text = replacePathPrefix(text, root, func(string) (int, string) { return 0, WorktreePlaceholder })
-	}
-	for _, root := range pathSpellings(worktreesRoot) {
-		// A single backslash separates only in text that spells the root
-		// with single backslashes; after "/" or "\\" it starts a JSON escape.
-		single := strings.Contains(root, `\`) && !strings.Contains(root, `\\`)
+	text = replaceDirectory(text, runWorktree, WorktreePlaceholder)
+	for _, root := range publishedSpellings(worktreesRoot) {
+		single := separatesWithSingleBackslash(root)
 		text = replacePathPrefix(text, root, func(rest string) (int, string) {
 			// <repo-id>/<run-id> names one run worktree; anything shorter
 			// still drops the repo id.
@@ -50,13 +45,52 @@ func RedactWorktrees(text, runWorktree, worktreesRoot string) string {
 }
 
 // RedactRunEvidence rewrites the run's evidence directory to
-// EvidencePlaceholder. Call it before RedactText: once the home prefix is "~",
-// the directory no longer matches. An empty argument changes nothing.
+// EvidencePlaceholder. An empty argument changes nothing.
 func RedactRunEvidence(text, runEvidence string) string {
-	for _, root := range pathSpellings(runEvidence) {
-		text = replacePathPrefix(text, root, func(string) (int, string) { return 0, EvidencePlaceholder })
+	return replaceDirectory(text, runEvidence, EvidencePlaceholder)
+}
+
+// replaceDirectory rewrites every spelling of dir to placeholder. Length caps
+// run ahead of the publication boundary and can stop a path inside dir's last
+// segment, the run ID, so a leading part of that segment counts as dir too.
+func replaceDirectory(text, dir, placeholder string) string {
+	for _, root := range publishedSpellings(dir) {
+		text = replacePathPrefix(text, root, func(string) (int, string) { return 0, placeholder })
+	}
+	dir = filepath.Clean(dir)
+	cut := strings.LastIndexAny(dir, `/\`)
+	if cut < 0 {
+		return text
+	}
+	name := dir[cut+1:]
+	for _, parent := range publishedSpellings(dir[:cut]) {
+		single := separatesWithSingleBackslash(parent)
+		text = replacePathPrefix(text, parent, func(rest string) (int, string) {
+			segment := pathSegment(rest, single)
+			if segment > 0 && strings.HasPrefix(name, strings.TrimLeft(rest[:segment], `/\`)) {
+				return segment, placeholder
+			}
+			return 0, parent
+		})
 	}
 	return text
+}
+
+// publishedSpellings adds to pathSpellings what home redaction leaves of each
+// spelling, the form a path has when its author already wrote it from "~".
+func publishedSpellings(dir string) []string {
+	spellings := pathSpellings(dir)
+	for _, spelling := range spellings {
+		spellings = append(spellings, RedactText(spelling))
+	}
+	return spellings
+}
+
+// separatesWithSingleBackslash reports whether a single backslash after root is
+// a separator: it is only in text that spells root with single backslashes, and
+// after "/" or "\\" it starts a JSON escape.
+func separatesWithSingleBackslash(root string) bool {
+	return strings.Contains(root, `\`) && !strings.Contains(root, `\\`)
 }
 
 // pathSegment returns the length of the separator plus path segment name at
@@ -98,9 +132,13 @@ func pathSpellings(dir string) []string {
 		}
 	}
 	dir = filepath.Clean(dir)
-	addBothSeparatorSpellings(add, dir)
+	roots := []string{dir}
 	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
-		addBothSeparatorSpellings(add, filepath.Clean(resolved))
+		roots = append(roots, filepath.Clean(resolved))
+	}
+	for _, root := range roots {
+		addBothSeparatorSpellings(add, root)
+		addDriveSpellings(add, root)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
 	return out

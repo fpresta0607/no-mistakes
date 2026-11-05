@@ -62,3 +62,108 @@ func TestRedactRunEvidence_EmptyDirectoryChangesNothing(t *testing.T) {
 		t.Errorf("RedactRunEvidence(%q, \"\") = %q", text, got)
 	}
 }
+
+// A Windows run's directory reaches published text through shells and tools
+// that spell it differently from the daemon, whichever case the daemon's drive
+// letter has.
+func TestRedactors_MatchEveryDriveSpelling(t *testing.T) {
+	for _, dir := range []string{
+		`C:\Users\operator\.no-mistakes\evidence\01RUN`,
+		`c:\Users\operator\.no-mistakes\evidence\01RUN`,
+	} {
+		for _, tc := range []struct {
+			name     string
+			spelling string
+		}{
+			{name: "upper-case drive", spelling: `C:\Users\operator\.no-mistakes\evidence\01RUN`},
+			{name: "upper-case drive forward slashes", spelling: "C:/Users/operator/.no-mistakes/evidence/01RUN"},
+			{name: "lower-case drive", spelling: `c:\Users\operator\.no-mistakes\evidence\01RUN`},
+			{name: "lower-case drive forward slashes", spelling: "c:/Users/operator/.no-mistakes/evidence/01RUN"},
+			{name: "lower-case drive doubled backslashes", spelling: `c:\\Users\\operator\\.no-mistakes\\evidence\\01RUN`},
+			{name: "git bash", spelling: "/c/Users/operator/.no-mistakes/evidence/01RUN"},
+			{name: "git bash upper-case drive", spelling: "/C/Users/operator/.no-mistakes/evidence/01RUN"},
+			{name: "cygwin", spelling: "/cygdrive/c/Users/operator/.no-mistakes/evidence/01RUN"},
+			{name: "wsl", spelling: "/mnt/c/Users/operator/.no-mistakes/evidence/01RUN"},
+		} {
+			t.Run(dir[:1]+" "+tc.name, func(t *testing.T) {
+				text := "kept in " + tc.spelling + "/out.log"
+				if got, want := RedactRunEvidence(text, dir), "kept in "+EvidencePlaceholder+"/out.log"; got != want {
+					t.Errorf("RedactRunEvidence(%q) = %q, want %q", text, got, want)
+				}
+				if got, want := RedactWorktrees(text, dir, ""), "kept in "+WorktreePlaceholder+"/out.log"; got != want {
+					t.Errorf("RedactWorktrees(%q) = %q, want %q", text, got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestRedactRunEvidence_RewritesADriveFileURL(t *testing.T) {
+	const text = "opened file:///C:/Users/operator/.no-mistakes/evidence/01RUN/report.html"
+	got := RedactRunEvidence(text, `C:\Users\operator\.no-mistakes\evidence\01RUN`)
+	if want := "opened file:///" + EvidencePlaceholder + "/report.html"; got != want {
+		t.Errorf("RedactRunEvidence(%q) = %q, want %q", text, got, want)
+	}
+}
+
+// Text an agent wrote from "~" never holds the absolute directory, and home
+// redaction leaves that form, run ID included, exactly as it found it.
+func TestRedactors_MatchTheHomeRelativeSpelling(t *testing.T) {
+	const home = `C:\Users\operator`
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	const dir = home + `\.no-mistakes\evidence\01RUN`
+	for _, spelling := range []string{
+		"~/.no-mistakes/evidence/01RUN",
+		`~\.no-mistakes\evidence\01RUN`,
+		`~\\.no-mistakes\\evidence\\01RUN`,
+	} {
+		t.Run(spelling, func(t *testing.T) {
+			text := "kept in " + spelling + "/out.log"
+			if got, want := RedactRunEvidence(text, dir), "kept in "+EvidencePlaceholder+"/out.log"; got != want {
+				t.Errorf("RedactRunEvidence(%q) = %q, want %q", text, got, want)
+			}
+			if got, want := RedactWorktrees(text, dir, ""), "kept in "+WorktreePlaceholder+"/out.log"; got != want {
+				t.Errorf("RedactWorktrees(%q) = %q, want %q", text, got, want)
+			}
+		})
+	}
+
+	const text = "~/.no-mistakes/worktrees/ab12/01RUN/out.log"
+	if got, want := RedactWorktrees(text, "", home+`\.no-mistakes\worktrees`), WorktreePlaceholder+"/out.log"; got != want {
+		t.Errorf("RedactWorktrees(%q) = %q, want %q", text, got, want)
+	}
+}
+
+// Length caps run ahead of the boundary, so a path can arrive stopped inside
+// the run ID, while a different directory beside it must survive.
+func TestRedactors_RewriteAPathCutInsideTheRunID(t *testing.T) {
+	const posix = "/srv/nm/evidence/01RUNIDFIXTURE"
+	const windows = `C:\nm\evidence\01RUNIDFIXTURE`
+	for _, tc := range []struct {
+		name string
+		dir  string
+		text string
+		want string
+	}{
+		{name: "before an ellipsis", dir: posix, text: "log at /srv/nm/evidence/01RUN…", want: "log at " + EvidencePlaceholder + "…"},
+		{name: "at the end of the text", dir: posix, text: "/srv/nm/evidence/01R", want: EvidencePlaceholder},
+		{name: "backslashes", dir: windows, text: `C:\nm\evidence\01RUN…`, want: EvidencePlaceholder + "…"},
+		{name: "doubled backslashes", dir: windows, text: `C:\\nm\\evidence\\01RUN…`, want: EvidencePlaceholder + "…"},
+		{name: "git bash", dir: windows, text: "/c/nm/evidence/01RUN…", want: EvidencePlaceholder + "…"},
+		{name: "before the run ID starts", dir: posix, text: "/srv/nm/evidence/…", want: "/srv/nm/evidence/…"},
+		{name: "another run's directory", dir: posix, text: "/srv/nm/evidence/01OTHER/out.log", want: "/srv/nm/evidence/01OTHER/out.log"},
+		{name: "a name that only starts alike", dir: posix, text: "/srv/nm/evidence/01RUNX…", want: "/srv/nm/evidence/01RUNX…"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RedactRunEvidence(tc.text, tc.dir); got != tc.want {
+				t.Errorf("RedactRunEvidence(%q) = %q, want %q", tc.text, got, tc.want)
+			}
+		})
+	}
+
+	const text = "/srv/trees/ab12/01RUN…"
+	if got, want := RedactWorktrees(text, "/srv/trees/ab12/01RUNIDFIXTURE", ""), WorktreePlaceholder+"…"; got != want {
+		t.Errorf("RedactWorktrees(%q) = %q, want %q", text, got, want)
+	}
+}
