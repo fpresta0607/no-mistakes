@@ -449,7 +449,15 @@ func replayRoundContext(p *paths.Paths, c Case, workDir string) (*db.DB, string,
 	if err != nil {
 		return fail(fmt.Errorf("read restored review history: %w", err))
 	}
-	return database, step.ID, fixing, previousFindings, deferredFindings, previousReviewedPaths, pipeline.SelectedOutstandingFindingIDs(restored), nil
+	// A round recorded as initial is the step starting over, and a restart at
+	// Review starts a fresh carry set, so only the rounds from the last one count.
+	carried := 0
+	for i, round := range restored {
+		if round.Trigger == "initial" {
+			carried = i
+		}
+	}
+	return database, step.ID, fixing, previousFindings, deferredFindings, previousReviewedPaths, pipeline.SelectedOutstandingFindingIDs(restored[carried:]), nil
 }
 
 func stringValue(value *string) string {
