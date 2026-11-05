@@ -155,6 +155,10 @@ func prepareLaunchAssertion(ctx context.Context, expected *launchassert.Expectat
 	if steps.IsDemoMode() {
 		return nil, nil, fmt.Errorf("demo mode cannot prove an asserted agent launch")
 	}
+	// The proof records the chain in order, so quota routing may not reorder it.
+	// Authored children and terminal successors descend from an asserted run, so
+	// none of them inherits a stored quota order either.
+	cfg.QuotaRouting.Enabled = false
 	roleConfigs, err := resolvePipelineAgentRoles(ctx, cfg, lookPath)
 	if err != nil {
 		return nil, nil, err

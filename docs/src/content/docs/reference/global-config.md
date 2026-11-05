@@ -1143,6 +1143,8 @@ Native `claude` and `codex` retain account, profile, and model-scope matching. A
 
 Each agent keeps its own [`agent_config`](#agent_config) model and effort: only the order changes. A missing, slow, or unreadable `quota-axi` keeps your configured order, logs the reason, and never blocks a run. The mid-run quota switch remains enabled in this case. Inspect the recorded outcome with `no-mistakes axi status` or [`no-mistakes stats`](/no-mistakes/reference/cli/#no-mistakes-stats). See [local telemetry](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine) for storage and privacy.
 
+A run with a [launch selection or assertion](/no-mistakes/reference/cli/#launch-selections) is never reordered and takes no quota switch: its proof names the chain in order, so the run starts that chain.
+
 Mid-run, a recognised quota-exhaustion error advances to the next agent in the chosen order with a fresh session, dropping any resumed session. This can happen once per agent, and later invocations do not return to earlier agents. If no successor remains, the error is returned. The existing agent-unavailable fallback is unchanged. Daemon recovery reuses the recorded order and last recorded switch without reading another snapshot, even if the global opt-in setting has since changed.
 
 Subkeys:

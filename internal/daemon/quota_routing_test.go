@@ -16,6 +16,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/quotarouting"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -73,6 +74,71 @@ func quotaRoutingConfig(path string) *config.Config {
 	cfg.QuotaRouting.Enabled = true
 	cfg.QuotaRouting.QuotaAXIPath = path
 	return cfg
+}
+
+// writeQuotaSnapshotCommand installs a fake quota-axi that also runs on Windows.
+func writeQuotaSnapshotCommand(t *testing.T, snapshot string) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		return writeQuotaAXI(t, snapshot)
+	}
+	dir := t.TempDir()
+	data := filepath.Join(dir, "snapshot.json")
+	if err := os.WriteFile(data, []byte(snapshot), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "quota-axi.cmd")
+	if err := os.WriteFile(path, []byte("@type \""+data+"\""), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A launch proof records its chain in order, so the run has to start that chain
+// even when a fresh quota snapshot favours a later agent.
+func TestProvenLaunchKeepsItsChainOrderUnderQuotaRouting(t *testing.T) {
+	chain := []agentcfg.Selection{
+		{Harness: types.AgentClaude, Model: "fixture", Effort: agentcfg.EffortXHigh},
+		{Harness: types.AgentCodex, Model: "fixture", Effort: agentcfg.EffortXHigh, ServiceTier: "default"},
+	}
+	for _, tc := range []struct {
+		name      string
+		isApplied bool
+	}{
+		{"selection_applied_at_launch", true},
+		{"configured_chain_asserted", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := quotaRoutingConfig(writeQuotaSnapshotCommand(t, claudeThenCodexSnapshot))
+			cfg.TrustedConfigSHA = strings.Repeat("a", 40)
+			cfg.AgentArgsOverride = map[string][]string{"codex": {"-c", `service_tier="default"`}}
+			if !tc.isApplied {
+				if err := cfg.ApplyLaunchSelection(chain); err != nil {
+					t.Fatal(err)
+				}
+			}
+			expected := &launchassert.Expectation{TrustedSHA: cfg.TrustedConfigSHA, Apply: tc.isApplied, Profiles: map[string][]agentcfg.Selection{
+				"primary": chain, "reviewer": chain, "fixer": chain,
+			}}
+			if err := applyLaunchSelection(cfg, expected); err != nil {
+				t.Fatal(err)
+			}
+			roles, _, err := prepareLaunchAssertion(context.Background(), expected, cfg, fakeLookPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ag, record, err := newResolvedPipelineAgent(context.Background(), cfg, roles, t.TempDir(), runenv.Overlay{}, nil)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ag.Close()
+			if ag.Name() != string(types.AgentClaude) || record != nil {
+				t.Fatalf("run starts on %s with record %+v, want the proven claude and no quota order", ag.Name(), record)
+			}
+		})
+	}
 }
 
 func TestQuotaRoutingRecordForRun_DisabledNeverRunsQuotaAXI(t *testing.T) {
