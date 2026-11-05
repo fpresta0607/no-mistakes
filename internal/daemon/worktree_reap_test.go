@@ -11,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/procreap"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -87,7 +88,7 @@ func TestReapWorktreesHonorsRetentionAndSparesActiveRuns(t *testing.T) {
 	activePending := f.seed("active-pending", types.RunPending, 30*24*time.Hour)
 	activeRunning := f.seed("active-running", types.RunRunning, 30*24*time.Hour)
 
-	reapWorktrees(f.db, f.p, worktreeReapPolicy{Retention: 14 * 24 * time.Hour}, time.Now())
+	NewRunManager(f.db, f.p, nil).reapWorktrees(worktreeReapPolicy{Retention: 14 * 24 * time.Hour}, time.Now())
 
 	if !f.exists(fresh) {
 		t.Error("a worktree inside the retention window was removed")
@@ -113,7 +114,7 @@ func TestReapWorktreesTrimsToTheRunCeilingOldestFirst(t *testing.T) {
 	middle := f.seed("middle", types.RunCompleted, 3*time.Hour)
 	newest := f.seed("newest", types.RunCompleted, time.Hour)
 
-	reapWorktrees(f.db, f.p, worktreeReapPolicy{Retention: 14 * 24 * time.Hour, MaxRuns: 2}, time.Now())
+	NewRunManager(f.db, f.p, nil).reapWorktrees(worktreeReapPolicy{Retention: 14 * 24 * time.Hour, MaxRuns: 2}, time.Now())
 
 	if f.exists(oldest) {
 		t.Error("the oldest leftover worktree survived the run ceiling")
@@ -131,11 +132,45 @@ func TestReapWorktreesKeepsEverythingWhenBothBoundsAreDisabled(t *testing.T) {
 	ancient := f.seed("ancient", types.RunCompleted, 365*24*time.Hour)
 	recent := f.seed("recent", types.RunCompleted, time.Hour)
 
-	reapWorktrees(f.db, f.p, worktreeReapPolicy{Retention: 0, MaxRuns: 0}, time.Now())
+	NewRunManager(f.db, f.p, nil).reapWorktrees(worktreeReapPolicy{Retention: 0, MaxRuns: 0}, time.Now())
 
 	if !f.exists(ancient) || !f.exists(recent) {
 		t.Error("worktrees were reaped even though both bounds are disabled")
 	}
+}
+
+func TestReapWorktreesLocksEachBranchThroughSweepAndRemoval(t *testing.T) {
+	f := newWorktreeReapFixture(t)
+	manager := NewRunManager(f.db, f.p, nil)
+	first := f.seed("same-branch", types.RunFailed, 30*24*time.Hour)
+	second := f.seed("same-branch", types.RunCompleted, 30*24*time.Hour)
+	branchMutex := manager.branchMutex(f.repo.ID, "same-branch")
+	originalSweep := sweepRunWorktrees
+	t.Cleanup(func() { sweepRunWorktrees = originalSweep })
+	sweepCount := 0
+	sweepRunWorktrees = func(_ string, worktrees []procreap.Worktree, _ string) {
+		sweepCount++
+		if len(worktrees) != 2 {
+			t.Errorf("swept %d worktrees, want both terminal runs on the branch", len(worktrees))
+		}
+		if branchMutex.TryLock() {
+			branchMutex.Unlock()
+			t.Error("worktree sweep did not hold the continuation's branch lock")
+		}
+		if !f.exists(first) || !f.exists(second) {
+			t.Error("worktree removal preceded the process sweep")
+		}
+	}
+
+	manager.reapWorktrees(worktreeReapPolicy{Retention: time.Hour}, time.Now())
+
+	if sweepCount != 1 || f.exists(first) || f.exists(second) {
+		t.Fatalf("cleanup did not remove both terminal worktrees in one sweep: sweeps=%d", sweepCount)
+	}
+	if !branchMutex.TryLock() {
+		t.Fatal("cleanup did not release the branch lock after removal")
+	}
+	branchMutex.Unlock()
 }
 
 // TestWorktreeReapPolicyForUsesGlobalConfigAndDefaults keeps the daemon's
@@ -219,7 +254,7 @@ func TestRemoveOrphanWorktreeReportsRemovalFailure(t *testing.T) {
 	t.Cleanup(func() { os.Chmod(parent, 0o755) })
 
 	wt := orphanWorktree{gateDir: filepath.Join(tmp, "nonexistent-gate"), dir: wtDir, repoID: "repo1", runID: "run1"}
-	if removeOrphanWorktree(context.Background(), wt) {
+	if removeOrphanWorktree(context.Background(), newWorktreeReapFixture(t).db, wt) {
 		t.Fatal("removeOrphanWorktree reported success for a directory that is still on disk")
 	}
 	if _, err := os.Stat(wtDir); err != nil {

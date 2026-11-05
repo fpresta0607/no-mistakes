@@ -1,3 +1,14 @@
+# Every probe and recipe below is POSIX shell, but GNU make for Windows falls
+# back to cmd.exe when no sh.exe is on PATH. Git for Windows ships sh, date and
+# perl in usr/bin, which its default install leaves off PATH.
+ifeq ($(SHELL),sh.exe)
+PATH := $(PATH);$(shell git --exec-path)/../../../usr/bin
+SHELL := sh.exe
+endif
+ifeq ($(SHELL),sh.exe)
+$(error This Makefile needs a POSIX shell: install Git for Windows or put sh.exe on PATH)
+endif
+
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -13,10 +24,11 @@ LDFLAGS := -X github.com/kunchenguid/no-mistakes/internal/buildinfo.Version=$(VE
            -X github.com/kunchenguid/no-mistakes/internal/buildinfo.TelemetryHost=$(UMAMI_HOST) \
            -X github.com/kunchenguid/no-mistakes/internal/buildinfo.TelemetryWebsiteID=$(UMAMI_WEBSITE_ID)
 
-.PHONY: build dist install test e2e e2e-record lint fmt clean docs docs-build docs-preview demo skill skill-check
+.PHONY: build dist install test e2e e2e-record lint fmt clean docs docs-build docs-preview demo skill skill-check winres winres-check
 
 DIST_DIR ?= dist
-INSTALL_BIN := $(shell go env GOPATH)/bin/no-mistakes
+# go env prints backslashes on Windows, which the shell would strip.
+INSTALL_BIN := $(subst \,/,$(shell go env GOPATH))/bin/no-mistakes
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/no-mistakes ./cmd/no-mistakes
@@ -85,7 +97,18 @@ skill:
 skill-check:
 	go run ./cmd/genskill --check
 
-lint: skill-check
+# Regenerate the committed Windows resource objects
+# (cmd/no-mistakes/rsrc_windows_*.syso) that embed the application manifest
+# from internal/winres.
+winres:
+	go run ./cmd/genwinres
+
+# Fail if a committed resource object has drifted from the generator. Wired
+# into lint alongside skill-check.
+winres-check:
+	go run ./cmd/genwinres --check
+
+lint: skill-check winres-check
 	go vet ./...
 
 fmt:

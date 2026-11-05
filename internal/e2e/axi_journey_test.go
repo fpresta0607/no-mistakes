@@ -103,6 +103,7 @@ func branchSyncScenario(t *testing.T) string {
           line: 1
           description: "unsafe value needs validation"
           action: auto-fix
+          review_scope: source
       summary: "found one issue"
       risk_level: medium
       risk_rationale: "the unsafe value needs a guard"

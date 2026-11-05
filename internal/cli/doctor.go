@@ -75,6 +75,12 @@ func newDoctorCmd() *cobra.Command {
 					ok("az            ", "ok")
 				}
 
+				if _, err := exec.LookPath("origin"); err != nil {
+					warn("origin        ", "not found "+sDim.Render("(optional, needed for Cursor Origin PR/CI)"))
+				} else {
+					ok("origin        ", "ok")
+				}
+
 				p, err := paths.New()
 				if err != nil {
 					fail("data directory", fmt.Sprintf("error resolving paths (%v)", err))
@@ -104,7 +110,12 @@ func newDoctorCmd() *cobra.Command {
 				if p != nil {
 					alive, _ := daemon.IsRunning(p)
 					if alive {
-						ok("daemon        ", "running")
+						// A daemon holding pushes for a restart must not look idle.
+						if status, err := daemon.RestartStatus(p); err == nil && status.Pending {
+							warn("daemon        ", "running; "+daemon.DescribePendingRestart(status))
+						} else {
+							ok("daemon        ", "running")
+						}
 					} else {
 						warn("daemon        ", "stopped")
 					}
@@ -143,6 +154,9 @@ func newDoctorCmd() *cobra.Command {
 						allOK = false
 					} else {
 						if !doctorForgeProfiles(cmd.Context(), w, globalCfg.ForgeProfiles, ok, fail) {
+							allOK = false
+						}
+						if !doctorProviderPlugins(w, globalCfg.ProviderPlugins, exec.LookPath, ok, fail) {
 							allOK = false
 						}
 						cfg := config.Merge(globalCfg, &config.RepoConfig{})
@@ -186,7 +200,11 @@ func doctorForgeProfiles(
 	sort.Strings(hosts)
 	allOK := true
 	for _, profileHost := range hosts {
-		remote := "git@" + profileHost + ":no-mistakes/doctor.git"
+		host, owner := config.SplitForgeProfileKey(profileHost)
+		if owner == "" {
+			owner = "no-mistakes"
+		}
+		remote := "git@" + host + ":" + owner + "/doctor.git"
 		resolved, err := forgecontext.Resolve(ctx, config.ForgeProfiles{profileHost: profiles[profileHost]}, remote, "")
 		label := fmt.Sprintf("%-14s", "forge "+profileHost)
 		if err != nil {
@@ -232,6 +250,44 @@ func doctorForgeProfiles(
 			continue
 		}
 		ok(label, fmt.Sprintf("%s authenticated for %s", resolved.Provider, resolved.Host))
+	}
+	return allOK
+}
+
+// doctorProviderPlugins reports each configured provider plugin and whether
+// its command resolves. It deliberately does not run the plugin's handshake:
+// doctor has no repository, and a plugin is free to check authentication per
+// repository, so a synthetic handshake could fail for a correctly configured
+// plugin. The PR step skips with a refused handshake's message and fails on
+// a handshake that breaks the protocol.
+func doctorProviderPlugins(
+	w io.Writer,
+	plugins config.ProviderPlugins,
+	lookPath func(string) (string, error),
+	ok func(string, string),
+	fail func(string, string),
+) bool {
+	if len(plugins) == 0 {
+		return true
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  %s\n", sCyan.Render("Provider plugins"))
+	names := make([]string, 0, len(plugins))
+	for name := range plugins {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	allOK := true
+	for _, name := range names {
+		plugin := plugins[name]
+		label := fmt.Sprintf("%-14s", "plugin "+name)
+		path, err := lookPath(plugin.Command)
+		if err != nil {
+			fail(label, fmt.Sprintf("command %q not found", plugin.Command))
+			allOK = false
+			continue
+		}
+		ok(label, fmt.Sprintf("%s %s", path, sDim.Render("(hosts: "+strings.Join(plugin.Hosts, ", ")+")")))
 	}
 	return allOK
 }

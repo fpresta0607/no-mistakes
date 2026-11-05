@@ -569,6 +569,7 @@ func TestCIStep_RepairWithoutReviewAuthorityRevalidatesRatherThanPublishing(t *t
 // cannot leave the monitor watching a head the run record does not know about
 // while its stale review approval still stands.
 func TestCIStep_FailedRevalidationWriteDoesNotAdvanceTheLiveHead(t *testing.T) {
+	t.Parallel()
 	f := newCIRepairFixture(t, true, nil)
 	writeCIFix(f.dir)
 	priorHead := f.sctx.Run.HeadSHA

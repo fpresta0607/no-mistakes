@@ -165,7 +165,35 @@ func TestCIStep_ProtectedPathRetryUsesPersistedRepair(t *testing.T) {
 				selected = []string{}
 				added = []types.Finding{{ID: "user-1", Severity: "info", Description: "publish the retained repair", Action: types.ActionAutoFix}}
 			}
-			if err := executor.RespondWithOverrides(types.StepCI, types.ActionFix, selected, nil, added, ""); err != nil {
+			// The parked gate carries every finding the resumed CI step
+			// reported - including ones the fixture's refusal outcome did not
+			// name - so decline all of them except the selection explicitly.
+			// An omission is not a decline, and the daemon refuses a fix
+			// response that leaves a gate finding unaccounted for.
+			selectedSet := make(map[string]bool, len(selected))
+			for _, id := range selected {
+				selectedSet[id] = true
+			}
+			var ignored []string
+			gateSteps, gateErr := f.sctx.DB.GetStepsByRun(run.ID)
+			if gateErr != nil {
+				t.Fatal(gateErr)
+			}
+			for _, sr := range gateSteps {
+				if sr.StepName != types.StepCI || sr.FindingsJSON == nil {
+					continue
+				}
+				gate, err := types.ParseFindingsJSON(*sr.FindingsJSON)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, item := range gate.Items {
+					if item.ID != "" && !selectedSet[item.ID] {
+						ignored = append(ignored, item.ID)
+					}
+				}
+			}
+			if _, err := executor.RespondWithOverrides(types.StepCI, types.ActionFix, selected, ignored, nil, added, ""); err != nil {
 				t.Fatal(err)
 			}
 			select {

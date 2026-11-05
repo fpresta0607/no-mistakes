@@ -536,6 +536,102 @@ func TestOmitIntentRoundTripAndClaimMatching(t *testing.T) {
 	}
 }
 
+func TestRunPRTextRoundTripAndClaimMatching(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := RunIntent{Summary: "exact persisted intent", Source: RunIntentSourceAgent, Score: 1}
+	const generation = "generation-pr-text-001"
+	const intentDigest = "pr-text-intent-digest"
+	text := RunPRText{Title: "Add widget", Body: "Our words.\n"}
+	run, err := d.InsertRunWithPRText(repo.ID, "feature", "head", "base", &intent, "nonce-pr-text", generation, intentDigest, "", false, nil, text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.PRTitle == nil || *stored.PRTitle != text.Title || stored.PRBody == nil || *stored.PRBody != text.Body {
+		t.Fatalf("stored PR text = %v / %v", stored.PRTitle, stored.PRBody)
+	}
+	plain, err := d.InsertRun(repo.ID, "other", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := d.GetRun(plain.ID); err != nil || got.PRTitle != nil || got.PRBody != nil || got.PRTextDigest() != "" {
+		t.Fatalf("run without supplied text = %#v, %v", got, err)
+	}
+
+	for _, mismatch := range []string{"", PRTextDigest(text.Title, "Other words.\n")} {
+		conflicting, claimed, err := d.ClaimLaunchReceiptWithPRText(repo.ID, "feature", "nonce-pr-text", "head", generation, intentDigest, "", false, mismatch)
+		if err != nil || claimed || conflicting == nil || conflicting.ID != run.ID {
+			t.Fatalf("mismatched PR text claim = %#v, claimed=%v, err=%v", conflicting, claimed, err)
+		}
+	}
+	if still, err := d.GetRun(run.ID); err != nil || still.LaunchReceiptClaimedAt != nil {
+		t.Fatalf("mismatched PR text claim consumed created disposition: %v", err)
+	}
+	first, claimed, err := d.ClaimLaunchReceiptWithPRText(repo.ID, "feature", "nonce-pr-text", "head", generation, intentDigest, "", false, PRTextDigest(text.Title, text.Body))
+	if err != nil || !claimed || first == nil || first.ID != run.ID {
+		t.Fatalf("matching PR text claim = %#v, claimed=%v, err=%v", first, claimed, err)
+	}
+
+	// Mismatched claimers already polling when the row is inserted must not
+	// consume `created` for the caller whose text matches.
+	const racers = 8
+	mismatch := PRTextDigest(text.Title, "Other words.\n")
+	start := make(chan struct{})
+	errs := make(chan error, racers)
+	for range racers {
+		go func() {
+			<-start
+			for {
+				got, claimed, err := d.ClaimLaunchReceiptWithPRText(repo.ID, "feature", "nonce-pr-text-race", "head", generation, intentDigest, "", false, mismatch)
+				if err != nil || claimed {
+					if err == nil {
+						err = errors.New("mismatched racing claim consumed created")
+					}
+					errs <- err
+					return
+				}
+				if got != nil {
+					errs <- nil
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	raced, err := d.InsertRunWithPRText(repo.ID, "feature", "head", "base", &intent, "nonce-pr-text-race", generation, intentDigest, "", false, nil, text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range racers {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if still, err := d.GetRun(raced.ID); err != nil || still.LaunchReceiptClaimedAt != nil {
+		t.Fatalf("racing mismatched claim consumed created disposition: %v", err)
+	}
+	won, claimed, err := d.ClaimLaunchReceiptWithPRText(repo.ID, "feature", "nonce-pr-text-race", "head", generation, intentDigest, "", false, PRTextDigest(text.Title, text.Body))
+	if err != nil || !claimed || won == nil || won.ID != raced.ID {
+		t.Fatalf("matching claim after race = %#v, claimed=%v, err=%v", won, claimed, err)
+	}
+}
+
+func TestPRTextDigestSeparatesTitleFromBody(t *testing.T) {
+	if PRTextDigest("", "") != "" {
+		t.Fatal("no supplied text must have no digest")
+	}
+	if PRTextDigest("a\n1:b", "") == PRTextDigest("a", "b") || PRTextDigest("ab", "") == PRTextDigest("a", "b") {
+		t.Fatal("different title/body splits share a digest")
+	}
+}
+
 func TestClaimLaunchReceiptAtomicallyReturnsCreatedOnce(t *testing.T) {
 	d := openTestDB(t)
 	repo, err := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
@@ -723,6 +819,9 @@ func TestRecoverStaleRunsMarksCIMonitorInterrupted(t *testing.T) {
 	if err := d.StartStep(ciStep.ID); err != nil {
 		t.Fatalf("start ci step: %v", err)
 	}
+	if err := d.SetRunPushActive(run.ID, true); err != nil {
+		t.Fatal(err)
+	}
 
 	count, err := d.RecoverStaleRuns("daemon crashed")
 	if err != nil {
@@ -738,6 +837,9 @@ func TestRecoverStaleRunsMarksCIMonitorInterrupted(t *testing.T) {
 	}
 	if got.Status != types.RunCIMonitorInterrupted {
 		t.Fatalf("run status = %q, want %q", got.Status, types.RunCIMonitorInterrupted)
+	}
+	if got.PushActive {
+		t.Fatal("a terminal interrupted monitor must not retain an active publisher")
 	}
 	if got.Error == nil || *got.Error != types.RunCIMonitorInterruptedReason {
 		t.Fatalf("run error = %v, want ci monitor interrupted message", got.Error)
@@ -1110,6 +1212,76 @@ func TestVerifyTerminalRunHeadRewriteUsesRecordedReviewCAS(t *testing.T) {
 	got, err = d.GetRun(run.ID)
 	if err != nil || got.HeadSHA != "live" || got.TerminalHeadVerifiedAt == nil {
 		t.Fatalf("successful CAS did not verify live head = %#v, %v", got, err)
+	}
+}
+
+func TestVerifyTerminalRunRecordedHeadIsACompareAndSwap(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/tmp/terminal-recorded-cas", "https://example.com/terminal-recorded-cas", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "submitted", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunHeadSHA(run.ID, "recorded"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunReviewApprovedHeadSHA(run.ID, "reviewed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	for name, args := range map[string][3]any{
+		"status":    {types.RunCancelled, "recorded", "reviewed"},
+		"head":      {types.RunFailed, "other", "reviewed"},
+		"authority": {types.RunFailed, "recorded", "other"},
+	} {
+		if updated, err := d.VerifyTerminalRunRecordedHead(run.ID, args[0].(types.RunStatus), args[1].(string), args[2].(string)); err != nil || updated {
+			t.Fatalf("%s mismatch CAS = %t, %v", name, updated, err)
+		}
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil || got.HeadSHA != "recorded" || got.TerminalHeadVerifiedAt != nil {
+		t.Fatalf("failed CAS changed run = %#v, %v", got, err)
+	}
+	if updated, err := d.VerifyTerminalRunRecordedHead(run.ID, types.RunFailed, "recorded", "reviewed"); err != nil || !updated {
+		t.Fatalf("matching CAS = %t, %v", updated, err)
+	}
+	got, err = d.GetRun(run.ID)
+	if err != nil || got.HeadSHA != "recorded" || got.TerminalHeadVerifiedAt == nil || got.Status != types.RunFailed {
+		t.Fatalf("successful CAS did not verify the recorded head in place = %#v, %v", got, err)
+	}
+	if updated, err := d.VerifyTerminalRunRecordedHead(run.ID, types.RunFailed, "recorded", "reviewed"); err != nil || updated {
+		t.Fatalf("already-verified CAS = %t, %v", updated, err)
+	}
+
+	// A run whose custody was already returned is never re-stamped, even when
+	// every other predicate matches.
+	returned, err := d.InsertRun(repo.ID, "feature-returned", "submitted", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunHeadSHA(returned.ID, "recorded"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunReviewApprovedHeadSHA(returned.ID, "reviewed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(returned.ID, types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetRunCustodyReturned(returned.ID); err != nil {
+		t.Fatal(err)
+	}
+	if updated, err := d.VerifyTerminalRunRecordedHead(returned.ID, types.RunFailed, "recorded", "reviewed"); err != nil || updated {
+		t.Fatalf("custody-returned CAS = %t, %v", updated, err)
+	}
+	got, err = d.GetRun(returned.ID)
+	if err != nil || got.TerminalHeadVerifiedAt != nil || got.CustodyReturnedAt == nil {
+		t.Fatalf("custody-returned CAS changed run = %#v, %v", got, err)
 	}
 }
 
@@ -1770,5 +1942,103 @@ func TestRebindRunPushedHeadAppliesOnlyToTheVerifiedBinding(t *testing.T) {
 	got, _ = d.GetRun(run.ID)
 	if got.HeadSHA != "live" || *got.LastPushedSHA != "live" || *got.PushGeneration != 2 {
 		t.Fatalf("rebind result: head %s pushed %s generation %d", got.HeadSHA, *got.LastPushedSHA, *got.PushGeneration)
+	}
+}
+
+func TestRecoverStaleRunsCompletedCI(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    types.RunStatus
+		ready     bool
+		completed bool
+		preserved bool
+		unmarked  bool
+		want      types.RunStatus
+	}{
+		{"committed verdict", types.RunRunning, true, true, false, false, types.RunChecksPassed},
+		{"pending run", types.RunPending, true, true, false, false, types.RunChecksPassed},
+		{"default mode ready without release marker", types.RunRunning, true, true, false, true, types.RunFailed},
+		{"no readiness", types.RunRunning, false, true, false, false, types.RunFailed},
+		{"live monitor", types.RunRunning, true, false, false, false, types.RunCIMonitorInterrupted},
+		{"cancelled", types.RunCancelled, true, true, false, false, types.RunCancelled},
+		{"failed", types.RunFailed, true, true, false, false, types.RunFailed},
+		{"preserved", types.RunRunning, true, true, true, false, types.RunRunning},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := openTestDB(t)
+			repo, err := d.InsertRepo("/project", "https://github.com/test/repo", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := d.InsertRun(repo.ID, "feature", "abc", "def")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, err := range []error{d.UpdateRunStatus(run.ID, tc.status), d.UpdateRunPRState(run.ID, "open"), d.UpdateRunPRURL(run.ID, "https://github.com/test/repo/pull/1")} {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			ci, err := d.InsertStepResult(run.ID, types.StepCI)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.StartStep(ci.ID); err != nil {
+				t.Fatal(err)
+			}
+			if tc.unmarked {
+				if err := d.SetRunCIReady(run.ID, true); err != nil {
+					t.Fatal(err)
+				}
+				if err := d.CompleteStepWithStatus(ci.ID, types.StepStatusCompleted, 0, 1234, "ci.log"); err != nil {
+					t.Fatal(err)
+				}
+			} else if tc.ready {
+				if err := d.CompleteCIStep(ci.ID, run.ID, false, 0, 1234, "ci.log"); err != nil {
+					t.Fatal(err)
+				}
+			} else if tc.completed {
+				if err := d.CompleteStepWithStatus(ci.ID, types.StepStatusCompleted, 0, 1234, "ci.log"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !tc.completed {
+				if err := d.StartStep(ci.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := d.GetStepResult(ci.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			preserved := map[string]struct{}{}
+			if tc.preserved {
+				preserved[run.ID] = struct{}{}
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				if _, err := d.RecoverStaleRunsExcept("daemon crashed", preserved); err != nil {
+					t.Fatal(err)
+				}
+				got, err := d.GetRun(run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Status != tc.want {
+					t.Fatalf("status = %s, want %s", got.Status, tc.want)
+				}
+				if tc.want == types.RunChecksPassed && got.Error != nil {
+					t.Fatalf("successful run error = %v", got.Error)
+				}
+				if tc.completed {
+					after, err := d.GetStepResult(ci.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if after.Status != types.StepStatusCompleted || after.DurationMS == nil || *after.DurationMS != 1234 || after.CompletedAt == nil || *after.CompletedAt != *before.CompletedAt {
+						t.Fatalf("recovery changed completed CI timing or status: %+v", after)
+					}
+				}
+			}
+		})
 	}
 }

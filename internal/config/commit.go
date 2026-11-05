@@ -241,6 +241,77 @@ func (c Commit) renderFixMessage(step types.StepName, summary, branch string, re
 	return message, nil
 }
 
+// RenderCommitMessage renders the evidence-branch commit subject. An unset
+// test.evidence.commit_message keeps the built-in subject byte for byte.
+// A configured one follows commit.fix_message's template rules and limits,
+// with {{.Branch}} and {{.RunID}} as its only placeholders.
+func (e Evidence) RenderCommitMessage(branch, runID string) (string, error) {
+	if e.CommitMessage == "" {
+		return fmt.Sprintf("no-mistakes: evidence for %s (run %s)", branch, runID), nil
+	}
+	return renderEvidenceMessage(e.CommitMessage, branch, runID)
+}
+
+func renderEvidenceMessage(source, branch, runID string) (string, error) {
+	const shapeErr = "test.evidence.commit_message supports only literal text and {{.Branch}} or {{.RunID}} placeholders"
+	if strings.TrimSpace(source) == "" {
+		return "", fmt.Errorf("test.evidence.commit_message must not be empty")
+	}
+	if len(source) > maxFixMessageTemplateBytes {
+		return "", fmt.Errorf("test.evidence.commit_message must not exceed %d bytes", maxFixMessageTemplateBytes)
+	}
+	if !utf8.ValidString(source) || containsUnsafeFixMessageRune(source) {
+		return "", fmt.Errorf("test.evidence.commit_message must be valid UTF-8 without control or unsafe Unicode format characters or line separators")
+	}
+	tmpl, err := template.New("test.evidence.commit_message").Option("missingkey=error").Parse(source)
+	if err != nil {
+		return "", fmt.Errorf("parse test.evidence.commit_message template: %w", err)
+	}
+	if len(tmpl.Templates()) != 1 || tmpl.Tree == nil || tmpl.Tree.Root == nil {
+		return "", fmt.Errorf(shapeErr)
+	}
+	// Predict the rendered size before allocating it, like predictFixMessageBytes.
+	size, placeholders := 0, 0
+	for _, node := range tmpl.Tree.Root.Nodes {
+		switch node := node.(type) {
+		case *parse.TextNode:
+			size += len(node.Text)
+		case *parse.ActionNode:
+			placeholders++
+			if placeholders > maxFixMessagePlaceholders {
+				return "", fmt.Errorf("test.evidence.commit_message must not contain more than %d placeholders", maxFixMessagePlaceholders)
+			}
+			switch name, _ := templateFieldName(node.Pipe); name {
+			case "Branch":
+				size += len(branch)
+			case "RunID":
+				size += len(runID)
+			default:
+				return "", fmt.Errorf(shapeErr)
+			}
+		default:
+			return "", fmt.Errorf(shapeErr)
+		}
+		if size > maxFixMessageSubjectBytes {
+			return "", fmt.Errorf("test.evidence.commit_message must not render to more than %d bytes", maxFixMessageSubjectBytes)
+		}
+	}
+	var rendered bytes.Buffer
+	rendered.Grow(size)
+	if err := tmpl.Execute(&rendered, struct{ Branch, RunID string }{branch, runID}); err != nil {
+		return "", fmt.Errorf("render test.evidence.commit_message template: %w", err)
+	}
+	message := rendered.String()
+	if !utf8.ValidString(message) || containsUnsafeFixMessageRune(message) {
+		return "", fmt.Errorf("test.evidence.commit_message must render valid UTF-8 without control or unsafe Unicode format characters or line separators")
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return "", fmt.Errorf("test.evidence.commit_message must render to a non-empty message")
+	}
+	return message, nil
+}
+
 // BranchValue returns the branch value exposed to commit and PR title
 // templates. BranchPattern, when configured, must capture the identifier in
 // its only capture group. BranchReplacement can add literal text around it.

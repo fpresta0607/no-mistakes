@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 )
 
 // Result is what Extract returns when it successfully attaches an intent
@@ -27,7 +29,10 @@ type ExtractParams struct {
 	OriginCWD string
 	// DiffFiles is the repo-relative file set used for matching and scoring.
 	DiffFiles []string
-	// BaseTime is the committer time of the base SHA.
+	// Change is the exact Git range and diff under validation, for summarization.
+	Change ChangeContext
+	// BaseTime anchors session discovery before SlackDays is subtracted. It
+	// need not be the committer time of Change.Base, which scopes the branch diff.
 	BaseTime time.Time
 	// HeadTime is the committer time of the head SHA.
 	HeadTime time.Time
@@ -140,7 +145,8 @@ func Extract(ctx context.Context, p ExtractParams) (*Result, error) {
 		return nil, err
 	}
 
-	key := cacheKeyFor(match.Session)
+	change := SummaryContext{Change: p.Change, WindowStart: opts.WindowStart, WindowEnd: opts.WindowEnd}
+	key := summaryCacheKeyFor(match.Session, change)
 	if cached, ok := p.Cache.Get(key); ok && cached != "" {
 		return &Result{
 			Summary:   cached,
@@ -150,7 +156,7 @@ func Extract(ctx context.Context, p ExtractParams) (*Result, error) {
 		}, nil
 	}
 
-	summary, err := p.Summarizer.Summarize(ctx, match.Session)
+	summary, err := p.Summarizer.Summarize(ctx, match.Session, change)
 	if err != nil {
 		return nil, fmt.Errorf("intent: summarize: %w", err)
 	}
@@ -179,6 +185,9 @@ func disambiguateMatch(ctx context.Context, p ExtractParams, fallback *Match, lo
 	if err != nil {
 		if errors.Is(err, ErrDisambiguatorCleanup) {
 			return nil, fmt.Errorf("intent: disambiguator cleanup: %w", err)
+		}
+		if agent.IsSafetyRefusal(err) {
+			return nil, fmt.Errorf("intent: disambiguator: %w", err)
 		}
 		if p.Logf != nil {
 			p.Logf("disambiguator failed: %v", err)

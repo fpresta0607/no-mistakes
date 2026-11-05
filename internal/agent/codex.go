@@ -50,7 +50,13 @@ func (a *codexAgent) NeutralizesGateInstructions() bool {
 }
 
 func (a *codexAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
-	return runWithRetry(ctx, "codex", opts, claudeMaxRetries, classifyTransient, nil, func() (*Result, error) {
+	classify := func(err error) (string, bool) {
+		if IsTerminalProviderError(err) {
+			return "", false
+		}
+		return classifyTransient(err)
+	}
+	return runWithRetry(ctx, "codex", opts, claudeMaxRetries, classify, nil, func() (*Result, error) {
 		return a.runOnce(ctx, opts)
 	})
 }
@@ -96,7 +102,7 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 
 	var stderrBuf []byte
 	var stderrWG sync.WaitGroup
-	started, err := startNativeAgentCommand(cmd, opts.Desktop, nativeAgentActivityObserver(opts, "codex"))
+	started, err := startNativeAgentCommand(cmd, opts.Desktop, nativeAgentActivityObserver(opts, "codex"), opts.RequireCompletedChildren)
 	if err != nil {
 		return nil, fmt.Errorf("codex start: %w", err)
 	}
@@ -112,6 +118,7 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 
 	var usage TokenUsage
 	var lastMessage string
+	var resultReceived bool
 	var codexErr string
 	var threadID string
 	metrics := newCodexMetricsAccumulator()
@@ -126,17 +133,39 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		}
 		return res
 	}
-	if err := parseCodexEvents(ctx, started.stdout, opts.OnChunk, &usage, &lastMessage, &codexErr, &threadID, metrics); err != nil {
+	if err := parseCodexEvents(ctx, started.stdout, opts.OnChunk, &usage, &lastMessage, &resultReceived, &codexErr, &threadID, metrics); err != nil {
 		err = started.waitAfterParseError(err)
-		stderrWG.Wait()
-		retErr := fmt.Errorf("codex parse events: %w", err)
+		if !started.closedByWaitDelay(err) || lastMessage == "" || codexErr != "" {
+			stderrWG.Wait()
+			retErr := fmt.Errorf("codex parse events (result received: %t): %w", resultReceived, err)
+			if detail := strings.TrimSpace(strings.Join([]string{codexErr, string(stderrBuf)}, "\n")); detail != "" {
+				retErr = fmt.Errorf("%w: %s", retErr, detail)
+			}
+			if isNativeSafetyRefusal(codexErr) || isNativeSafetyRefusal(string(stderrBuf)) {
+				retErr = fmt.Errorf("%w: %w", ErrSafetyRefusal, retErr)
+			}
+			emitAgentExited(opts, "codex", pid, retErr)
+			return partialResult(), retErr
+		}
+	}
+
+	isResultFinished := lastMessage != "" && codexErr == ""
+	waitErr := started.waitKeepingResult(isResultFinished)
+	stderrWG.Wait()
+	isRefusal := isNativeSafetyRefusal(codexErr) || isNativeSafetyRefusal(string(stderrBuf))
+	// Stderr can retain a recovered request's diagnostic after a successful
+	// turn. Only a failed exit makes it authoritative; JSONL error events are
+	// still failures even if Codex exits zero.
+	if !isRefusal && schemaPath != "" && (codexRejectsOutputSchema(codexErr) || waitErr != nil && codexRejectsOutputSchema(string(stderrBuf))) {
+		cause := waitErr
+		if cause == nil {
+			cause = fmt.Errorf("provider rejected output schema")
+		}
+		retErr := &codexSchemaIncompatibility{err: fmt.Errorf("%w: %s", cause, strings.TrimSpace(codexErr+"\n"+string(stderrBuf)))}
 		emitAgentExited(opts, "codex", pid, retErr)
 		return partialResult(), retErr
 	}
-
-	waitErr := started.wait()
-	stderrWG.Wait()
-	if waitErr != nil {
+	if waitErr != nil || isRefusal {
 		detail := strings.TrimSpace(codexErr)
 		stderr := strings.TrimSpace(string(stderrBuf))
 		if detail != "" && stderr != "" {
@@ -144,7 +173,15 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		} else if detail == "" {
 			detail = stderr
 		}
-		retErr := fmt.Errorf("codex exited: %w: %s", waitErr, detail)
+		var retErr error
+		if waitErr != nil {
+			retErr = fmt.Errorf("codex exited: %w: %s", waitErr, detail)
+		} else {
+			retErr = fmt.Errorf("codex reported: %s", detail)
+		}
+		if isRefusal {
+			retErr = fmt.Errorf("%w: %w", ErrSafetyRefusal, retErr)
+		}
 		emitAgentExited(opts, "codex", pid, retErr)
 		return partialResult(), retErr
 	}
@@ -264,6 +301,9 @@ type codexEvent struct {
 	Usage    *codexUsage `json:"usage,omitempty"`
 	Message  string      `json:"message,omitempty"`
 	ThreadID string      `json:"thread_id,omitempty"`
+	Error    *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
 }
 
 type codexItem struct {
@@ -287,17 +327,11 @@ type codexUsage struct {
 // evidence (round-trips, tool calls + categories, subprocess wait time). It is
 // clocked by time.Now as events arrive, so a tool item's started->completed gap
 // is its real subprocess wall time.
-func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, lastMessage *string, codexErr *string, threadID *string, metrics *codexMetricsAccumulator) error {
+func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, lastMessage *string, resultReceived *bool, codexErr *string, threadID *string, metrics *codexMetricsAccumulator) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024*1024)
 
 	for scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
@@ -307,11 +341,18 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), us
 		if err := json.Unmarshal(line, &event); err != nil {
 			continue // skip malformed lines
 		}
+		if ctx.Err() != nil && event.Type != "error" {
+			continue
+		}
 
 		switch event.Type {
 		case "error":
-			if event.Message != "" && codexErr != nil {
+			if event.Message != "" && codexErr != nil && !isNativeSafetyRefusal(*codexErr) {
 				*codexErr = event.Message
+			}
+		case "turn.failed":
+			if event.Error != nil && event.Error.Message != "" && codexErr != nil {
+				*codexErr = event.Error.Message
 			}
 
 		case "thread.started":
@@ -325,6 +366,7 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), us
 		case "item.completed":
 			metrics.onItem(event.Type, event.Item, time.Now())
 			if event.Item != nil && event.Item.Type == "agent_message" {
+				*resultReceived = true
 				*lastMessage = event.Item.Text
 				if onChunk != nil {
 					onChunk(event.Item.Text)
@@ -345,7 +387,10 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), us
 		}
 	}
 
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 func codexOutputSchema(schema json.RawMessage) ([]byte, error) {
@@ -426,6 +471,12 @@ func codexFillNullableFields(value, schema any) bool {
 	return changed
 }
 
+// addAdditionalPropertiesFalse rewrites a parsed JSON schema in place into the
+// shape a strict function schema requires: every object level carries
+// additionalProperties: false and a required list naming every property, and a
+// property the caller left optional becomes nullable instead of omittable.
+// This normalizes Codex's output schema file; Pi uses piStrictToolSchema to
+// keep concrete property types for compatibility with legacy tool validation.
 func addAdditionalPropertiesFalse(value any) {
 	schema, ok := value.(map[string]any)
 	if !ok {

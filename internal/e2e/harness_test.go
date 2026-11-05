@@ -5,7 +5,9 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -16,6 +18,94 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestHarnessFakeExecutablesPreserveDispatchAndInterception(t *testing.T) {
+	h := NewHarness(t, SetupOpts{Agent: "pi"})
+	fakeInfo, err := os.Stat(h.FakeAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"claude", "codex", "grok", "opencode", "pi", "antigravity", "agy", "gh", "tea"} {
+		path := filepath.Join(h.BinDir, executableName(name))
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatalf("inspect %s: %v", name, err)
+		}
+		if !info.Mode().IsRegular() || !os.SameFile(fakeInfo, info) || info.Mode().Perm() != fakeInfo.Mode().Perm() {
+			t.Fatalf("%s must share the fake executable and its permissions without a symlink", name)
+		}
+		resolved, err := exec.LookPath(name)
+		if err != nil || resolved != path {
+			t.Fatalf("resolve %s = %q, %v; want %q", name, resolved, err, path)
+		}
+	}
+
+	t.Setenv("FAKEAGENT_SCENARIO", "")
+	t.Setenv("FAKEAGENT_GH_MODE", "")
+	for _, test := range []struct {
+		name     string
+		args     []string
+		want     string
+		wantExit int
+	}{
+		{name: "pi", want: `"type":"agent_end"`},
+		{name: "gh", args: []string{"auth", "status"}, want: "fakeagent gh: not authenticated (e2e stub)", wantExit: 1},
+		{name: "tea", args: []string{"api", "/user"}, want: `{"login":"e2e-tea-user"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			command := exec.CommandContext(ctx, test.name, test.args...)
+			command.Dir = h.WorkDir
+			output, err := command.CombinedOutput()
+			exitCode := 0
+			if err != nil {
+				var exitError *exec.ExitError
+				if !errors.As(err, &exitError) {
+					t.Fatalf("execute %s: %v\n%s", test.name, err, output)
+				}
+				exitCode = exitError.ExitCode()
+			}
+			if exitCode != test.wantExit || !strings.Contains(string(output), test.want) {
+				t.Fatalf("%s: exit=%d, output=%s; want exit=%d containing %q", test.name, exitCode, output, test.wantExit, test.want)
+			}
+		})
+	}
+	invocations := h.AgentInvocations()
+	if len(invocations) != 1 || invocations[0].Agent != "pi" {
+		t.Fatalf("basename dispatch recorded %v, want one Pi invocation", invocations)
+	}
+}
+
+func TestHarnessFixtureCheckoutIgnoresSystemGitConfig(t *testing.T) {
+	systemConfig := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(systemConfig, []byte("[core]\n\tautocrlf = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_SYSTEM", systemConfig)
+	h := NewHarness(t, SetupOpts{Agent: "pi", Scenario: writeReviewAgentsRoutingScenario(t)})
+	if out, err := h.Run("init"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	const (
+		branch  = "feature/line-endings"
+		content = "seed for review-agents routing\n"
+	)
+	h.CommitChange(branch, "feature.txt", content, "seed feature")
+	h.PushToGate(branch)
+	parked := waitForStepStatus(t, h, branch, types.StepReview, types.StepStatusAwaitingApproval, 90*time.Second)
+
+	// Scripted agent edits run in the daemon's run worktree, not in a checkout
+	// the harness makes itself, so that is the one whose bytes must hold.
+	worktree := paths.WithRoot(h.NMHome).WorktreeDir(h.repoID(), parked.ID)
+	checkedOut, err := os.ReadFile(filepath.Join(worktree, "feature.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(checkedOut) != content {
+		t.Fatalf("fixture checkout of feature.txt = %q, want %q unchanged by the system git config", checkedOut, content)
+	}
+}
 
 func TestFixtureRootFromRepoRoot(t *testing.T) {
 	root, err := fixtureRootFromRepoRoot(t.TempDir())

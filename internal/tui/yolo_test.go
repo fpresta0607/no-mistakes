@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/kunchenguid/no-mistakes/internal/authoredvalidation"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -30,6 +31,8 @@ func TestModel_Yolo_RefusalGatesSendNoAutomaticResponse(t *testing.T) {
 	}{
 		{types.StepDocument, pipeline.ProtectedPathOutcome(&pipeline.ProtectedPathError{Path: "ledger.json", Rule: "ledger.json"}).Findings},
 		{types.StepTest, unvalidatedWork},
+		{types.StepReview, `{"findings":[{"id":"agent-safety-refusal","severity":"error","description":"Native safety refusal","action":"ask-user"}]}`},
+		{types.StepReview, `{"findings":[{"id":"review-fix-rounds-exhausted","severity":"warning","action":"ask-user","description":"Review used 1/1 fix rounds"}]}`},
 	} {
 		for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
 			t.Run(string(refusal.step)+"/"+string(status), func(t *testing.T) {
@@ -127,6 +130,43 @@ func TestModel_Yolo_UnreadableQuestionHistorySendsNoAutomaticResponse(t *testing
 	}
 }
 
+func TestModel_Yolo_AuthoredValidationGateSendsNoAutomaticResponse(t *testing.T) {
+	for name, authored := range map[string]func(*ipc.RunInfo){
+		"family": func(run *ipc.RunInfo) {
+			run.AuthoredValidation = &authoredvalidation.Family{AdmissionID: "admission", PredecessorID: "parent"}
+		},
+		"unreadable provenance": func(run *ipc.RunInfo) {
+			run.AuthoredValidationError = "immutable validation predecessor history changed"
+		},
+	} {
+		for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
+			t.Run(name+"/"+string(status), func(t *testing.T) {
+				sock, client, snapshot := captureRespond(t)
+				run := testRun()
+				fj := `{"findings":[{"id":"review-1","severity":"error","file":"main.go","description":"repair needed","action":"auto-fix"}],"summary":"1 issue"}`
+				run.Steps = []ipc.StepResultInfo{{StepName: types.StepReview, Status: status, FindingsJSON: &fj}}
+				authored(run)
+				m := NewModel(sock, client, run)
+				m.yoloMode = true
+				m.stepDiffLoaded[types.StepReview] = true
+				for range 2 {
+					if cmd := m.maybeAutoApproveCmd(); cmd != nil {
+						if msg := cmd(); msg != nil {
+							t.Fatalf("automatic response failed: %v", msg)
+						}
+					}
+				}
+				if calls := snapshot(); len(calls) != 0 {
+					t.Fatalf("authored validation gate was auto-resolved: %+v", calls)
+				}
+				if m.yoloFixed[types.StepReview] || m.yoloApproved[types.StepReview] {
+					t.Fatal("authored validation gate consumed yolo bookkeeping without an operator decision")
+				}
+			})
+		}
+	}
+}
+
 // A review gate carrying ORDINARY findings is still yolo's to fix, so the guard
 // must key on the question category and nothing broader.
 func TestModel_Yolo_OrdinaryReviewFindingsAreStillFixed(t *testing.T) {
@@ -183,7 +223,7 @@ func TestModel_Yolo_AutoApprovesAwaitingStep(t *testing.T) {
 		mu.Lock()
 		calls = append(calls, params)
 		mu.Unlock()
-		return &ipc.RespondResult{}, nil
+		return &ipc.RespondResult{OK: true}, nil
 	})
 
 	client, err := ipc.Dial(sock)
@@ -235,7 +275,7 @@ func captureRespond(t *testing.T) (string, *ipc.Client, func() []ipc.RespondPara
 		mu.Lock()
 		calls = append(calls, params)
 		mu.Unlock()
-		return &ipc.RespondResult{}, nil
+		return &ipc.RespondResult{OK: true}, nil
 	})
 
 	client, err := ipc.Dial(sock)

@@ -18,6 +18,16 @@ const protectedPathFindingID = "protected-path-refusal"
 // unreadable.
 const ReviewQuestionsUnreadableFindingID = "review-questions-unreadable"
 
+// IsReservedFindingID reports whether an ID carries pipeline-owned semantics.
+func IsReservedFindingID(id string) bool {
+	switch id {
+	case protectedPathFindingID, types.FindingIDTestAgentTimeout, types.FindingIDTestAgentUnvalidatedWork, ReviewQuestionsUnreadableFindingID, types.FindingIDReviewFixRoundsExhausted:
+		return true
+	default:
+		return false
+	}
+}
+
 // HasProtectedPathRefusal identifies gates that require an explicit response.
 func HasProtectedPathRefusal(findingsJSON string) bool {
 	return hasFindingID(findingsJSON, protectedPathFindingID)
@@ -91,6 +101,10 @@ func HasUnreadableReviewQuestionHistory(findingsJSON string) bool {
 // accepted.
 func approvalRefusal(step types.StepName, findingsJSON string) string {
 	switch {
+	case HasSafetyRefusal(findingsJSON):
+		return "cannot approve a native agent safety refusal: automatic execution stopped; inspect the refusal and preserved work before making an explicit decision"
+	case HasProtectedPathRefusal(findingsJSON) && HasReviewFixRoundLimit(findingsJSON):
+		return fmt.Sprintf("cannot approve a protected-path refusal, and the Review fix-round budget is exhausted so fix cannot retry %s either; skip this step or abort the run", step)
 	case HasProtectedPathRefusal(findingsJSON):
 		return fmt.Sprintf("cannot approve a protected-path refusal: resolve the reported edit, then use fix to retry %s; approval would skip unfinished work", step)
 	case HasUnvalidatedWorkRefusal(findingsJSON):

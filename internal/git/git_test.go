@@ -269,6 +269,29 @@ func TestHasUncommittedChangesUntrackedFile(t *testing.T) {
 	}
 }
 
+func TestOnlyCustodyChecksCountUntrackedFilesTheStatusConfigHides(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		check     func(context.Context, string) (bool, error)
+		wantDirty bool
+	}{
+		{"user-facing check honours the display configuration", HasUncommittedChanges, false},
+		{"custody check counts the hidden file", HasUncommittedChangesIncludingHidden, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := initTestRepo(t)
+			writeFile(t, filepath.Join(dir, "hidden.txt"), "hidden\n")
+			run(t, dir, "git", "config", "status.showUntrackedFiles", "no")
+
+			dirty, err := test.check(context.Background(), dir)
+
+			if err != nil || dirty != test.wantDirty {
+				t.Fatalf("dirty = %v, %v; want %v", dirty, err, test.wantDirty)
+			}
+		})
+	}
+}
+
 func TestUntrackedFilesPreservesRawPaths(t *testing.T) {
 	dir := initTestRepo(t)
 	ctx := context.Background()

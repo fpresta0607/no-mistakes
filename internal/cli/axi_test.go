@@ -40,7 +40,10 @@ func TestRunViewFromDBAwaitingStep(t *testing.T) {
 		{StepName: types.StepReview, Status: types.StepStatusCompleted},
 		{StepName: types.StepTest, Status: types.StepStatusAwaitingApproval, FindingsJSON: strptr(`{"findings":[],"summary":"x"}`)},
 	}
-	rv := runViewFromDB(run, steps, nil)
+	rv, err := runViewFromDB(run, steps, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	gate, ok := rv.awaitingStep()
 	if !ok {
 		t.Fatal("expected an awaiting step")
@@ -61,7 +64,10 @@ func TestRunViewFromDBCarriesCIOverrideReason(t *testing.T) {
 		{StepName: types.StepTest, Status: types.StepStatusCompleted, OverrideReason: strptr("configured test command failed")},
 		{StepName: types.StepCI, Status: types.StepStatusCompleted, OverrideReason: strptr("live checks still failing: required-check")},
 	}
-	rv := runViewFromDB(run, steps, nil)
+	rv, err := runViewFromDB(run, steps, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if rv.CIOverrideReason != "live checks still failing: required-check" {
 		t.Errorf("CIOverrideReason = %q, want the step's override reason", rv.CIOverrideReason)
 	}
@@ -303,7 +309,10 @@ func TestStatusRendersCurrentAutoFixAttemptWithPersistedLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load steps: %v", err)
 	}
-	rv := runViewFromDB(run, steps, database)
+	rv, err := runViewFromDB(run, steps, database)
+	if err != nil {
+		t.Fatal(err)
+	}
 	reviewLimit := 9
 	annotateRunView(&axiEnv{
 		d: database,
@@ -364,6 +373,31 @@ func TestGateHelpForUnvalidatedTestWorkDoesNotOfferSkip(t *testing.T) {
 	}
 }
 
+func TestGateHelpForProtectedPathRefusalWithExhaustedReviewBudget(t *testing.T) {
+	protected, err := types.ParseFindingsJSON(pipeline.ProtectedPathOutcome(&pipeline.ProtectedPathError{Path: "package.lock", Rule: "*.lock"}).Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectedOnly := stepView{Name: "review", Status: "fix_review", FindingsJSON: findingsJSON(t, protected.Items, protected.Summary)}
+	if out := axiDoc(gateFields(protectedOnly)...); !strings.Contains(out, "--action fix") {
+		t.Fatalf("protected-path refusal with budget left lost its fix retry:\n%s", out)
+	}
+
+	exhausted := append(protected.Items, types.Finding{ID: "review-fix-rounds-exhausted", Severity: "warning", Action: types.ActionAskUser, Description: "Review used 1/1 fix rounds"})
+	gate := stepView{Name: "review", Status: "fix_review", FindingsJSON: findingsJSON(t, exhausted, protected.Summary)}
+	for _, runID := range []string{"", "run-7"} {
+		out := axiDoc(gateFieldsForRun(gate, runID)...)
+		if strings.Contains(out, "--action fix") || strings.Contains(out, "--action approve") {
+			t.Fatalf("gate help offers a response the executor refuses (fix: budget exhausted, approve: protected path):\n%s", out)
+		}
+		for _, want := range []string{"--action skip", "`no-mistakes axi abort" + runFlag(runID) + "`", "Approve is rejected", "fix-round budget is exhausted"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("gate help missing %q:\n%s", want, out)
+			}
+		}
+	}
+}
+
 func TestWriteGateShape(t *testing.T) {
 	gate := stepView{
 		Name:   "review",
@@ -414,6 +448,12 @@ func TestRenderDriveResult_ProtectedPathGateHelp(t *testing.T) {
 					"including its commit and publication",
 				},
 				absent: []string{"--action approve", "do not edit files yourself"},
+			},
+			{
+				name:     "native_safety",
+				findings: findingsJSON(t, []types.Finding{{ID: "agent-safety-refusal", Severity: "error", Action: types.ActionAskUser, Description: "This content was flagged for possible cybersecurity risk."}}, "Native safety refusal"),
+				want:     []string{"safety refusal stopped automatic execution", "Approve is rejected", "operator inspect the refusal and preserved work"},
+				absent:   []string{"--action approve", "--action fix", "do not edit files yourself"},
 			},
 			{
 				name:     "ordinary",
@@ -539,6 +579,9 @@ func TestParseAddFinding(t *testing.T) {
 	}
 	if _, err := parseAddFinding(`not json`); err == nil {
 		t.Error("expected error for invalid JSON")
+	}
+	if _, err := parseAddFinding(`{"description":"add a nil check","driver_instructions":"only touch a.go"}`); err == nil {
+		t.Error("expected error for driver_instructions on an added finding")
 	}
 }
 
@@ -1384,6 +1427,20 @@ func TestAxiHomeLeadsWithAnsweringWhenTheGateHasAnOpenQuestion(t *testing.T) {
 			finding: types.Finding{
 				ID: "question-q1", Severity: types.FindingSeverityWarning, Action: types.ActionAskUser,
 				Description: "not actually a review question",
+			},
+		},
+		{
+			name: "ordinary protected-path refusal",
+			finding: types.Finding{
+				ID: "protected-path-refusal", Severity: types.FindingSeverityError, Action: types.ActionAskUser,
+				Description: "protected path edited",
+			},
+		},
+		{
+			name: "ordinary unvalidated-work refusal",
+			finding: types.Finding{
+				ID: types.FindingIDTestAgentUnvalidatedWork, Severity: types.FindingSeverityError, Action: types.ActionAskUser,
+				Description: "unvalidated work in the worktree",
 			},
 		},
 	} {

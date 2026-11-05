@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 )
 
 // staticReader is a minimal Reader for tests.
@@ -28,7 +30,7 @@ type fixedSummarizer struct {
 	calls   int
 }
 
-func (f *fixedSummarizer) Summarize(_ context.Context, _ *Session) (string, error) {
+func (f *fixedSummarizer) Summarize(_ context.Context, _ *Session, _ SummaryContext) (string, error) {
 	f.calls++
 	return f.summary, nil
 }
@@ -152,13 +154,14 @@ func TestExtract_CacheHitSkipsSummarizer(t *testing.T) {
 	// Pre-populate cache with the key the extractor will compute. Note we need
 	// to set AgentName first because Discover does it inside Extract; mimic.
 	sess.AgentName = "claude"
-	cache.Put(cacheKeyFor(sess), "cached", "claude", "s1")
+	base, head := time.Now().Add(-time.Hour), time.Now()
+	cache.Put(summaryCacheKeyFor(sess, SummaryContext{WindowStart: base, WindowEnd: head}), "cached", "claude", "s1")
 
 	got, err := Extract(context.Background(), ExtractParams{
 		OriginCWD:  "/tmp/repo",
 		DiffFiles:  []string{"foo.go"},
-		HeadTime:   time.Now(),
-		BaseTime:   time.Now().Add(-time.Hour),
+		HeadTime:   head,
+		BaseTime:   base,
 		Threshold:  0.1,
 		Readers:    []Reader{r},
 		Cache:      cache,
@@ -345,6 +348,20 @@ func TestExtract_ReturnsErrorWhenDisambiguatorCleanupFails(t *testing.T) {
 	})
 	if !errors.Is(err, ErrDisambiguatorCleanup) {
 		t.Fatalf("error = %v, want ErrDisambiguatorCleanup", err)
+	}
+}
+
+func TestExtract_RefusedDisambiguatorDoesNotStartSummarizer(t *testing.T) {
+	head := time.Now()
+	r := &staticReader{name: "claude", sessions: []*Session{
+		{SessionID: "s1", LastActivity: head, Messages: []Message{{Role: RoleUser, FilePaths: []string{"foo.go"}}}},
+		{SessionID: "s2", LastActivity: head.Add(-time.Minute), Messages: []Message{{Role: RoleUser, FilePaths: []string{"foo.go"}}}},
+	}}
+	summary := &fixedSummarizer{summary: "fallback"}
+	refusal := errors.Join(agent.ErrSafetyRefusal, errors.New("This content was flagged for possible cybersecurity risk."))
+	_, err := Extract(context.Background(), ExtractParams{OriginCWD: "/tmp/repo", DiffFiles: []string{"foo.go"}, HeadTime: head, BaseTime: head.Add(-time.Hour), Threshold: 0.2, Readers: []Reader{r}, Summarizer: summary, Disambiguator: &fixedDisambiguator{err: refusal}})
+	if !errors.Is(err, refusal) || summary.calls != 0 {
+		t.Fatalf("error = %v, summary calls = %d", err, summary.calls)
 	}
 }
 

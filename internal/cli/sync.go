@@ -10,6 +10,8 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/spf13/cobra"
 )
@@ -81,6 +83,8 @@ func newSyncCmd() *cobra.Command {
 func newAxiSyncCmd() *cobra.Command {
 	var check, recover, keepLocal, adoptPublished bool
 	var bindArchiveRef string
+	var continueRecovery bool
+	var reason string
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Check or apply guarded current-branch synchronization",
@@ -93,6 +97,8 @@ func newAxiSyncCmd() *cobra.Command {
 			"--check performs the same fresh read-only plan. Blocked states change nothing.\n" +
 			"--recover performs the guarded custody return offered by\n" +
 			"next_action.code: recover_custody; --keep-local keeps the current local head.\n" +
+			"--recover --continue --reason explicitly adopts a terminal run's bound source\n" +
+			"as an unvalidated successor with immutable history and fresh Review and checks.\n" +
 			"It also performs next_action.code: recover_remote_rewritten, which anchors the\n" +
 			"superseded pipeline head and rebinds the push binding to the re-verified live head.\n" +
 			"--bind-archive-ref binds one exact existing refs/heads/archive/* commit to\n" +
@@ -103,6 +109,15 @@ func newAxiSyncCmd() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if continueRecovery {
+				if !recover || check || keepLocal || adoptPublished || bindArchiveRef != "" || strings.TrimSpace(reason) == "" {
+					return emitError(cmd, 2, "--continue requires --recover and --reason, without other recovery modes")
+				}
+				return runTerminalContinuation(cmd, reason)
+			}
+			if reason != "" {
+				return emitError(cmd, 2, "--reason requires --recover --continue")
+			}
 			if (check && recover) || (check && adoptPublished) || (recover && adoptPublished) {
 				return emitError(cmd, 2, "choose only one of --check, --recover, and --adopt-published")
 			}
@@ -120,6 +135,8 @@ func newAxiSyncCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&keepLocal, "keep-local", false, "with --recover: keep the current local head; anchor available preserved commits, discard genuinely missing ones, and make the gate follow the kept head")
 	cmd.Flags().BoolVar(&adoptPublished, "adopt-published", false, "adopt a clean diverged local head into its stale gate lane only when the configured push target already has that exact head")
 	cmd.Flags().StringVar(&bindArchiveRef, "bind-archive-ref", "", "bind one existing refs/heads/archive/* commit as exact keep-local recovery evidence without changing Git refs")
+	cmd.Flags().BoolVar(&continueRecovery, "continue", false, "with --recover and --reason: explicitly adopt this terminal run's bound source as an unvalidated successor preserving cumulative repair spending")
+	cmd.Flags().StringVar(&reason, "reason", "", "operator reason for terminal source adoption")
 	return cmd
 }
 
@@ -271,7 +288,11 @@ func runHumanRecover(cmd *cobra.Command, keepLocal, yes bool) error {
 		}
 		if keepLocal {
 			fmt.Fprintln(cmd.OutOrStdout(), "  Recovery returns custody of this branch from its terminal run. The only")
-			if state.Recovery != nil && state.Recovery.KeepLocal {
+			if state.Recovery != nil && state.Recovery.KeepLocal && state.Recovery.Source == "pinned_head" {
+				fmt.Fprintln(cmd.OutOrStdout(), "  possible Git change is moving the local gate branch to the exact required")
+				fmt.Fprintln(cmd.OutOrStdout(), "  head; the worktree is never touched and the pipeline commits stay at the")
+				fmt.Fprintln(cmd.OutOrStdout(), "  recovery ref.")
+			} else if state.Recovery != nil && state.Recovery.KeepLocal {
 				fmt.Fprintln(cmd.OutOrStdout(), "  possible Git change is moving the local gate branch to the exact required")
 				fmt.Fprintln(cmd.OutOrStdout(), "  head; the worktree and verified divergent archive are never touched.")
 			} else {
@@ -400,6 +421,9 @@ func humanSyncSummary(state branchsync.State) string {
 	switch state.State {
 	case branchsync.StatePipelineOwned:
 		if state.Safety == "blocked_pipeline_owned_recoverable" {
+			if state.Recovery != nil && state.Recovery.KeepLocal && state.Recovery.Source == "pinned_head" {
+				return "pipeline commits stay at the recovery ref and are not on the branch; recover custody at the current local head with `no-mistakes sync --recover --keep-local`"
+			}
 			if state.Recovery != nil && state.Recovery.KeepLocal {
 				return "later pipeline work is preserved by a verified archive; recover custody at the exact required head with `no-mistakes sync --recover --keep-local`"
 			}
@@ -653,6 +677,17 @@ func branchSyncField(state branchsync.State) toON.Field {
 }
 
 func cachedBranchSyncField(ctxCmd *cobra.Command, runID string) *toON.Field {
+	if runID != "" {
+		if appPaths, err := paths.New(); err == nil {
+			if database, err := db.OpenReadOnly(appPaths.DB()); err == nil {
+				run, readErr := database.GetRun(runID)
+				closeErr := database.Close()
+				if readErr == nil && closeErr == nil && run == nil {
+					return nil
+				}
+			}
+		}
+	}
 	service, closeFn, err := openSyncService()
 	if err != nil {
 		return nil

@@ -273,6 +273,13 @@ func TestTestStep_LiveCheckRulesOffIsTodaysPrompt(t *testing.T) {
 		sctx.Config.Test.Environment = "scripts/live-env.ps1 starts the app on a seeded database at http://127.0.0.1:4010"
 		sctx.Config.Test.SurfacePaths = []string{"*.txt"}
 	})
+	// The one change above the appended sections: the turn limit states the
+	// budget when that is the shorter of the two.
+	const limitOff, limitOn = "at most 30m0s of wall-clock time", "at most 15m0s of wall-clock time"
+	if !strings.Contains(off, limitOff) || !strings.Contains(on, limitOn) {
+		t.Fatalf("turn limit does not follow the budget: off %q, on %q", off, on)
+	}
+	on = strings.Replace(on, limitOn, limitOff, 1)
 	if !strings.HasPrefix(on, off) {
 		t.Fatal("the prompt with the live check settings on must be today's prompt plus appended sections")
 	}

@@ -22,6 +22,7 @@ func TestAxiTestExceptionOutput(t *testing.T) {
 	}{
 		{"completed", "passed-with-override", types.RunCompleted, false},
 		{"checks-ready", "checks-passed", types.RunRunning, true},
+		{"released", "passed-with-override", types.RunChecksPassed, false},
 		{"failed", "failed", types.RunFailed, false},
 		{"cancelled", "cancelled", types.RunCancelled, false},
 	} {
@@ -57,7 +58,10 @@ func TestRunViewFromDBQualifiesLegacyTestOverrides(t *testing.T) {
 	for _, approval := range []*string{nil, strptr(reason)} {
 		run := &db.Run{Status: types.RunCompleted}
 		steps := []*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted, OverrideReason: strptr(condition), ApprovalReason: approval}}
-		view := runViewFromDB(run, steps, nil)
+		view, err := runViewFromDB(run, steps, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if outcomeForRun(view) != "passed-with-override" || !strings.Contains(view.TestOverrideReason, condition) || view.CIOverrideReason != "" {
 			t.Fatalf("DB fallback lost Test override: %+v", view)
 		}
@@ -80,7 +84,10 @@ func TestRunViewFromDBQualifiesOnlyExceptionEvidence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			run := &db.Run{Status: types.RunCompleted}
 			steps := []*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: strptr(tc.findings), ApprovalReason: strptr(reason)}}
-			view := runViewFromDB(run, steps, nil)
+			view, err := runViewFromDB(run, steps, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if got := outcomeForRun(view); got != tc.outcome {
 				t.Fatalf("outcome = %q, want %q (%+v)", got, tc.outcome, view)
 			}

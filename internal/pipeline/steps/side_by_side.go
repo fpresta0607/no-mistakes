@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -54,8 +55,7 @@ const (
 	sideLaneDirName = "side-lane"
 	// sideLaneBranch names a lane's commit inside its clone so the run's
 	// worktree can fetch it.
-	sideLaneBranch = "no-mistakes-side-lane"
-	// sideLaneLogLimit bounds how much of a lane's log is kept in memory.
+	sideLaneBranch   = "no-mistakes-side-lane"
 	sideLaneLogLimit = 1 << 20
 	// pushGuardCommitLimit bounds how many commits a note names.
 	pushGuardCommitLimit = 20
@@ -70,19 +70,27 @@ var sideLaneAgents = map[types.AgentName]bool{types.AgentClaude: true, types.Age
 // needs.
 var errSideLaneStopped = errors.New("side lane stopped")
 
-// sideLaneLog keeps the tail of what a lane's step logged.
+// sideLaneLog keeps the bounded tail of what a lane's step logged.
 type sideLaneLog struct {
-	mu   sync.Mutex
-	text []byte
+	mu        sync.Mutex
+	text      []byte
+	truncated bool
 }
 
 func (l *sideLaneLog) write(text string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.text = append(l.text, text...)
-	if over := len(l.text) - sideLaneLogLimit; over > 0 {
-		l.text = append([]byte(nil), l.text[over:]...)
+	if len(text) >= sideLaneLogLimit {
+		l.truncated = l.truncated || len(l.text) > 0 || len(text) > sideLaneLogLimit
+		l.text = append(l.text[:0], text[len(text)-sideLaneLogLimit:]...)
+		return
 	}
+	if over := len(l.text) + len(text) - sideLaneLogLimit; over > 0 {
+		copy(l.text, l.text[over:])
+		l.text = l.text[:len(l.text)-over]
+		l.truncated = true
+	}
+	l.text = append(l.text, text...)
 }
 
 func (l *sideLaneLog) line(text string) { l.write(strings.TrimRight(text, "\n") + "\n") }
@@ -90,6 +98,9 @@ func (l *sideLaneLog) line(text string) { l.write(strings.TrimRight(text, "\n") 
 func (l *sideLaneLog) String() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.truncated {
+		return "[earlier lane log truncated]\n" + string(l.text)
+	}
 	return string(l.text)
 }
 
@@ -149,15 +160,52 @@ func (l *sideLanes) claimStale(head string) []*sideLane {
 	return stale
 }
 
-// close stops and removes every lane no step claimed. It runs when the run's
-// execution ends, so a lane never outlives its run.
-func (l *sideLanes) close() {
+// keep puts back a lane its step must still see.
+func (l *sideLanes) keep(lane *sideLane) {
 	l.mu.Lock()
-	lanes := l.lanes
+	defer l.mu.Unlock()
+	l.lanes[lane.step.Name()] = lane
+}
+
+// stop stops every lane no step claimed and returns them. It cancels them all
+// before it waits for any, so none starts more work while another winds down.
+// A lane that ended in a native agent safety refusal stays for its step, which
+// reports that refusal at its turn.
+func (l *sideLanes) stop() map[types.StepName]*sideLane {
+	l.mu.Lock()
+	stopped := l.lanes
 	l.lanes = map[types.StepName]*sideLane{}
 	l.mu.Unlock()
-	for _, lane := range lanes {
+	for _, lane := range stopped {
+		lane.cancel(errSideLaneStopped)
+	}
+	for _, lane := range stopped {
 		lane.discard()
+		if agent.IsSafetyRefusal(lane.err) {
+			l.keep(lane)
+		}
+	}
+	return stopped
+}
+
+// close stops every lane no step claimed. It runs when the run's execution
+// ends, so a lane never outlives its run.
+func (l *sideLanes) close() { l.stop() }
+
+// Stop stops every lane no step claimed, keeping in sctx's log what each one
+// logged. The executor calls it when it parks on a native agent safety
+// refusal, so no lane starts an agent while the operator decides.
+func (l *sideLanes) Stop(sctx *pipeline.StepContext) {
+	for name, lane := range l.stop() {
+		on := shortObjectID(lane.head)
+		if text := lane.log.String(); text != "" {
+			sctx.LogFile(fmt.Sprintf("side by side: log of the stopped %s work on %s:\n%s", name, on, text))
+		}
+		if agent.IsSafetyRefusal(lane.err) {
+			sctx.Log(fmt.Sprintf("side by side: the %s work started beside the review on %s ended in a native agent safety refusal; it is kept at %s and its step reports the refusal at its turn", name, on, lane.checkout))
+			continue
+		}
+		sctx.Log(fmt.Sprintf("side by side: the %s work started beside the review on %s is stopped and removed, because a native agent safety refusal stopped automatic execution", name, on))
 	}
 }
 
@@ -255,9 +303,8 @@ func sideLaneCopyGap(sctx *pipeline.StepContext) string {
 	return ""
 }
 
-// stopStaleSideLanes stops and removes every lane started on a commit other
-// than head, as soon as the run's head moves to it. The lane's step would
-// discard it at its own turn, and until then it would only hold the machine.
+// stopStaleSideLanes stops every lane started on a commit other than head as
+// soon as the run's head moves. It removes the lane unless it refused.
 func stopStaleSideLanes(sctx *pipeline.StepContext, head string) {
 	if sctx.SideLane || sctx.Shared == nil {
 		return
@@ -268,6 +315,13 @@ func stopStaleSideLanes(sctx *pipeline.StepContext, head string) {
 	}
 	for _, lane := range lanes.claimStale(head) {
 		lane.discard()
+		if agent.IsSafetyRefusal(lane.err) {
+			// A new head does not answer a refusal. The step reports it at its
+			// turn rather than doing the refused work again on that head.
+			lanes.keep(lane)
+			sctx.Log(fmt.Sprintf("side by side: the %s work started beside the review on %s ended in a native agent safety refusal; it is kept at %s and its step reports the refusal at its turn", lane.step.Name(), shortObjectID(lane.head), lane.checkout))
+			continue
+		}
 		sctx.Log(fmt.Sprintf("side by side: the %s work started beside the review on %s is stopped and removed, because the run's head moved to %s", lane.step.Name(), shortObjectID(lane.head), shortObjectID(head)))
 	}
 }
@@ -358,11 +412,16 @@ func (lane *sideLane) execute(sctx *pipeline.StepContext, runWorkDir, baseSHA st
 
 // discard stops a lane and removes what it wrote. It is safe on a lane that
 // is still running, and it waits for the lane to stop before it removes
-// anything the lane's processes may still hold.
+// anything the lane's processes may still hold. Work that ended in a native
+// agent safety refusal keeps its clone, with its edits, for the operator. Its
+// evidence folder is still removed: the run's evidence is published, and
+// refused work never is.
 func (lane *sideLane) discard() {
 	lane.cancel(errSideLaneStopped)
 	<-lane.done
-	lane.removeClone()
+	if !agent.IsSafetyRefusal(lane.err) {
+		lane.removeClone()
+	}
 	if lane.evidenceDir != "" {
 		_ = os.RemoveAll(lane.evidenceDir)
 	}
@@ -386,27 +445,32 @@ func (lane *sideLane) removeClone() {
 // takeSideLane returns the result of name's work started beside the review
 // when that work is still what the step would do now. Otherwise it discards
 // the lane, says why, and returns false, and the caller runs the step as it
-// always has.
-func takeSideLane(sctx *pipeline.StepContext, name types.StepName) (*pipeline.StepOutcome, bool) {
+// always has. Work that ended in a native agent safety refusal is never run
+// again: its refusal is returned as the step's error.
+func takeSideLane(sctx *pipeline.StepContext, name types.StepName) (*pipeline.StepOutcome, bool, error) {
 	if sctx.SideLane || sctx.Shared == nil {
-		return nil, false
+		return nil, false, nil
 	}
 	lanes, _ := sctx.Shared.SideLanes().(*sideLanes)
 	if lanes == nil {
-		return nil, false
+		return nil, false, nil
 	}
 	lane := lanes.claim(name)
 	if lane == nil {
-		return nil, false
+		return nil, false, nil
 	}
 	on := shortObjectID(lane.head)
-	refuse := func(reason string) (*pipeline.StepOutcome, bool) {
+	refuse := func(reason string) (*pipeline.StepOutcome, bool, error) {
 		lane.discard()
-		if text := strings.TrimSpace(lane.log.String()); text != "" {
+		if text := lane.log.String(); text != "" {
 			sctx.LogFile(fmt.Sprintf("side by side: log of the discarded %s work on %s:\n%s", name, on, text))
 		}
+		if agent.IsSafetyRefusal(lane.err) {
+			sctx.Log(fmt.Sprintf("side by side: the refused %s work is kept at %s", name, lane.checkout))
+			return nil, false, fmt.Errorf("side by side: the %s work started beside the review on %s: %w", name, on, lane.err)
+		}
 		sctx.Log(fmt.Sprintf("side by side: the %s work started beside the review on %s is not used: %s. The step runs now, as it does without side by side.", name, on, reason))
-		return nil, false
+		return nil, false, nil
 	}
 	// A fix round answers findings of this run's worktree. Work done on the
 	// commit before those findings existed says nothing about it.
@@ -427,11 +491,11 @@ func takeSideLane(sctx *pipeline.StepContext, name types.StepName) (*pipeline.St
 		return refuse(reason)
 	}
 	lane.removeClone()
-	if text := strings.TrimSpace(lane.log.String()); text != "" {
+	if text := lane.log.String(); text != "" {
 		sctx.LogFile(fmt.Sprintf("side by side: log of the %s work on %s:\n%s", name, on, text))
 	}
 	sctx.Log(fmt.Sprintf("side by side: took the %s result of the work started beside the review on %s, which is still the run's head. It ran for %s there.", name, on, lane.elapsed.Round(time.Second)))
-	return lane.outcome, true
+	return lane.outcome, true, nil
 }
 
 // adopt brings a finished lane's result into the run, or returns why it

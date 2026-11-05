@@ -313,6 +313,133 @@ sleep 100
 	}
 }
 
+func TestCodexAgent_CancellationPreservesObservedSafetyRefusal(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' 'diagnostic from stderr' >&2
+printf '%s\n' '{"type":"error","message":"This content was flagged for possible cybersecurity risk"}'
+printf '%s\n' '{"type":"error","message":"later ordinary error"}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"progress"}}'
+printf '%s\n' '{"type":"turn.completed"}'
+`, strings.Join([]string{
+		"@echo off",
+		"echo diagnostic from stderr 1>&2",
+		"echo {\"type\":\"error\",\"message\":\"This content was flagged for possible cybersecurity risk\"}",
+		"echo {\"type\":\"error\",\"message\":\"later ordinary error\"}",
+		"echo {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"progress\"}}",
+		"echo {\"type\":\"turn.completed\"}",
+	}, "\r\n"))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := (&codexAgent{bin: bin}).Run(ctx, RunOpts{CWD: dir, OnChunk: func(string) { cancel() }})
+	if !IsSafetyRefusal(err) {
+		t.Fatalf("error = %v, want the observed refusal", err)
+	}
+}
+
+func TestCodexAgent_CancellationPreservesEmittedSafetyRefusal(t *testing.T) {
+	for _, stream := range []string{"stdout", "stderr"} {
+		t.Run(stream, func(t *testing.T) {
+			dir := t.TempDir()
+			stdout := `{"type":"thread.started","thread_id":"t1"}`
+			stderr := "ordinary diagnostic"
+			if stream == "stdout" {
+				stdout = `{"type":"error","message":"This content was flagged for possible cybersecurity risk."}`
+			} else {
+				stderr = "This content was flagged for possible cybersecurity risk."
+			}
+			bin := writeFakeCodex(t, dir, "#!/bin/sh\nprintf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"progress\"}}'\nprintf '%s\\n' '"+stdout+"'\nprintf '%s\\n' '"+stderr+"' >&2\necho ready > ready.txt\n", strings.Join([]string{
+				"@echo off",
+				"echo {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"progress\"}}",
+				"echo " + stdout,
+				"echo " + stderr + " 1>&2",
+				"echo ready>ready.txt",
+			}, "\r\n"))
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			ready := false
+			_, err := (&codexAgent{bin: bin}).Run(ctx, RunOpts{CWD: dir, OnChunk: func(string) {
+				deadline := time.Now().Add(10 * time.Second)
+				for time.Now().Before(deadline) {
+					if _, statErr := os.Stat(filepath.Join(dir, "ready.txt")); statErr == nil {
+						ready = true
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				cancel()
+			}})
+			if !ready || !IsSafetyRefusal(err) {
+				t.Fatalf("ready = %v, Run error = %v, want the emitted %s refusal", ready, err, stream)
+			}
+		})
+	}
+}
+
+func TestParseCodexEventsDrainsRefusalAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	events := "{\"type\":\"thread.started\",\"thread_id\":\"t1\"}\n" +
+		"{\"type\":\"error\",\"message\":\"This content was flagged for possible cybersecurity risk.\"}\n" +
+		"{\"type\":\"error\",\"message\":\"ordinary error\"}\n" +
+		"{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"late\"}}\n"
+	var usage TokenUsage
+	var message, refusal, thread string
+	var resultReceived bool
+	var chunks []string
+	err := parseCodexEvents(ctx, strings.NewReader(events), func(chunk string) { chunks = append(chunks, chunk) }, &usage, &message, &resultReceived, &refusal, &thread, nil)
+	if !errors.Is(err, context.Canceled) || !isNativeSafetyRefusal(refusal) || len(chunks) != 0 || thread != "" || message != "" {
+		t.Fatalf("parse = %v, refusal %q, chunks %v, thread %q, message %q", err, refusal, chunks, thread, message)
+	}
+}
+
+func TestCodexAgent_SuccessfulExitDoesNotHideNativeRefusal(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' '{"type":"error","message":"This content was flagged for possible cybersecurity risk."}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"valid output"}}'
+`, strings.Join([]string{
+		"@echo off",
+		"echo {\"type\":\"error\",\"message\":\"This content was flagged for possible cybersecurity risk.\"}",
+		"echo {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"valid output\"}}",
+		"exit /b 0",
+	}, "\r\n"))
+	result, err := (&codexAgent{bin: bin}).Run(context.Background(), RunOpts{CWD: dir})
+	if !IsSafetyRefusal(err) || result != nil {
+		t.Fatalf("Run = %+v, %v, want the native refusal", result, err)
+	}
+}
+
+func TestCodexAgent_QuotedRefusalInNativeErrorIsOrdinaryFailure(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' '{"type":"error","message":"invalid response: This content was flagged for possible cybersecurity risk."}'
+printf '%s\n' 'invalid response: This content was flagged for possible cybersecurity risk.' >&2
+exit 1
+`, strings.Join([]string{
+		"@echo off",
+		"echo {\"type\":\"error\",\"message\":\"invalid response: This content was flagged for possible cybersecurity risk.\"}",
+		"echo invalid response: This content was flagged for possible cybersecurity risk. 1>&2",
+		"exit /b 1",
+	}, "\r\n"))
+	_, err := (&codexAgent{bin: bin}).Run(context.Background(), RunOpts{CWD: dir})
+	if err == nil || IsSafetyRefusal(err) {
+		t.Fatalf("Run error = %v, want an ordinary failure", err)
+	}
+}
+
+func TestCodexAgent_StderrSafetyRefusalStopsAfterFailedExit(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' 'This content was flagged for possible cybersecurity risk.' >&2
+exit 1
+`, "@echo off\r\necho This content was flagged for possible cybersecurity risk. 1>&2\r\nexit /b 1\r\n")
+	_, err := (&codexAgent{bin: bin}).Run(context.Background(), RunOpts{CWD: dir})
+	if !IsSafetyRefusal(err) {
+		t.Fatalf("Run error = %v, want the native stderr refusal", err)
+	}
+}
+
 func TestCodexAgent_ProgressWithoutTerminalCompletionIsRejected(t *testing.T) {
 	dir := t.TempDir()
 	progress := `{"findings":[],"risk_level":"low"}`
@@ -581,6 +708,7 @@ func TestParseCodexEvents_AgentMessage(t *testing.T) {
 
 	var usage TokenUsage
 	var lastMessage string
+	var resultReceived bool
 
 	err := parseCodexEvents(
 		context.Background(),
@@ -588,6 +716,7 @@ func TestParseCodexEvents_AgentMessage(t *testing.T) {
 		nil,
 		&usage,
 		&lastMessage,
+		&resultReceived,
 		nil,
 		nil,
 		nil,
@@ -619,6 +748,7 @@ func TestParseCodexEvents_SeparatesMultipleMessages(t *testing.T) {
 	var chunks []string
 	var usage TokenUsage
 	var lastMessage string
+	var resultReceived bool
 
 	err := parseCodexEvents(
 		context.Background(),
@@ -626,6 +756,7 @@ func TestParseCodexEvents_SeparatesMultipleMessages(t *testing.T) {
 		func(text string) { chunks = append(chunks, text) },
 		&usage,
 		&lastMessage,
+		&resultReceived,
 		nil,
 		nil,
 		nil,
@@ -654,6 +785,7 @@ func TestParseCodexEvents_DoesNotSeparateSplitTurnMessages(t *testing.T) {
 	var chunks []string
 	var usage TokenUsage
 	var lastMessage string
+	var resultReceived bool
 
 	err := parseCodexEvents(
 		context.Background(),
@@ -661,6 +793,7 @@ func TestParseCodexEvents_DoesNotSeparateSplitTurnMessages(t *testing.T) {
 		func(text string) { chunks = append(chunks, text) },
 		&usage,
 		&lastMessage,
+		&resultReceived,
 		nil,
 		nil,
 		nil,
@@ -684,7 +817,8 @@ func TestParseCodexEvents_SkipsMalformedLines(t *testing.T) {
 
 	var usage TokenUsage
 	var lastMessage string
-	err := parseCodexEvents(context.Background(), strings.NewReader(events), nil, &usage, &lastMessage, nil, nil, nil)
+	var resultReceived bool
+	err := parseCodexEvents(context.Background(), strings.NewReader(events), nil, &usage, &lastMessage, &resultReceived, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

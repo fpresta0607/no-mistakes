@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -217,6 +218,42 @@ func stepGitRunInput(sctx *pipeline.StepContext, input string, args ...string) (
 	return string(out), nil
 }
 
+// stepGitRunTree is stepGitRun for a read that only its context deadline can
+// end, such as ls-remote against a peer that never answers. cmd.Output returns
+// after every process holding its pipes has exited, and cancelling the context
+// kills git alone: a transport helper it started (ssh, git-remote-https, or the
+// real git.exe behind the cmd\git.exe launcher on Windows) keeps the pipes open
+// and the read hangs. shellenv ends the whole process tree on cancellation.
+func stepGitRunTree(sctx *pipeline.StepContext, args ...string) (string, error) {
+	cmd := stepCmd(sctx, "git", args...)
+	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
+	// OutputShellCommand never fills ExitError.Stderr, so capture it here.
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	shellenv.ConfigureShellCommand(cmd)
+	out, err := shellenv.OutputShellCommand(cmd)
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(strings.TrimSpace(stderr.String())))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// stepGitRunEnv is stepGitRun with extra environment variables appended after
+// the step environment, for commands that read identity from GIT_* variables.
+func stepGitRunEnv(sctx *pipeline.StepContext, extraEnv []string, args ...string) (string, error) {
+	cmd := stepCmd(sctx, "git", args...)
+	cmd.Env = append(git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir), extraEnv...)
+	out, err := cmd.Output()
+	if err != nil {
+		stderr := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(ee.Stderr))
+		}
+		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func stepGitHeadSHA(sctx *pipeline.StepContext) (string, error) {
 	return stepGitRun(sctx, "rev-parse", "HEAD")
 }
@@ -240,6 +277,16 @@ func stepGitPush(sctx *pipeline.StepContext, remote, ref, expectedSHA string, fo
 // explicit source SHA (rather than HEAD) is what lets a caller publish exactly
 // the commit it verified, even if the worktree moves underneath it.
 func stepGitPushCommit(sctx *pipeline.StepContext, remote, commitSHA, ref, expectedSHA string, forceWithLease bool) error {
+	if err := sctx.AssertValidationSource(); err != nil {
+		return err
+	}
+	isValidationOnly, err := sctx.IsValidationOnly()
+	if err != nil {
+		return err
+	}
+	if isValidationOnly && commitSHA != sctx.Run.HeadSHA {
+		return fmt.Errorf("validation-only publication must use the exact authored candidate")
+	}
 	args := []string{"push", remote}
 	if forceWithLease {
 		if expectedSHA != "" {
@@ -249,7 +296,7 @@ func stepGitPushCommit(sctx *pipeline.StepContext, remote, commitSHA, ref, expec
 		}
 	}
 	args = append(args, commitSHA+":"+ref)
-	_, err := stepGitRun(sctx, args...)
+	_, err = stepGitRun(sctx, args...)
 	return err
 }
 
@@ -308,7 +355,11 @@ func runShellCommand(ctx context.Context, dir, cmdStr string) (string, int, erro
 }
 
 func runStepShellCommand(sctx *pipeline.StepContext, cmdStr string) (string, int, error) {
-	return runShellCommandWithProcessEnv(sctx.Ctx, sctx.WorkDir, stepEnvironment(sctx), cmdStr)
+	if err := sctx.AssertValidationSource(); err != nil {
+		return "", 0, err
+	}
+	output, exitCode, err := runShellCommandWithProcessEnv(sctx.Ctx, sctx.WorkDir, stepEnvironment(sctx), cmdStr)
+	return output, exitCode, errors.Join(err, sctx.AssertValidationSource())
 }
 
 func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdStr string) (string, int, error) {

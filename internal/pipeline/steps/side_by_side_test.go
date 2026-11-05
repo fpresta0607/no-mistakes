@@ -20,6 +20,23 @@ import (
 
 const sideBySideWait = 2 * time.Minute
 
+func TestSideLaneLogBoundsAndReportsItsTail(t *testing.T) {
+	var log sideLaneLog
+	log.write(strings.Repeat("a", sideLaneLogLimit))
+	if got := log.String(); len(got) != sideLaneLogLimit || strings.Contains(got, "truncated") {
+		t.Fatal("an exact-sized lane log should be kept without a truncation notice")
+	}
+	log.write("end")
+	got := log.String()
+	if !strings.HasPrefix(got, "[earlier lane log truncated]\n") || !strings.HasSuffix(got, "end") || len(log.text) != sideLaneLogLimit {
+		t.Fatal("a lane log beyond its limit should keep and identify its bounded tail")
+	}
+	log.write(strings.Repeat("z", 2*sideLaneLogLimit))
+	if len(log.text) != sideLaneLogLimit || !strings.HasSuffix(log.String(), strings.Repeat("z", sideLaneLogLimit)) {
+		t.Fatal("a large single write should keep only its tail")
+	}
+}
+
 // sideBySideAgent is a stand-in harness that is safe to call from the run and
 // from its side lanes at once. It tells the evidence turn from the
 // documentation pass by their prompts and records where each call ran.

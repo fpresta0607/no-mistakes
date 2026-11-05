@@ -44,7 +44,11 @@ func TestVerificationPlanStatusIncludesSnapshotOrExplicitAbsence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, view := range []runView{runViewFromDB(run, nil, d), runViewFromIPC(&ipc.RunInfo{ID: run.ID, VerificationPlan: plan})} {
+	databaseView, err := runViewFromDB(run, nil, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, view := range []runView{databaseView, runViewFromIPC(&ipc.RunInfo{ID: run.ID, VerificationPlan: plan})} {
 		var out bytes.Buffer
 		cmd := &cobra.Command{}
 		cmd.SetOut(&out)

@@ -107,11 +107,11 @@ Rules:
 - Do not run tests or broader behavioral validation.
 - Focus on lint, format, and static-analysis issues only.
 - Do not report issues you already fixed.
-- The summary must be one concise sentence fragment suitable for a git commit subject.
-- Keep the summary under 10 words.%s`,
+%s%s`,
 			sctx.Run.Branch,
 			baseSHA,
 			sctx.Run.HeadSHA,
+			fixSummaryRules(sctx, s.Name()),
 			reassessHistory,
 		)
 		if sctx.PreviousFindings != "" {
@@ -119,6 +119,13 @@ Rules:
 
 Previous lint findings to address:
 ` + sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
+		}
+		isValidationOnly, err := sctx.IsValidationOnly()
+		if err != nil {
+			return nil, err
+		}
+		if isValidationOnly {
+			prompt = fmt.Sprintf("Validate lint and formatting for %s..%s. Discover and run the relevant checks without applying fixes or editing files. Report every issue as a finding and return a summary. Do not run tests.\n%s", baseSHA, sctx.Run.HeadSHA, reassessHistory)
 		}
 		before, err := untrackedFiles(sctx)
 		if err != nil {
@@ -137,15 +144,15 @@ Previous lint findings to address:
 
 		var findings Findings
 		if result.Output == nil {
-			return nil, errors.New("lint analyzer returned no structured findings")
+			return nil, agent.RejectStructuredOutput(errors.New("lint analyzer returned no structured findings"))
 		}
 		if err := unmarshalRequiredFindings(result.Output, &findings, true); err != nil {
-			return nil, fmt.Errorf("validate lint analyzer findings: %w", err)
+			return nil, agent.RejectStructuredOutput(fmt.Errorf("validate lint analyzer findings: %w", err))
 		}
 		summary, err := extractCommitSummary(result)
 		if err != nil {
 			if errors.Is(err, errRejectedCommitSummary) {
-				return nil, fmt.Errorf("validate lint summary: %w", err)
+				return nil, agent.RejectStructuredOutput(fmt.Errorf("validate lint summary: %w", err))
 			}
 			sctx.Log(fmt.Sprintf("warning: could not parse lint summary: %v", err))
 		}
@@ -182,11 +189,11 @@ Rules:
 - Do not run tests or broader behavioral validation.
 - Re-run the relevant lint or format commands before finishing.
 - Return JSON with a single "summary" field when you are done.
-- The summary must be one concise sentence fragment suitable for a git commit subject.
-- Keep the summary under 10 words.%s`,
+%s%s`,
 			sctx.Run.Branch,
 			baseSHA,
 			sctx.Run.HeadSHA,
+			fixSummaryRules(sctx, s.Name()),
 			historySection,
 		)
 		if sctx.PreviousFindings != "" {
@@ -248,9 +255,16 @@ Previous lint findings to address:
 // step's own agent path: blocking (error/warning) findings park for a
 // decision, info findings pass through.
 func lintOutcomeFromHousekeeping(sctx *pipeline.StepContext, stash pipeline.HousekeepingLintResult) (*pipeline.StepOutcome, error) {
+	isValidationOnly, err := sctx.IsValidationOnly()
+	if err != nil {
+		return nil, err
+	}
 	findings, err := types.ParseFindingsJSON(stash.FindingsJSON)
 	if err != nil {
 		return nil, fmt.Errorf("validate combined housekeeping lint result: %w", err)
+	}
+	if isValidationOnly {
+		stash.Summary = ""
 	}
 	sctx.Log(fmt.Sprintf("lint assessed in the combined document+lint housekeeping pass: %d unresolved items", len(findings.Items)))
 	return &pipeline.StepOutcome{

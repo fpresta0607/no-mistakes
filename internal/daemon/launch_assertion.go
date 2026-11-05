@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/quotarouting"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 )
 
@@ -39,35 +40,99 @@ func decodeLaunchParams(data json.RawMessage, target interface{}) error {
 	return json.Unmarshal(data, target)
 }
 
-func resolvePipelineAgentRoles(ctx context.Context, cfg *config.Config, lookPath func(string) (string, error)) (map[string]*config.Config, error) {
+// resolvePipelineAgentRoles resolves the primary agent and every candidate of
+// each review role, fallbacks included, so a launch proof covers each agent the
+// run could start.
+func resolvePipelineAgentRoles(ctx context.Context, cfg *config.Config, lookPath func(string) (string, error)) (map[string][]*config.Config, error) {
 	if err := cfg.ResolveAgent(ctx, lookPath); err != nil {
 		return nil, err
 	}
-	roleConfigs := make(map[string]*config.Config, len(cfg.ReviewAgents))
+	roleConfigs := make(map[string][]*config.Config, len(cfg.ReviewAgents))
 	for _, role := range config.ReviewAgentRoles {
-		if entry, hasRole := cfg.ReviewAgents[role]; hasRole {
-			roleConfig := cfg.ForReviewAgent(entry)
+		entry, hasRole := cfg.ReviewAgents[role]
+		if !hasRole {
+			continue
+		}
+		for _, roleConfig := range reviewCandidateConfigs(cfg, entry) {
+			roleConfig.QuotaRouting.Enabled = false
 			if err := roleConfig.ResolveAgent(ctx, lookPath); err != nil {
 				return nil, fmt.Errorf("resolve review_agents.%s: %w", role, err)
 			}
-			roleConfigs[role] = roleConfig
+			roleConfigs[role] = append(roleConfigs[role], roleConfig)
 		}
 	}
 	return roleConfigs, nil
 }
 
-func (m *RunManager) newRunPipelineAgent(ctx context.Context, run *db.Run, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error), environment runenv.Overlay) (agent.Agent, error) {
+// replayQuotaRouting reads the quota order a run stored, for its recovery or
+// its successor. A run that stored none stays off the feature instead of
+// reading a fresh order.
+func replayQuotaRouting(cfg *config.Config, stored string) (*quotarouting.Record, error) {
+	record, err := storedQuotaRoutingRecord(stored)
+	if err != nil {
+		return nil, err
+	}
+	if record == nil {
+		cfg.QuotaRouting.Enabled = false
+	}
+	return record, nil
+}
+
+func (m *RunManager) newRunPipelineAgent(ctx context.Context, run *db.Run, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error), environment runenv.Overlay, quota *quotarouting.Record) (agent.Agent, error) {
+	family, err := m.db.ValidationFamily(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if family != nil {
+		if family.HasChildRepairs {
+			return nil, fmt.Errorf("validation-only child contains a forbidden repair selection")
+		}
+		cfg.AutoFix, cfg.SideBySide = config.AutoFix{}, false
+	}
 	if err := run.LaunchAssertionProof.Check(run.LaunchAssertion); err != nil {
 		return nil, err
 	}
 	if run.LaunchAssertion == nil {
-		return newPipelineAgent(ctx, cfg, evidenceRoot, lookPath, environment)
+		ag, _, err := newPipelineAgent(ctx, cfg, evidenceRoot, lookPath, environment, quota)
+		return ag, err
 	}
-	roleConfigs, _, err := prepareLaunchAssertion(ctx, run.LaunchAssertion, cfg, lookPath)
+	expected := run.LaunchAssertion
+	event, err := m.db.GetTerminalPredecessor(run.ID)
 	if err != nil {
 		return nil, err
 	}
-	return newResolvedPipelineAgent(cfg, roleConfigs, evidenceRoot, environment)
+	if event != nil {
+		if !event.Assertion.Matches(run.LaunchAssertion) || event.Snapshot.Run.LaunchValidationGeneration == nil || run.LaunchValidationGeneration == nil || *event.Snapshot.Run.LaunchValidationGeneration != *run.LaunchValidationGeneration {
+			return nil, fmt.Errorf("terminal recovery launch provenance conflicts with the original receipt")
+		}
+		if err := event.Proof.Check(event.Assertion); err != nil {
+			return nil, err
+		}
+		expected = event.Assertion
+		freezeTerminalLimits(cfg, &event.Snapshot)
+	}
+	roleConfigs, _, err := prepareLaunchAssertion(ctx, expected, cfg, lookPath)
+	if err != nil {
+		return nil, err
+	}
+	ag, _, err := newResolvedPipelineAgent(ctx, cfg, roleConfigs, evidenceRoot, environment, quota)
+	return ag, err
+}
+
+func prepareTerminalLaunch(ctx context.Context, run *db.Run, cfg *config.Config, lookPath func(string) (string, error)) (*launchassert.Expectation, *launchassert.Proof, map[string][]*config.Config, error) {
+	if run.LaunchAssertion == nil || run.LaunchValidationGeneration == nil || *run.LaunchValidationGeneration == "" {
+		return nil, nil, nil, fmt.Errorf("terminal recovery needs the original bound launch selection and frozen policy")
+	}
+	if err := run.LaunchAssertionProof.Check(run.LaunchAssertion); err != nil {
+		return nil, nil, nil, err
+	}
+	fresh := *run.LaunchAssertion
+	fresh.TrustedSHA = cfg.TrustedConfigSHA
+	roles, proof, err := prepareLaunchAssertion(ctx, &fresh, cfg, lookPath)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return &fresh, proof, roles, nil
 }
 
 // applyLaunchSelection gives a run the agents its launch selection names,
@@ -83,32 +148,38 @@ func applyLaunchSelection(cfg *config.Config, expected *launchassert.Expectation
 	return cfg.ApplyLaunchSelection(expected.Profiles["primary"])
 }
 
-func prepareLaunchAssertion(ctx context.Context, expected *launchassert.Expectation, cfg *config.Config, lookPath func(string) (string, error)) (map[string]*config.Config, *launchassert.Proof, error) {
+func prepareLaunchAssertion(ctx context.Context, expected *launchassert.Expectation, cfg *config.Config, lookPath func(string) (string, error)) (map[string][]*config.Config, *launchassert.Proof, error) {
 	if expected.TrustedSHA != cfg.TrustedConfigSHA {
 		return nil, nil, fmt.Errorf("launch assertion trusted source differs after fresh fetch")
 	}
 	if steps.IsDemoMode() {
 		return nil, nil, fmt.Errorf("demo mode cannot prove an asserted agent launch")
 	}
+	// The proof records the chain in order, so quota routing may not reorder it.
+	// Authored children and terminal successors descend from an asserted run, so
+	// none of them inherits a stored quota order either.
+	cfg.QuotaRouting.Enabled = false
 	roleConfigs, err := resolvePipelineAgentRoles(ctx, cfg, lookPath)
 	if err != nil {
 		return nil, nil, err
 	}
 	profiles := make(map[string][]agentcfg.Selection, 1+len(config.ReviewAgentRoles))
 	for _, role := range append([]string{"primary"}, config.ReviewAgentRoles...) {
-		roleConfig := roleConfigs[role]
-		if roleConfig == nil {
+		candidates := roleConfigs[role]
+		if len(candidates) == 0 {
 			if role == config.RoleReviewerAfterRound || role == config.RoleFixerAfterRound {
 				continue
 			}
-			roleConfig = cfg
+			candidates = []*config.Config{cfg}
 		}
-		for _, name := range roleConfig.Agents {
-			selection, err := agentcfg.EffectiveSelection(name, roleConfig.AgentProfileFor(name), roleConfig.AgentArgsFor(name))
-			if err != nil {
-				return nil, nil, fmt.Errorf("prove %s agent selection: %w", role, err)
+		for _, roleConfig := range candidates {
+			for _, name := range roleConfig.Agents {
+				selection, err := agentcfg.EffectiveSelection(name, roleConfig.AgentProfileFor(name), roleConfig.AgentArgsFor(name))
+				if err != nil {
+					return nil, nil, fmt.Errorf("prove %s agent selection: %w", role, err)
+				}
+				profiles[role] = append(profiles[role], selection)
 			}
-			profiles[role] = append(profiles[role], selection)
 		}
 	}
 	proof, err := expected.Verify(cfg.TrustedConfigSHA, profiles)

@@ -160,9 +160,9 @@ Rules:
 - After applying the fixes and before verification, re-trace for each finding the concrete failing sequence it describes through the code as it now is, and trace the ordinary successful path through every function you changed, including each of its callers. Remove any alias, branch, parameter, or helper your fix made unreachable. A fix that makes the reported sequence pass while breaking the ordinary path, a caller's assumption, or a sibling site is a regression the next review will report.
 - After all fixes are applied, run one focused verification limited to the changed area (the specific package, file, or test you touched) at the end of the fix round to confirm the fixes hold.
 - Do NOT run the complete repository test suite or lint suite during this fix round. The pipeline has dedicated test and lint steps after review that are the authoritative test and lint gates; their coverage may itself be focused on the changed area when the repository has no configured test or lint commands.
-- Return JSON with a single "summary" field when you are done.
-- The summary must be one concise sentence fragment suitable for a git commit subject.
-- Keep the summary under 10 words.%s
+- If the tool needed for that verification is missing, still apply every fix you intended and skip the unavailable verification. Never make fewer edits, or none, because verification is unavailable.
+- Return JSON with a "summary" field when you are done. Add a "verification_blocked" field, naming the missing tool and why verification could not run, only when the verification you intended could not run; otherwise omit it.
+%s%s
 
 Previous review findings to address:
 %s`,
@@ -172,6 +172,7 @@ Previous review findings to address:
 			reviewScope,
 			baseBranch,
 			ignorePatterns,
+			fixSummaryRules(sctx, types.StepReview),
 			historySection,
 			previousFindings,
 		)
@@ -179,15 +180,16 @@ Previous review findings to address:
 		// the step parent for synchronous preparation and commit work, so the
 		// independent rereviewer cannot inherit its spent deadline.
 		summary, err := s.executeReviewFixWithTimeout(sctx, s.Name(), fixExecutionOptions{
-			RequirePreviousFindings: true,
-			MissingFindingsError:    "review fix requires previous review findings",
-			LogMessage:              "asking agent to fix identified issues...",
-			Prompt:                  fixPrompt,
-			ErrorPrefix:             "agent fix",
-			FallbackSummary:         "address review findings",
-			SessionRole:             pipeline.SessionRoleFixer,
-			Purpose:                 "review-fix",
-			Workload:                workload,
+			RequirePreviousFindings:   true,
+			MissingFindingsError:      "review fix requires previous review findings",
+			LogMessage:                "asking agent to fix identified issues...",
+			Prompt:                    fixPrompt,
+			ErrorPrefix:               "agent fix",
+			FallbackSummary:           "address review findings",
+			SessionRole:               pipeline.SessionRoleFixer,
+			Purpose:                   "review-fix",
+			Workload:                  workload,
+			ReportBlockedVerification: true,
 		})
 		if err != nil {
 			return nil, err
@@ -196,10 +198,8 @@ Previous review findings to address:
 	}
 	reviewTargetSHA := sctx.Run.HeadSHA
 
-	// The changed-file set is read once and viewed two ways on purpose: the
-	// ignore-filtered subset decides whether there is anything to review, while
-	// trusted path instructions are selected against the complete set (see
-	// matchPathInstructions).
+	// Required instruction-covered paths join the review scope before the empty
+	// scope shortcut, so pushed ignores cannot waive a trusted review obligation.
 	var args []string
 	if sctx.Fixing {
 		args = []string{"diff", "--name-only", "-z", "--no-renames", baseSHA}
@@ -212,7 +212,15 @@ Previous review findings to address:
 	}
 	changed := changedPathList(changedFiles)
 
-	reviewable := reviewablePaths(changed, sctx.Config.IgnorePatterns)
+	reviewable, pathInstructions := reviewPathsAndInstructions(changed, sctx.Config, sctx.Log)
+	var retained *Findings
+	if sctx.CoverageContinuation != nil {
+		prior, err := retainedCoverageForReview(sctx, baseSHA, reviewTargetSHA, reviewable)
+		if err != nil {
+			return refusedCoverageContinuation(sctx, err)
+		}
+		retained = &prior
+	}
 	if len(reviewable) == 0 {
 		sctx.Log("no changes to review")
 		noChangeFindings := Findings{
@@ -228,6 +236,31 @@ Previous review findings to address:
 			ReviewablePaths: reviewable,
 			FixSummary:      fixSummary,
 		})
+	}
+
+	// A repair round's rereview judges what the fix changed, the files of the
+	// open findings, and whatever the round before left
+	// unjudged; every other changed file keeps that round's verdict, which
+	// joins this round's coverage record below. An answer round reviews in
+	// full: its starting head is already past the fix.
+	var carried []string
+	if sctx.Fixing && !sctx.FinalizingAnswers && sctx.ReviewStartingHeadSHA != "" {
+		sinceStart, err := git.Run(ctx, sctx.WorkDir, "diff", "--name-only", "-z", "--no-renames", sctx.ReviewStartingHeadSHA)
+		if err != nil {
+			return nil, fmt.Errorf("get files changed since starting head: %w", err)
+		}
+		if sentToFix, err := types.ParseFindingsJSON(sctx.PreviousFindings); err == nil {
+			deferred := types.Findings{}
+			if sctx.DeferredFindings != "" {
+				deferred, err = types.ParseFindingsJSON(sctx.DeferredFindings)
+			}
+			if err == nil {
+				carried = fixRoundCarriedPaths(reviewable, sctx.PreviousReviewedPaths, changedPathList(sinceStart), append(sentToFix.Items, deferred.Items...))
+			}
+		}
+		if len(carried) > 0 {
+			reviewScope = fmt.Sprintf("the branch changes relative to base commit %s in the changed files this review is held to, including this fix round's changes since starting head %s", baseSHA, sctx.ReviewStartingHeadSHA)
+		}
 	}
 
 	// Ask agent to review. This fresh deadline is invocation-owned: a
@@ -257,18 +290,6 @@ Previous review findings to address:
 		return nil, err
 	}
 	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + settledQuestionsPromptSection(sctx) + supersededReviewHistoryPromptSection(sctx) + uncertifiedRoundHistoryPromptSection(sctx) + fixRoundProvenanceClause(sctx) + userIntentPromptSection(sctx) + planSection + intentConformanceReviewClause(sctx) + pipelineDeliveryPhaseClause() + testguidance.Rule + testguidance.ReviewerAction
-
-	// Path-scoped repository review guidance, taken from the trusted
-	// default-branch config copy (regardless of allow_repo_commands) so a pushed
-	// branch cannot steer the reviewer that gates it. Selection runs against the
-	// complete changed-file set, never the ignore-filtered one, so a pushed
-	// ignore_patterns entry cannot suppress a trusted rule. Only blocks whose
-	// glob matches a changed path are appended, so a repository with none
-	// configured - or none relevant to this diff - gets the prompt above
-	// unchanged.
-	pathInstructionMatches := matchPathInstructions(changed, sctx.Config.Review.PathInstructions)
-	logPathInstructions(sctx.Log, pathInstructionMatches)
-	pathInstructions := reviewPathInstructionsSection(pathInstructionMatches)
 
 	// The authorization/privacy obligation below specializes the existing
 	// concrete-state trace only when changed behavior crosses a potentially
@@ -385,7 +406,7 @@ Risk assessment (after listing all findings):
 		reviewScope,
 		baseBranch,
 		ignorePatterns,
-		reviewCoverageSection(reviewable),
+		reviewCoverageSection(uncoveredReviewablePaths(carried, reviewable))+carriedVerdictSection(carried),
 		historySection,
 		pathInstructions,
 		agent.MemoryFilesRule,
@@ -465,31 +486,48 @@ Risk assessment (after listing all findings):
 	var findings Findings
 	var validationErrors []error
 	noAnswers := 0
-	for attempt := 1; ; attempt++ {
-		result, err := s.runReviewAgent(sctx, "agent review", sessionRole, opts)
-		if err == nil {
-			findings, err = parseReviewAnalyzerOutput(result)
-			if err == nil {
-				break
-			}
-		} else if !agent.IsStructuredOutputRejected(err) || sctx.Ctx.Err() != nil || errors.Is(err, errReviewAgentTimeout) {
+	if retained != nil {
+		findings, err = s.completeCoverageGaps(sctx, turnPrompt, sessionRole, opts, *retained, reviewable, askDir)
+		if err != nil {
 			return nil, err
 		}
-		validationErrors = append(validationErrors, err)
-		if errors.As(err, new(*agent.NoTextOutputError)) {
-			noAnswers++
-			if noAnswers == reviewNoAnswerMaxAttempts {
-				return nil, fmt.Errorf("agent review wrote no answer on %d of %d attempts, so its findings are unknown, not empty: %sattempt %d: %w", noAnswers, attempt, reviewValidationAttempts(validationErrors[:attempt-1]), attempt, err)
-			}
+		if _, err := retainedCoverageForReview(sctx, baseSHA, reviewTargetSHA, reviewable); err != nil {
+			return refusedCoverageContinuation(sctx, err)
 		}
-		if attempt == reviewAnalyzerMaxAttempts {
-			if summary := distinctReviewValidationFailures(validationErrors); summary != "" {
-				return nil, fmt.Errorf("validate review analyzer findings after %d attempts: output kept failing validation across distinct fields (%s): %sattempt %d: %w", reviewAnalyzerMaxAttempts, summary, reviewValidationAttempts(validationErrors[:attempt-1]), attempt, err)
+	} else {
+		for attempt := 1; ; attempt++ {
+			result, err := s.runReviewAgent(sctx, "agent review", sessionRole, opts)
+			if err == nil {
+				findings, err = parseReviewAnalyzerOutput(result)
+				if err == nil {
+					break
+				}
+			} else if !agent.IsStructuredOutputRejected(err) || sctx.Ctx.Err() != nil || errors.Is(err, errReviewAgentTimeout) {
+				return nil, err
 			}
-			return nil, fmt.Errorf("validate review analyzer findings after %d attempts: %w", reviewAnalyzerMaxAttempts, err)
+			if agent.IsSafetyRefusal(err) {
+				// A refusal given as the answer is not a schema slip to rerun.
+				return nil, err
+			}
+			validationErrors = append(validationErrors, err)
+			if errors.As(err, new(*agent.NoTextOutputError)) {
+				noAnswers++
+				if noAnswers == reviewNoAnswerMaxAttempts {
+					return nil, agent.RejectStructuredOutput(fmt.Errorf("agent review wrote no answer on %d of %d attempts, so its findings are unknown, not empty: %sattempt %d: %w", noAnswers, attempt, reviewValidationAttempts(validationErrors[:attempt-1]), attempt, err))
+				}
+			}
+			if attempt == reviewAnalyzerMaxAttempts {
+				if summary := distinctReviewValidationFailures(validationErrors); summary != "" {
+					return nil, agent.RejectStructuredOutput(fmt.Errorf("validate review analyzer findings after %d attempts: output kept failing validation across distinct fields (%s): %sattempt %d: %w", reviewAnalyzerMaxAttempts, summary, reviewValidationAttempts(validationErrors[:attempt-1]), attempt, err))
+				}
+				return nil, agent.RejectStructuredOutput(fmt.Errorf("validate review analyzer findings after %d attempts: %w", reviewAnalyzerMaxAttempts, err))
+			}
+			sctx.Log(fmt.Sprintf("review analyzer findings rejected (%s); rerunning the review (attempt %d of %d)", strings.ReplaceAll(err.Error(), "\n", "; "), attempt+1, reviewAnalyzerMaxAttempts))
+			opts.Prompt = turnPrompt + reviewRetryNote(err)
 		}
-		sctx.Log(fmt.Sprintf("review analyzer findings rejected (%s); rerunning the review (attempt %d of %d)", strings.ReplaceAll(err.Error(), "\n", "; "), attempt+1, reviewAnalyzerMaxAttempts))
-		opts.Prompt = turnPrompt + reviewRetryNote(err)
+	}
+	if len(carried) > 0 {
+		findings.ReviewedPaths = mergeReviewedPaths(findings.ReviewedPaths, carried)
 	}
 
 	// Phase ownership boundary: drop findings that only claim later pipeline-
@@ -512,16 +550,18 @@ Risk assessment (after listing all findings):
 	// must not have a fresh review inherit questions an earlier run asked.
 	// Delivering an answer to a finalize turn is the read-side case and is
 	// handled above; this is the ask-side one.
-	if err := s.appendOpenReviewQuestionFindings(sctx, askDir, &findings); err != nil {
-		return nil, err
+	if retained == nil {
+		if err := s.appendOpenReviewQuestionFindings(sctx, askDir, &findings); err != nil {
+			return nil, err
+		}
 	}
 	needsApproval := hasBlockingFindings(findings.Items)
 	if !needsApproval && !reviewedPathsCoverReviewable(findings.ReviewedPaths, reviewable) {
 		// A clean round certifies the whole head, so it is held to a positive
 		// coverage record over every trusted reviewable path. An omitted
 		// reviewed_paths is not a legacy pass: the field is optional in the
-		// schema only so an older payload still parses, and an absent list is
-		// the same missing evidence as an empty or partial one (VISION.md R4:
+		// schema only so an older payload still parses; an absent reviewer list
+		// supplies no new coverage beyond any carried verdicts (VISION.md R4:
 		// every review pass covers the complete change).
 		//
 		// Before parking, one focused completion turn reviews exactly the
@@ -533,7 +573,10 @@ Risk assessment (after listing all findings):
 		// nothing to fix. The completion turn keeps the operator out of that
 		// loop; whatever is still uncovered after it parks with the explicit
 		// remainder named, so a partial or fabricated record never approves.
-		completed, err := s.completeCoverageGaps(sctx, turnPrompt, sessionRole, opts, findings, reviewable, askDir)
+		completed := findings
+		if retained == nil {
+			completed, err = s.completeCoverageGaps(sctx, turnPrompt, sessionRole, opts, findings, reviewable, askDir)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -544,6 +587,7 @@ Risk assessment (after listing all findings):
 			needsApproval = true
 		}
 	}
+	findings.ReviewCoverageScope = currentReviewCoverageScope(sctx, baseSHA, reviewTargetSHA, reviewable)
 	findingsJSON, _ := json.Marshal(findings)
 
 	return approvedReviewOutcome(reviewTargetSHA, &pipeline.StepOutcome{
@@ -598,9 +642,9 @@ func coveragePathLine(p string) string {
 	return b.String()
 }
 
-// reviewCoverageSection enumerates the trusted reviewable changed-file set in
-// the review prompt. The coverage gate holds the round to exactly this set,
-// but the prompt used to leave its enumeration to the reviewer, which had to
+// reviewCoverageSection enumerates the changed files this turn must judge in
+// the review prompt. The coverage gate also accepts eligible carried verdicts,
+// but the prompt used to leave enumeration to the reviewer, which had to
 // reconstruct it from its own diff reading and then retype it into
 // reviewed_paths - a lossy round trip that dropped a different handful of
 // files on each of three consecutive real rounds. Handing the reviewer the
@@ -609,7 +653,7 @@ func coveragePathLine(p string) string {
 // file the reviewer did not examine still must not be listed.
 func reviewCoverageSection(paths []string) string {
 	var b strings.Builder
-	b.WriteString("\nChanged files this review is held to (computed by the pipeline from the branch diff, minus ignored paths):\n")
+	b.WriteString("\nChanged files this review is held to (computed by the pipeline from the branch diff, minus ignored paths, plus instruction-covered paths unless the trusted default branch also ignores them):\n")
 	for _, p := range paths {
 		fmt.Fprintf(&b, "- %s\n", coveragePathLine(p))
 	}
@@ -635,8 +679,61 @@ func reviewCoverageCompletionSection(missing []string) string {
 	return b.String()
 }
 
+// fixRoundCarriedPaths returns the reviewable paths whose verdict a repair
+// round's rereview keeps from the round before instead of judging them again:
+// each one that round covered, that is unchanged since the starting head it
+// judged, and that no open finding names. A finding is verified
+// only by a rereview that covers its file, so its file is always judged again,
+// and a finding with no file can be verified only by a pass over every path,
+// so it keeps nothing. A round left with nothing of its own to judge reviews
+// in full.
+func fixRoundCarriedPaths(reviewable, previouslyReviewed, changedSinceStart []string, openFindings []Finding) []string {
+	judgeAgain := make(map[string]bool, len(changedSinceStart)+len(openFindings))
+	for _, changed := range changedSinceStart {
+		judgeAgain[normalizeReviewedPath(changed)] = true
+	}
+	for _, finding := range openFindings {
+		file := normalizeReviewedPath(finding.File)
+		if file == "" {
+			return nil
+		}
+		judgeAgain[file] = true
+	}
+	judged := make(map[string]bool, len(previouslyReviewed))
+	for _, reviewed := range previouslyReviewed {
+		judged[normalizeReviewedPath(reviewed)] = true
+	}
+	var carried []string
+	for _, candidate := range reviewable {
+		key := normalizeReviewedPath(candidate)
+		if key != "" && judged[key] && !judgeAgain[key] {
+			carried = append(carried, candidate)
+		}
+	}
+	if len(carried) == len(reviewable) {
+		return nil
+	}
+	return carried
+}
+
+// carriedVerdictSection names the changed files a repair round's rereview
+// does not judge again. Empty when the rereview judges every changed file.
+func carriedVerdictSection(carried []string) string {
+	if len(carried) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nChanged files whose verdict carries from the previous review round (it judged them at their current content, this fix round did not change them, and no open finding names them):\n")
+	for _, p := range carried {
+		fmt.Fprintf(&b, "- %s\n", coveragePathLine(p))
+	}
+	b.WriteString("- Do not review these files again. Read one only as context for the files this review is held to, and judge it again, listing it in reviewed_paths, only when a change in this round alters how its code behaves.\n")
+	b.WriteString("- The pipeline adds these files to this round's reviewed_paths itself.\n")
+	return b.String()
+}
+
 // completeCoverageGaps runs at most one focused review turn over exactly the
-// reviewable files the just-finished pass did not cover, and merges its
+// reviewable files the current or retained pass did not cover, and merges its
 // findings and coverage record into the round's. It runs only on a round that
 // would otherwise park SOLELY on a coverage gap (zero blocking findings), so
 // a healthy full-coverage review costs nothing extra and a round with
@@ -679,6 +776,10 @@ func (s *ReviewStep) completeCoverageGaps(sctx *pipeline.StepContext, basePrompt
 	completionOpts.Prompt = basePrompt + reviewCoverageCompletionSection(missing)
 	completionOpts.Purpose = "review-coverage"
 	result, err := s.runReviewAgent(sctx, "agent review coverage", role, completionOpts)
+	if agent.IsSafetyRefusal(err) {
+		// Not an ordinary coverage gap, which an approval could clear.
+		return findings, err
+	}
 	if err != nil {
 		sctx.Log(fmt.Sprintf("focused coverage pass failed (%s); parking on the incomplete coverage record", strings.ReplaceAll(err.Error(), "\n", "; ")))
 		return findings, nil
@@ -946,6 +1047,7 @@ func sanitizedPreviousFindingsForPrompt(raw string) string {
 		findings.Items[i].Description = sanitizePromptMultilineText(findings.Items[i].Description)
 		findings.Items[i].Source = sanitizePromptText(findings.Items[i].Source)
 		findings.Items[i].UserInstructions = sanitizePromptMultilineText(findings.Items[i].UserInstructions)
+		findings.Items[i].DriverInstructions = sanitizePromptMultilineText(findings.Items[i].DriverInstructions)
 		findings.Items[i].ReviewScope = sanitizePromptText(findings.Items[i].ReviewScope)
 		findings.Items[i].Category = sanitizePromptText(findings.Items[i].Category)
 		findings.Items[i].Check = sanitizePromptText(findings.Items[i].Check)

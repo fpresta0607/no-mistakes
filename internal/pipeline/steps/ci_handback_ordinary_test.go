@@ -33,6 +33,7 @@ func newOrdinaryCIHandbackFixture(t *testing.T) *ordinaryCIHandbackFixture {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
 	remote := filepath.Join(t.TempDir(), "remote.git")
 	gate := filepath.Join(t.TempDir(), "gate.git")
 	managed := filepath.Join(t.TempDir(), "managed")
