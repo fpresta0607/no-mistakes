@@ -236,10 +236,14 @@ func (r *repairRoundScope) split(log func(string), findings *Findings) {
 // still reaches, and taking it out would clear that selected finding on
 // silence (pipeline.resolveVerifiedFindingsJSON). A finding repeating a selected
 // description still contradicts the verdict. A deferred finding cannot be named
-// closed, so nothing leaves while one is open; such a round parks on it anyway.
+// closed, so nothing leaves while one that parks the run is open, which adds no
+// park. An informational note parks nothing and holds nothing back.
 func (r *repairRoundScope) isFollowUp(finding Finding) bool {
 	file := normalizeReviewedPath(finding.File)
-	if !r.tracked[file] || finding.Line <= 0 || finding.ActionOrDefault() == types.ActionAskUser || len(r.deferred) > 0 {
+	if !r.tracked[file] || finding.Line <= 0 || finding.ActionOrDefault() == types.ActionAskUser {
+		return false
+	}
+	if hasBlockingFindings(r.deferred) || types.HasAskUserFindings(Findings{Items: r.deferred}) {
 		return false
 	}
 	if strings.TrimSpace(finding.FailingInput) != "" && strings.TrimSpace(finding.WrongResult) != "" {

@@ -141,6 +141,9 @@ func TestRepairRoundScopeSplit(t *testing.T) {
 		{name: "beside a finding left out of the repair", finding: withFile(outside, "deferred.go", 90), deferred: heldBack},
 		{name: "in another file while a finding is left out of the repair", finding: outside, deferred: heldBack},
 		{name: "a deferred finding cannot be named closed", finding: withFile(outside, "deferred.go", 90), closed: []string{"f-1", "f-2"}, deferred: heldBack},
+		{name: "a deferred warning parks the run", finding: outside, deferred: []Finding{{ID: "f-3", Severity: "warning", File: "deferred.go", Line: 7, Action: types.ActionAutoFix}}},
+		{name: "a deferred ask-user note parks the run", finding: outside, deferred: []Finding{{ID: "f-3", Severity: "info", File: "deferred.go", Line: 7, Action: types.ActionAskUser}}},
+		{name: "a deferred note parks nothing", finding: outside, deferred: []Finding{{ID: "f-3", Severity: "info", File: "deferred.go", Line: 7, Action: types.ActionNoOp}}, wantFollowUp: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -690,6 +693,32 @@ func TestReviewLoop_AnOpenQuestionIsLeftToItsAnswer(t *testing.T) {
 			t.Fatalf("the answer did not end the wait: steps = %+v", steps)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestReviewLoop_ADeferredNoteHoldsNoFollowUpBack(t *testing.T) {
+	const firstRoundWithANote = `{"findings":[{"id":"f-1","severity":"error","file":"feature.txt","line":1,"description":"selected defect","action":"auto-fix"},{"id":"note","severity":"info","file":"feature2.txt","line":1,"description":"worth knowing","action":"no-op"}],"summary":"bug","risk_level":"high","risk_rationale":"it can lose data","risk_scope":"source-or-external","reviewed_paths":["feature.txt","feature2.txt"]}`
+	mock := scriptedRepairRound(t, fmt.Sprintf(`{"findings":[{"id":"n-1","severity":"error","file":"feature.txt","line":30,"description":"a thought for later","action":"auto-fix"}],"closed_findings":["f-1"],"reviewed_paths":["feature.txt","feature2.txt"],%s}`, cleanRereview))
+	answerReview := mock.respond
+	isFirstReview := true
+	mock.respond = func(opts agent.RunOpts) *agent.Result {
+		result := answerReview(opts)
+		if opts.Purpose == "review" && isFirstReview {
+			isFirstReview = false
+			return &agent.Result{Output: []byte(firstRoundWithANote)}
+		}
+		return result
+	}
+	exec, database, run, repo, workDir := longFeatureHarness(t, mock)
+
+	executeWithoutAPark(t, exec, run, repo, workDir)
+
+	if got := len(fixCalls(mock.snapshot())); got != 1 {
+		t.Fatalf("fix turns = %d, want 1: a note must not turn a follow-up into another round", got)
+	}
+	_, _, record := lastReviewRound(t, database, run)
+	if len(record.FollowUps) != 1 || record.FollowUps[0].Description != "a thought for later" {
+		t.Fatalf("follow-ups = %+v, want the finding on the record", record.FollowUps)
 	}
 }
 
