@@ -21,6 +21,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
@@ -202,6 +203,7 @@ type retryFixtureOptions struct {
 	beforeSource func(t *testing.T, f *retryFixture)
 	profile      *agentcfg.PiProfile
 	plan         *verificationplan.Snapshot
+	assertion    *launchassert.Expectation
 	failInTest   bool
 	twoHop       bool
 	globalYAML   string
@@ -232,7 +234,16 @@ func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
 	if opts.profile != nil {
 		profiles = append(profiles, opts.profile)
 	}
-	source, err := d.InsertRunWithPRText(repo.ID, "main", submitted, submitted, &db.RunIntent{Summary: "keep it", Source: db.RunIntentSourceAgent, Score: 1}, "", "", "", "", false, opts.plan, opts.prText, profiles...)
+	var proof *launchassert.Proof
+	var launchNonce, validationGeneration string
+	if opts.assertion != nil {
+		var err error
+		if proof, err = opts.assertion.Verify(opts.assertion.TrustedSHA, opts.assertion.Profiles); err != nil {
+			t.Fatal(err)
+		}
+		launchNonce, validationGeneration = "retry-launch-nonce", "retry-generation"
+	}
+	source, err := d.InsertLaunchedRun(repo.ID, "main", submitted, submitted, &db.RunIntent{Summary: "keep it", Source: db.RunIntentSourceAgent, Score: 1}, launchNonce, validationGeneration, "", "", false, opts.plan, opts.prText, opts.assertion, proof, profiles...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,6 +512,15 @@ func TestRetryRefusesUnlessEveryProofHolds(t *testing.T) {
 		}},
 		{name: "a verification plan", proof: "compatible configuration",
 			opts: retryFixtureOptions{plan: &verificationplan.Snapshot{ID: "plan-bound-run", Path: "plan.md", SourcePath: "plan.md", SHA256: "abc", CapturedAt: 1}}},
+		{name: "a launch assertion", proof: "compatible configuration", reason: "launch assertion",
+			opts: retryFixtureOptions{assertion: &launchassert.Expectation{
+				TrustedSHA: strings.Repeat("a", 40),
+				Profiles: map[string][]agentcfg.Selection{
+					"primary":  {{Harness: "codex", Model: "fixture", Effort: agentcfg.EffortXHigh, ServiceTier: "default"}},
+					"reviewer": {{Harness: "codex", Model: "fixture", Effort: agentcfg.EffortXHigh, ServiceTier: "default"}},
+					"fixer":    {{Harness: "codex", Model: "fixture", Effort: agentcfg.EffortXHigh, ServiceTier: "default"}},
+				},
+			}}},
 		{name: "a model profile that no longer resolves", proof: "compatible configuration",
 			opts: retryFixtureOptions{profile: &agentcfg.PiProfile{Model: "openai-codex/gpt-5.4", Effort: agentcfg.EffortHigh}},
 			breakProof: func(t *testing.T, f *retryFixture) string {

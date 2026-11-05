@@ -638,3 +638,70 @@ func TestQuotaRoutingUsesProvidersFromTheOtherACPSpelling(t *testing.T) {
 		}
 	}
 }
+
+func TestReplayQuotaRoutingKeepsTheStoredOrderOrTurnsRoutingOff(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		stored      string
+		wantOrder   []string
+		wantEnabled bool
+		wantErr     string
+	}{
+		{name: "a stored order replays", stored: `{"version":1,"enabled":true,"order":["codex","claude"],"choice":"codex"}`, wantOrder: []string{"codex", "claude"}, wantEnabled: true},
+		{name: "a run that stored none stays off", stored: "", wantEnabled: false},
+		{name: "an unreadable record refuses", stored: "{", wantEnabled: true, wantErr: "stored quota routing record is unusable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{QuotaRouting: config.QuotaRouting{Enabled: true}}
+
+			record, err := replayQuotaRouting(cfg, tc.stored)
+
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.QuotaRouting.Enabled != tc.wantEnabled {
+				t.Fatalf("routing enabled = %v, want %v", cfg.QuotaRouting.Enabled, tc.wantEnabled)
+			}
+			if tc.wantOrder == nil {
+				if record != nil {
+					t.Fatalf("record = %+v, want none", record)
+				}
+				return
+			}
+			if record == nil || !reflect.DeepEqual(record.Order, tc.wantOrder) {
+				t.Fatalf("record = %+v, want order %v", record, tc.wantOrder)
+			}
+		})
+	}
+}
+
+func TestResolvePipelineAgentRolesIncludesEveryReviewFallback(t *testing.T) {
+	cfg := &config.Config{
+		Agent:        types.AgentClaude,
+		QuotaRouting: config.QuotaRouting{Enabled: true},
+		ReviewAgents: map[string]config.ReviewAgent{
+			config.RoleReviewer: {Agent: types.AgentClaude, Fallback: []config.ReviewAgent{{Agent: types.AgentCodex}}},
+		},
+	}
+
+	roles, err := resolvePipelineAgentRoles(context.Background(), cfg, fakeLookPath)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates := roles[config.RoleReviewer]
+	if len(candidates) != 2 || candidates[0].Agent != types.AgentClaude || candidates[1].Agent != types.AgentCodex {
+		t.Fatalf("reviewer candidates = %+v, want the primary then its fallback", candidates)
+	}
+	for _, candidate := range candidates {
+		if candidate.QuotaRouting.Enabled {
+			t.Fatalf("candidate %s reorders by quota, which would change what the launch proved", candidate.Agent)
+		}
+	}
+}
