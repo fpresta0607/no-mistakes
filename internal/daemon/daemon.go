@@ -1131,7 +1131,7 @@ func terminalWorktreeSourceReason(ctx context.Context, database *db.DB, runID, w
 			if step.Status == types.StepStatusSkipped && (step.Error == nil || *step.Error != types.RunCIMonitorInterruptedReason) {
 				continue
 			}
-			if run.Status == types.RunCancelled && run.Error != nil && *run.Error == types.RunCancelReasonAbortedByUser || step.Error != nil && *step.Error == "aborted by user" {
+			if run.Status == types.RunCancelled && run.Error != nil && *run.Error == types.RunCancelReasonAbortedByUser || step.Error != nil && types.IsUserAbortStepError(*step.Error) {
 				return ""
 			}
 		}
