@@ -98,7 +98,7 @@ type Result struct {
 // It fails closed rather than guessing: an unreadable remote, a branch that
 // exists without the marker file, a lost push race, or a refused push (no
 // permission, protected ref) all return an error and publish nothing. The
-// caller then leaves the PR body pointing at local paths instead of links that
+// caller then renders the files as unpublished instead of adding links that
 // would not resolve.
 func Publish(ctx context.Context, req Request) (*Result, error) {
 	branch, err := NormalizeBranch(req.Branch)

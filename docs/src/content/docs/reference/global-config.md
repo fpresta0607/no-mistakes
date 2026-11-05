@@ -1778,7 +1778,7 @@ Branch slashes become nested directories, unsafe branch characters are replaced,
 `branch` must be a valid Git branch name; an invalid value fails the config with the offending key and value.
 `commit_message` supports literal text and two placeholders: `{{.Branch}}` (the code branch name) and `{{.RunID}}` (the run ID). It follows the same template restrictions, size limits, and unsafe-character rules as [`commit.fix_message`](#commitfix_message); an invalid template fails configuration loading, and a subject that fails validation at publish time leaves the evidence unpublished.
 The publisher never force-pushes. It appends to the fetched evidence-branch tip with a fast-forward push, retries one lost race, and refuses to use the run branch, default branch, or an existing branch whose tip lacks the `.no-mistakes-evidence` marker.
-Publication is also refused when the remote cannot be read or pushed, an artifact exceeds 64 MiB, a run exceeds 500 files or 256 MiB, or another writer wins the retry. The PR body then keeps its local rendering instead of adding links that would not resolve.
+Publication is also refused when the remote cannot be read or pushed, an artifact exceeds 64 MiB, a run exceeds 500 files or 256 MiB, or another writer wins the retry. The PR body then renders those files as unpublished instead of adding links that would not resolve.
 Evidence-branch publication currently supports GitHub links only. On other providers, no evidence branch is pushed. GitLab image uploads are independent of these publication settings; see [Pull request](/no-mistakes/reference/pipeline-steps/#pull-request).
 Enabling this pushes a branch to your remote, so pick a `branch` name your CI workflows do not build.
 

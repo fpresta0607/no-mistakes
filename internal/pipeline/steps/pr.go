@@ -1078,12 +1078,12 @@ func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD st
 // decides which attestation comment a body consumer sees.
 //
 // pipelineMD carries the run's real attestation. Every other component -
-// what-changed, intent, risk, and above all the Testing section, which embeds
-// artifact captions, captured output, and whole files read from the evidence
-// directory - is agent-derived and can carry a foreign attestation comment. The
-// compliance check (.github/actions/require-no-mistakes/verify.py) scans the raw
-// body and binds the FIRST marker it finds to the PR head, so a foreign copy
-// placed before pipelineMD fails a PR the pipeline did produce.
+// what-changed, intent, risk, and above all the Testing section, which carries
+// agent-written artifact content - is agent-derived and can carry a foreign
+// attestation comment. The compliance check
+// (.github/actions/require-no-mistakes/verify.py) scans the raw body and binds
+// the FIRST marker it finds to the PR head, so a foreign copy placed before
+// pipelineMD fails a PR the pipeline did produce.
 //
 // The neutralization is applied HERE rather than at each render path on
 // purpose. The first attempt at this fix escaped the marker inside
