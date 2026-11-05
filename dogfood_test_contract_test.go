@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
 // Local Test is targeted validation of the requested intent. This repository
@@ -52,8 +54,13 @@ func TestDogfoodConfig_NoBroadLocalTestCommand(t *testing.T) {
 // scenario ended untested (issue #55). The trusted runbook names the e2e
 // harness, which builds this worktree and runs every phase in a disposable
 // home against a local upstream and stub forge CLIs, as the supported live
-// path, and keeps package tests out of the live count. The journeys and hooks
-// it cites must stay real, or the runbook sends the agent nowhere.
+// path, and keeps package tests out of the live count.
+//
+// test.instructions is an owned text contract: the Test prompt carries it
+// verbatim, so the rules issue #55 decided are checked as that text, whitespace
+// aside, which says nothing about how an agent follows them. What the runbook
+// cites is executed instead: the Go test runner has to list every journey, and
+// TestRunbookHooksKeepTheirCitedNames has to pass against this runbook.
 func TestDogfoodConfig_RunbookNamesTheIsolatedLaterPhaseLivePath(t *testing.T) {
 	t.Parallel()
 
@@ -61,35 +68,21 @@ func TestDogfoodConfig_RunbookNamesTheIsolatedLaterPhaseLivePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e2eFiles, err := filepath.Glob(filepath.Join(root, "internal", "e2e", "*.go"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var e2eSource strings.Builder
-	for _, path := range e2eFiles {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		e2eSource.Write(data)
-	}
-
 	cfg, err := config.LoadRepo(root)
 	if err != nil {
 		t.Fatalf("LoadRepo: %v", err)
 	}
-	runbook := cfg.Test.Instructions
+	runbook := strings.Join(strings.Fields(cfg.Test.Instructions), " ")
 
 	for _, want := range []string{
-		"bash scripts/e2e.sh -tags=e2e",
+		"TMPDIR=/tmp bash scripts/e2e.sh -tags=e2e",
+		"-overlay=",
 		"temporary NM_HOME",
 		"local bare upstream",
-		"PR body",
-		"AgentInvocations",
-		"FAKEAGENT_GH_LOG",
-		"readGHStubInvocations",
+		"PR title and body rendering",
 		"is live",
-		"never return them as artifacts",
+		"Test scratch directory",
+		"Never return them as artifacts",
 		"never the outer run",
 		"not live",
 	} {
@@ -100,20 +93,37 @@ func TestDogfoodConfig_RunbookNamesTheIsolatedLaterPhaseLivePath(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "scripts", "e2e.sh")); err != nil {
 		t.Errorf("runbook names a missing runner: %v", err)
 	}
-	for _, hook := range []string{"func (h *Harness) AgentInvocations(", `"FAKEAGENT_GH_LOG"`, "func readGHStubInvocations("} {
-		if !strings.Contains(e2eSource.String(), hook) {
-			t.Errorf("internal/e2e no longer has %s, which the runbook names", hook)
+
+	// The harness never removes the binaries it builds into the temp directory,
+	// and TestMain reaps the daemon inventory it finds there, so this run gets
+	// its own.
+	temp := t.TempDir()
+	goTestE2E := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("go", slices.Concat([]string{"test", "-tags=e2e"}, args, []string{"./internal/e2e/"})...)
+		winproc.Harden(cmd)
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(), "TMPDIR="+temp, "TMP="+temp, "TEMP="+temp)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("go test -tags=e2e %s: %v\n%s", strings.Join(args, " "), err, out)
 		}
+		return string(out)
 	}
+
+	const hooksTest = "TestRunbookHooksKeepTheirCitedNames"
 	journeys := regexp.MustCompile(`\bTest[A-Z]\w*`).FindAllString(runbook, -1)
 	if len(journeys) == 0 {
 		t.Error("runbook cites no e2e journey to copy")
 	}
-	for _, journey := range journeys {
-		if !strings.Contains(e2eSource.String(), "func "+journey+"(t *testing.T)") {
-			t.Errorf("runbook cites %s, which internal/e2e does not define", journey)
+	required := append(journeys, hooksTest)
+	listed := strings.Fields(goTestE2E("-list", "^("+strings.Join(required, "|")+")$"))
+	for _, name := range required {
+		if !slices.Contains(listed, name) {
+			t.Errorf("go test -tags=e2e -list does not find %s", name)
 		}
 	}
+	goTestE2E("-count=1", "-run", "^"+hooksTest+"$")
 }
 
 // commands.test contract ownership lives in repo-config.md: targeted local
