@@ -264,8 +264,8 @@ func TestTestStep_LiveCheckRulesOffIsTodaysPrompt(t *testing.T) {
 			t.Fatalf("with every setting off the prompt contains %q", marker)
 		}
 	}
-	if !strings.Contains(off, "build a disposable one yourself") {
-		t.Fatal("with test.environment unset the agent must still be told to build its own disposable environment")
+	if !strings.Contains(off, "Building what is missing is not part of this turn") {
+		t.Fatal("with test.environment unset the agent must still be told to report what is missing rather than build it")
 	}
 
 	on := prompt(func(sctx *pipeline.StepContext) {

@@ -1053,6 +1053,12 @@ func sanitizedPreviousFindingsForPrompt(raw string) string {
 		findings.Items[i].Check = sanitizePromptText(findings.Items[i].Check)
 	}
 	findings.Summary = sanitizePromptMultilineText(findings.Summary)
+	if failure := findings.BaselineFailure; failure != nil {
+		for i := range failure.Tests {
+			failure.Tests[i] = sanitizePromptText(failure.Tests[i])
+		}
+		failure.Attribution = sanitizePromptMultilineText(failure.Attribution)
+	}
 	findings.RiskLevel = sanitizePromptText(findings.RiskLevel)
 	findings.RiskRationale = sanitizePromptMultilineText(findings.RiskRationale)
 	findings.RiskScope = sanitizePromptText(findings.RiskScope)

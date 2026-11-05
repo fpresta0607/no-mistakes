@@ -25,15 +25,16 @@ var _ pipeline.ApprovalOverrideVerifier = (*TestStep)(nil)
 
 func (s *TestStep) Name() types.StepName { return types.StepTest }
 
-// Both turns need the same scope: the repair turn leaves an unauthorized
-// remedy unapplied, and the evidence turn reports the unresolved failure.
+// Both turns need the same scope: each leaves an unauthorized remedy unapplied
+// and asks for a human decision, because no evidence turn follows a repair that
+// leaves the baseline failing.
 const testRepairScopeRules = `
 
 Repair scope:
 - Tests or product code, including shared libraries and prompts, may be fixed when the repair is required by the change under validation and respects its intent.
 - Do not tune product logic or prompts to a single scenario's literal wording or scripted ordering. Derive the expected behavior from the intended product contract, not from the scenario's exact inputs.
 - If the proposed repair would contradict explicit intent, edit a file the intent puts off limits, or change product policy beyond the change under validation, do not apply or commit that repair. Leave the failure unresolved for a human decision. Later recorded human decisions supersede conflicting original intent.
-- In a repair turn, leave such a repair unapplied and summarize the unresolved failure. The following evidence turn must reassess unresolved failures under these same scope rules.
+- In a repair turn, leave such a repair unapplied and put it in "needs_decision": name the failure, the proposed repair, and the intent restriction or product-policy change that needs a human decision.
 - In the evidence turn, when resolving a failure would require such a repair, report a warning finding with action "ask-user" instead of making the repair. Name the proposed repair and the intent restriction or product-policy change that needs a human decision. Do not classify that repair as "auto-fix".`
 
 // Execute runs the step with every agent it starts on a hidden desktop of its
@@ -181,8 +182,12 @@ func (s *TestStep) execute(sctx *pipeline.StepContext, desktop string) (*pipelin
 	// detectNewTestFiles reads uncommitted status, so the evidence turn that
 	// follows can no longer see a test file the fixer already committed.
 	var newTestsFromFix []string
+	var repairQuestions []Finding
 	var fixSummary string
 	var repairCut error
+	// repaired is true when a repair turn ran, which is what lets this execution
+	// re-run only what the failure and the repair touch.
+	var repaired bool
 	if sctx.Fixing && onlyTestCommandNoTurnFindings(sctx.PreviousFindings) {
 		sctx.Log("fix selection holds only a test command that was given no turn; running it again without a repair turn...")
 		fixSummary = NoChangesAppliedSummary
@@ -190,6 +195,7 @@ func (s *TestStep) execute(sctx *pipeline.StepContext, desktop string) (*pipelin
 		sctx.Log("fix selection holds only the Test agent budget cut; re-running validation without a repair turn...")
 		fixSummary = NoChangesAppliedSummary
 	} else if sctx.Fixing {
+		repaired = true
 		historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + planSection + testguidance.Rule
 		fixPrompt := fmt.Sprintf(
 			`Fix the failing tests in this repository. Reproduce the specific failure, identify the root cause, and fix either the tests or the code so that failure passes.
@@ -203,15 +209,16 @@ Rules:
 - Make the smallest correct root-cause fix.
 - Do not refactor beyond what is needed for that root-cause fix.
 - If tests fail, determine whether the problem is a real product/code failure, a setup/environment problem you can fix, or a flaky/infrastructure issue.
+- A failing test may be wanted: the change deliberately alters what it pins, or you question why the test exists at all. Do not change the test or the product just to turn it green. Leave it unrepaired and put the question for the author in "needs_decision". Repair the objective failures.
 - Do NOT run linters, formatters, or static analysis tools.
-- Reproduce the specific failing case first (the exact test, package, script, or check named in the findings), then re-run only that focused verification after the fix.
+- Reproduce the specific failing case first (the exact test, package, script, or check named in the findings, including their baseline_failure record when there is one), then re-run only that focused verification after the fix.
 - Await every required check and read its actual exit status. Stop disposable browser and server children before returning success. Report incomplete verification honestly.
 - Do NOT run the complete repository test suite. Local Test is targeted validation of the failure and the requested intent; remote CI owns broad regression and remains mandatory before a PR is ready.
 - A generic driver or user instruction asking for broad or full-suite confirmation does NOT override this product boundary. Keep verification focused on the failure and intent.
 - Never treat "do not run everything" as permission to run nothing: if you cannot reproduce or re-verify with a targeted check, report that honestly in the summary rather than inventing a full-suite pass.
 %s
 - Before finishing, remove any transient artifacts your testing created in the working tree (downloaded models, caches, build outputs, large binaries, or generated data directories) so they are not committed and pushed. Do not remove intentional source or test-file changes. Do not remove dependencies materialized by commands.prepare; later configured commands share them.
-- Return JSON with a single "summary" field when you are done.
+- Return JSON with a "summary" field when you are done, plus a "needs_decision" array with one entry for each failure that needs a human decision. Leave that array out when none does.
 %s%s`,
 			sctx.Run.Branch,
 			baseSHA,
@@ -236,14 +243,16 @@ Previous test findings to address:
 				runOpts.RequireCompletedChildren = true
 				runOpts.Desktop = desktop
 				runOpts.Env = sctx.Env
+				runOpts.JSONSchema = testFixSchema
 				result, runErr := sctx.RunAgentBudget(sctx.Ctx, fixTimeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, runOpts)
 				if runErr != nil {
 					return nil, testAgentError(fixTimeout, "agent fix tests", runErr)
 				}
 				return result, nil
 			},
-			AfterAgentRun: func(*agent.Result) error {
+			AfterAgentRun: func(result *agent.Result) error {
 				newTestsFromFix = detectNewTestFiles(ctx, sctx.WorkDir)
+				repairQuestions = repairDecisionFindings(result)
 				return nil
 			},
 		})
@@ -257,74 +266,64 @@ Previous test findings to address:
 	}
 
 	testCmd := sctx.Config.Commands.Test
-	tested := []string{}
-	var baselineResults []checkResult
-	var baselineFindings []Finding
-	var baselineSummary string
-	var baselineExitCode int
-	var baselineNoTurn bool
-	var attributionSection string
+	var repairedPaths []string
+	if repaired {
+		if repairedPaths, err = pathsChangedSince(sctx, startHead); err != nil {
+			return nil, err
+		}
+	}
+	var baseline testBaseline
 	if testCmd != "" || len(sctx.Config.CommandOverrides["test"].Additional) > 0 {
 		if err := ensurePrepared(sctx, s.Name()); err != nil {
 			return nil, fmt.Errorf("prepare test dependencies: %w", err)
 		}
 		declareStepCommandOverrides(sctx, "test")
-		if testCmd != "" {
-			sctx.Log(fmt.Sprintf("running tests: %s", testCmd))
-		}
-		output, results, err := runConfiguredChecks(sctx, "test", testCmd)
+		focus, err := repairFocus(sctx, scratchDir, repaired, repairedPaths)
 		if err != nil {
-			logConfiguredCommandOutput(sctx, output, types.StepTest)
-			return nil, fmt.Errorf("run test command: %w", err)
+			return nil, err
 		}
-		baselineResults = results
-		for _, result := range results {
-			tested = append(tested, result.Command)
-		}
-
-		projectedOutput := logConfiguredCommandOutput(sctx, output, types.StepTest)
-		if refused := noTurnChecks(results); len(refused) > 0 {
-			baselineNoTurn = true
-			baselineFindings = append(baselineFindings, testCommandNoTurnFinding(refused[0]))
-			baselineSummary = projectedOutput
-			baselineExitCode = refused[0].ExitCode
-		} else if failed := failedChecks(results); len(failed) > 0 {
-			for _, result := range failed {
-				baselineFindings = append(baselineFindings, Finding{
-					Severity:    "error",
-					Category:    types.FindingCategoryTestCommand,
-					Description: result.description("test"),
-				})
-			}
-			baselineSummary = projectedOutput
-			baselineExitCode = failed[0].ExitCode
-			if sctx.Config.Test.BaseAttribution && !failed[0].Local {
-				attribution, err := attributeTestFailures(sctx, testCmd, baseSHA, failed[0].Output)
-				if err != nil {
-					return nil, err
-				}
-				attributionSection = attribution.render()
-				baselineSummary = attributionSection + "\n\n" + baselineSummary
-			}
+		if baseline, err = runTestBaseline(sctx, testCmd, focus, baseSHA); err != nil {
+			return nil, err
 		}
 	}
+	baseline.findings = append(baseline.findings, repairQuestions...)
 	// The commit the baseline ran on, and whether it passed there, is what the
 	// Push step under side_by_side compares the head it is about to push with.
-	sctx.Shared.RecordBaseline(sctx.Run.HeadSHA, baseSHA, !baselineNoTurn && len(failedChecks(baselineResults)) == 0)
+	// A focused pass is not that baseline, so that step runs it.
+	passed := !baseline.noTurn && len(failedChecks(baseline.results)) == 0
+	if passed && baseline.focused != nil {
+		sctx.Shared.RecordFocusedPass(baseSHA)
+	} else {
+		sctx.Shared.RecordBaseline(sctx.Run.HeadSHA, baseSHA, passed)
+	}
 	if repairCut != nil {
-		return testAgentTimeoutOutcome(sctx, repairCut, startHead, baselineFindings, baselineSummary, baselineExitCode), nil
+		return testAgentTimeoutOutcome(sctx, repairCut, startHead, baseline), nil
 	}
 
 	// The machine gave the test command no turn, so there is no test result:
 	// nothing for a fix agent to repair, and no room for a live check either.
-	if baselineNoTurn {
-		findingsJSON, _ := json.Marshal(Findings{Items: baselineFindings, Summary: baselineSummary})
+	if baseline.noTurn {
+		findingsJSON, _ := json.Marshal(Findings{Items: baseline.findings, Summary: baseline.summary})
 		return &pipeline.StepOutcome{
 			NeedsApproval: true,
 			Findings:      string(findingsJSON),
-			ExitCode:      baselineExitCode,
+			ExitCode:      baseline.exitCode,
 			FixSummary:    fixSummary,
 		}, nil
+	}
+
+	// A failed baseline has already named what to repair, and a live check of a
+	// head that fails its own tests proves nothing, so the step parks for the
+	// repair without an evidence turn.
+	if failed := failedChecks(baseline.results); len(failed) > 0 {
+		for _, result := range failed {
+			if result.Local {
+				sctx.Log(fmt.Sprintf("machine-local test check failed: %s, parking for repair with no live check...", result.Command))
+			} else {
+				sctx.Log("configured test command failed, parking for repair with no live check...")
+			}
+		}
+		return failedBaselineOutcome(sctx, baseline, fixSummary, newTestsFromFix), nil
 	}
 
 	// The repository's own trusted rule can say this change has nothing to
@@ -332,21 +331,13 @@ Previous test findings to address:
 	if skip, err := liveSurfaceUntouched(sctx, baseSHA); err != nil {
 		return nil, err
 	} else if skip {
-		findings := liveSurfaceSkipFindings(sctx, len(baselineResults) > 0)
-		return testStepOutcome(sctx, findings, tested, baselineFindings, baselineSummary, baselineExitCode, fixSummary, newTestsFromFix), nil
+		findings := liveSurfaceSkipFindings(sctx, baseline)
+		return testStepOutcome(sctx, findings, baseline, fixSummary, newTestsFromFix), nil
 	}
 
-	failedBaseline := failedChecks(baselineResults)
-	for _, result := range failedBaseline {
-		if result.Local {
-			sctx.Log(fmt.Sprintf("machine-local test check failed: %s, asking agent to gather live evidence...", result.Command))
-		} else {
-			sctx.Log("configured test command failed, asking agent to gather live evidence...")
-		}
-	}
-	if len(failedBaseline) == 0 && len(baselineResults) == 0 {
+	if len(baseline.results) == 0 {
 		sctx.Log("no test command configured, asking agent to run tests...")
-	} else if len(failedBaseline) == 0 {
+	} else {
 		sctx.Log("baseline tests passed, asking agent to gather live evidence...")
 	}
 	reassessHistory := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + planSection + testguidance.Rule
@@ -355,22 +346,17 @@ Previous test findings to address:
 		evidenceGuidance = fmt.Sprintf("- Write new evidence files into this evidence directory, never into the worktree; they are published to the repository's %s branch automatically and linked from the PR: %s", sctx.Config.Test.Evidence.Branch, evidenceDir)
 	}
 	configuredTestCommand := ""
-	for _, result := range baselineResults {
+	for _, result := range baseline.results {
 		switch {
-		case result.Local && result.ExitCode == 0:
-			configuredTestCommand += fmt.Sprintf("\nMachine-local test check (the operator's addition, not the repository's command) already ran successfully as baseline: `%s`\n", result.Command)
 		case result.Local:
-			configuredTestCommand += fmt.Sprintf("\nMachine-local test check (the operator's addition, not the repository's command) failed with exit code %d: `%s`\n", result.ExitCode, result.Command)
-		case result.ExitCode == 0:
-			configuredTestCommand += fmt.Sprintf("\nConfigured test command already ran successfully as baseline: `%s`\n", result.Command)
+			configuredTestCommand += fmt.Sprintf("\nMachine-local test check (the operator's addition, not the repository's command) already ran successfully as baseline: `%s`\n", result.Command)
+		case baseline.focused != nil:
+			configuredTestCommand += fmt.Sprintf("\nThe repair's focused check already ran successfully in place of the configured test command, which did not run on this head: `%s`\n", result.Command)
 		default:
-			configuredTestCommand += fmt.Sprintf("\nConfigured test command failed with exit code %d: `%s`\n", result.ExitCode, result.Command)
-			if attributionSection != "" {
-				configuredTestCommand += sanitizePromptMultilineText(attributionSection) + "\n"
-			}
+			configuredTestCommand += fmt.Sprintf("\nConfigured test command already ran successfully as baseline: `%s`\n", result.Command)
 		}
 	}
-	if declaration := commandOverrideDeclaration("test", sctx.Config.CommandOverrides["test"]); declaration != "" && len(baselineResults) > 0 {
+	if declaration := commandOverrideDeclaration("test", sctx.Config.CommandOverrides["test"]); declaration != "" && len(baseline.results) > 0 {
 		configuredTestCommand += fmt.Sprintf("Baseline ran with %s. Declare these overrides in testing_summary.\n", declaration)
 	}
 	runbook := testRunbookSections(sctx) + budgetCutGuidanceSection(sctx)
@@ -398,14 +384,14 @@ Derive the scenarios:
 - This turn has at most %s of wall-clock time. When it runs out the turn is stopped and its result is lost: no verdict, no scenarios, and no artifacts. Scope the list and each scenario's evidence to finish well inside it.
 
 Drive each scenario:
-- Stand the product up the way an end user runs it, in an isolated environment, and drive each scenario end-to-end against that running product.
-- Getting every scenario live is your responsibility. When a scenario needs something that is not already provided - an environment, an instance, an account, records, a data set, an endpoint - find a workaround: build a disposable one yourself (throwaway fixtures, data, configuration, or a local instance), point the real product at it through whatever isolation the product supports (a separate root, home, or data directory, a temporary config, a local port, a sandbox or test mode), and drive the scenario there. A missing environment is a problem to solve, not a reason to skip the scenario. A scenario driven by the real product against a disposable setup you built is live; a fixture that stands in for the product itself is not.
-- Everything you build must stay disposable and isolated: never read or write the operator's real data, real configuration, or shared services, and tear it down before finishing unless it is evidence.
+- Use what already exists: the repository's own tests, any prepared environment named below, and the product run the way its own docs run it, and drive each scenario end-to-end against that running product.
+- Building what is missing is not part of this turn. When a scenario needs something that does not already exist here - an environment, an instance, an account, records, a data set, an endpoint, a tool - do not build or install it. Report that scenario "untested" at once, naming what is missing and how to provide it. A fixture that stands in for the product itself is never live.
+- What you do run stays isolated: use whatever isolation the product supports (a separate root, home, or data directory, a temporary config, a local port, a sandbox or test mode), never read or write the operator's real data, real configuration, or shared services, and tear down what you started before finishing unless it is evidence.
 %s
 - When a live scenario drives a TUI through a pseudo-terminal, give the pty a non-zero window size (TIOCSWINSZ) before the TUI reads its grid, and drain the master. A 0x0 grid makes the TUI exit immediately with a symptom such as "terminal reported a zero-sized grid" and never register, so a live UI check silently becomes a fake. Bare script(1) and pty.fork() from a non-tty parent typically yield that 0x0 grid.
 - Mark a scenario "live": true ONLY when you drove it against the real product in this run. Live describes execution, not tenant or production liveness. An actually executed local product or real SDK against a localhost emulator with synthetic inputs counts as live for that local scenario; it does not prove tenant, mailbox, Graph, or production behavior. Name the local surface and synthetic inputs in the scenario name and reason, and cite what actually ran in evidence. An unexecuted tenant or production scenario stays "untested" with "live": false and a reason, even when a local scenario passed. Both "pass" and "fail" require "live": true and evidence. A unit test, a stub, a mock, a recorded fixture, or reading the code is NOT live.
-- Return a scenario with result "untested" only when live validation is truly impossible here: every workaround you could find within the workspace boundary still cannot drive it. Its reason must state what you tried in order to drive it live and why each attempt cannot work, naming the specific tool, credential, permission, or authority that is out of reach and how to provide it. "No environment was provided" is not such a reason while you could have built a disposable one.
-- If a needed tool is not on PATH and has no repository-local path, do not search the host machine for it or install it system-wide or globally. Try another available route or obtain, install, or build the tool inside the disposable workspace and use it there. Only if no workspace-local route can drive the scenario live, report the affected scenario as "untested" with what you tried and why it could not work.
+- An "untested" scenario's reason must name the specific environment, tool, credential, permission, or authority that is missing and how to provide it.
+- If a needed tool is not on PATH and has no repository-local path, do not search the host machine for it and do not install it. Report the affected scenario as "untested", naming the tool.
 - Never guess a pass, and never mark a scenario live because you believe it would work.
 - Report every scenario in the "scenarios" array with name, result ("pass", "fail", or "untested"), live, evidence, and reason.
 - Await every required production build, browser run, and other check child before reporting a final "go". A background launch, early structured result, or completion notification does not prove that a check passed.
@@ -414,7 +400,7 @@ Drive each scenario:
 - Read each required child's actual exit status and retained result evidence. Do not mask a failed check with a later successful shell command or report detached work as completed.
 - If any required check is still running, has an unknown result, or lacks evidence, do not report "go". Use "no-go" for a known failure or unsafe change, and "inconclusive" when completion or evidence cannot be established. Record the outstanding check and the missing result.
 - Return a "verdict": "go" when every scenario you could drive passed and nothing untested puts the intent in doubt, "no-go" when a scenario failed or the change is not safe to ship, "inconclusive" when the change has a live-exercisable product surface but too little could be driven live to judge, "no-surface" when this change has no runtime product surface no-mistakes can drive live (a CI-workflow-only change, a docs-only change, a pure non-runtime refactor, or anything else with no live-exercisable scenario).
-- A "no-go" verdict parks this step for a decision. A "no-surface" verdict parks for a human to decide whether to proceed without live validation; mark every scenario untested with a reason naming why there is no live-validatable surface, never mark those as pass, and never use no-surface to skip live validation of a change that does have a product surface you could have driven. Untested scenarios are listed on the pull request and do not park by themselves, so an honest "untested" after exhausting your workarounds costs nothing and a guessed "pass" costs everything.
+- A "no-go" verdict parks this step for a decision. A "no-surface" verdict parks for a human to decide whether to proceed without live validation; mark every scenario untested with a reason naming why there is no live-validatable surface, never mark those as pass, and never use no-surface to skip live validation of a change that does have a product surface you could have driven. Untested scenarios are listed on the pull request and do not park by themselves, so an honest "untested" costs nothing and a guessed "pass" costs everything.
 - A single scenario you could not drive live is reported as an untested scenario with its reason, NOT as a finding. Report a finding only when the step as a whole cannot demonstrate the user intent.
 
 Evidence:
@@ -461,6 +447,11 @@ Rules:
 		agent.MemoryFilesRule,
 	) + testRepairScopeRules
 	evidencePrompt += liveCheckPromptSections(sctx, evidenceDir)
+	var lastCheck Findings
+	if repaired {
+		lastCheck = lastLiveCheck(sctx)
+		evidencePrompt += focusedRecheckSection(lastCheck, repairedPaths)
+	}
 	turn := beginLiveCheck(sctx, evidenceDir)
 	findings, err := runTestAnalyzer(turn.ctx, sctx, evidencePrompt, desktop)
 	turn.cancel()
@@ -471,37 +462,142 @@ Rules:
 	}
 	if err != nil {
 		if errors.Is(err, errTestAgentTimeout) || errors.Is(err, errTestLiveCheckBudget) {
-			outcome := testAgentTimeoutOutcome(sctx, err, startHead, baselineFindings, baselineSummary, baselineExitCode)
+			outcome := testAgentTimeoutOutcome(sctx, err, startHead, baseline)
 			outcome.FixSummary = fixSummary
 			return outcome, nil
 		}
-		// Keep a known command failure terminal even when the evidence agent
-		// also crashed. Retrying that step would replay a verdict failure.
-		if baselineExitCode != 0 && sctx.Config.AgentCrashRetries > 0 {
-			return &pipeline.StepOutcome{ExitCode: baselineExitCode}, err
-		}
 		return nil, err
 	}
-	return testStepOutcome(sctx, findings, tested, baselineFindings, baselineSummary, baselineExitCode, fixSummary, newTestsFromFix), nil
+	findings = keepUndrivenScenarios(findings, lastCheck)
+	return testStepOutcome(sctx, findings, baseline, fixSummary, newTestsFromFix), nil
+}
+
+// testBaseline is one execution's result of the configured test checks.
+type testBaseline struct {
+	results  []checkResult
+	tested   []string
+	findings []Finding
+	summary  string
+	exitCode int
+	// noTurn is true when the machine gave a check no turn, so there is no result.
+	noTurn bool
+	// failure is what a failed repository command named, for the repair turn.
+	failure *types.TestBaselineFailure
+	// focused is set when commands.test_focused stood in for commands.test.
+	focused *types.TestFocusedCheck
+}
+
+// runTestBaseline runs the configured checks: commands.test, or with a focus
+// commands.test_focused in its place, then the machine-local checks. Only these
+// commands see the focus: the agent turns that follow run on sctx.Env without it.
+func runTestBaseline(sctx *pipeline.StepContext, testCmd string, focus *testRepairFocus, baseSHA string) (testBaseline, error) {
+	baseline := testBaseline{tested: []string{}}
+	if focus != nil {
+		testCmd = focus.command
+		sctx.Log(fmt.Sprintf("running the focused check after the repair: %s (%d failed tests, %d repaired paths)", testCmd, len(focus.tests), len(focus.paths)))
+		env := sctx.Env
+		sctx.Env = append(slices.Clip(env), testFocusEnv+"="+focus.file)
+		defer func() { sctx.Env = env }()
+	} else if testCmd != "" {
+		sctx.Log(fmt.Sprintf("running tests: %s", testCmd))
+	}
+	output, results, err := runConfiguredChecks(sctx, "test", testCmd)
+	if err != nil {
+		logConfiguredCommandOutput(sctx, output, types.StepTest)
+		return baseline, fmt.Errorf("run test command: %w", err)
+	}
+	baseline.results = results
+	for _, result := range results {
+		baseline.tested = append(baseline.tested, result.Command)
+	}
+
+	projectedOutput := logConfiguredCommandOutput(sctx, output, types.StepTest)
+	if refused := noTurnChecks(results); len(refused) > 0 {
+		baseline.noTurn = true
+		baseline.findings = append(baseline.findings, testCommandNoTurnFinding(refused[0]))
+		baseline.summary = projectedOutput
+		baseline.exitCode = refused[0].ExitCode
+		return baseline, nil
+	}
+	if focus != nil {
+		baseline.focused = focus.record(sctx.Run.HeadSHA, results[0].ExitCode)
+	}
+	failed := failedChecks(results)
+	if len(failed) == 0 {
+		return baseline, nil
+	}
+	for _, result := range failed {
+		baseline.findings = append(baseline.findings, Finding{
+			Severity:    "error",
+			Action:      types.ActionAutoFix,
+			Category:    types.FindingCategoryTestCommand,
+			Description: result.description("test"),
+		})
+	}
+	baseline.summary = projectedOutput
+	baseline.exitCode = failed[0].ExitCode
+	attributionSection := ""
+	if sctx.Config.Test.BaseAttribution && !failed[0].Local {
+		attribution, err := attributeTestFailures(sctx, testCmd, baseSHA, failed[0].Output)
+		if err != nil {
+			return baseline, err
+		}
+		attributionSection = attribution.render()
+		baseline.summary = attributionSection + "\n\n" + baseline.summary
+	}
+	baseline.failure = namedBaselineFailure(failed, attributionSection)
+	return baseline, nil
 }
 
 // testStepOutcome assembles the step's outcome from a live check's findings
 // (or the record of one that did not run) and this execution's baseline.
-func testStepOutcome(sctx *pipeline.StepContext, findings Findings, tested []string, baselineFindings []Finding, baselineSummary string, baselineExitCode int, fixSummary string, newTestsFromFix []string) *pipeline.StepOutcome {
-	if len(tested) > 0 {
-		findings.Tested = append(append([]string{}, tested...), findings.Tested...)
+func testStepOutcome(sctx *pipeline.StepContext, findings Findings, baseline testBaseline, fixSummary string, newTestsFromFix []string) *pipeline.StepOutcome {
+	if len(baseline.tested) > 0 {
+		findings.Tested = append(append([]string{}, baseline.tested...), findings.Tested...)
 	}
 	findings.TestedHeadSHA = sctx.Run.HeadSHA
-	findings.Items = append(baselineFindings, findings.Items...)
-	if baselineSummary != "" {
-		findings.Summary = strings.TrimSpace(strings.Join([]string{baselineSummary, findings.Summary}, "\n"))
+	findings.Items = append(baseline.findings, findings.Items...)
+	if baseline.summary != "" {
+		findings.Summary = strings.TrimSpace(strings.Join([]string{baseline.summary, findings.Summary}, "\n"))
+	}
+	if check := baseline.focused; check != nil {
+		findings.FocusedCheck = check
+		findings.TestingSummary = strings.TrimSpace(focusedCheckSentence(check) + " " + findings.TestingSummary)
 	}
 
 	findings.Items = append(findings.Items, verdictFindings(findings)...)
 	findings.Items = append(findings.Items, unselectedTestFindings(sctx, findings.Items)...)
+	return finishTestOutcome(sctx, findings, baseline, fixSummary, newTestsFromFix)
+}
 
+// failedBaselineOutcome parks a failed baseline with no evidence turn. Its
+// findings are auto-fixable, so the executor's fix loop and budget decide
+// whether the repair runs. A fix round keeps the gate it answered (see
+// answeredTestGate), because no live check ran to show any of it gone, and that
+// record's tested head stays the one its live check saw, so nothing claims this
+// head was driven.
+func failedBaselineOutcome(sctx *pipeline.StepContext, baseline testBaseline, fixSummary string, newTestsFromFix []string) *pipeline.StepOutcome {
+	findings := answeredTestGate(sctx)
+	findings.Tested = baseline.tested
+	findings.Items = append(baseline.findings, findings.Items...)
+	findings.Summary = baseline.summary
+	findings.BaselineFailure = baseline.failure
+	findings.FocusedCheck = baseline.focused
+	findings.TestingSummary = "The configured test command failed on this head, so no live check ran on it."
+	if check := baseline.focused; check != nil {
+		findings.TestingSummary = focusedCheckSentence(check) + " No live check ran on this head."
+	}
+	return finishTestOutcome(sctx, findings, baseline, fixSummary, newTestsFromFix)
+}
+
+// finishTestOutcome turns the assembled findings into the step's outcome. A
+// question a repair turn left for a human stops the automatic fix loop: another
+// round would meet the same failure with nobody having answered it.
+func finishTestOutcome(sctx *pipeline.StepContext, findings Findings, baseline testBaseline, fixSummary string, newTestsFromFix []string) *pipeline.StepOutcome {
 	needsApproval := hasBlockingFindings(findings.Items)
-	autoFixable := needsApproval
+	autoFixable := needsApproval && !slices.ContainsFunc(baseline.findings, func(item Finding) bool {
+		return item.ActionOrDefault() == types.ActionAskUser
+	})
 
 	// Record any new test files the agent wrote as informational (no-op)
 	// findings. Their presence alone is not an actionable problem, so they
@@ -521,7 +617,7 @@ func testStepOutcome(sctx *pipeline.StepContext, findings Findings, tested []str
 		NeedsApproval: needsApproval,
 		AutoFixable:   autoFixable,
 		Findings:      string(findingsJSON),
-		ExitCode:      baselineExitCode,
+		ExitCode:      baseline.exitCode,
 		FixSummary:    fixSummary,
 	}
 }
@@ -608,6 +704,8 @@ func parseTestAnalyzerOutput(result *agent.Result) (Findings, error) {
 		}
 	}
 	findings.UnvalidatedSinceSHA = ""
+	findings.BaselineFailure = nil
+	findings.FocusedCheck = nil
 	return findings, nil
 }
 
@@ -845,10 +943,12 @@ var errTestAgentTimeout = errors.New("test agent timeout")
 // result from this execution rides along with its exit code, so approving over
 // a failing command still needs the same waiver as any other Test gate, and a
 // fix round keeps the gate it was answering.
-func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead string, baseline []Finding, baselineSummary string, exitCode int) *pipeline.StepOutcome {
+func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead string, baseline testBaseline) *pipeline.StepOutcome {
 	park := answeredTestGate(sctx)
+	park.BaselineFailure = baseline.failure
+	park.FocusedCheck = baseline.focused
 	cause := "This is a budget or provider-slowness cut, not a code failure."
-	if exitCode != 0 || hasBlockingFindings(park.Items) || park.Verdict == types.TestVerdictNoGo || park.Verdict == types.TestVerdictInconclusive {
+	if baseline.exitCode != 0 || hasBlockingFindings(park.Items) || park.Verdict == types.TestVerdictNoGo || park.Verdict == types.TestVerdictInconclusive {
 		cause = "The cut does not clear the findings reported alongside it."
 	}
 	items := []Finding{{
@@ -880,16 +980,16 @@ func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead st
 			Description: "Approval is refused: the run worktree at " + sctx.WorkDir + " holds work no Test turn validated, and the steps after Test would commit and publish it. It holds " + work + ". Respond with fix to validate it, or abort.",
 		})
 	}
-	park.Summary = strings.TrimSpace(strings.Join([]string{baselineSummary, "Test agent exceeded its invocation budget"}, "\n"))
+	park.Summary = strings.TrimSpace(strings.Join([]string{baseline.summary, "Test agent exceeded its invocation budget"}, "\n"))
 	if park.TestingSummary == "" {
 		park.TestingSummary = "The Test agent exceeded its invocation budget before live validation completed; no evidence was gathered for this head."
 	}
-	park.Items = append(append(items, baseline...), park.Items...)
+	park.Items = append(append(items, baseline.findings...), park.Items...)
 	findingsJSON, _ := json.Marshal(park)
 	return &pipeline.StepOutcome{
 		NeedsApproval: true,
 		Findings:      string(findingsJSON),
-		ExitCode:      exitCode,
+		ExitCode:      baseline.exitCode,
 	}
 }
 
