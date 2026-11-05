@@ -1035,7 +1035,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					}
 					sctx.DeferredFindings = ""
 					declaredNoCI := len(checks) == 0
-					if ended, err := endAtGreen(sctx, pr.HeadSHA, declaredNoCI, &lastEndAtGreenNote); err != nil {
+					if ended, err := endAtGreen(sctx, observedHead, declaredNoCI, &lastEndAtGreenNote); err != nil {
 						return nil, err
 					} else if ended {
 						return &pipeline.StepOutcome{}, nil
@@ -1126,12 +1126,12 @@ type ciMonitorStatus struct {
 // endAtGreen ends the run at its first green CI under ci_end_at_green, when
 // that green belongs to the head this run pushed. observedHead is the head the
 // provider read the checks for: the forge's live pull request head where the
-// provider reports one (GitHub), else the run's head. The push target's branch
-// must point at the run's head too, so a green on a commit somebody else
-// pushed never ends a run. Readiness is recorded first, so the run ends marked
-// ready exactly as a monitor that kept watching would have marked it. A green
-// it cannot bind to the pushed head leaves monitoring as it is today, and the
-// reason is logged once per distinct reason in note.
+// provider reports one, else empty, which stands for the run's head. The push
+// target's branch must point at the run's head too, so a green on a commit
+// somebody else pushed never ends a run. Readiness is recorded first, so the
+// run ends marked ready exactly as a monitor that kept watching would have
+// marked it. A green it cannot bind to the pushed head leaves monitoring as it
+// is today, and the reason is logged once per distinct reason in note.
 func endAtGreen(sctx *pipeline.StepContext, observedHead string, declaredNoCI bool, note *string) (bool, error) {
 	if sctx.Config == nil || !sctx.Config.CIEndAtGreen {
 		return false, nil
@@ -1144,7 +1144,7 @@ func endAtGreen(sctx *pipeline.StepContext, observedHead string, declaredNoCI bo
 		}
 		return false, nil
 	}
-	if observedHead != head {
+	if observedHead != "" && observedHead != head {
 		return keepMonitoring(fmt.Sprintf("on %s, the pull request's head, not on %s, the head this run pushed", shortSHA(observedHead), shortSHA(head)))
 	}
 	published, err := publishedBranchHead(sctx)
