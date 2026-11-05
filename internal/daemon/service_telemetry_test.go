@@ -169,6 +169,9 @@ func assertServiceTelemetryTransport(t *testing.T, env map[string]string, enable
 		"NO_MISTAKES_UMAMI_WEBSITE_ID=synthetic-test",
 		"NM_HOME=" + t.TempDir(),
 		"HOME=" + t.TempDir(),
+		// Without it Windows resolves the temp directory to the system
+		// directory, which TestMain cannot write unless the account is an admin.
+		"TMP=" + t.TempDir(),
 	}
 	for key, value := range env {
 		if key != "HOME" {

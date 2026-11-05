@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -286,18 +287,25 @@ func TestExecutor_FixResponseRefusedWhenEarlierDecisionsAreUnavailable(t *testin
 // since a gate that cannot be validated against its history cannot be answered
 // with a fix response at all.
 func TestExecutor_FixResponseRefusedWhenTheRoundReadFails(t *testing.T) {
-	exec, database, _, _, _ := respondFixStepFindings(t)
-	if err := database.Close(); err != nil {
+	exec, _, _, _, _ := respondFixStepFindings(t)
+	raw, err := sql.Open("sqlite", exec.paths.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	// Only the round history goes: closing the whole database would trip the
+	// validation ledger read that runs first, and never reach this refusal.
+	if _, err := raw.Exec("ALTER TABLE step_rounds RENAME TO unavailable"); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"R1", "R2", "R3"}, nil, nil, nil, "")
+	_, err = exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"R1", "R2", "R3"}, nil, nil, nil, "")
 	var refusal *RespondRefusal
 	if !errors.As(err, &refusal) {
 		t.Fatalf("err = %v, want a refusal", err)
 	}
-	if !strings.Contains(refusal.Message, "could not be read") {
-		t.Fatalf("message = %q, want the read failure named", refusal.Message)
+	if !strings.Contains(refusal.Message, "earlier decisions could not be read") {
+		t.Fatalf("message = %q, want the round history read failure named", refusal.Message)
 	}
 }
 
