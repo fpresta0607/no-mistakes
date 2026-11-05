@@ -21,8 +21,10 @@ func TestMain(m *testing.M) {
 	globalConfig := filepath.Join(globalConfigDir, "gitconfig")
 	// Every fixture repository reads its identity from here: three per-repo
 	// `git config` spawns per repository were ~8% of the package's git.exe
-	// spawns, which set its Windows wall time.
-	identity := "[core]\n\tautocrlf = false\n[user]\n\temail = test@example.com\n\tname = Test User\n"
+	// spawns, which set its Windows wall time. Automatic maintenance is off
+	// because it detaches and can outlive a fixture's build (see
+	// TestFixtureBuildStartsNoBackgroundMaintenance).
+	identity := "[core]\n\tautocrlf = false\n[maintenance]\n\tauto = false\n[user]\n\temail = test@example.com\n\tname = Test User\n"
 	if err := os.WriteFile(globalConfig, []byte(identity), 0o644); err != nil {
 		panic(err)
 	}
