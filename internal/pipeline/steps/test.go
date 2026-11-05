@@ -763,7 +763,7 @@ Validation errors:
 // workspace, scratchDir, which this step deletes itself (see
 // testScratchDirName).
 func testScratchGuidance(scratchDir string) string {
-	return fmt.Sprintf("- Your disposable workspace is this scratch directory outside the worktree: %s. Put everything you create only to drive or check the change there, never in the worktree: downloaded or built tools and browsers, their profiles and caches, throwaway scripts, data, and logs. no-mistakes deletes it when this step ends, so keep evidence files and intended source or test changes out of it.", scratchDir)
+	return fmt.Sprintf("- Your disposable workspace is this scratch directory outside the worktree: %s. Put everything you create only to drive or check the change there, never in the worktree: throwaway scripts, data, logs, and the profiles and caches of what you run. no-mistakes deletes it when this step ends, so keep evidence files and intended source or test changes out of it.", scratchDir)
 }
 
 // evidenceTurnLimit is the wall-clock limit the evidence prompt states: the

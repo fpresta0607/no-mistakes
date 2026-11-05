@@ -39,7 +39,7 @@ var hostSearchBoundaryClauses = []string{
 // testOnlyUntestedFallback is the Test-step half of the missing-tool rule. Only
 // the Test result schema has scenarios and an "untested" state, so this wording
 // must stay on the Test prompt and must not leak into other roles.
-const testOnlyUntestedFallback = `report the affected scenario as "untested"`
+const testOnlyUntestedFallback = `Report the affected scenario as "untested"`
 
 // TestHostSearchBoundaryReachesEveryPipelinePrompt drives a real gate push
 // through the real daemon and inspects the prompts the daemon delivered to the
@@ -98,27 +98,21 @@ func TestHostSearchBoundaryReachesEveryPipelinePrompt(t *testing.T) {
 		t.Fatal("no steered prompt observed; the daemon is not wrapping agents with the workspace-boundary preamble")
 	}
 
-	// The Test step must add its own scenario-shaped fallback: the whole point
-	// of the fix is that a missing tool triggers workspace-local setup before
-	// an honest "untested" scenario, never a 30-minute whole-host search.
+	// The Test step must add its own scenario-shaped fallback: a missing tool
+	// means an honest "untested" scenario at once, never a 30-minute whole-host
+	// search and never a tool the agent sets up for itself.
 	if !strings.Contains(testPrompt, testOnlyUntestedFallback) {
 		t.Errorf("test prompt is missing the scenario untested fallback %q:\n%s", testOnlyUntestedFallback, truncate(testPrompt, 4000))
 	}
-	for _, want := range []string{
-		"do not search the host machine for it or install it system-wide or globally",
-		"obtain, install, or build the tool inside the disposable workspace and use it there",
-		`Only if no workspace-local route can drive the scenario live, report the affected scenario as "untested"`,
-	} {
-		if !strings.Contains(testPrompt, want) {
-			t.Errorf("test prompt missing local-setup fallback %q:\n%s", want, truncate(testPrompt, 4000))
-		}
+	if !strings.Contains(testPrompt, "do not search the host machine for it and do not install it") {
+		t.Errorf("test prompt is missing the no-search, no-install rule:\n%s", truncate(testPrompt, 4000))
+	}
+	if strings.Contains(testPrompt, "obtain, install, or build the tool") {
+		t.Errorf("test prompt still sends the agent to set up a missing tool:\n%s", truncate(testPrompt, 4000))
 	}
 
-	// Role neutrality: only Test may set up disposable tools and has a
-	// scenario-shaped untested result; neither belongs in Review.
-	if strings.Contains(reviewPrompt, "obtain, install, or build the tool inside the disposable workspace") {
-		t.Errorf("review prompt leaked Test-only tool setup permission:\n%s", truncate(reviewPrompt, 4000))
-	}
+	// Role neutrality: only Test has a scenario-shaped untested result, so it
+	// does not belong in Review.
 	if strings.Contains(reviewPrompt, testOnlyUntestedFallback) {
 		t.Errorf("review prompt leaked the Test-only scenario untested fallback:\n%s", truncate(reviewPrompt, 4000))
 	}

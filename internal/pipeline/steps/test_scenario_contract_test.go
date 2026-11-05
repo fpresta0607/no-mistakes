@@ -66,12 +66,11 @@ func TestTestStep_PromptBoundsCompletionAndStatesBudget(t *testing.T) {
 
 // TestTestStep_PromptDerivesScenariosAndMarksLive pins the live-validation
 // prompt contract: the step asks for named scenarios driven against the real
-// product, agent-owned workarounds (disposable, isolated setups it builds
-// itself) to get each scenario live, an explicit live marking that a unit test
-// cannot claim, untested reserved for scenarios that are truly impossible to
-// drive live with a reason saying what was tried, and a verdict. The
-// pre-contract framing that let a green unit-test run stand in for driving the
-// product must be gone.
+// product with what already exists, an explicit live marking that a unit test
+// cannot claim, untested for a scenario that needs something absent with a
+// reason naming what is missing, and a verdict. The pre-contract framing that
+// let a green unit-test run stand in for driving the product must be gone, and
+// so must the duty to build what is missing.
 func TestTestStep_PromptDerivesScenariosAndMarksLive(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -150,6 +149,7 @@ func TestTestStep_PromptDerivesScenariosAndMarksLive(t *testing.T) {
 		"No environment was provided",
 		"Everything you build",
 		"obtain, install, or build the tool",
+		"downloaded or built tools",
 	} {
 		if strings.Contains(prompt, forbidden) {
 			t.Errorf("evidence prompt still carries pre-contract framing %q", forbidden)
