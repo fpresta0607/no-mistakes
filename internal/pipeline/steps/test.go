@@ -433,7 +433,7 @@ Evidence:
 - Include a concise "testing_summary" sentence describing what you exercised and the overall result.
 - The "testing_summary" must account for the complete test step: baseline commands that already ran, scenarios driven, manual or evidence-producing checks, artifacts gathered, and the overall result.
 - Record the exact tests, manual checks, and evidence-producing steps you ran in a "tested" array. Prefer concrete commands or test selectors wrapped in backticks.
-- Always include an "artifacts" array. Leave it empty when you produced no reviewer-visible evidence artifacts. Use artifact path for file artifacts, artifact url for externally visible artifacts, and artifact content for short logs or command output that should be shown directly in the PR.
+- Always include an "artifacts" array. Leave it empty when you produced no reviewer-visible evidence artifacts. Use artifact path for file artifacts, artifact url for externally visible artifacts, and artifact content for a short excerpt of logs or command output that should be shown directly in the PR. Evidence files stay private unless the repository publishes them: the PR names them by label and digest, so a reader sees their bytes only through what you put in artifact content. Artifact content is published, so it must never hold a captured agent prompt, execution context, temporary paths, or run identifiers.
 - If a scenario fails, determine whether the problem is a real product/code failure, a setup/environment problem you can fix, or a flaky/infrastructure issue.
 - If the issue is setup-related and fixable, fix it and re-drive that scenario.
 

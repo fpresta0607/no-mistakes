@@ -17,6 +17,10 @@ const (
 	WorktreesPlaceholder = "{worktrees}"
 )
 
+// EvidencePlaceholder replaces a run's evidence directory, <root>/<run-id>:
+// home redaction alone leaves the run ID and the directory layout standing.
+const EvidencePlaceholder = "{run-evidence}"
+
 // RedactWorktrees rewrites the run's worktree root, and as a fallback any path
 // into worktreesRoot, to the worktree placeholders. Call it before RedactText:
 // once the home prefix is "~", these roots no longer match. Either argument
@@ -41,6 +45,16 @@ func RedactWorktrees(text, runWorktree, worktreesRoot string) string {
 			}
 			return repoID, WorktreesPlaceholder
 		})
+	}
+	return text
+}
+
+// RedactRunEvidence rewrites the run's evidence directory to
+// EvidencePlaceholder. Call it before RedactText: once the home prefix is "~",
+// the directory no longer matches. An empty argument changes nothing.
+func RedactRunEvidence(text, runEvidence string) string {
+	for _, root := range pathSpellings(runEvidence) {
+		text = replacePathPrefix(text, root, func(string) (int, string) { return 0, EvidencePlaceholder })
 	}
 	return text
 }

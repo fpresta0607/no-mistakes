@@ -229,3 +229,23 @@ func TestWithSteering_EveryAgentOnlyAddsNewCommits(t *testing.T) {
 		}
 	}
 }
+
+func TestCarriesCapturedPrompt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+		want bool
+	}{
+		{name: "steering preamble", text: WorktreeSteering("/evidence"), want: true},
+		{name: "execution context section", text: ExecutionContextPromptSection("/work/tree"), want: true},
+		{name: "ordinary command output", text: "ok  	example.com/widgets	0.31s", want: false},
+		{name: "a reader's note about the workspace", text: "The workspace boundary was respected.", want: false},
+		{name: "empty", text: "", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CarriesCapturedPrompt(tc.text); got != tc.want {
+				t.Errorf("CarriesCapturedPrompt(%q) = %v, want %v", tc.text, got, tc.want)
+			}
+		})
+	}
+}

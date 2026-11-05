@@ -3,7 +3,10 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 )
+
+const steeringHeading = "Workspace boundary (important):"
 
 // WorktreeSteering renders the preamble prepended to every pipeline agent
 // prompt. It keeps the agent's writes inside the git worktree and steers it
@@ -43,7 +46,7 @@ func WorktreeSteering(evidenceRoot string) string {
 	if location == "" {
 		location = "the run's managed evidence directory"
 	}
-	return fmt.Sprintf(`Workspace boundary (important):
+	return fmt.Sprintf(steeringHeading+`
 - Confine source, project, user-data, and system file changes to the current working directory, which is a git worktree. Do not intentionally create, modify, move, or delete those files anywhere outside it.
 - Do not modify system state outside the worktree. In particular, do not install or upgrade system packages (for example brew install/upgrade, or other system package managers), do not modify applications under /Applications, and do not change global or user-level tool configuration.
 - This is prompt steering, not true enforcement: treat the worktree boundary as a soft boundary you must follow.
@@ -55,6 +58,13 @@ func WorktreeSteering(evidenceRoot string) string {
 - Only add new commits on top of the current HEAD. Never amend, squash, reword, reorder, drop, or reset an existing commit, and never otherwise rewrite history, unless your prompt explicitly asks you to run or continue a rebase or merge. The pipeline records the head it validated, and a rewritten history strands the run. This holds even when a finding or instruction asks you to change a commit message or an existing commit: make any file changes it needs as new work, and report that you left history unchanged.
 
 `, location)
+}
+
+// CarriesCapturedPrompt reports whether text holds a pipeline prompt's fixed
+// steering or execution-context wording, the mark of a prompt captured from a
+// run rather than text written for a reader.
+func CarriesCapturedPrompt(text string) bool {
+	return strings.Contains(text, steeringHeading) || strings.Contains(text, executionContextOpening)
 }
 
 // steeredAgent wraps an Agent and prepends the steering preamble to each prompt.

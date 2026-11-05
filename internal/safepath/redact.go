@@ -1,6 +1,6 @@
 // Package safepath keeps operator filesystem identity - home directory paths,
-// and run worktree paths (RedactWorktrees) - out of the text a caller passes
-// it.
+// run worktree paths (RedactWorktrees), and the run's evidence directory
+// (RedactRunEvidence) - out of the text a caller passes it.
 //
 // It guarantees nothing on its own about what no-mistakes publishes: coverage
 // is exactly the set of publication boundaries that call it. Today that is the
