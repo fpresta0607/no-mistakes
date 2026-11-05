@@ -340,7 +340,7 @@ type collectedFile struct {
 // the exclusion belongs here rather than at a caller: an excluded directory is
 // skipped WHOLE, so its contents are never published and never counted against
 // the size and file-count budgets either - otherwise unpublishable content
-// could still fail the publication and drop real evidence back to local links.
+// could still fail the publication and leave real evidence unpublished.
 func collectFiles(root string, exclude []string) ([]collectedFile, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, nil
