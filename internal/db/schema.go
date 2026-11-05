@@ -129,14 +129,6 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     created_at           INTEGER NOT NULL
 );
 
--- The daemon holds one connection, so the per-run step and per-step round
--- lookups behind get_run and gate_context must not scan all history.
-CREATE INDEX IF NOT EXISTS idx_step_results_run_order
-    ON step_results (run_id, step_order, id);
-
-CREATE INDEX IF NOT EXISTS idx_step_rounds_step_round
-    ON step_rounds (step_result_id, round);
-
 CREATE TABLE IF NOT EXISTS validation_admissions (
     predecessor_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
     child_id TEXT NOT NULL UNIQUE REFERENCES runs(id) ON DELETE CASCADE,
@@ -531,4 +523,7 @@ CREATE INDEX IF NOT EXISTS idx_step_rounds_step_round ON step_rounds (step_resul
 CREATE INDEX IF NOT EXISTS idx_runs_repo_branch_created_id ON runs (repo_id, branch, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_status_created_id ON runs (status, created_at DESC, id DESC);
 COMMIT;`,
+	// An earlier release's copy of idx_step_results_run_order_id, under another
+	// name. Left in place, a database that has it maintains both on every write.
+	`DROP INDEX IF EXISTS idx_step_results_run_order`,
 }

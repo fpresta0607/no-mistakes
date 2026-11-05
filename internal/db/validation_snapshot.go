@@ -45,7 +45,7 @@ func readTerminalSnapshot(tx *sql.Tx, runID string) (*TerminalSnapshot, error) {
 		return nil, err
 	}
 	snapshot.Gates = gates.String
-	rows, err := tx.Query(`SELECT `+stepResultColumns+`, round_started_at, override_reason, skip_reason, approval_reason FROM step_results WHERE run_id = ? ORDER BY step_order, id`, runID)
+	rows, err := tx.Query(`SELECT `+stepResultColumns+`, last_activity_at, last_activity, agent_pid, auto_fix_limit, round_started_at, override_reason, skip_reason, approval_reason FROM step_results WHERE run_id = ? ORDER BY step_order, id`, runID)
 	if err != nil {
 		return nil, err
 	}

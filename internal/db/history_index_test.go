@@ -59,6 +59,33 @@ func dropHistoryIndexes(t *testing.T, d *DB) {
 	}
 }
 
+func TestOpenDropsTheDuplicateStepResultsIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`CREATE INDEX idx_step_results_run_order ON step_results (run_id, step_order, id)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+
+	if columns := indexColumns(t, reopened, "idx_step_results_run_order"); len(columns) != 0 {
+		t.Fatalf("duplicate index survived with columns %v", columns)
+	}
+	if columns := indexColumns(t, reopened, "idx_step_results_run_order_id"); len(columns) == 0 {
+		t.Fatal("reopening lost the step history index")
+	}
+}
+
 func indexColumns(t *testing.T, d *DB, name string) []string {
 	t.Helper()
 	rows, err := d.sql.Query(`SELECT name FROM pragma_index_info(?) ORDER BY seqno`, name)
