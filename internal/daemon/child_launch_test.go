@@ -6,12 +6,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/launchassert"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -34,6 +38,7 @@ func (s *childLaunchStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOut
 type childLaunchFixture struct {
 	manager  *RunManager
 	database *db.DB
+	repoID   string
 	calls    *atomic.Int32
 	evidence *atomic.Value
 	launch   func() (runID string, isStarted bool, err error)
@@ -41,9 +46,35 @@ type childLaunchFixture struct {
 
 // childLaunches are the paths that start a run without going through startRun,
 // so every rule startRun applies to a new run has to hold on them as well.
-var childLaunches = map[string]func(*testing.T) childLaunchFixture{
+var childLaunches = map[string]func(*testing.T, launchConfigurer) childLaunchFixture{
 	"authored": authoredChildLaunch,
 	"terminal": terminalChildLaunch,
+}
+
+// launchConfigurer returns the launch a parent run asserts and the default
+// branch commit a child's trusted config is read from.
+type launchConfigurer func(t *testing.T, root *paths.Paths, repo *db.Repo, head, global string) (*launchassert.Expectation, string)
+
+func assertedLaunch(_ *testing.T, _ *paths.Paths, _ *db.Repo, head, _ string) (*launchassert.Expectation, string) {
+	return launchExpectation(head), head
+}
+
+// launchRefusedByItsAgent passes the launch proof and fails in agent
+// construction: the operator's args bring project settings back to claude, and
+// the trusted default branch has since turned them off.
+func launchRefusedByItsAgent(t *testing.T, root *paths.Paths, repo *db.Repo, head, global string) (*launchassert.Expectation, string) {
+	t.Helper()
+	claudeConfig := strings.NewReplacer(
+		"agent: codex", "agent: claude",
+		"  codex: {model: fixture, effort: xhigh}", "  claude: {model: fixture, effort: xhigh}",
+		"  codex: ['-c', 'service_tier=\"default\"']", "  claude: ['--setting-sources', 'project,user']",
+	).Replace(global)
+	if err := os.WriteFile(root.ConfigFile(), []byte(claudeConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	profile := []agentcfg.Selection{{Harness: types.AgentClaude, Model: "fixture", Effort: agentcfg.EffortXHigh}}
+	assertion := &launchassert.Expectation{TrustedSHA: head, Profiles: map[string][]agentcfg.Selection{"primary": profile, "reviewer": profile, "fixer": profile}}
+	return assertion, commitDefaultBranchConfig(t, repo.WorkingPath, "disable_project_settings: true\n")
 }
 
 func childLaunchFactory(calls *atomic.Int32, evidence *atomic.Value) StepFactory {
@@ -56,11 +87,11 @@ func childLaunchFactory(calls *atomic.Int32, evidence *atomic.Value) StepFactory
 	}
 }
 
-func authoredChildLaunch(t *testing.T) childLaunchFixture {
+func authoredChildLaunch(t *testing.T, configure launchConfigurer) childLaunchFixture {
 	t.Helper()
 	calls, evidence := &atomic.Int32{}, &atomic.Value{}
-	manager, database, _, request, _ := authoredAdmissionFixture(t, childLaunchFactory(calls, evidence))
-	return childLaunchFixture{manager: manager, database: database, calls: calls, evidence: evidence, launch: func() (string, bool, error) {
+	manager, database, repo, request, _ := authoredAdmissionFixtureFor(t, childLaunchFactory(calls, evidence), configure)
+	return childLaunchFixture{manager: manager, database: database, repoID: repo.ID, calls: calls, evidence: evidence, launch: func() (string, bool, error) {
 		result, err := manager.validateAuthored(context.Background(), request, os.Getpid())
 		if err != nil {
 			return "", false, err
@@ -69,14 +100,14 @@ func authoredChildLaunch(t *testing.T) childLaunchFixture {
 	}}
 }
 
-func terminalChildLaunch(t *testing.T) childLaunchFixture {
+func terminalChildLaunch(t *testing.T, configure launchConfigurer) childLaunchFixture {
 	t.Helper()
 	calls, evidence := &atomic.Int32{}, &atomic.Value{}
-	manager, p, database, repo, head, _, _ := launchAssertionFixture(t, childLaunchFactory(calls, evidence))
-	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature")
+	manager, p, database, repo, head, _, global := launchAssertionFixture(t, childLaunchFactory(calls, evidence))
+	assertion, _ := configure(t, p, repo, head, global)
+	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature", head)
 	gate := p.RepoDir(repo.ID)
 	gitCmd(t, gate, "update-ref", "refs/heads/feature", head)
-	assertion := launchExpectation(head)
 	proof, err := assertion.Verify(head, assertion.Profiles)
 	if err != nil {
 		t.Fatal(err)
@@ -114,7 +145,7 @@ func terminalChildLaunch(t *testing.T) childLaunchFixture {
 	gitCmd(t, managed, "add", "correction.txt")
 	gitCmd(t, managed, "commit", "-m", "correction")
 	request := ipc.RecoverTerminalParams{RepoID: repo.ID, RunID: run.ID, Branch: run.Branch, CallerDir: repo.WorkingPath, SnapshotDigest: observed.Digest(), Reason: "continue from the correction"}
-	return childLaunchFixture{manager: manager, database: database, calls: calls, evidence: evidence, launch: func() (string, bool, error) {
+	return childLaunchFixture{manager: manager, database: database, repoID: repo.ID, calls: calls, evidence: evidence, launch: func() (string, bool, error) {
 		result, err := manager.recoverTerminal(context.Background(), request, os.Getpid())
 		if err != nil {
 			return "", false, err
@@ -154,7 +185,7 @@ func TestChildReplayLeavesAQueuedChildToTheQueue(t *testing.T) {
 	for name, build := range childLaunches {
 		for _, isRestartPending := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/restart_pending=%t", name, isRestartPending), func(t *testing.T) {
-				fixture := build(t)
+				fixture := build(t, assertedLaunch)
 				manager := fixture.manager
 				appendGlobalConfig(t, manager, "max_concurrent_runs: 1\n")
 				const heldSlot = "held-slot"
@@ -199,7 +230,7 @@ func TestChildReplayLeavesAQueuedChildToTheQueue(t *testing.T) {
 func TestChildLaunchIsRefusedWhileARestartIsPending(t *testing.T) {
 	for name, build := range childLaunches {
 		t.Run(name, func(t *testing.T) {
-			fixture := build(t)
+			fixture := build(t, assertedLaunch)
 			fixture.manager.restart.pending.Store(true)
 
 			runID, isStarted, err := fixture.launch()
@@ -214,11 +245,35 @@ func TestChildLaunchIsRefusedWhileARestartIsPending(t *testing.T) {
 	}
 }
 
+// Agent construction holds fail-closed launch checks the proof does not cover.
+// A launch it refuses records nothing, because an accepted child would hold the
+// branch for a run that never started.
+func TestChildLaunchRefusedByItsAgentRecordsNothing(t *testing.T) {
+	for name, build := range childLaunches {
+		t.Run(name, func(t *testing.T) {
+			fixture := build(t, launchRefusedByItsAgent)
+
+			runID, isStarted, err := fixture.launch()
+
+			if err == nil || !strings.Contains(err.Error(), "does not neutralize") || isStarted {
+				t.Fatalf("launch = %q, %v, %v; want the agent's refusal", runID, isStarted, err)
+			}
+			runs, err := fixture.database.GetRunsByRepo(fixture.repoID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(runs) != 1 {
+				t.Fatalf("refused launch left %d runs on the repository, want only the parent", len(runs))
+			}
+		})
+	}
+}
+
 // A child is a new run, so its evidence goes under evidence_dir like any other.
 func TestChildRunKeepsEvidenceUnderEvidenceDir(t *testing.T) {
 	for name, build := range childLaunches {
 		t.Run(name, func(t *testing.T) {
-			fixture := build(t)
+			fixture := build(t, assertedLaunch)
 			root := t.TempDir()
 			appendGlobalConfig(t, fixture.manager, "evidence_dir: "+filepath.ToSlash(root)+"\n")
 

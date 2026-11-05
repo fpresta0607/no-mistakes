@@ -255,6 +255,25 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil {
 			return "", err
 		}
+		// Agent construction holds fail-closed launch checks, so it comes before
+		// acceptance and a refused launch records nothing. A new child has no
+		// directory yet, so its agent is steered to the root it will go under.
+		var evidenceRoot string
+		if event != nil {
+			evidenceRoot = pipelineEvidenceRoot(m.paths, cfg, &event.InitialChild)
+		} else if evidenceRoot, err = m.newRunEvidenceRoot(global); err != nil {
+			return "", err
+		}
+		ag, _, err := newResolvedPipelineAgent(ctx, cfg, roles, evidenceRoot, forgeEnvironment(forge), quotaRecord)
+		if err != nil {
+			return "", err
+		}
+		isScheduled := false
+		defer func() {
+			if !isScheduled {
+				_ = ag.Close()
+			}
+		}()
 		if err := proveAuthoredCheckout(ctx, params.CallerDir, &request, repo); err != nil {
 			return "", err
 		}
@@ -280,10 +299,6 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 				}
 			}
 			worktreeRoot := filepath.Dir(layout.Dir(repo.ID, repo.WorkingPath, "pending"))
-			evidenceRoot, err := m.newRunEvidenceRoot(global)
-			if err != nil {
-				return "", err
-			}
 			event, _, err = m.db.AcceptValidationAdmission(ctx, db.ValidationAdmission{Request: request, Snapshot: *snapshot, AssertionProof: proof, WorktreeRoot: worktreeRoot, EvidenceRoot: evidenceRoot, Plan: plan, Gates: gates, Steps: stepNames, Operator: strconv.Itoa(operator)})
 			if err != nil {
 				return "", err
@@ -327,14 +342,8 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if ctx.Err() != nil {
 			return child.ID, nil
 		}
-		// The agent is built only now, because the accepted child names the
-		// directory its evidence goes under.
-		ag, _, err := newResolvedPipelineAgent(ctx, cfg, roles, pipelineEvidenceRoot(m.paths, cfg, child), forgeEnvironment(forge), quotaRecord)
-		if err != nil {
-			return "", err
-		}
 		m.resumeRecoveredRun(recoveredRunPlan{run: child, repo: repo, workDir: workDir, gateDir: gateDir, cfg: cfg, agent: ag, steps: executionSteps, forge: forge, admission: event})
-		result.Started = true
+		isScheduled, result.Started = true, true
 		return child.ID, nil
 	})
 	return result, err

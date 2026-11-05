@@ -203,6 +203,25 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if err != nil {
 			return "", err
 		}
+		// Agent construction holds fail-closed launch checks, so it comes before
+		// acceptance and a refused launch records nothing. A new successor has no
+		// directory yet, so its agent is steered to the root it will go under.
+		var evidenceRoot string
+		if event != nil {
+			evidenceRoot = pipelineEvidenceRoot(m.paths, cfg, &event.Successor)
+		} else if evidenceRoot, err = m.newRunEvidenceRoot(globalCfg); err != nil {
+			return "", err
+		}
+		ag, _, err := newResolvedPipelineAgent(ctx, cfg, roleConfigs, evidenceRoot, forgeEnvironment(forge), quotaRecord)
+		if err != nil {
+			return "", err
+		}
+		isScheduled := false
+		defer func() {
+			if !isScheduled {
+				_ = ag.Close()
+			}
+		}()
 		callerHead, err := git.HeadSHA(ctx, request.CallerDir)
 		if err != nil {
 			return "", err
@@ -222,10 +241,6 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 			}
 		}
 		if event == nil {
-			evidenceRoot, err := m.newRunEvidenceRoot(globalCfg)
-			if err != nil {
-				return "", err
-			}
 			event, _, err = m.db.AdoptTerminalCandidate(ctx, db.TerminalAdoption{Snapshot: *original, SuccessorID: successorID, WorktreeRoot: filepath.Dir(workDir), EvidenceRoot: evidenceRoot, Plan: plan, Gates: gates, StepNames: stepNames, CandidateSHA: source.Head, RetainedSHA: source.RetainedHead, CandidateTree: source.Tree, SourceRef: candidateRef, GateHead: source.GateHead, RecoveryHead: source.RecoveryHead, CallerDir: request.CallerDir, CallerHead: callerHead, ManagedDir: source.ManagedDir, Reason: request.Reason, Operator: strconv.Itoa(operator), Assertion: assertion, Proof: proof})
 			if err != nil {
 				return "", err
@@ -267,17 +282,11 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if ctx.Err() != nil || isChildScheduled {
 			return fresh.ID, nil
 		}
-		// The agent is built only now, because the accepted successor names the
-		// directory its evidence goes under.
-		ag, _, err := newResolvedPipelineAgent(ctx, cfg, roleConfigs, pipelineEvidenceRoot(m.paths, cfg, fresh), forgeEnvironment(forge), quotaRecord)
-		if err != nil {
-			return "", err
-		}
 		m.subMu.Lock()
 		delete(m.completedRuns, fresh.ID)
 		m.subMu.Unlock()
 		m.resumeRecoveredRun(recoveredRunPlan{run: fresh, repo: repo, workDir: workDir, gateDir: service.GateDir, cfg: cfg, agent: ag, steps: execSteps, forge: forge, terminal: event})
-		result.Started = true
+		isScheduled, result.Started = true, true
 		return fresh.ID, nil
 	})
 	return result, err

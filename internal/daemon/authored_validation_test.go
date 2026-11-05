@@ -388,10 +388,15 @@ func (step *authoredFixtureStep) Execute(*pipeline.StepContext) (*pipeline.StepO
 
 func authoredAdmissionFixture(t *testing.T, factory StepFactory) (*RunManager, *db.DB, *db.Repo, ipc.ValidateAuthoredParams, string) {
 	t.Helper()
-	manager, root, database, repo, head, _, _ := launchAssertionFixture(t, factory)
+	return authoredAdmissionFixtureFor(t, factory, assertedLaunch)
+}
+
+func authoredAdmissionFixtureFor(t *testing.T, factory StepFactory, configure launchConfigurer) (*RunManager, *db.DB, *db.Repo, ipc.ValidateAuthoredParams, string) {
+	t.Helper()
+	manager, root, database, repo, head, _, global := launchAssertionFixture(t, factory)
 	gitCmd(t, root.RepoDir(repo.ID), "config", "url."+filepath.ToSlash(root.RepoDir(repo.ID))+".insteadOf", repo.UpstreamURL)
 	gitCmd(t, root.RepoDir(repo.ID), "remote", "set-url", "origin", repo.UpstreamURL)
-	assertion := launchExpectation(head)
+	assertion, trustedSHA := configure(t, root, repo, head, global)
 	proof, err := assertion.Verify(head, assertion.Profiles)
 	if err != nil {
 		t.Fatal(err)
@@ -419,9 +424,11 @@ func authoredAdmissionFixture(t *testing.T, factory StepFactory) (*RunManager, *
 	if err != nil {
 		t.Fatal(err)
 	}
+	fresh := *assertion
+	fresh.TrustedSHA = trustedSHA
 	request := authoredvalidation.Request{PredecessorID: parent.ID, SnapshotDigest: snapshot.Digest(), RepoID: repo.ID, Branch: "feature", CallerDir: caller,
 		CandidateSHA: gitOutput(t, caller, "rev-parse", "HEAD"), CandidateTree: gitOutput(t, caller, "rev-parse", "HEAD^{tree}"), LaunchNonce: "original-launch", ValidationGeneration: "original-generation", IntentDigest: digest,
-		ControllerPolicy: authoredvalidation.ControllerPolicy{SHA256: strings.Repeat("a", 64), Class: "ordinary", ReviewCycles: 2}, LaunchAssertion: assertion, HistoricalSourceCompleteness: "unknown", Reason: "Validate this authored candidate without certifying historical lost source"}
+		ControllerPolicy: authoredvalidation.ControllerPolicy{SHA256: strings.Repeat("a", 64), Class: "ordinary", ReviewCycles: 2}, LaunchAssertion: &fresh, HistoricalSourceCompleteness: "unknown", Reason: "Validate this authored candidate without certifying historical lost source"}
 	return manager, database, repo, ipc.ValidateAuthoredParams{Request: request, CallerDir: caller}, root.RepoDir(repo.ID)
 }
 
