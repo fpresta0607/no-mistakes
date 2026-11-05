@@ -518,7 +518,8 @@ func TestPushStep_CatchAllCommitSubject(t *testing.T) {
 			gitCmd(t, upstream, "init", "--bare")
 			dir, baseSHA, headSHA := setupGitRepo(t)
 			gitCmd(t, dir, "remote", "add", "origin", upstream)
-			if err := os.WriteFile(filepath.Join(dir, "leftover.txt"), []byte("formatted\n"), 0o644); err != nil {
+			// A tracked edit: an untracked file already here is never committed.
+			if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("formatted\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 
