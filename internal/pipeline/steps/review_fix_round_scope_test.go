@@ -111,6 +111,11 @@ func TestFixRoundCarriedPaths(t *testing.T) {
 func fixRoundScopeHarness(t *testing.T, mock *sessionMockAgent) (*pipeline.Executor, *db.DB, *db.Run, *db.Repo, string) {
 	t.Helper()
 	workDir, baseSHA, headSHA := twoFileRepo(t)
+	return fixRoundScopeHarnessOn(t, mock, workDir, baseSHA, headSHA)
+}
+
+func fixRoundScopeHarnessOn(t *testing.T, mock *sessionMockAgent, workDir, baseSHA, headSHA string) (*pipeline.Executor, *db.DB, *db.Run, *db.Repo, string) {
+	t.Helper()
 	ensureHermeticOrigin(t, workDir)
 	database, err := db.Open(filepath.Join(t.TempDir(), "state.sqlite"))
 	if err != nil {
@@ -270,7 +275,7 @@ func TestReviewLoop_DeferredFindingKeepsPendingFindingUnverified(t *testing.T) {
 			case 1:
 				return &agent.Result{Output: []byte(`{"findings":[{"id":"f-1","severity":"error","file":"feature.txt","line":1,"description":"original bug","action":"auto-fix"}],"summary":"bug","risk_level":"medium","risk_rationale":"bug","risk_scope":"source-or-external","reviewed_paths":["feature.txt","feature2.txt"]}`)}
 			case 2:
-				return &agent.Result{Output: []byte(`{"findings":[{"id":"note","severity":"info","file":"feature.txt","line":1,"description":"still relevant","action":"no-op"},{"id":"f-2","severity":"error","file":"feature2.txt","line":1,"description":"second bug","action":"auto-fix"}],"summary":"issues","risk_level":"medium","risk_rationale":"issues","risk_scope":"source-or-external","reviewed_paths":["feature.txt","feature2.txt"]}`)}
+				return &agent.Result{Output: []byte(`{"findings":[{"id":"note","severity":"info","file":"feature.txt","line":1,"description":"still relevant","action":"no-op"},{"id":"f-2","severity":"error","file":"feature2.txt","line":1,"description":"second bug","action":"auto-fix","failing_input":"an empty name","wrong_result":"the record is lost"}],"summary":"issues","risk_level":"medium","risk_rationale":"issues","risk_scope":"source-or-external","reviewed_paths":["feature.txt","feature2.txt"]}`)}
 			default:
 				return &agent.Result{Output: []byte(`{"findings":[{"id":"decision","severity":"warning","file":"feature2.txt","line":1,"description":"needs decision","action":"ask-user"}],"summary":"decision","risk_level":"medium","risk_rationale":"decision","risk_scope":"source-or-external","reviewed_paths":["feature2.txt"]}`)}
 			}
@@ -362,8 +367,8 @@ func TestReviewLoop_RepairScopeIncludesUnchangedHeldFile(t *testing.T) {
 	if !ok || !strings.Contains(held, "- feature2.txt\n") || !strings.Contains(carried, "- feature3.txt\n") {
 		t.Fatalf("uncovered file must be held and covered untouched file carried: %s", prompt)
 	}
-	want := "the branch changes relative to base commit " + run.BaseSHA + " in the changed files this review is held to, including this fix round's changes since starting head " + startingHead
+	want := "only this repair's change since starting head " + startingHead + ", plus the branch changes relative to base commit " + run.BaseSHA + " in the files no earlier round judged"
 	if !strings.Contains(prompt, want) {
-		t.Fatalf("review scope must include branch changes in all held files, want %q in %s", want, prompt)
+		t.Fatalf("review scope must name the repair and the files never judged, want %q in %s", want, prompt)
 	}
 }

@@ -234,6 +234,11 @@ type Finding struct {
 	// every non-CI finding.
 	Check   string `json:"check,omitempty"`
 	CheckID string `json:"check_id,omitempty"`
+	// FailingInput and WrongResult are a repair round's concrete failure: the
+	// input that reaches the defect and the wrong result it produces. Naming
+	// both is what lets a finding outside the repair keep blocking.
+	FailingInput string `json:"failing_input,omitempty"`
+	WrongResult  string `json:"wrong_result,omitempty"`
 }
 
 // TestScenario is one named end-to-end scenario the test step derived from the
@@ -336,6 +341,8 @@ type findingWire struct {
 	Category            string `json:"category,omitempty"`
 	Check               string `json:"check,omitempty"`
 	CheckID             string `json:"check_id,omitempty"`
+	FailingInput        string `json:"failing_input,omitempty"`
+	WrongResult         string `json:"wrong_result,omitempty"`
 	RequiresHumanReview *bool  `json:"requires_human_review,omitempty"`
 }
 
@@ -383,12 +390,19 @@ type Findings struct {
 	// ONLY by appearing here. Silence keeps it, so covering a file can no
 	// longer clear an unrelated finding in it. Empty on every other payload.
 	WithdrawnFindings []WithdrawnFinding `json:"withdrawn_findings,omitempty"`
-	Tested            []string           `json:"tested,omitempty"`
-	TestingSummary    string             `json:"testing_summary,omitempty"`
-	Artifacts         []TestArtifact     `json:"artifacts,omitempty"`
-	Scenarios         []TestScenario     `json:"scenarios,omitempty"`
-	Verdict           string             `json:"verdict,omitempty"`
-	TestedHeadSHA     string             `json:"tested_head_sha,omitempty"`
+	// ClosedFindings is a repair round's positive verdict: the selected findings
+	// the rereview confirmed the repair closed. Empty on every other payload.
+	ClosedFindings []string `json:"closed_findings,omitempty"`
+	// FollowUps is step-owned, never agent output: this round's findings outside
+	// the repair's change that name no concrete failure. They are on the record
+	// and block nothing, so they never join Items or the outstanding set.
+	FollowUps      []Finding      `json:"follow_ups,omitempty"`
+	Tested         []string       `json:"tested,omitempty"`
+	TestingSummary string         `json:"testing_summary,omitempty"`
+	Artifacts      []TestArtifact `json:"artifacts,omitempty"`
+	Scenarios      []TestScenario `json:"scenarios,omitempty"`
+	Verdict        string         `json:"verdict,omitempty"`
+	TestedHeadSHA  string         `json:"tested_head_sha,omitempty"`
 	// UnvalidatedSinceSHA is set only on a Test budget-cut park: the head its
 	// unvalidated-work check measured from, carried so a repeated cut before any
 	// evidence turn completes re-measures from that same head.
@@ -409,6 +423,8 @@ type findingsWire struct {
 	ReviewedPaths       []string             `json:"reviewed_paths"`
 	ReviewCoverageScope *ReviewCoverageScope `json:"review_coverage_scope"`
 	WithdrawnFindings   []WithdrawnFinding   `json:"withdrawn_findings"`
+	ClosedFindings      []string             `json:"closed_findings"`
+	FollowUps           []Finding            `json:"follow_ups"`
 	Tested              []string             `json:"tested"`
 	TestingSummary      string               `json:"testing_summary"`
 	Artifacts           []TestArtifact       `json:"artifacts"`
@@ -440,6 +456,8 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		ReviewedPaths:       wire.ReviewedPaths,
 		ReviewCoverageScope: wire.ReviewCoverageScope,
 		WithdrawnFindings:   wire.WithdrawnFindings,
+		ClosedFindings:      wire.ClosedFindings,
+		FollowUps:           wire.FollowUps,
 		Tested:              wire.Tested,
 		TestingSummary:      wire.TestingSummary,
 		Artifacts:           wire.Artifacts,
@@ -732,6 +750,8 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	f.Category = wire.Category
 	f.Check = wire.Check
 	f.CheckID = wire.CheckID
+	f.FailingInput = wire.FailingInput
+	f.WrongResult = wire.WrongResult
 	if f.Action == "" && wire.RequiresHumanReview != nil {
 		if *wire.RequiresHumanReview {
 			f.Action = ActionAskUser

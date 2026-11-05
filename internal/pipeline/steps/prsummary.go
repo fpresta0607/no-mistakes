@@ -1514,6 +1514,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 				inner.WriteString("✅ No issues found.\n")
 			}
 			writeTestedDetails(&inner, sr, &findings, flavor)
+			writeReviewFollowUps(&inner, &findings, flavor)
 			inner.WriteString("\n")
 			continue
 		}
@@ -1524,6 +1525,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 			inner.WriteString(fmt.Sprintf("%s still open:\n\n", countFindingsBySeverity(&findings)))
 		}
 		writeFindingItems(&inner, sr, &findings, flavor)
+		writeReviewFollowUps(&inner, &findings, flavor)
 		inner.WriteString("\n")
 	}
 
@@ -1601,18 +1603,34 @@ func fixRoundLine(r *db.StepRound) string {
 // followed by any test command details for the test step.
 func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Findings, flavor prBodyFlavor) {
 	for _, f := range findings.Items {
-		emoji := severityEmoji(f.Severity)
-		loc := ""
-		if f.File != "" {
-			loc = fmt.Sprintf("`%s", escapePRText(f.File, flavor))
-			if f.Line > 0 {
-				loc += fmt.Sprintf(":%d", f.Line)
-			}
-			loc += "` - "
-		}
-		b.WriteString(fmt.Sprintf("- %s %s%s\n", emoji, loc, escapePRText(f.Description, flavor)))
+		writeFindingLine(b, f, flavor)
 	}
 	writeTestedDetails(b, sr, findings, flavor)
+}
+
+func writeFindingLine(b *strings.Builder, f types.Finding, flavor prBodyFlavor) {
+	emoji := severityEmoji(f.Severity)
+	loc := ""
+	if f.File != "" {
+		loc = fmt.Sprintf("`%s", escapePRText(f.File, flavor))
+		if f.Line > 0 {
+			loc += fmt.Sprintf(":%d", f.Line)
+		}
+		loc += "` - "
+	}
+	b.WriteString(fmt.Sprintf("- %s %s%s\n", emoji, loc, escapePRText(f.Description, flavor)))
+}
+
+// writeReviewFollowUps lists a repair round's findings outside the repair, so a
+// reader of the PR has what the run recorded without blocking on it.
+func writeReviewFollowUps(b *strings.Builder, findings *types.Findings, flavor prBodyFlavor) {
+	if len(findings.FollowUps) == 0 {
+		return
+	}
+	b.WriteString("\nFollow-ups outside the repair, not blocking:\n\n")
+	for _, f := range findings.FollowUps {
+		writeFindingLine(b, f, flavor)
+	}
 }
 
 // writeTestedDetails lists what the test step exercised: its live-validation

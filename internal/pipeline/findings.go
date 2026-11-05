@@ -72,6 +72,8 @@ func findingKey(item types.Finding) types.Finding {
 	item.Source = ""
 	item.UserInstructions = ""
 	item.DriverInstructions = ""
+	item.FailingInput = ""
+	item.WrongResult = ""
 	return item
 }
 
@@ -711,6 +713,8 @@ func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string, reviewedPat
 		}
 		findings.ReviewedPaths = append([]string(nil), reviewedPaths...)
 		findings.WithdrawnFindings = nil
+		findings.ClosedFindings = nil
+		findings.FollowUps = nil
 		encoded, err := types.MarshalFindingsJSON(findings)
 		if err != nil {
 			return existingRaw
@@ -734,6 +738,9 @@ func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string, reviewedPat
 	merged.ReviewedPaths = append([]string(nil), reviewedPaths...)
 	if currentErr == nil {
 		merged.ReviewCoverageScope = current.ReviewCoverageScope
+		// Both describe one round, so its record never inherits an earlier one's.
+		merged.ClosedFindings = current.ClosedFindings
+		merged.FollowUps = current.FollowUps
 	}
 	merged.WithdrawnFindings = nil
 	seen := make(map[string]bool, len(merged.Items))

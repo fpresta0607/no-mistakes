@@ -241,9 +241,11 @@ Previous review findings to address:
 	// A repair round's rereview judges what the fix changed, the files of the
 	// open findings, and whatever the round before left
 	// unjudged; every other changed file keeps that round's verdict, which
-	// joins this round's coverage record below. An answer round reviews in
+	// joins this round's coverage record below. Within those files it reads the
+	// repair's own change, not the branch again. An answer round reviews in
 	// full: its starting head is already past the fix.
 	var carried []string
+	var repair *repairRoundScope
 	if sctx.Fixing && !sctx.FinalizingAnswers && sctx.ReviewStartingHeadSHA != "" {
 		sinceStart, err := git.Run(ctx, sctx.WorkDir, "diff", "--name-only", "-z", "--no-renames", sctx.ReviewStartingHeadSHA)
 		if err != nil {
@@ -255,11 +257,17 @@ Previous review findings to address:
 				deferred, err = types.ParseFindingsJSON(sctx.DeferredFindings)
 			}
 			if err == nil {
-				carried = fixRoundCarriedPaths(reviewable, sctx.PreviousReviewedPaths, changedPathList(sinceStart), append(sentToFix.Items, deferred.Items...))
+				changed := changedPathList(sinceStart)
+				open := append(sentToFix.Items, deferred.Items...)
+				carried = fixRoundCarriedPaths(reviewable, sctx.PreviousReviewedPaths, changed, open)
+				if repairRoundCanNarrow(reviewable, sctx.PreviousReviewedPaths, changed, open) {
+					repair, err = newRepairRoundScope(ctx, sctx.WorkDir, sctx.ReviewStartingHeadSHA, changed, reviewable, sctx.PreviousReviewedPaths, sentToFix, deferred.Items)
+					if err != nil {
+						return nil, err
+					}
+					reviewScope = repair.reviewScope(baseSHA)
+				}
 			}
-		}
-		if len(carried) > 0 {
-			reviewScope = fmt.Sprintf("the branch changes relative to base commit %s in the changed files this review is held to, including this fix round's changes since starting head %s", baseSHA, sctx.ReviewStartingHeadSHA)
 		}
 	}
 
@@ -338,6 +346,10 @@ Previous review findings to address:
 	// fixer's removal rule has something to act on. It stays ask-user because
 	// whether extra surface is wanted is the author's call; the section
 	// deliberately adds no schema field or second reviewer.
+	repairSection := ""
+	if repair != nil {
+		repairSection = repair.promptSection()
+	}
 	prompt := fmt.Sprintf(
 		`Review the code changes and return structured findings with a risk assessment.
 
@@ -406,7 +418,7 @@ Risk assessment (after listing all findings):
 		reviewScope,
 		baseBranch,
 		ignorePatterns,
-		reviewCoverageSection(uncoveredReviewablePaths(carried, reviewable))+carriedVerdictSection(carried),
+		reviewCoverageSection(uncoveredReviewablePaths(carried, reviewable))+carriedVerdictSection(carried)+repairSection,
 		historySection,
 		pathInstructions,
 		agent.MemoryFilesRule,
@@ -483,11 +495,14 @@ Risk assessment (after listing all findings):
 		Purpose:    "review",
 		Workload:   workload,
 	}
+	if repair != nil {
+		opts.JSONSchema = repairReviewSchema
+	}
 	var findings Findings
 	var validationErrors []error
 	noAnswers := 0
 	if retained != nil {
-		findings, err = s.completeCoverageGaps(sctx, turnPrompt, sessionRole, opts, *retained, reviewable, askDir)
+		findings, err = s.completeCoverageGaps(sctx, turnPrompt, sessionRole, opts, *retained, reviewable, askDir, repair)
 		if err != nil {
 			return nil, err
 		}
@@ -538,6 +553,9 @@ Risk assessment (after listing all findings):
 		sctx.Log(fmt.Sprintf("dropped %d deferred pipeline-owned delivery finding(s) (owned by later push/PR/CI steps)", n))
 		findings = stripped
 	}
+	if repair != nil {
+		repair.split(sctx.Log, &findings)
+	}
 
 	// Read the conversation the turn that just ended left behind. Answers
 	// arriving mid-turn are recorded here, once, so the next COLD reviewer -
@@ -575,7 +593,7 @@ Risk assessment (after listing all findings):
 		// remainder named, so a partial or fabricated record never approves.
 		completed := findings
 		if retained == nil {
-			completed, err = s.completeCoverageGaps(sctx, turnPrompt, sessionRole, opts, findings, reviewable, askDir)
+			completed, err = s.completeCoverageGaps(sctx, turnPrompt, sessionRole, opts, findings, reviewable, askDir, repair)
 		}
 		if err != nil {
 			return nil, err
@@ -746,7 +764,7 @@ func carriedVerdictSection(carried []string) string {
 // keeps the strict coverage rule intact - the union is re-checked by
 // reviewedPathsCoverReviewable, so an out-of-scope entry from either turn
 // still fails the round and is named in the park message.
-func (s *ReviewStep) completeCoverageGaps(sctx *pipeline.StepContext, basePrompt string, role pipeline.SessionRole, opts agent.RunOpts, findings Findings, reviewable []string, askDir string) (Findings, error) {
+func (s *ReviewStep) completeCoverageGaps(sctx *pipeline.StepContext, basePrompt string, role pipeline.SessionRole, opts agent.RunOpts, findings Findings, reviewable []string, askDir string, repair *repairRoundScope) (Findings, error) {
 	if sctx.EvalReplay {
 		// Eval replay scores the review's findings against captured gold and
 		// never consumes the reviewed_paths certification, so the completion
@@ -797,6 +815,11 @@ func (s *ReviewStep) completeCoverageGaps(sctx *pipeline.StepContext, basePrompt
 	if stripped, n := stripDeferredPipelineOwnedDeliveryFindings(completion); n > 0 {
 		sctx.Log(fmt.Sprintf("dropped %d deferred pipeline-owned delivery finding(s) from the focused coverage pass (owned by later push/PR/CI steps)", n))
 		completion = stripped
+	}
+	if repair != nil {
+		repair.split(sctx.Log, &completion)
+		findings.ClosedFindings = append(findings.ClosedFindings, completion.ClosedFindings...)
+		findings.FollowUps = append(findings.FollowUps, completion.FollowUps...)
 	}
 	findings.Items = append(findings.Items, completion.Items...)
 	findings.ReviewedPaths = mergeReviewedPaths(findings.ReviewedPaths, completion.ReviewedPaths)
@@ -900,6 +923,7 @@ func parseReviewAnalyzerOutput(result *agent.Result) (Findings, error) {
 	if err := json.Unmarshal(result.Output, &findings); err != nil {
 		return findings, fmt.Errorf("validate review analyzer findings: %w", err)
 	}
+	findings.FollowUps = nil
 	findings.RiskLevel = strings.TrimSpace(findings.RiskLevel)
 	findings.RiskScope = strings.TrimSpace(findings.RiskScope)
 	if findings.RiskLevel == "" || strings.TrimSpace(findings.RiskRationale) == "" || findings.RiskScope == "" {
@@ -1051,7 +1075,13 @@ func sanitizedPreviousFindingsForPrompt(raw string) string {
 		findings.Items[i].ReviewScope = sanitizePromptText(findings.Items[i].ReviewScope)
 		findings.Items[i].Category = sanitizePromptText(findings.Items[i].Category)
 		findings.Items[i].Check = sanitizePromptText(findings.Items[i].Check)
+		findings.Items[i].FailingInput = sanitizePromptMultilineText(findings.Items[i].FailingInput)
+		findings.Items[i].WrongResult = sanitizePromptMultilineText(findings.Items[i].WrongResult)
 	}
+	// These describe the round that raised the findings and are not work for
+	// the fixer, which must not chase a follow-up.
+	findings.ClosedFindings = nil
+	findings.FollowUps = nil
 	findings.Summary = sanitizePromptMultilineText(findings.Summary)
 	if failure := findings.BaselineFailure; failure != nil {
 		for i := range failure.Tests {
