@@ -95,7 +95,8 @@ func separatesWithSingleBackslash(root string) bool {
 
 // pathSegment returns the length of the separator plus path segment name at
 // the start of rest, or 0 when rest does not start with one. A single
-// backslash counts as a separator only when singleBackslash is set.
+// backslash counts as a separator only when singleBackslash is set. Trailing
+// dots stay out of the name: they end a sentence or mark a length cap's cut.
 func pathSegment(rest string, singleBackslash bool) int {
 	sep := 0
 	switch {
@@ -109,6 +110,9 @@ func pathSegment(rest string, singleBackslash bool) int {
 	n := sep
 	for n < len(rest) && isPathNameByte(rest[n]) {
 		n++
+	}
+	for n > sep && rest[n-1] == '.' {
+		n--
 	}
 	if n == sep {
 		return 0

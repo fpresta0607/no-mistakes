@@ -147,13 +147,16 @@ func TestRedactors_RewriteAPathCutInsideTheRunID(t *testing.T) {
 		want string
 	}{
 		{name: "before an ellipsis", dir: posix, text: "log at /srv/nm/evidence/01RUN…", want: "log at " + EvidencePlaceholder + "…"},
+		{name: "before three dots", dir: posix, text: "log at /srv/nm/evidence/01RUN...", want: "log at " + EvidencePlaceholder + "..."},
 		{name: "at the end of the text", dir: posix, text: "/srv/nm/evidence/01R", want: EvidencePlaceholder},
 		{name: "backslashes", dir: windows, text: `C:\nm\evidence\01RUN…`, want: EvidencePlaceholder + "…"},
 		{name: "doubled backslashes", dir: windows, text: `C:\\nm\\evidence\\01RUN…`, want: EvidencePlaceholder + "…"},
 		{name: "git bash", dir: windows, text: "/c/nm/evidence/01RUN…", want: EvidencePlaceholder + "…"},
 		{name: "before the run ID starts", dir: posix, text: "/srv/nm/evidence/…", want: "/srv/nm/evidence/…"},
+		{name: "before the run ID starts, three dots", dir: posix, text: "/srv/nm/evidence/...", want: "/srv/nm/evidence/..."},
 		{name: "another run's directory", dir: posix, text: "/srv/nm/evidence/01OTHER/out.log", want: "/srv/nm/evidence/01OTHER/out.log"},
 		{name: "a name that only starts alike", dir: posix, text: "/srv/nm/evidence/01RUNX…", want: "/srv/nm/evidence/01RUNX…"},
+		{name: "a name that only starts alike, before a period", dir: posix, text: "/srv/nm/evidence/01RUNX.", want: "/srv/nm/evidence/01RUNX."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := RedactRunEvidence(tc.text, tc.dir); got != tc.want {
@@ -165,5 +168,39 @@ func TestRedactors_RewriteAPathCutInsideTheRunID(t *testing.T) {
 	const text = "/srv/trees/ab12/01RUN…"
 	if got, want := RedactWorktrees(text, "/srv/trees/ab12/01RUNIDFIXTURE", ""), WorktreePlaceholder+"…"; got != want {
 		t.Errorf("RedactWorktrees(%q) = %q, want %q", text, got, want)
+	}
+}
+
+// A period is a name byte, so a directory that ends a sentence reads as a longer
+// name unless the period stays out of the comparison, and it has to survive for
+// the sentence to read the same.
+func TestRedactors_RewriteADirectoryEndingASentence(t *testing.T) {
+	const dir = "/srv/nm/evidence/01RUNIDFIXTURE"
+	for _, tc := range []struct {
+		name string
+		text string
+		want string
+	}{
+		{name: "at the end of the text", text: "Logs are in /srv/nm/evidence/01RUNIDFIXTURE.", want: "Logs are in " + EvidencePlaceholder + "."},
+		{name: "before more prose", text: "In /srv/nm/evidence/01RUNIDFIXTURE. Then done.", want: "In " + EvidencePlaceholder + ". Then done."},
+		{name: "inside parentheses", text: "(see /srv/nm/evidence/01RUNIDFIXTURE.)", want: "(see " + EvidencePlaceholder + ".)"},
+		{name: "a longer name", text: "Logs are in /srv/nm/evidence/01RUNIDFIXTURE2.", want: "Logs are in /srv/nm/evidence/01RUNIDFIXTURE2."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RedactRunEvidence(tc.text, dir); got != tc.want {
+				t.Errorf("RedactRunEvidence(%q) = %q, want %q", tc.text, got, tc.want)
+			}
+		})
+	}
+
+	// A configured placement is <root>/<run-id>, outside any worktrees root, so
+	// no fallback sees it.
+	const placed = "kept in /srv/trees/01RUNIDFIXTURE."
+	if got, want := RedactWorktrees(placed, "/srv/trees/01RUNIDFIXTURE", ""), "kept in "+WorktreePlaceholder+"."; got != want {
+		t.Errorf("RedactWorktrees(%q) = %q, want %q", placed, got, want)
+	}
+	const fallback = "saw /nm/worktrees/ab12/run-0."
+	if got, want := RedactWorktrees(fallback, "", "/nm/worktrees"), "saw "+WorktreePlaceholder+"."; got != want {
+		t.Errorf("RedactWorktrees(%q) = %q, want %q", fallback, got, want)
 	}
 }

@@ -62,7 +62,7 @@ func TestPRStep_ExecuteKeepsCapturedRuntimeContextOutOfThePublishedBody(t *testi
 			sctx.Config.Test.Evidence.Compact = tc.isCompact
 
 			insertCompletedStep(t, sctx, types.StepTest, findingsJSON(t, types.Findings{
-				TestingSummary: "Rendered the PR body from a stub agent.",
+				TestingSummary: "Rendered the PR body from a stub agent in " + evidenceDir + ".",
 				Verdict:        types.TestVerdictInconclusive,
 				Scenarios: []types.TestScenario{{
 					Name:   "publish the rendered body",
@@ -113,6 +113,7 @@ func TestPRStep_ExecuteKeepsCapturedRuntimeContextOutOfThePublishedBody(t *testi
 				withheldArtifactContent,
 				"publish ok in " + safepath.EvidencePlaceholder,
 				"evidence now lands under " + safepath.EvidencePlaceholder,
+				"from a stub agent in " + safepath.EvidencePlaceholder + ".",
 			} {
 				if !strings.Contains(filepath.ToSlash(published), want) {
 					t.Errorf("expected %q in published PR content:\n%s", want, published)
@@ -160,6 +161,13 @@ func TestRedactPRContent_RewritesARunIDCutByALengthCap(t *testing.T) {
 			truncate: func(text string) string { return scenarioCell(text, prBodyFlavorFor(scm.ProviderGitHub)) },
 		},
 		{name: "review conversation text", limit: maxPublishedConversationChars, truncate: publishedConversationText},
+		{
+			name:  "base attribution line",
+			limit: baseAttributionMaxLineRunes,
+			truncate: func(text string) string {
+				return renderAttributedList("Introduced by this change", []string{text})
+			},
+		},
 		{
 			name:     "body truncation",
 			limit:    bodyLimit,
