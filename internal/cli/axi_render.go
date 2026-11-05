@@ -751,9 +751,14 @@ func gateFieldsForRun(gate stepView, runID string) []toon.Field {
 	))
 }
 
-func inspectionOnlyGateFields(gate stepView, runID string) []toon.Field {
+func inspectionOnlyGateFields(gate stepView, runID string, isHandbackOpen bool) []toon.Field {
+	next := fmt.Sprintf("The explicitly selected gate for run %s is inspection-only here; respond with `no-mistakes axi respond --run %s --action approve|fix|skip`", runID, runID)
+	if isHandbackOpen {
+		// The executor refuses every response while a handback owns the gate.
+		next = fmt.Sprintf("The explicitly selected gate for run %s is inspection-only here: a CI handback owns it and it takes no response. Run `no-mistakes axi status` from the recorded caller worktree for the next step", runID)
+	}
 	return gateFieldsWithHelp(gate, []string{
-		fmt.Sprintf("The explicitly selected gate for run %s is inspection-only here; respond with `no-mistakes axi respond --run %s --action approve|fix|skip`", runID, runID),
+		next,
 		fmt.Sprintf("Run `%s` to read the complete step summary and log", axiLogsFullCommand(gate.Name, runID)),
 	})
 }

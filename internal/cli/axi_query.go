@@ -131,10 +131,11 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 		// answers the branch's run. Keep status inspection-only; the response
 		// command for an explicit selection is `axi respond --run <id>`.
 		branchScopedCommandsSafe := runID == ""
+		isHandbackOpen := handback != nil && handback.AcceptedHead == nil
 		if !branchScopedCommandsSafe {
-			fields = append(fields, inspectionOnlyGateFields(gate, run.ID)...)
+			fields = append(fields, inspectionOnlyGateFields(gate, run.ID, isHandbackOpen)...)
 		} else {
-			if handback != nil && handback.AcceptedHead == nil {
+			if isHandbackOpen {
 				fields = append(fields, gateFieldsWithHelp(gate, []string{"Failed published CI is released to its recorded caller worktree. Preserve both histories, commit the correction there, then submit it with no-mistakes axi handback --resume --receipt " + handback.ID + "; the same run requires fresh validation."})...)
 			} else {
 				fields = append(fields, gateFields(gate)...)
