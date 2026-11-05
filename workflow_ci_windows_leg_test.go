@@ -23,11 +23,11 @@ import (
 // packages sequentially until timeout-minutes cancelled it with no verdict.
 // These tests pin the properties that keep that from silently coming back - the
 // scan-exclusion step, a shard split (core remainder, git-heavy packages
-// without pipeline/steps/daemon/gate, pipeline/steps alone, daemon alone, and
-// gate alone, with steps/daemon/gate each split by test name across matrix
-// rows) so each job's wall stays inside the cap, and a per-binary Go timeout
-// well inside that cap so a genuine hang lands as a goroutine dump instead of
-// an opaque job cancellation.
+// without pipeline/steps/daemon/gate/branchsync, pipeline/steps alone, daemon
+// alone, gate alone, and branchsync alone, with steps/daemon/gate/branchsync
+// each split by test name across matrix rows) so each job's wall stays inside
+// the cap, and a per-binary Go timeout well inside that cap so a genuine hang
+// lands as a goroutine dump instead of an opaque job cancellation.
 //
 // The workflow cannot be exercised from `go test` (it needs a Windows runner),
 // so it is asserted through a typed workflow, `go list` package sets, and a
