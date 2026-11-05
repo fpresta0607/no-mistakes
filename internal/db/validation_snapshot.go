@@ -33,7 +33,7 @@ func (d *DB) ReadTerminalSnapshot(runID string) (*TerminalSnapshot, error) {
 
 func readTerminalSnapshot(tx *sql.Tx, runID string) (*TerminalSnapshot, error) {
 	var snapshot TerminalSnapshot
-	if err := scanRun(tx.QueryRow(`SELECT `+runColumns+` FROM runs WHERE id = ?`, runID), &snapshot.Run); err != nil {
+	if err := scanRun(tx.QueryRow(`SELECT `+runColumnsFrom(tx)+` FROM runs WHERE id = ?`, runID), &snapshot.Run); err != nil {
 		return nil, err
 	}
 	snapshot.Run.CustodyReturnedAt, snapshot.Run.UpdatedAt = nil, 0

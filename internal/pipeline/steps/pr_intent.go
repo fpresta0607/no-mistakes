@@ -1,6 +1,8 @@
 package steps
 
 import (
+	"strings"
+
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
 
@@ -10,6 +12,17 @@ import (
 // Withholding intent from drafting also prevents paraphrasing the private brief
 // into public prose. Validation prompts and stored intent remain unchanged.
 func publicPRIntent(sctx *pipeline.StepContext) string {
+	source := publicPRIntentSource(sctx)
+	if source == "" {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(sctx.Config.PR.Intent.Format), "brief") {
+		return strings.TrimSpace(sctx.PublicIntentBrief)
+	}
+	return source
+}
+
+func publicPRIntentSource(sctx *pipeline.StepContext) string {
 	if sctx == nil || sctx.Config == nil || !sctx.Config.PR.PublishesIntent() {
 		return ""
 	}

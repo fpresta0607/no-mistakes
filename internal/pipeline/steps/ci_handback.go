@@ -209,15 +209,16 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 		}
 	}
 	if isOrdinary && !request.Resume && (receipt == nil || receipt.AcceptedHead != nil) {
+		bots := scm.ReviewBotsFor(requiredReviews(sctx))
 		for _, check := range checks {
-			if _, isReviewBot := scm.ReviewBotForApp(check.App); isReviewBot && check.Failing() {
+			if _, isReviewBot := scm.ReviewBotForCheck(bots, check); isReviewBot && check.Failing() {
 				return nil, fmt.Errorf("ordinary CI handback cannot release a review-bot failure")
 			}
 		}
 		for _, finding := range findings.Items {
 			hasFailedCheck := false
 			for _, check := range checks {
-				_, isReviewBot := scm.ReviewBotForApp(check.App)
+				_, isReviewBot := scm.ReviewBotForCheck(bots, check)
 				if !isReviewBot && check.Failing() && check.Name == finding.Check && (finding.CheckID == "" || finding.CheckID == check.ProviderID) {
 					hasFailedCheck = true
 				}

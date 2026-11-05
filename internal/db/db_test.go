@@ -108,21 +108,21 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if err := d.sql.QueryRow("SELECT count(*) FROM recovery_archives").Scan(&count); err != nil {
 		t.Fatalf("recovery_archives table missing: %v", err)
 	}
-	if !hasColumn(t, d, "repos", "fork_url") {
+	if !d.hasColumn("repos", "fork_url") {
 		t.Fatal("repos.fork_url column missing from fresh schema")
 	}
-	for _, column := range []string{"worktree_dir", "submitted_head_sha", "no_mistakes_version", "no_mistakes_build_sha", "review_approved_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "terminal_head_verified_at", "pr_state", "pr_state_observed_at", "ci_ready_at", "ci_ready_no_ci", "custody_returned_at", "launch_nonce", "launch_validation_generation", "launch_intent_digest", "launch_receipt_claimed_at", "pr_base_branch"} {
-		if !hasColumn(t, d, "runs", column) {
+	for _, column := range []string{"worktree_dir", "evidence_dir", "submitted_head_sha", "no_mistakes_version", "no_mistakes_build_sha", "review_approved_head_sha", "last_pushed_sha", "push_target_fingerprint", "push_ref", "last_pushed_at", "push_generation", "push_active", "terminal_head_verified_at", "pr_state", "pr_state_observed_at", "ci_ready_at", "ci_ready_no_ci", "custody_returned_at", "launch_nonce", "launch_validation_generation", "launch_intent_digest", "launch_receipt_claimed_at", "pr_base_branch"} {
+		if !d.hasColumn("runs", column) {
 			t.Fatalf("runs.%s column missing from fresh schema", column)
 		}
 	}
 	for _, column := range []string{"reviewed_head_sha", "repair_published"} {
-		if !hasColumn(t, d, "step_rounds", column) {
+		if !d.hasColumn("step_rounds", column) {
 			t.Fatalf("step_rounds.%s column missing from fresh schema", column)
 		}
 	}
 	for _, column := range []string{"round_started_at", "last_activity_at", "last_activity", "agent_pid", "ci_fix_attempts"} {
-		if !hasColumn(t, d, "step_results", column) {
+		if !d.hasColumn("step_results", column) {
 			t.Fatalf("step_results.%s column missing from fresh schema", column)
 		}
 	}
@@ -420,7 +420,7 @@ func TestOpenMigratesReposForkURLColumn(t *testing.T) {
 	}
 	t.Cleanup(func() { d.Close() })
 
-	if !hasColumn(t, d, "repos", "fork_url") {
+	if !d.hasColumn("repos", "fork_url") {
 		t.Fatal("expected migrated fork_url column")
 	}
 	repo, err := d.GetRepo("repo-1")
@@ -479,37 +479,10 @@ func TestOpenMigratesStepActivityColumns(t *testing.T) {
 	t.Cleanup(func() { d.Close() })
 
 	for _, column := range []string{"round_started_at", "last_activity_at", "last_activity", "agent_pid"} {
-		if !hasColumn(t, d, "step_results", column) {
+		if !d.hasColumn("step_results", column) {
 			t.Fatalf("expected migrated column %q", column)
 		}
 	}
-}
-
-func hasColumn(t *testing.T, d *DB, table, column string) bool {
-	t.Helper()
-	rows, err := d.sql.Query(`PRAGMA table_info(` + table + `)`)
-	if err != nil {
-		t.Fatalf("pragma table_info(%s): %v", table, err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid int
-		var name string
-		var colType string
-		var notNull int
-		var dfltValue any
-		var pk int
-		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
-			t.Fatalf("scan table_info: %v", err)
-		}
-		if name == column {
-			return true
-		}
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate table_info: %v", err)
-	}
-	return false
 }
 
 func TestOpenWaitsForTransientMigrationLock(t *testing.T) {
@@ -541,15 +514,16 @@ func TestOpenWaitsForTransientMigrationLock(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
+	// Always release the lock and join Open before TempDir cleanup, including
+	// when COMMIT fails. The package test timeout bounds a stuck migration;
+	// fresh-schema migrations can exceed five seconds on Windows runners.
+	defer func() {
+		_, _ = locker.Exec("ROLLBACK")
+		if err := <-done; err != nil {
+			t.Errorf("Open after lock release: %v", err)
+		}
+	}()
 	if _, err := locker.Exec("COMMIT"); err != nil {
 		t.Fatalf("commit exclusive lock: %v", err)
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Open after lock release: %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Open did not finish after the migration lock was released")
 	}
 }

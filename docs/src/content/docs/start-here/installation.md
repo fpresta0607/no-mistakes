@@ -23,6 +23,8 @@ irm https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.
 
 Installs the binary and restarts the background daemon automatically with `no-mistakes.exe daemon restart`, preferring a managed Task Scheduler task and falling back to a detached daemon if needed. If the restart fails, the install command fails.
 
+Run `no-mistakes` from a terminal. On Windows 11 24H2, Windows Server 2025, and later, `no-mistakes.exe` only uses a console it can share with whatever started it, which is what keeps the [background daemon](/no-mistakes/concepts/daemon/) from opening a window. It also means that double-clicking `no-mistakes.exe`, or starting it with `Start-Process` without `-NoNewWindow`, runs it without a window, so you see none of its output.
+
 Official release binaries installed this way include the default self-hosted telemetry host and website ID. Disable telemetry with `NO_MISTAKES_TELEMETRY=0`, or override the host and website ID with `NO_MISTAKES_UMAMI_HOST` and `NO_MISTAKES_UMAMI_WEBSITE_ID`.
 
 ## Go install
@@ -85,11 +87,14 @@ On native Windows the Makefile needs a POSIX shell. When `sh.exe` is not on `PAT
 - **Optional, for PRs and CI:**
   - `gh` CLI (GitHub)
   - `glab` CLI (GitLab)
+  - `forgejo-axi` (Forgejo)
   - `NO_MISTAKES_BITBUCKET_EMAIL` and `NO_MISTAKES_BITBUCKET_API_TOKEN` (Bitbucket Cloud)
   - `az` CLI with the `azure-devops` extension (Azure DevOps)
   - `tea` CLI (Gitea)
+  - `origin` CLI (Cursor Origin)
+  - or a configured [provider plugin](/no-mistakes/reference/global-config/#provider_plugins) for custom hosts
 
-Run `no-mistakes doctor` to check native agents, ACP aliases such as `cursor` and `devin`, provider tools, and whether the configured global runner can start a validation gate.
+Run `no-mistakes doctor` to check native agents, ACP aliases such as `cursor` and `devin`, provider tools, configured provider plugins, and whether the configured global runner can start a validation gate.
 Every validation gate requires a runnable pipeline agent and otherwise fails before its first pipeline step.
 
 See [Provider Integration](/no-mistakes/guides/provider-integration/) for PR and CI setup per host.
@@ -112,6 +117,7 @@ Version discovery uses the GitHub release-asset CDN rather than the rate-limited
 Because `update` installs the latest official release binary, it installs a binary with the default self-hosted telemetry host and website ID. Disable telemetry with `NO_MISTAKES_TELEMETRY=0`, or override the host and website ID with `NO_MISTAKES_UMAMI_HOST` and `NO_MISTAKES_UMAMI_WEBSITE_ID`.
 
 If pending or running pipeline runs exist, the update refuses to restart the daemon and prints each active run's ID, status, branch, and short head SHA. Pass `--force` to restart the daemon anyway and accept that those runs may fail; `-y`/`--yes` does **not** bypass this guard.
+Pass `--when-idle` to let those runs finish on the current version instead: the update installs the new binary, the daemon restarts on it once no run is executing, and pushes that arrive meanwhile run after the restart. [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the details.
 If the running daemon was started from a different binary, the update still prompts before replacing it; `-y`/`--yes` answers that prompt non-interactively.
 If the daemon executable path cannot be determined, the update aborts before replacing the binary.
 If the daemon does not come back cleanly after a successful replacement, the new binary stays installed but the command reports the daemon reset failure.
@@ -125,14 +131,14 @@ A [Nix install](#nix) upgrades through Nix instead.
 no-mistakes eject
 ```
 
-Removes the `no-mistakes` remote, deletes the bare repo, cleans up worktrees, and removes the database record.
-It does not remove repo-local agent skill files created by `no-mistakes init`.
+Removes the gate from the current repository; [`no-mistakes eject`](/no-mistakes/reference/cli/#no-mistakes-eject) lists exactly what it removes and what it leaves in place.
 
 ## Uninstall
 
 Stop the daemon, delete the binary, and clear state:
 
 ```sh
+no-mistakes daemon uninstall # macOS: removes the LaunchAgent
 no-mistakes daemon stop
 rm -f ~/.local/bin/no-mistakes /usr/local/bin/no-mistakes
 rm -rf ~/.no-mistakes
@@ -140,4 +146,4 @@ rm -rf ~/.no-mistakes
 
 If you configured [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots), also delete the run worktree directories it placed outside `~/.no-mistakes`.
 
-On macOS, also remove `~/Library/LaunchAgents/com.kunchenguid.no-mistakes.daemon.*.plist`. On Linux, also remove `~/.config/systemd/user/no-mistakes-daemon-*.service`. On Windows, remove the `no-mistakes-daemon-*` Task Scheduler task.
+On macOS, `daemon uninstall` removes only the LaunchAgent for the current `NM_HOME`. Repeat it with each instance's `NM_HOME` if you installed multiple services. On Linux, also remove `~/.config/systemd/user/no-mistakes-daemon-*.service`. On Windows, remove the `no-mistakes-daemon-*` Task Scheduler task.

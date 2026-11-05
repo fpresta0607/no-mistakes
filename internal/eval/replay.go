@@ -246,7 +246,7 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 		evaluation.CompletedAt = time.Now().Unix()
 		return evaluation
 	}
-	cfg, err := replayConfig(c)
+	cfg, err := replayConfig(ctx, c, workDir)
 	if err != nil {
 		evaluation.Error = safeurl.RedactText(err.Error())
 		evaluation.CompletedAt = time.Now().Unix()
@@ -349,6 +349,7 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 			evaluation.InputTokens = int64(observed.usage.InputTokens)
 			evaluation.OutputTokens = int64(observed.usage.OutputTokens)
 			evaluation.CacheReadTokens = int64(observed.usage.CacheReadTokens)
+			evaluation.CacheWriteTokens = int64(observed.usage.CacheCreationTokens)
 			evaluation.FreshInputTokens = int64(observed.freshInputTokens)
 		}
 	}
@@ -433,7 +434,7 @@ func replayRoundContext(p *paths.Paths, c Case, workDir string) (*db.DB, string,
 			if previousFindings == "" {
 				previousFindings = stringValue(round.FindingsJSON)
 			}
-			deferredFindings = pipeline.RemoveMatchingFindingsJSON(stringValue(round.FindingsJSON), previousFindings)
+			deferredFindings = pipeline.DeferredFindingsJSON(stringValue(round.FindingsJSON), previousFindings)
 			if recorded, err := types.ParseFindingsJSON(stringValue(round.FindingsJSON)); err == nil {
 				previousReviewedPaths = recorded.ReviewedPaths
 			}
@@ -475,7 +476,7 @@ func restoreCase(ctx context.Context, store *Store, c Case, root string) (string
 	return workDir, nil
 }
 
-func replayConfig(c Case) (*config.Config, error) {
+func replayConfig(ctx context.Context, c Case, workDir string) (*config.Config, error) {
 	global, err := config.LoadGlobal(filepath.Join(c.Dir, "config", "global.yaml"))
 	if err != nil {
 		return nil, fmt.Errorf("load captured global config: %w", err)
@@ -488,6 +489,11 @@ func replayConfig(c Case) (*config.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load captured repo config: %w", err)
 	}
+	trusted, err := repoConfigAt(ctx, workDir, c.TrustedConfigSHA)
+	if err != nil {
+		return nil, fmt.Errorf("load captured trusted review ignores: %w", err)
+	}
+	repo.TrustedIgnorePatterns = trusted.IgnorePatterns
 	return config.Merge(global, repo), nil
 }
 
@@ -558,10 +564,8 @@ func (a *observedAgent) observeUsage(result *agent.Result) {
 		a.usageMissing = true
 		return
 	}
-	a.usage.InputTokens += result.Usage.InputTokens
-	a.usage.OutputTokens += result.Usage.OutputTokens
-	a.usage.CacheReadTokens += result.Usage.CacheReadTokens
-	a.freshInputTokens += agent.FreshInputTokens(result.Usage.InputTokens, result.Usage.CacheReadTokens)
+	a.usage.Add(result.Usage)
+	a.freshInputTokens += agent.FreshInputTokens(result.Usage.InputTokens, result.Usage.CacheReadTokens+result.Usage.CacheCreationTokens)
 }
 
 func findingCount(raw string) int {
@@ -590,12 +594,13 @@ func (s *Store) persistEvaluation(c Case, evaluation Evaluation) error {
 		reported = 1
 	}
 	_, err := s.db.Exec(`INSERT INTO evaluations
-(id, session_id, case_id, candidate, repeat_number, started_at, completed_at, status, gold_count, true_positive, false_negative, false_positive, pending, tokens_reported, input_tokens, output_tokens, fresh_input_tokens, duration_ms, path)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+(id, session_id, case_id, candidate, repeat_number, started_at, completed_at, status, gold_count, true_positive, false_negative, false_positive, pending, tokens_reported, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, fresh_input_tokens, duration_ms, path)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		evaluation.ID, evaluation.SessionID, evaluation.CaseID, evaluation.Candidate, evaluation.Repeat,
 		evaluation.StartedAt, evaluation.CompletedAt, evaluation.Status, evaluation.GoldCount,
 		evaluation.TruePositive, evaluation.FalseNegative, evaluation.FalsePositive, evaluation.Pending, reported,
-		evaluation.InputTokens, evaluation.OutputTokens, evaluation.FreshInputTokens, evaluation.DurationMS, path)
+		evaluation.InputTokens, evaluation.OutputTokens, evaluation.CacheReadTokens, evaluation.CacheWriteTokens,
+		evaluation.FreshInputTokens, evaluation.DurationMS, path)
 	if err != nil {
 		return fmt.Errorf("record eval result: %w", err)
 	}

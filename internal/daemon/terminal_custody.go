@@ -199,7 +199,11 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if err := proveTerminalPublication(ctx, &original.Run, repo, request.CallerDir, forge, cfg); err != nil {
 			return "", err
 		}
-		ag, err := newResolvedPipelineAgent(cfg, roleConfigs, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), forgeEnvironment(forge))
+		quotaRecord, err := replayQuotaRouting(cfg, original.Run.QuotaRouting)
+		if err != nil {
+			return "", err
+		}
+		ag, _, err := newResolvedPipelineAgent(ctx, cfg, roleConfigs, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), forgeEnvironment(forge), quotaRecord)
 		if err != nil {
 			return "", err
 		}

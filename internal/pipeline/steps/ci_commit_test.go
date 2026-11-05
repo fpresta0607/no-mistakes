@@ -419,6 +419,7 @@ func TestCIStep_CommitAndPush_GitCommandsUseStandardCredentialEnv(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
 
 	realGit, err := testgit.RealGit()
 	if err != nil {
@@ -471,7 +472,7 @@ func TestCIStep_CommitAndPush_NoChanges_ReconcilesStaleDatabaseHeadSHA(t *testin
 	gitCmd(t, dir, "checkout", "-b", "feature")
 	os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature"), 0o644)
 	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "feature")
+	gitCmd(t, dir, "commit", "-m", "no-mistakes(ci): repair failing checks")
 	actualHeadSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "push", "origin", "feature")
 
@@ -525,7 +526,7 @@ func TestCIStep_CommitAndPush_NoChanges_ReconcilesStaleDatabaseHeadSHA_UsesStepE
 	gitCmd(t, dir, "checkout", "-b", "feature")
 	os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature"), 0o644)
 	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "feature")
+	gitCmd(t, dir, "commit", "-m", "no-mistakes(ci): repair failing checks")
 	actualHeadSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "push", "origin", "feature")
 
@@ -598,7 +599,7 @@ func TestCIStep_CommitAndPush_NoDirtyChangesRecordsAdvancedLocalHead(t *testing.
 
 	os.WriteFile(filepath.Join(dir, "resolved.txt"), []byte("resolved"), 0o644)
 	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "resolve conflict")
+	gitCmd(t, dir, "commit", "-m", "no-mistakes(ci): repair failing checks")
 	advancedHeadSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 
 	ag := &mockAgent{name: "test"}

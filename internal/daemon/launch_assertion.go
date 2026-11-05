@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/quotarouting"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 )
 
@@ -39,24 +40,45 @@ func decodeLaunchParams(data json.RawMessage, target interface{}) error {
 	return json.Unmarshal(data, target)
 }
 
-func resolvePipelineAgentRoles(ctx context.Context, cfg *config.Config, lookPath func(string) (string, error)) (map[string]*config.Config, error) {
+// resolvePipelineAgentRoles resolves the primary agent and every candidate of
+// each review role, fallbacks included, so a launch proof covers each agent the
+// run could start.
+func resolvePipelineAgentRoles(ctx context.Context, cfg *config.Config, lookPath func(string) (string, error)) (map[string][]*config.Config, error) {
 	if err := cfg.ResolveAgent(ctx, lookPath); err != nil {
 		return nil, err
 	}
-	roleConfigs := make(map[string]*config.Config, len(cfg.ReviewAgents))
+	roleConfigs := make(map[string][]*config.Config, len(cfg.ReviewAgents))
 	for _, role := range config.ReviewAgentRoles {
-		if entry, hasRole := cfg.ReviewAgents[role]; hasRole {
-			roleConfig := cfg.ForReviewAgent(entry)
+		entry, hasRole := cfg.ReviewAgents[role]
+		if !hasRole {
+			continue
+		}
+		for _, roleConfig := range reviewCandidateConfigs(cfg, entry) {
+			roleConfig.QuotaRouting.Enabled = false
 			if err := roleConfig.ResolveAgent(ctx, lookPath); err != nil {
 				return nil, fmt.Errorf("resolve review_agents.%s: %w", role, err)
 			}
-			roleConfigs[role] = roleConfig
+			roleConfigs[role] = append(roleConfigs[role], roleConfig)
 		}
 	}
 	return roleConfigs, nil
 }
 
-func (m *RunManager) newRunPipelineAgent(ctx context.Context, run *db.Run, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error), environment runenv.Overlay) (agent.Agent, error) {
+// replayQuotaRouting reads the quota order a run stored, for its recovery or
+// its successor. A run that stored none stays off the feature instead of
+// reading a fresh order.
+func replayQuotaRouting(cfg *config.Config, stored string) (*quotarouting.Record, error) {
+	record, err := storedQuotaRoutingRecord(stored)
+	if err != nil {
+		return nil, err
+	}
+	if record == nil {
+		cfg.QuotaRouting.Enabled = false
+	}
+	return record, nil
+}
+
+func (m *RunManager) newRunPipelineAgent(ctx context.Context, run *db.Run, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error), environment runenv.Overlay, quota *quotarouting.Record) (agent.Agent, error) {
 	family, err := m.db.ValidationFamily(run.ID)
 	if err != nil {
 		return nil, err
@@ -71,7 +93,8 @@ func (m *RunManager) newRunPipelineAgent(ctx context.Context, run *db.Run, cfg *
 		return nil, err
 	}
 	if run.LaunchAssertion == nil {
-		return newPipelineAgent(ctx, cfg, evidenceRoot, lookPath, environment)
+		ag, _, err := newPipelineAgent(ctx, cfg, evidenceRoot, lookPath, environment, quota)
+		return ag, err
 	}
 	expected := run.LaunchAssertion
 	event, err := m.db.GetTerminalPredecessor(run.ID)
@@ -92,10 +115,11 @@ func (m *RunManager) newRunPipelineAgent(ctx context.Context, run *db.Run, cfg *
 	if err != nil {
 		return nil, err
 	}
-	return newResolvedPipelineAgent(cfg, roleConfigs, evidenceRoot, environment)
+	ag, _, err := newResolvedPipelineAgent(ctx, cfg, roleConfigs, evidenceRoot, environment, quota)
+	return ag, err
 }
 
-func prepareTerminalLaunch(ctx context.Context, run *db.Run, cfg *config.Config, lookPath func(string) (string, error)) (*launchassert.Expectation, *launchassert.Proof, map[string]*config.Config, error) {
+func prepareTerminalLaunch(ctx context.Context, run *db.Run, cfg *config.Config, lookPath func(string) (string, error)) (*launchassert.Expectation, *launchassert.Proof, map[string][]*config.Config, error) {
 	if run.LaunchAssertion == nil || run.LaunchValidationGeneration == nil || *run.LaunchValidationGeneration == "" {
 		return nil, nil, nil, fmt.Errorf("terminal recovery needs the original bound launch selection and frozen policy")
 	}
@@ -124,7 +148,7 @@ func applyLaunchSelection(cfg *config.Config, expected *launchassert.Expectation
 	return cfg.ApplyLaunchSelection(expected.Profiles["primary"])
 }
 
-func prepareLaunchAssertion(ctx context.Context, expected *launchassert.Expectation, cfg *config.Config, lookPath func(string) (string, error)) (map[string]*config.Config, *launchassert.Proof, error) {
+func prepareLaunchAssertion(ctx context.Context, expected *launchassert.Expectation, cfg *config.Config, lookPath func(string) (string, error)) (map[string][]*config.Config, *launchassert.Proof, error) {
 	if expected.TrustedSHA != cfg.TrustedConfigSHA {
 		return nil, nil, fmt.Errorf("launch assertion trusted source differs after fresh fetch")
 	}
@@ -137,19 +161,21 @@ func prepareLaunchAssertion(ctx context.Context, expected *launchassert.Expectat
 	}
 	profiles := make(map[string][]agentcfg.Selection, 1+len(config.ReviewAgentRoles))
 	for _, role := range append([]string{"primary"}, config.ReviewAgentRoles...) {
-		roleConfig := roleConfigs[role]
-		if roleConfig == nil {
+		candidates := roleConfigs[role]
+		if len(candidates) == 0 {
 			if role == config.RoleReviewerAfterRound || role == config.RoleFixerAfterRound {
 				continue
 			}
-			roleConfig = cfg
+			candidates = []*config.Config{cfg}
 		}
-		for _, name := range roleConfig.Agents {
-			selection, err := agentcfg.EffectiveSelection(name, roleConfig.AgentProfileFor(name), roleConfig.AgentArgsFor(name))
-			if err != nil {
-				return nil, nil, fmt.Errorf("prove %s agent selection: %w", role, err)
+		for _, roleConfig := range candidates {
+			for _, name := range roleConfig.Agents {
+				selection, err := agentcfg.EffectiveSelection(name, roleConfig.AgentProfileFor(name), roleConfig.AgentArgsFor(name))
+				if err != nil {
+					return nil, nil, fmt.Errorf("prove %s agent selection: %w", role, err)
+				}
+				profiles[role] = append(profiles[role], selection)
 			}
-			profiles[role] = append(profiles[role], selection)
 		}
 	}
 	proof, err := expected.Verify(cfg.TrustedConfigSHA, profiles)

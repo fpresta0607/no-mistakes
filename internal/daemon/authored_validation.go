@@ -219,7 +219,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil {
 			return "", err
 		}
-		cfg, _, err := m.loadRunConfig(ctx, repo, global, candidateConfig, gateDir, trustedSHA, "", request.Branch, snapshot.Run.PiProfile)
+		cfg, _, _, err := m.loadRunConfig(ctx, repo, global, candidateConfig, gateDir, trustedSHA, "", request.Branch, snapshot.Run.PiProfile)
 		if err != nil {
 			return "", err
 		}
@@ -247,7 +247,11 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err := proveAuthoredPublication(ctx, &snapshot.Run, repo, request.CallerDir, cfg, forge); err != nil {
 			return "", err
 		}
-		ag, err := newResolvedPipelineAgent(cfg, roles, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), forgeEnvironment(forge))
+		quotaRecord, err := replayQuotaRouting(cfg, snapshot.Run.QuotaRouting)
+		if err != nil {
+			return "", err
+		}
+		ag, _, err := newResolvedPipelineAgent(ctx, cfg, roles, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), forgeEnvironment(forge), quotaRecord)
 		if err != nil {
 			return "", err
 		}

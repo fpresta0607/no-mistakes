@@ -385,8 +385,9 @@ func TestParseCodexEventsDrainsRefusalAfterCancellation(t *testing.T) {
 		"{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"late\"}}\n"
 	var usage TokenUsage
 	var message, refusal, thread string
+	var resultReceived bool
 	var chunks []string
-	err := parseCodexEvents(ctx, strings.NewReader(events), func(chunk string) { chunks = append(chunks, chunk) }, &usage, &message, &refusal, &thread, nil)
+	err := parseCodexEvents(ctx, strings.NewReader(events), func(chunk string) { chunks = append(chunks, chunk) }, &usage, &message, &resultReceived, &refusal, &thread, nil)
 	if !errors.Is(err, context.Canceled) || !isNativeSafetyRefusal(refusal) || len(chunks) != 0 || thread != "" || message != "" {
 		t.Fatalf("parse = %v, refusal %q, chunks %v, thread %q, message %q", err, refusal, chunks, thread, message)
 	}
@@ -707,6 +708,7 @@ func TestParseCodexEvents_AgentMessage(t *testing.T) {
 
 	var usage TokenUsage
 	var lastMessage string
+	var resultReceived bool
 
 	err := parseCodexEvents(
 		context.Background(),
@@ -714,6 +716,7 @@ func TestParseCodexEvents_AgentMessage(t *testing.T) {
 		nil,
 		&usage,
 		&lastMessage,
+		&resultReceived,
 		nil,
 		nil,
 		nil,
@@ -745,6 +748,7 @@ func TestParseCodexEvents_SeparatesMultipleMessages(t *testing.T) {
 	var chunks []string
 	var usage TokenUsage
 	var lastMessage string
+	var resultReceived bool
 
 	err := parseCodexEvents(
 		context.Background(),
@@ -752,6 +756,7 @@ func TestParseCodexEvents_SeparatesMultipleMessages(t *testing.T) {
 		func(text string) { chunks = append(chunks, text) },
 		&usage,
 		&lastMessage,
+		&resultReceived,
 		nil,
 		nil,
 		nil,
@@ -780,6 +785,7 @@ func TestParseCodexEvents_DoesNotSeparateSplitTurnMessages(t *testing.T) {
 	var chunks []string
 	var usage TokenUsage
 	var lastMessage string
+	var resultReceived bool
 
 	err := parseCodexEvents(
 		context.Background(),
@@ -787,6 +793,7 @@ func TestParseCodexEvents_DoesNotSeparateSplitTurnMessages(t *testing.T) {
 		func(text string) { chunks = append(chunks, text) },
 		&usage,
 		&lastMessage,
+		&resultReceived,
 		nil,
 		nil,
 		nil,
@@ -810,7 +817,8 @@ func TestParseCodexEvents_SkipsMalformedLines(t *testing.T) {
 
 	var usage TokenUsage
 	var lastMessage string
-	err := parseCodexEvents(context.Background(), strings.NewReader(events), nil, &usage, &lastMessage, nil, nil, nil)
+	var resultReceived bool
+	err := parseCodexEvents(context.Background(), strings.NewReader(events), nil, &usage, &lastMessage, &resultReceived, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
 func TestMain(m *testing.M) {
@@ -52,11 +53,43 @@ func TestMain(m *testing.M) {
 			os.Exit(2)
 		}
 		os.Exit(0)
+	case "restartable":
+		// RunRestartable as `daemon run` calls it: a scheduled restart
+		// executes this test binary again with the same environment.
+		if err := RunRestartable(); err != nil {
+			_, _ = os.Stderr.WriteString(err.Error() + "\n")
+			os.Exit(2)
+		}
+		os.Exit(0)
 	case "bootstrap-sink":
 		if err := RunBootstrapLogSink(); err != nil {
 			_, _ = os.Stderr.WriteString(err.Error() + "\n")
 			os.Exit(2)
 		}
+		os.Exit(0)
+	case "run-stdio":
+		// The run_stdio tests start this with prepared standard handles and
+		// look for each marker where daemon run's output must land.
+		if err := PrepareRunStdio(); err != nil {
+			os.Exit(3)
+		}
+		_, _ = os.Stdout.WriteString("stdout-marker\n")
+		_, _ = os.Stderr.WriteString("stderr-marker\n")
+		println("runtime-stderr-marker") // the runtime's own stderr handle, as crash output uses
+		exe, err := os.Executable()
+		if err != nil {
+			os.Exit(4)
+		}
+		child := exec.Command(exe)
+		child.Env = upsertEnv(os.Environ(), "NM_DAEMON_HELPER_PROCESS", "stderr-marker")
+		child.Stderr = os.Stderr // as the bootstrap log-sink inherits it
+		winproc.Harden(child)
+		if err := child.Run(); err != nil {
+			os.Exit(5)
+		}
+		os.Exit(0)
+	case "stderr-marker":
+		_, _ = os.Stderr.WriteString("child-stderr-marker\n")
 		os.Exit(0)
 	case "capture-output":
 		p := paths.WithRoot(os.Getenv("NM_HOME"))
@@ -93,7 +126,17 @@ func TestMain(m *testing.M) {
 	// the in-directory use of the bare fixture repositories these tests
 	// create. Mirrors internal/git's TestMain.
 	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	os.Exit(m.Run())
+	// Fixtures must not inherit the developer's global git config: a
+	// commit.gpgsign=true there makes every fixture commit ask gpg to sign.
+	globalConfigDir, err := os.MkdirTemp("", "no-mistakes-daemon-tests-")
+	if err != nil {
+		panic(err)
+	}
+	globalConfig := filepath.Join(globalConfigDir, "gitconfig")
+	os.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	code := m.Run()
+	os.RemoveAll(globalConfigDir)
+	os.Exit(code)
 }
 
 // startTestDaemon starts a daemon with a temp root and registers shutdown cleanup.
@@ -325,6 +368,17 @@ func setupTestGitRepo(t *testing.T, p *paths.Paths, d *db.DB, repoID string) (*d
 	_ = ctx
 
 	return repo, headSHA
+}
+
+func commitTrustedRepoConfig(t *testing.T, repo *db.Repo, contents string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, ".no-mistakes.yaml"), []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", ".no-mistakes.yaml")
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "configure trusted test policy")
+	gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/main")
+	return gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
 }
 
 func gitCmd(t *testing.T, dir string, args ...string) {

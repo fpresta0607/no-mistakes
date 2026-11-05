@@ -1037,9 +1037,26 @@ func TestRunAgent_HelperStartedBeforeTheLastOutputDoesNotExtendTheBudget(t *test
 		name: "wedged-with-helper",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			// A long-lived helper (an ACP agent under acpx, a stdio MCP server)
-			// starts with the agent, which then talks and hangs.
-			return runLaunchedShell(ctx, opts, "sleep 6 & read go; wait", func(_, _ func()) {
-				time.Sleep(1200 * time.Millisecond)
+			// starts with the agent, which then talks and hangs. The launch is
+			// reported only once the helper runs, so the child sample taken at
+			// launch already holds it; otherwise the baseline depends on the
+			// next 1s sample settling before the output, which a loaded host
+			// misses.
+			talk := time.Now().Add(1200 * time.Millisecond)
+			report := opts.OnLifecycle
+			var launch agent.LifecycleEvent
+			held := opts
+			held.OnLifecycle = func(event agent.LifecycleEvent) {
+				if event.Phase == agent.LifecyclePhaseStart {
+					launch = event
+					return
+				}
+				report(event)
+			}
+			return runLaunchedShell(ctx, held, "sleep 6 & echo ready; read go; wait", func(_, ready func()) {
+				ready()
+				report(launch)
+				time.Sleep(time.Until(talk))
 				opts.OnChunk("thinking\n")
 			})
 		},

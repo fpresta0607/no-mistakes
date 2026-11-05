@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/quotarouting"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 	"github.com/spf13/cobra"
@@ -118,13 +120,16 @@ type runView struct {
 	AuthoredValidation *authoredvalidation.Family
 	PiProfile          *agentcfg.PiProfile
 	VerificationPlan   *verificationplan.Snapshot
-	ID                 string
-	Branch             string
-	Status             string
-	HeadSHA            string
-	PRURL              string
-	CIReady            bool
-	CIReadyNoCI        bool
+	// QuotaRouting is the run's parsed quota-aware ordering record, nil when
+	// the feature was off for this run.
+	QuotaRouting *quotarouting.Record
+	ID           string
+	Branch       string
+	Status       string
+	HeadSHA      string
+	PRURL        string
+	CIReady      bool
+	CIReadyNoCI  bool
 	// AwaitingAgentSince is the unix-seconds time the run parked at a gate
 	// awaiting the driving agent, or nil when the run is not parked. It powers
 	// the top-level parked signal in the run object.
@@ -136,6 +141,8 @@ type runView struct {
 	// genuinely green run in agent-facing output.
 	CIOverrideReason   string
 	TestOverrideReason string
+	RetryOf            *ipc.RunRetryInfo
+	RetriedBy          string
 }
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
@@ -152,6 +159,13 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		TestOverrideReason: r.TestOverrideReason,
 		PiProfile:          r.PiProfile,
 		VerificationPlan:   r.VerificationPlan,
+		RetryOf:            r.RetryOf,
+		RetriedBy:          r.RetriedBy,
+	}
+	if payload, err := quotarouting.ParseRecord(r.QuotaRouting); err != nil {
+		slog.Warn("run carries an unreadable quota routing record", "run", r.ID, "error", err)
+	} else if payload != nil {
+		rv.QuotaRouting = payload
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
@@ -203,6 +217,11 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) (runView,
 			return runView{}, fmt.Errorf("read validation family: %w", err)
 		}
 		rv.AuthoredValidation = family
+	}
+	if payload, err := quotarouting.ParseRecord(r.QuotaRouting); err != nil {
+		slog.Warn("run carries an unreadable quota routing record", "run", r.ID, "error", err)
+	} else if payload != nil {
+		rv.QuotaRouting = payload
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
@@ -504,6 +523,17 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	if rv.TestOverrideReason != "" {
 		fields = append(fields, toon.Field{Key: "test_override_reason", Value: rv.TestOverrideReason})
 	}
+	if r := rv.RetryOf; r != nil {
+		fields = append(fields, toon.Field{Key: "retry_of", Value: toon.NewObject(
+			toon.Field{Key: "run", Value: r.RunID},
+			toon.Field{Key: "step", Value: string(r.Step)},
+			toon.Field{Key: "failed_round", Value: r.Round},
+			toon.Field{Key: "checkpoint_head", Value: shortSHA(r.CheckpointHeadSHA)},
+		)})
+	}
+	if rv.RetriedBy != "" {
+		fields = append(fields, toon.Field{Key: "retried_by", Value: rv.RetriedBy})
+	}
 	if p := rv.VerificationPlan; p != nil {
 		fields = append(fields, toon.Field{Key: "verification_plan", Value: toon.NewObject(
 			toon.Field{Key: "path", Value: p.Path},
@@ -519,6 +549,9 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 			toon.Field{Key: "model", Value: rv.PiProfile.Model},
 			toon.Field{Key: "effort", Value: string(rv.PiProfile.Effort)},
 		)})
+	}
+	if rv.QuotaRouting != nil {
+		fields = append(fields, quotaRoutingField(rv.QuotaRouting))
 	}
 	if rv.PRURL != "" {
 		fields = append(fields, toon.Field{Key: "pr", Value: rv.PRURL})
@@ -546,6 +579,80 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	return toon.Field{Key: key, Value: toon.NewObject(fields...)}
 }
 
+// quotaRoutingField renders the run's quota-aware ordering outcome: the
+// choice, why the order is what it is, the per-candidate evidence table, and
+// any mid-run switches. Everything here is local-only data the daemon already
+// holds; nothing in the record names a prompt, output, or credential.
+func quotaRoutingField(record *quotarouting.Record) toon.Field {
+	fields := []toon.Field{
+		{Key: "enabled", Value: record.Enabled},
+		{Key: "choice", Value: record.Choice},
+		{Key: "reason", Value: record.Reason},
+	}
+	if len(record.Order) > 0 {
+		fields = append(fields, toon.Field{Key: "order", Value: strings.Join(record.Order, ", ")})
+	}
+	candidates := make([]quotaCandidateRow, 0, len(record.Candidates))
+	for _, c := range record.Candidates {
+		row := quotaCandidateRow{
+			Agent:    string(c.Agent),
+			Provider: c.Provider,
+			Account:  c.Account,
+			Scope:    c.Scope,
+			Runway:   c.Runway,
+			Status:   quotaCandidateStatus(c),
+			Reason:   c.Reason,
+		}
+		if c.Remaining != nil {
+			row.Remaining = fmt.Sprintf("%.0f%%", *c.Remaining)
+		}
+		if c.SpendPriority != nil {
+			row.SpendPriority = fmt.Sprintf("%.2f", *c.SpendPriority)
+		}
+		candidates = append(candidates, row)
+	}
+	if len(candidates) > 0 {
+		fields = append(fields, toon.Field{Key: "candidates", Value: candidates})
+	}
+	if len(record.Switches) > 0 {
+		switches := make([]quotaSwitchRow, 0, len(record.Switches))
+		for _, s := range record.Switches {
+			switches = append(switches, quotaSwitchRow{From: s.From, To: s.To, Reason: s.Reason})
+		}
+		fields = append(fields, toon.Field{Key: "switches", Value: switches})
+	}
+	return toon.Field{Key: "quota_routing", Value: toon.NewObject(fields...)}
+}
+
+func quotaCandidateStatus(c quotarouting.Evidence) string {
+	switch {
+	case !c.Eligible:
+		return "ineligible"
+	case c.Rankable:
+		return "ranked"
+	default:
+		return "unranked"
+	}
+}
+
+type quotaCandidateRow struct {
+	Agent         string `toon:"agent"`
+	Provider      string `toon:"provider"`
+	Account       string `toon:"account"`
+	Scope         string `toon:"scope"`
+	Remaining     string `toon:"remaining"`
+	SpendPriority string `toon:"spend_priority"`
+	Runway        string `toon:"runway"`
+	Status        string `toon:"status"`
+	Reason        string `toon:"reason"`
+}
+
+type quotaSwitchRow struct {
+	From   string `toon:"from"`
+	To     string `toon:"to"`
+	Reason string `toon:"reason"`
+}
+
 func (rv runView) automaticSkips() []automaticSkipRow {
 	var rows []automaticSkipRow
 	for _, s := range rv.Steps {
@@ -560,25 +667,43 @@ func (rv runView) automaticSkips() []automaticSkipRow {
 // gateFields renders the active approval gate: the awaiting step, its findings
 // table, and the next-step commands an agent can run to clear it.
 func gateFields(gate stepView) []toon.Field {
+	return gateFieldsForRun(gate, "")
+}
+
+// gateFieldsForRun renders the gate with every follow-up command that accepts
+// --run carrying runID, so a caller that selected the run by id keeps naming it.
+func gateFieldsForRun(gate stepView, runID string) []toon.Field {
+	respond := "no-mistakes axi respond" + runFlag(runID)
+	abort := "no-mistakes axi abort" + runFlag(runID)
 	if gate.ValidationOnly {
 		help := []string{"This authored validation has zero automatic/manual repair authority. Required stages cannot be skipped."}
 		switch {
 		case pipeline.HasProtectedPathRefusal(gate.FindingsJSON):
-			help = append(help, "Approve is rejected: protected-path edits require the operator's authorized workflow. Run `no-mistakes axi abort` to stop this child.")
+			help = append(help, "Approve is rejected: protected-path edits require the operator's authorized workflow. Run `"+abort+"` to stop this child.")
 		case pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON):
-			help = append(help, "Approve is rejected: the worktree holds unvalidated work. Run `no-mistakes axi abort` to stop this child.")
+			help = append(help, "Approve is rejected: the worktree holds unvalidated work. Run `"+abort+"` to stop this child.")
 		default:
-			help = append(help, "Run `no-mistakes axi respond --action approve` only to explicitly accept the reported condition, or `no-mistakes axi abort` to stop this child; a later authored candidate must retain its predecessor lineage.")
+			help = append(help, "Run `"+respond+" --action approve` only to explicitly accept the reported condition, or `"+abort+"` to stop this child; a later authored candidate must retain its predecessor lineage.")
 		}
-		help = append(help, fmt.Sprintf("Run `%s` to inspect the complete findings", axiLogsFullCommand(gate.Name, "")))
+		help = append(help, fmt.Sprintf("Run `%s` to inspect the complete findings", axiLogsFullCommand(gate.Name, runID)))
 		if pipeline.HasUnansweredReviewQuestion(gate.FindingsJSON) {
 			help = append([]string{"Answer each open review question with `no-mistakes axi answer --question <id> --answer \"...\"`; an answer grants no repair authority."}, help...)
 		}
 		return gateFieldsWithHelp(gate, help)
 	}
+	coverageHelp := "Run `" + respond + " --action complete-coverage` to review only the remaining paths using stored coverage for this source"
 	help := []string{
-		"Run `no-mistakes axi respond --action approve` to accept this step and continue",
-		"Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)",
+		"Run `" + respond + " --action approve` to accept this step and continue",
+		"Run `" + respond + " --action fix --findings <ids> [--ignore <ids>]` to have the pipeline fix the selected findings (do not edit files yourself); list every finding below in `--findings` or `--ignore`, unless an earlier round of this step already decided it, and a finding that round chose to fix cannot be declined by a later response",
+	}
+	if pipeline.HasReviewFixRoundLimit(gate.FindingsJSON) {
+		help = []string{
+			"The total Review fix-round budget is exhausted; further fix requests are refused and automatic resolvers leave this gate parked. Remaining findings are unchanged.",
+			"Inspect the remaining findings, then explicitly run `" + respond + " --action approve` to accept them, or abort the run. A new run gets a new budget; changing config does not extend this run.",
+		}
+	}
+	if pipeline.CanContinueReviewCoverage(types.StepName(gate.Name), gate.FindingsJSON) {
+		help = append([]string{coverageHelp}, help...)
 	}
 	// A review parked in waiting-on-answers is not asking for a verdict: its
 	// reviewer asked questions and cannot finish without them. Approving or
@@ -588,16 +713,21 @@ func gateFields(gate stepView) []toon.Field {
 	// question is already a finding in the rows below, carrying its id and the
 	// options the reviewer stated.
 	if pipeline.HasUnansweredReviewQuestion(gate.FindingsJSON) {
+		answerScope := ""
+		if runID != "" {
+			answerScope = fmt.Sprintf(" (`axi answer` has no --run form: run it in the clone of run %s)", runID)
+		}
 		help = append([]string{
-			"This review is waiting on answers to the question(s) its reviewer asked; each is a `question-<id>` finding below. Answer each with `no-mistakes axi answer --question <id> --answer \"<one of its options>\"` and the same reviewer resumes and finishes its pass; the answer that closes the last one blocks like `axi respond` and returns the next gate or outcome",
+			"This review is waiting on answers to the question(s) its reviewer asked; each is a `question-<id>` finding below. Answer each with `no-mistakes axi answer --question <id> --answer \"<one of its options>\"`" + answerScope + " and the same reviewer resumes and finishes its pass; the answer that closes the last one blocks like `axi respond` and returns the next gate or outcome",
 			"Do not approve or fix to get past a review question: that throws away the paused review pass instead of answering it",
 		}, help...)
 	}
 	if pipeline.HasProtectedPathRefusal(gate.FindingsJSON) {
-		help = []string{
-			"Protected-path refusals require an explicit operator response; Approve is rejected.",
-			"Have the operator inspect and resolve the reported protected-path edit through the repository's authorized workflow, then run `no-mistakes axi respond --action fix` to retry the refused step, including its commit and publication.",
+		next := "Have the operator inspect and resolve the reported protected-path edit through the repository's authorized workflow, then run `" + respond + " --action fix` to retry the refused step, including its commit and publication."
+		if pipeline.HasReviewFixRoundLimit(gate.FindingsJSON) {
+			next = "The total Review fix-round budget is exhausted, so a fix request is refused and cannot retry the refused step. Skip this step or run `no-mistakes axi abort" + runFlag(runID) + "` to stop the run. A new run gets a new budget; changing config does not extend this run."
 		}
+		help = []string{"Protected-path refusals require an explicit operator response; Approve is rejected.", next}
 	}
 	if pipeline.HasSafetyRefusal(gate.FindingsJSON) {
 		help = []string{
@@ -605,17 +735,17 @@ func gateFields(gate stepView) []toon.Field {
 			"Have the operator inspect the refusal and preserved work before deciding how to proceed.",
 		}
 	}
-	skip := "Run `no-mistakes axi respond --action skip` to skip this step"
+	skip := "Run `" + respond + " --action skip` to skip this step"
 	if pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON) {
 		help = []string{
 			"Approve is rejected: the run worktree holds work a timed-out Test agent left that no Test turn validated, and approval would publish it. The findings name that work and how to inspect it.",
-			"Run `no-mistakes axi respond --action fix --findings <ids>` to validate that work (do not edit files yourself), or `no-mistakes axi abort` to stop the run",
+			"Run `" + respond + " --action fix --findings <ids>` to validate that work (do not edit files yourself), or `no-mistakes axi abort" + runFlag(runID) + "` to stop the run",
 		}
 		skip = "Do not skip this step: the steps after Test would commit and publish the unvalidated work, so skipping needs the operator's explicit decision"
 	}
 	return gateFieldsWithHelp(gate, append(help,
 		skip,
-		fmt.Sprintf("Run `%s` to read the complete step summary and log", axiLogsFullCommand(gate.Name, "")),
+		fmt.Sprintf("Run `%s` to read the complete step summary and log", axiLogsFullCommand(gate.Name, runID)),
 		"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.",
 		preserveGateFixCommitsGuidance,
 	))
@@ -623,7 +753,7 @@ func gateFields(gate stepView) []toon.Field {
 
 func inspectionOnlyGateFields(gate stepView, runID string) []toon.Field {
 	return gateFieldsWithHelp(gate, []string{
-		fmt.Sprintf("The explicitly selected gate for run %s is inspection-only; no run-scoped response command exists", runID),
+		fmt.Sprintf("The explicitly selected gate for run %s is inspection-only here; respond with `no-mistakes axi respond --run %s --action approve|fix|skip`", runID, runID),
 		fmt.Sprintf("Run `%s` to read the complete step summary and log", axiLogsFullCommand(gate.Name, runID)),
 	})
 }
@@ -695,6 +825,13 @@ func recordedFindingsFields(findingsJSON string, full bool) ([]toon.Field, bool)
 		fields = append(fields, toon.Field{Key: "findings", Value: findingRows(parsed.Items)})
 	}
 	return fields, bounded
+}
+
+func runFlag(runID string) string {
+	if runID == "" {
+		return ""
+	}
+	return " --run " + runID
 }
 
 func axiLogsFullCommand(step, runID string) string {
