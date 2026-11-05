@@ -454,7 +454,7 @@ func TestLivePiProfileResumeAfterDaemonRestartKeepsPin(t *testing.T) {
 
 	run := h.WaitForRun(branch, 120*time.Second)
 	if run.Status != types.RunCompleted {
-		t.Fatalf("resumed pinned run did not complete: %s (%v)", run.Status, run.Error)
+		t.Fatalf("resumed pinned run did not complete: %s (%s)", run.Status, deref(run.Error))
 	}
 	invs := invocationsForRun(t, h, parked.ID)
 	if len(invs) == 0 {
