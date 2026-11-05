@@ -25,6 +25,7 @@ type ValidationAdmission struct {
 	InitialChild   Run
 	AssertionProof *launchassert.Proof
 	WorktreeRoot   string
+	EvidenceRoot   string
 	Plan           *verificationplan.Snapshot
 	Gates          string
 	Steps          []types.StepName
@@ -180,19 +181,24 @@ func (d *DB) AcceptValidationAdmission(ctx context.Context, proposal ValidationA
 		return nil, false, fmt.Errorf("authored admission cannot drop the original verification input")
 	}
 	workDir, nonce := filepath.Join(proposal.WorktreeRoot, childID), "authored-"+childID
+	var evidenceDir *string
+	if proposal.EvidenceRoot != "" {
+		resolved := filepath.Join(proposal.EvidenceRoot, childID)
+		evidenceDir = &resolved
+	}
 	if _, err := tx.Exec(`INSERT INTO runs
 		(id, repo_id, branch, head_sha, base_sha, submitted_head_sha, worktree_dir, no_mistakes_version, no_mistakes_build_sha, status,
 		intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest,
-		launch_assertion, launch_assertion_proof, pr_base_branch, omit_intent, pi_profile, verification_plan, gates_json,
+		launch_assertion, launch_assertion_proof, pr_base_branch, omit_intent, pi_profile, quota_routing, pr_title, pr_body, verification_plan, gates_json,
 		pr_url, pr_state, pr_state_observed_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation,
-		closing_issue_refs, closing_issue_refs_locked_at, created_at, updated_at)
+		closing_issue_refs, closing_issue_refs_locked_at, evidence_dir, created_at, updated_at)
 		SELECT ?, repo_id, branch, ?, base_sha, ?, ?, ?, ?, 'pending',
 		intent, intent_source, intent_session_id, intent_score, ?, launch_validation_generation, launch_intent_digest,
-		?, ?, pr_base_branch, omit_intent, pi_profile, ?, ?,
+		?, ?, pr_base_branch, omit_intent, pi_profile, quota_routing, pr_title, pr_body, ?, ?,
 		pr_url, pr_state, pr_state_observed_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation,
-		closing_issue_refs, closing_issue_refs_locked_at, ?, ? FROM runs WHERE id = ?`,
+		closing_issue_refs, closing_issue_refs_locked_at, ?, ?, ? FROM runs WHERE id = ?`,
 		childID, proposal.Request.CandidateSHA, proposal.Request.CandidateSHA, workDir, buildinfo.CurrentVersion(), buildinfo.Commit, nonce,
-		proposal.Request.LaunchAssertion, proposal.AssertionProof, proposal.Plan, proposal.Gates, timestamp, timestamp, current.Run.ID); err != nil {
+		proposal.Request.LaunchAssertion, proposal.AssertionProof, proposal.Plan, proposal.Gates, evidenceDir, timestamp, timestamp, current.Run.ID); err != nil {
 		return nil, false, err
 	}
 	proposal.ID, proposal.CreatedAt, proposal.ChildID = newID(), timestamp, childID

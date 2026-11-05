@@ -242,3 +242,6 @@ func processAlive(pid int) bool {
 	state, err := windows.WaitForSingleObject(handle, 0)
 	return err != nil || state != windows.WAIT_OBJECT_0
 }
+
+// CheckEndpointPath always succeeds: the Windows endpoint is a regular file.
+func CheckEndpointPath(endpoint string) error { return nil }

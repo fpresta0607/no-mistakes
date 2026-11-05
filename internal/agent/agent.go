@@ -36,6 +36,11 @@ type Agent interface {
 // RunOpts configures a single agent invocation.
 type RunOpts struct {
 	Prompt string
+	// RequireCompletedChildren refuses a successful native agent exit if its
+	// owned process group or job still has children after the bounded settle
+	// window, or completion cannot be verified.
+	// It does not verify detached checks or their exit statuses.
+	RequireCompletedChildren bool
 	// Env appends invocation-scoped environment entries to the agent process.
 	// Entries later in the slice override inherited values.
 	Env         []string
@@ -78,7 +83,8 @@ type RunOpts struct {
 	// OnAttempt receives each concrete adapter attempt, including retries and
 	// fallback-provider attempts, after it completes. It is instrumentation
 	// only and must not change invocation behavior.
-	OnAttempt func(Attempt)
+	OnAttempt       func(Attempt)
+	ConfiguredModel string
 }
 
 // IsStructuredOutputRejected reports whether an invocation completed but its
@@ -104,6 +110,23 @@ func RejectedOutput(err error) string {
 	return ""
 }
 
+// IsUsageLimitReached reports the adapter's terminal usage-limit signal. The
+// signal remains matchable through pipeline error wrappers, even when a
+// timeout diagnostic bounds the adapter's displayed error text.
+func IsUsageLimitReached(err error) bool {
+	var limit interface {
+		UsageLimitReached() bool
+	}
+	return errors.As(err, &limit) && limit.UsageLimitReached()
+}
+
+func IsTerminalProviderError(err error) bool {
+	var terminal interface {
+		TerminalProviderError() bool
+	}
+	return errors.As(err, &terminal) && terminal.TerminalProviderError()
+}
+
 type structuredOutputRejection struct {
 	err    error
 	output string
@@ -113,7 +136,9 @@ func (e *structuredOutputRejection) Error() string                { return e.err
 func (e *structuredOutputRejection) Unwrap() error                { return e.err }
 func (*structuredOutputRejection) StructuredOutputRejected() bool { return true }
 
-func rejectStructuredOutput(err error) error {
+// RejectStructuredOutput marks absent, malformed, or schema-rejected final
+// output without changing its diagnostic or underlying error chain.
+func RejectStructuredOutput(err error) error {
 	if err == nil || IsStructuredOutputRejected(err) {
 		return err
 	}
@@ -124,6 +149,7 @@ func rejectStructuredOutput(err error) error {
 // invocation. An Agent may make several attempts when it retries transient
 // failures or moves to a fallback provider.
 type Attempt struct {
+	ConfiguredModel string
 	Agent           string
 	Result          *Result
 	Err             error
@@ -245,6 +271,10 @@ type LifecycleEvent struct {
 	Phase   string
 	PID     int
 	Message string
+	// NextAgent names the agent a LifecyclePhaseQuotaSwitch event moves the
+	// run to, so the executor can record the switch on the run's quota-routing
+	// record without parsing the prose. Empty on every other phase.
+	NextAgent string
 }
 
 // Result holds the output of an agent invocation.
@@ -262,7 +292,8 @@ type Result struct {
 	// when the adapter reports one. Callers persist it to resume later.
 	SessionID string
 	// Resumed reports whether this invocation resumed opts.Session.ID.
-	Resumed bool
+	Resumed         bool
+	ResumeRetryable *bool
 	// Model is the model the adapter reported serving this invocation, when
 	// available. Instrumentation records it, and eval replay validates it
 	// against the requested candidate.
@@ -381,7 +412,7 @@ func finalizeTextResult(agentName, text string, schema json.RawMessage, usage To
 	if text == "" {
 		err := &NoTextOutputError{Agent: agentName}
 		if len(schema) > 0 {
-			return resultFromUsage(usage), rejectStructuredOutput(err)
+			return resultFromUsage(usage), RejectStructuredOutput(err)
 		}
 		return resultFromUsage(usage), err
 	}

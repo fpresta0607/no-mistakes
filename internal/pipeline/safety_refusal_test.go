@@ -97,7 +97,7 @@ func TestOrdinaryFindingCannotImpersonateSafetyRefusal(t *testing.T) {
 }
 
 func TestUserAddedFindingCannotImpersonateSafetyRefusal(t *testing.T) {
-	merged := mergeUserOverridesJSON(`{"findings":[],"summary":""}`, nil, []types.Finding{{ID: safetyRefusalFindingID, Severity: "warning", Description: "ordinary issue"}})
+	merged := mergeUserOverridesJSON(`{"findings":[],"summary":""}`, nil, nil, []types.Finding{{ID: safetyRefusalFindingID, Severity: "warning", Description: "ordinary issue"}})
 	findings, err := types.ParseFindingsJSON(merged)
 	if err != nil || len(findings.Items) != 1 || HasSafetyRefusal(merged) || findings.Items[0].ID != "user-1" {
 		t.Fatalf("user findings = %s, error %v", merged, err)

@@ -259,6 +259,37 @@ func TestPRTemplateCreateAppliesConfiguredTitleFormat(t *testing.T) {
 	}
 }
 
+func TestPRTemplateSuppliedTitleIgnoresAnEmptyDraftedTitle(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		data, _ := json.Marshal(prContent{Title: "", Body: filledPRTemplate})
+		return &agent.Result{Output: data}, nil
+	}
+	title := "Add the Bar helper"
+	sctx.Run.PRTitle = &title
+	env, logFile := fakeGH(t, "")
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile)
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatalf("an empty drafted title refused the template narrative: %v", err)
+	}
+	logs, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logs), "--title "+title) {
+		t.Fatalf("supplied title was not published:\n%s", logs)
+	}
+	body, err := os.ReadFile(bodyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(body), filledPRTemplate) {
+		t.Fatalf("template narrative was not published:\n%s", body)
+	}
+}
+
 func TestPRTemplateUpdateAppliesConfiguredTitleFormat(t *testing.T) {
 	t.Parallel()
 	sctx, ag, _ := templateTestContext(t)
@@ -338,7 +369,7 @@ func TestPRTemplateRegenerationPreservesAuthorsAndClosingReferences(t *testing.T
 	}
 	logs, _ := os.ReadFile(logFile)
 	for _, line := range strings.Split(string(logs), "\n") {
-		if strings.Contains(line, "pr edit") && strings.Contains(line, "--title") {
+		if strings.Contains(line, "stdin --title") {
 			t.Fatal("template update must not replace an author's title")
 		}
 	}
@@ -378,7 +409,7 @@ func TestPRTemplateDraftFailureDoesNotFallBackOrPublish(t *testing.T) {
 				t.Fatal("untrusted template output published")
 			}
 			logs, _ := os.ReadFile(logFile)
-			if strings.Contains(string(logs), "pr create") || strings.Contains(string(logs), "pr edit") {
+			if strings.Contains(string(logs), "pr create") || strings.Contains(string(logs), "--method PATCH") {
 				t.Fatalf("publication after invalid template output: %s", logs)
 			}
 		})
@@ -420,7 +451,7 @@ func TestPRTemplateUpdateErrorIsNotMaskedByLegacyWarning(t *testing.T) {
 		t.Fatalf("failed first attachment recorded as success: %+v, %v", run, err)
 	}
 	logs, _ := os.ReadFile(logFile)
-	if strings.Count(string(logs), "pr edit") != 1 || strings.Contains(string(logs), "pr create") {
+	if strings.Count(string(logs), "--method PATCH") != 1 || strings.Contains(string(logs), "pr create") {
 		t.Fatalf("uncertain write retried or duplicated: %s", logs)
 	}
 }
@@ -436,6 +467,18 @@ func TestPRTemplateBarePinnedReadsUnderExplicitBarePolicy(t *testing.T) {
 	got, err := loadPRTemplate(context.Background(), bare, pin, sctx.Config.PR.Template)
 	if err != nil || got != testPRTemplate {
 		t.Fatalf("bare pinned template = %q, %v", got, err)
+	}
+}
+
+func TestPRTemplateSupportsOrigin(t *testing.T) {
+	t.Parallel()
+	sctx, _, _ := templateTestContext(t)
+	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", sctx.Run.BaseSHA, scm.ProviderOrigin, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(content.Body, filledPRTemplate) {
+		t.Fatalf("body = %q, want filled template", content.Body)
 	}
 }
 
@@ -487,7 +530,7 @@ func TestPRTemplateIncompleteGitHubReadsNeverOverwriteAuthor(t *testing.T) {
 				if readErr != nil {
 					t.Fatal(readErr)
 				}
-				if strings.Contains(string(logs), "pr edit") || strings.Contains(string(logs), "pr create") || len(ag.calls) != 0 {
+				if strings.Contains(string(logs), "--method PATCH") || strings.Contains(string(logs), "pr create") || len(ag.calls) != 0 {
 					t.Fatalf("incomplete read drafted or wrote content: %s; agent calls=%d", logs, len(ag.calls))
 				}
 			})
@@ -511,5 +554,48 @@ func TestPRTemplateStructureInvalidBacktickFenceKeepsRequiredHeadings(t *testing
 	// Tilde fences allow backticks in their info strings.
 	if err := validateTemplateStructure("~~~ `example`\n# Example\n~~~\n# Required\n", "# Required\n"); err != nil {
 		t.Fatalf("fenced example treated as required: %v", err)
+	}
+}
+
+// A supplied description replaces the agent's template fill, under the same
+// top-level heading rule, and is refused loudly before anything is created.
+func TestPRTemplateSuppliedBodyMustKeepTheTemplateHeadings(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{name: "kept", body: "# Overview\n\nOur own words.\n\n### Rollout\n\nStaged.\n"},
+		{name: "missing", body: "## Overview\n\nOur own words.\n", wantErr: `"# Overview" is missing, changed or out of order`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sctx, ag, _ := templateTestContext(t)
+			env, logFile := fakeGH(t, "")
+			sctx.Env = env
+			title := "Supplied title"
+			sctx.Run.PRTitle, sctx.Run.PRBody = &title, &tc.body
+			_, err := (&PRStep{}).Execute(sctx)
+			logs := string(mustRead(t, logFile))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), "pr.template") || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v", err)
+				}
+				if strings.Contains(logs, "pr create") {
+					t.Fatalf("refused body was published:\n%s", logs)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if body := string(mustRead(t, envEntry(env, "FAKE_CLI_PR_BODY_FILE"))); !strings.HasPrefix(body, tc.body) {
+				t.Fatalf("supplied body did not replace the template fill:\n%s", body)
+			}
+			if len(ag.calls) != 0 {
+				t.Fatalf("template was drafted despite a supplied title and body: calls=%d", len(ag.calls))
+			}
+		})
 	}
 }

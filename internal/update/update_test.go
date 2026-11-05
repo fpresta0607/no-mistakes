@@ -204,7 +204,7 @@ func TestUpdaterRunResetsDaemonAfterUpdate(t *testing.T) {
 		httpClient:     server.Client(),
 		executablePath: execPath,
 		now:            func() time.Time { return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC) },
-		resetDaemon: func() error {
+		resetDaemon: func(bool) error {
 			resetCalled = true
 			return nil
 		},
@@ -294,7 +294,7 @@ func TestUpdaterRunRefusesWithActiveRunsAndListsThem(t *testing.T) {
 		stderr:         stderr,
 		stdin:          strings.NewReader("y\n"),
 		now:            func() time.Time { return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC) },
-		resetDaemon: func() error {
+		resetDaemon: func(bool) error {
 			resetCalled = true
 			return nil
 		},
@@ -420,7 +420,7 @@ func TestUpdaterRunFailsWhenDaemonResetFails(t *testing.T) {
 		stdout:         stdout,
 		stderr:         stderr,
 		now:            func() time.Time { return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC) },
-		resetDaemon: func() error {
+		resetDaemon: func(bool) error {
 			return fmt.Errorf("boom")
 		},
 	}
@@ -492,7 +492,7 @@ func TestUpdaterRunFailsWhenDaemonResetLeavesDaemonOffline(t *testing.T) {
 		executablePath: execPath,
 		stdout:         stdout,
 		now:            func() time.Time { return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC) },
-		resetDaemon: func() error {
+		resetDaemon: func(bool) error {
 			return &daemonResetError{err: errors.New("start daemon: boom"), daemonOffline: true}
 		},
 	}
@@ -581,7 +581,7 @@ func TestUpdaterRunFailsWhenDaemonUsesDifferentExecutable(t *testing.T) {
 		httpClient:     server.Client(),
 		executablePath: execPath,
 		now:            func() time.Time { return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC) },
-		resetDaemon: func() error {
+		resetDaemon: func(bool) error {
 			resetCalled = true
 			return nil
 		},
@@ -690,7 +690,7 @@ func TestUpdaterRunReplacesDaemonWhenDifferentExecutableConfirmed(t *testing.T) 
 				stderr:         stderr,
 				stdin:          strings.NewReader(tt.stdin),
 				now:            func() time.Time { return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC) },
-				resetDaemon: func() error {
+				resetDaemon: func(bool) error {
 					resetCalled = true
 					return nil
 				},
@@ -786,7 +786,7 @@ func TestUpdaterRunFailsWhenDaemonExecutableCannotBeResolved(t *testing.T) {
 		httpClient:     server.Client(),
 		executablePath: execPath,
 		now:            func() time.Time { return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC) },
-		resetDaemon: func() error {
+		resetDaemon: func(bool) error {
 			resetCalled = true
 			return nil
 		},

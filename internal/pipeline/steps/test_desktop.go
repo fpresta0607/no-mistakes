@@ -58,9 +58,14 @@ func reportTestWindows(sctx *pipeline.StepContext, outcome *pipeline.StepOutcome
 	if outcome == nil {
 		return outcome, err
 	}
-	findings, parseErr := types.ParseFindingsJSON(outcome.Findings)
-	if parseErr != nil {
-		return nil, errors.Join(err, fmt.Errorf("name the windows the test agent opened in the step's findings: %w", parseErr))
+	// An outcome that carries only a known baseline exit code has no findings
+	// yet, and losing it would let the failure be retried as a crash.
+	var findings Findings
+	if outcome.Findings != "" {
+		var parseErr error
+		if findings, parseErr = types.ParseFindingsJSON(outcome.Findings); parseErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("name the windows the test agent opened in the step's findings: %w", parseErr))
+		}
 	}
 	findings.Items = append(findings.Items, items...)
 	findingsJSON, marshalErr := json.Marshal(findings)

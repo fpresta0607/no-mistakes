@@ -89,11 +89,11 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		}
 		m.mu.Lock()
 		executor := m.executors[original.Run.ID]
-		var childExecutor *pipeline.Executor
-		if event != nil {
-			childExecutor = m.executors[event.Successor.ID]
-		}
+		isChildScheduled := event != nil && m.runScheduledLocked(event.Successor.ID)
 		m.mu.Unlock()
+		if m.restartPending() && !isChildScheduled {
+			return "", errRestartPending
+		}
 		if executor != nil || !original.Run.Status.Terminal() || original.Run.Status == types.RunCompleted {
 			return "", fmt.Errorf("only a terminal run without an executor can adopt source")
 		}
@@ -199,7 +199,20 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if err := proveTerminalPublication(ctx, &original.Run, repo, request.CallerDir, forge, cfg); err != nil {
 			return "", err
 		}
-		ag, err := newResolvedPipelineAgent(cfg, roleConfigs, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), forgeEnvironment(forge))
+		quotaRecord, err := replayQuotaRouting(cfg, original.Run.QuotaRouting)
+		if err != nil {
+			return "", err
+		}
+		// Agent construction holds fail-closed launch checks, so it comes before
+		// acceptance and a refused launch records nothing. A new successor has no
+		// directory yet, so its agent is steered to the root it will go under.
+		var evidenceRoot string
+		if event != nil {
+			evidenceRoot = pipelineEvidenceRoot(m.paths, cfg, &event.Successor)
+		} else if evidenceRoot, err = m.newRunEvidenceRoot(globalCfg); err != nil {
+			return "", err
+		}
+		ag, _, err := newResolvedPipelineAgent(ctx, cfg, roleConfigs, evidenceRoot, forgeEnvironment(forge), quotaRecord)
 		if err != nil {
 			return "", err
 		}
@@ -228,7 +241,7 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 			}
 		}
 		if event == nil {
-			event, _, err = m.db.AdoptTerminalCandidate(ctx, db.TerminalAdoption{Snapshot: *original, SuccessorID: successorID, WorktreeRoot: filepath.Dir(workDir), Plan: plan, Gates: gates, StepNames: stepNames, CandidateSHA: source.Head, RetainedSHA: source.RetainedHead, CandidateTree: source.Tree, SourceRef: candidateRef, GateHead: source.GateHead, RecoveryHead: source.RecoveryHead, CallerDir: request.CallerDir, CallerHead: callerHead, ManagedDir: source.ManagedDir, Reason: request.Reason, Operator: strconv.Itoa(operator), Assertion: assertion, Proof: proof})
+			event, _, err = m.db.AdoptTerminalCandidate(ctx, db.TerminalAdoption{Snapshot: *original, SuccessorID: successorID, WorktreeRoot: filepath.Dir(workDir), EvidenceRoot: evidenceRoot, Plan: plan, Gates: gates, StepNames: stepNames, CandidateSHA: source.Head, RetainedSHA: source.RetainedHead, CandidateTree: source.Tree, SourceRef: candidateRef, GateHead: source.GateHead, RecoveryHead: source.RecoveryHead, CallerDir: request.CallerDir, CallerHead: callerHead, ManagedDir: source.ManagedDir, Reason: request.Reason, Operator: strconv.Itoa(operator), Assertion: assertion, Proof: proof})
 			if err != nil {
 				return "", err
 			}
@@ -266,7 +279,7 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 			}
 			result.PhaseBudgets[string(step.Name())] = budget
 		}
-		if ctx.Err() != nil || childExecutor != nil {
+		if ctx.Err() != nil || isChildScheduled {
 			return fresh.ID, nil
 		}
 		m.subMu.Lock()

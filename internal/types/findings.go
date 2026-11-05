@@ -92,13 +92,14 @@ const (
 // Finding category constants for the CI step's check findings. The CI step
 // turns each settled issue on the pull request into one finding and the fix
 // half routes by this category: a check finding names its provider check in
-// Finding.Check, a merge-conflict finding asks for a rebase, a transient
+// Finding.Check, a merge-conflict or behind-base finding asks for a rebase, a transient
 // finding is a provider-attributed outcome no code change can clear, and a
 // review-bot finding carries one unresolved comment from a third-party
 // review bot's check.
 const (
 	FindingCategoryCICheck         = "ci-check"
 	FindingCategoryCIMergeConflict = "ci-merge-conflict"
+	FindingCategoryCIBehindBase    = "ci-behind-base"
 	FindingCategoryCITransient     = "ci-transient"
 	FindingCategoryCIReviewBot     = "ci-review-bot"
 )
@@ -116,6 +117,12 @@ const FindingCategoryReviewQuestion = "review-question"
 // ApprovalOverrideVerifier keys on it so an approval over that failure is
 // recorded as an override rather than a silent green completion.
 const FindingCategoryTestCommand = "test-command"
+
+// FindingCategoryTestVerdict marks the finding the Test step derives from its
+// evidence turn's verdict. A completed evidence turn replaces an earlier
+// verdict finding; a budget-cut park can retain the last completed turn's
+// verdict finding because the cut supplies no new verdict.
+const FindingCategoryTestVerdict = "test-verdict"
 
 // FindingIDTestAgentTimeout is the Test-step park when an evidence or repair
 // invocation burned its wall-clock budget. It is a budget/provider-slowness
@@ -139,6 +146,11 @@ const FindingIDTestLiveCheckBudget = "test-live-check-budget"
 // command: the machine gave the run no turn, or the command did not start.
 // It is not a test failure, so no repair agent is ever sent to it.
 const FindingIDTestCommandNoTurn = "test-command-no-turn"
+
+// FindingIDReviewFixRoundsExhausted is the Review-step notice that the
+// trusted review.max_fix_rounds budget is spent. Like the Test budget cuts it
+// records an operator's budget, not a code mistake.
+const FindingIDReviewFixRoundsExhausted = "review-fix-rounds-exhausted"
 
 // Test scenario result constants: the vocabulary the test step's evidence
 // prompt instructs the agent to use for each derived scenario.
@@ -207,7 +219,11 @@ type Finding struct {
 	Action           string `json:"action"`
 	Source           string `json:"source,omitempty"`
 	UserInstructions string `json:"user_instructions,omitempty"`
-	ReviewScope      string `json:"review_scope,omitempty"`
+	// DriverInstructions is fix guidance from an agent driving the run through
+	// `no-mistakes axi`. It is kept apart from UserInstructions because it
+	// scopes one fix round and is not a decision the user made.
+	DriverInstructions string `json:"driver_instructions,omitempty"`
+	ReviewScope        string `json:"review_scope,omitempty"`
 	// Category separates the combined document+lint housekeeping pass's
 	// findings into their owning gates and the CI step's findings by kind
 	// (see the FindingCategoryCI* constants). Empty everywhere else.
@@ -284,6 +300,7 @@ type findingWire struct {
 	Action              string `json:"action"`
 	Source              string `json:"source,omitempty"`
 	UserInstructions    string `json:"user_instructions,omitempty"`
+	DriverInstructions  string `json:"driver_instructions,omitempty"`
 	ReviewScope         string `json:"review_scope,omitempty"`
 	Category            string `json:"category,omitempty"`
 	Check               string `json:"check,omitempty"`
@@ -296,6 +313,20 @@ type findingWire struct {
 type WithdrawnFinding struct {
 	ID     string `json:"id"`
 	Reason string `json:"reason,omitempty"`
+}
+
+// ReviewCoverageScope is pipeline-written provenance for retained coverage.
+// Agent output never supplies authority for this record.
+type ReviewCoverageScope struct {
+	Version          int      `json:"version"`
+	RunID            string   `json:"run_id"`
+	StepResultID     string   `json:"step_result_id"`
+	HeadSHA          string   `json:"head_sha"`
+	RunBaseSHA       string   `json:"run_base_sha"`
+	BaseSHA          string   `json:"base_sha"`
+	TrustedConfigSHA string   `json:"trusted_config_sha"`
+	Paths            []string `json:"paths"`
+	SourceRoundID    string   `json:"source_round_id,omitempty"`
 }
 
 // Findings is the structured findings payload exchanged across pipeline, IPC, and TUI.
@@ -313,7 +344,8 @@ type Findings struct {
 	// outstanding set (see pipeline.resolveVerifiedFindingsJSON). A review turn
 	// that does not list a path has not proven anything about it, so silence is
 	// never read as resolution. Empty on every non-review payload.
-	ReviewedPaths []string `json:"reviewed_paths,omitempty"`
+	ReviewedPaths       []string             `json:"reviewed_paths,omitempty"`
+	ReviewCoverageScope *ReviewCoverageScope `json:"review_coverage_scope,omitempty"`
 	// WithdrawnFindings is an answer round's explicit re-adjudication: the
 	// carried findings the reviewer now says no longer hold, each with its
 	// reason. On an answer round a carried finding leaves the outstanding set
@@ -336,21 +368,22 @@ type Findings struct {
 }
 
 type findingsWire struct {
-	Items               []Finding          `json:"findings"`
-	Legacy              []Finding          `json:"items"`
-	Summary             string             `json:"summary"`
-	ReviewedPaths       []string           `json:"reviewed_paths"`
-	WithdrawnFindings   []WithdrawnFinding `json:"withdrawn_findings"`
-	Tested              []string           `json:"tested"`
-	TestingSummary      string             `json:"testing_summary"`
-	Artifacts           []TestArtifact     `json:"artifacts"`
-	Scenarios           []TestScenario     `json:"scenarios"`
-	Verdict             string             `json:"verdict"`
-	TestedHeadSHA       string             `json:"tested_head_sha"`
-	UnvalidatedSinceSHA string             `json:"unvalidated_since_sha"`
-	RiskLevel           string             `json:"risk_level"`
-	RiskRationale       string             `json:"risk_rationale"`
-	RiskScope           string             `json:"risk_scope"`
+	Items               []Finding            `json:"findings"`
+	Legacy              []Finding            `json:"items"`
+	Summary             string               `json:"summary"`
+	ReviewedPaths       []string             `json:"reviewed_paths"`
+	ReviewCoverageScope *ReviewCoverageScope `json:"review_coverage_scope"`
+	WithdrawnFindings   []WithdrawnFinding   `json:"withdrawn_findings"`
+	Tested              []string             `json:"tested"`
+	TestingSummary      string               `json:"testing_summary"`
+	Artifacts           []TestArtifact       `json:"artifacts"`
+	Scenarios           []TestScenario       `json:"scenarios"`
+	Verdict             string               `json:"verdict"`
+	TestedHeadSHA       string               `json:"tested_head_sha"`
+	UnvalidatedSinceSHA string               `json:"unvalidated_since_sha"`
+	RiskLevel           string               `json:"risk_level"`
+	RiskRationale       string               `json:"risk_rationale"`
+	RiskScope           string               `json:"risk_scope"`
 }
 
 // ParseFindingsJSON decodes findings JSON, accepting current and legacy item
@@ -368,6 +401,7 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		Items:               items,
 		Summary:             wire.Summary,
 		ReviewedPaths:       wire.ReviewedPaths,
+		ReviewCoverageScope: wire.ReviewCoverageScope,
 		WithdrawnFindings:   wire.WithdrawnFindings,
 		Tested:              wire.Tested,
 		TestingSummary:      wire.TestingSummary,
@@ -397,13 +431,34 @@ func FindingsMetadata(findings Findings) Findings {
 	return findings
 }
 
-// NormalizeFindings assigns deterministic IDs to findings that do not have one yet.
+// NormalizeFindings trims IDs and makes them unique within the findings set.
+// The first occurrence of an explicit ID keeps it; missing IDs and later
+// duplicates receive deterministic prefix-N IDs that skip every reserved ID,
+// including explicit IDs later in the set. Selecting one finding must never
+// select or discard an unrelated finding with the same ID.
+// Surrounding whitespace is never part of a finding's identity: the gate shows
+// the ID and a response names it, and the response side trims what it is given,
+// so a padded gate ID used to have no spelling that could select or decline it.
 func NormalizeFindings(findings Findings, prefix string) Findings {
+	used := make(map[string]bool, len(findings.Items))
+	for i := range findings.Items {
+		findings.Items[i].ID = strings.TrimSpace(findings.Items[i].ID)
+		if used[findings.Items[i].ID] {
+			findings.Items[i].ID = ""
+			continue
+		}
+		used[findings.Items[i].ID] = true
+	}
 	for i := range findings.Items {
 		if findings.Items[i].ID != "" {
 			continue
 		}
-		findings.Items[i].ID = prefix + "-" + itoa(i+1)
+		id := prefix + "-" + itoa(i+1)
+		for next := i + 2; used[id]; next++ {
+			id = prefix + "-" + itoa(next)
+		}
+		findings.Items[i].ID = id
+		used[id] = true
 	}
 	return findings
 }
@@ -488,6 +543,10 @@ func MergeUserOverrides(findings Findings, instructions map[string]string, added
 		if item.Action == "" {
 			item.Action = ActionAutoFix
 		}
+		// The added ID is trimmed for the same reason the producer's is: the
+		// identity a later round attributes by must not carry whitespace, and a
+		// padded collision must still be seen as a collision.
+		item.ID = strings.TrimSpace(item.ID)
 		if item.ID == "" || used[item.ID] {
 			item.ID, counter = nextUserFindingID(used, counter)
 		} else {
@@ -629,6 +688,7 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	f.Action = wire.Action
 	f.Source = wire.Source
 	f.UserInstructions = wire.UserInstructions
+	f.DriverInstructions = wire.DriverInstructions
 	f.ReviewScope = wire.ReviewScope
 	f.Category = wire.Category
 	f.Check = wire.Check

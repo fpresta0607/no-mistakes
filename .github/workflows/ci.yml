@@ -33,20 +33,6 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      # pipeline/steps is one package whose ~1000 top-level tests cost about
-      # 1600-1850s of test time on a 4-core Windows runner, more than one 15m
-      # go test budget. Proven here, on every run, before any Windows job spends
-      # a slot: the parts the Windows jobs use are a real partition of this
-      # package's `go test -list '^Test'` output, every part pattern is what Go's
-      # own matching selects back, and no part pattern is too long for a Windows
-      # command line. tools/testshard computes the parts for both this check and
-      # the Windows jobs, so they cannot drift.
-      - name: Proven partition of pipeline/steps tests for the Windows shards
-        run: go run ./tools/testshard -verify
-
-      - name: Proven partition of git-heavy tests for the Windows shards
-        run: go run ./tools/testshard -parts 2 -packages ./internal/git,./internal/branchsync,./internal/gate,./internal/evidence,./internal/daemon,./internal/eval -verify
-
   test:
     name: ${{ matrix.name }}
     strategy:
@@ -61,25 +47,52 @@ jobs:
             name: test (windows-core)
             shard: core
           - os: windows-latest
-            name: test (windows-git 1/2)
+            name: test (windows-git)
             shard: git
-            git_part: 1
+          # pipeline/steps, daemon, and gate are each split by test name. The
+          # last row of a group skips the union of the other rows' patterns, so
+          # a new test always lands in exactly one shard; rebalance the ranges
+          # against the shards' -v timings (issue #1580, #1682).
           - os: windows-latest
-            name: test (windows-git 2/2)
-            shard: git
-            git_part: 2
-          - os: windows-latest
-            name: test (windows-steps 1/3)
+            name: test (windows-steps-1)
             shard: steps
-            steps_part: 1
+            steps_run: '^Test[A-K]'
           - os: windows-latest
-            name: test (windows-steps 2/3)
+            name: test (windows-steps-2)
             shard: steps
-            steps_part: 2
+            steps_run: '^Test[L-Q]'
           - os: windows-latest
-            name: test (windows-steps 3/3)
+            name: test (windows-steps-3)
             shard: steps
-            steps_part: 3
+            steps_skip: '^Test[A-Q]'
+          - os: windows-latest
+            name: test (windows-daemon-1)
+            shard: daemon
+            daemon_run: '^Test[A-O]'
+          - os: windows-latest
+            name: test (windows-daemon-2)
+            shard: daemon
+            daemon_run: '^TestP'
+          - os: windows-latest
+            name: test (windows-daemon-3)
+            shard: daemon
+            daemon_run: '^Test[QR]'
+          - os: windows-latest
+            name: test (windows-daemon-4)
+            shard: daemon
+            daemon_skip: '^Test[A-R]'
+          - os: windows-latest
+            name: test (windows-gate-1)
+            shard: gate
+            gate_run: '^Test[A-I]'
+          - os: windows-latest
+            name: test (windows-gate-2)
+            shard: gate
+            gate_run: '^TestReconcileStale'
+          - os: windows-latest
+            name: test (windows-gate-3)
+            shard: gate
+            gate_skip: '^Test([A-I]|ReconcileStale)'
     runs-on: ${{ matrix.os }}
     # Sized for each Windows shard, which still sets the floor: git.exe plus
     # Defender tax makes git-backed packages ~10x their Linux time (see the
@@ -87,11 +100,11 @@ jobs:
     # and then ran those packages sequentially, so total wall could exceed
     # timeout-minutes with no package hitting go test -timeout - an
     # evidence-free cancellation. Git-heavy packages are split from the core
-    # remainder, and pipeline/steps is its own shard so it no longer serializes
-    # behind the other git-heavy packages on a 4-core GitHub-hosted runner.
-    # Each shard's wall stays below this cap so a real hang dumps goroutines.
-    # 40 is a runaway guard, not a target - Linux and macOS finish far inside
-    # it, and it still keeps a wedged runner well short of the six-hour default.
+    # remainder; pipeline/steps, daemon, and gate are their own shards, each
+    # also split by test name, so a 15m per-package hang still dumps
+    # goroutines instead of cancelling the job. 40 is a runaway guard, not a
+    # target - Linux and macOS finish far inside it, and it still keeps a
+    # wedged runner well short of the six-hour default.
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
@@ -142,35 +155,39 @@ jobs:
         run: go test -race -timeout=20m ./...
 
       # Git-heavy packages are the Windows wall floor. NM_CI_WINDOWS_GIT_EXCLUDE
-      # on the core shard is the union of the git and steps shards; the workflow
-      # tests resolve every shard through `go list` and fail if they drift or
-      # overlap. pipeline/steps is its own shard (~10 min) so it runs in
-      # parallel with the remaining git-heavy packages instead of setting a
-      # ~21 min serial floor.
-      # branchsync and daemon also exceed a single package budget as the suite
-      # grows. Reuse the proven partition without changing either timeout.
-      - name: Test on Windows (git-heavy, part ${{ matrix.git_part }}/2)
+      # on the core shard is the union of the git, steps, daemon, and gate
+      # shards; the workflow tests resolve every shard through `go list` and
+      # fail if they drift or overlap. pipeline/steps, daemon, and gate are
+      # their own shards (daemon and gate also split by test name) so they run
+      # in parallel with the remaining git-heavy packages instead of setting a
+      # serial floor that hits go test -timeout (issue #1682).
+      - name: Test on Windows (git-heavy)
         if: runner.os == 'Windows' && matrix.shard == 'git'
-        shell: pwsh
-        run: |
-          $run = (go run ./tools/testshard -parts 2 -part ${{ matrix.git_part }} -packages ./internal/git,./internal/branchsync,./internal/gate,./internal/evidence,./internal/daemon,./internal/eval).Trim()
-          if (-not $run) { throw "tools/testshard printed no -run pattern for part ${{ matrix.git_part }}" }
-          Write-Host "git-heavy part ${{ matrix.git_part }}/2: -run pattern is $($run.Length) characters"
-          go test -v -timeout=15m -run $run ./internal/git ./internal/branchsync ./internal/gate ./internal/evidence ./internal/daemon ./internal/eval
+        run: go test -v -timeout=15m ./internal/git ./internal/branchsync ./internal/evidence ./internal/eval
 
-      # One part of the package's top-level tests per job, from the real
-      # `go test -list '^Test'` output. -timeout and this job's cap are unchanged,
-      # no test is skipped and no parallelism is lowered: the same tests run, in
-      # three jobs instead of one. tools/testshard -verify in the check job proves
-      # the parts cover every listed test exactly once.
-      - name: Test on Windows (pipeline/steps, part ${{ matrix.steps_part }}/3)
+      - name: Test on Windows (pipeline/steps)
         if: runner.os == 'Windows' && matrix.shard == 'steps'
         shell: pwsh
-        run: |
-          $run = (go run ./tools/testshard -parts 3 -part ${{ matrix.steps_part }}).Trim()
-          if (-not $run) { throw "tools/testshard printed no -run pattern for part ${{ matrix.steps_part }}" }
-          Write-Host "pipeline/steps part ${{ matrix.steps_part }}/3: -run pattern is $($run.Length) characters"
-          go test -v -timeout=15m -run $run ./internal/pipeline/steps/...
+        env:
+          NM_CI_WINDOWS_STEPS_RUN: ${{ matrix.steps_run }}
+          NM_CI_WINDOWS_STEPS_SKIP: ${{ matrix.steps_skip }}
+        run: go test -v -timeout=15m "-run=$env:NM_CI_WINDOWS_STEPS_RUN" "-skip=$env:NM_CI_WINDOWS_STEPS_SKIP" ./internal/pipeline/steps/...
+
+      - name: Test on Windows (daemon)
+        if: runner.os == 'Windows' && matrix.shard == 'daemon'
+        shell: pwsh
+        env:
+          NM_CI_WINDOWS_DAEMON_RUN: ${{ matrix.daemon_run }}
+          NM_CI_WINDOWS_DAEMON_SKIP: ${{ matrix.daemon_skip }}
+        run: go test -v -timeout=15m "-run=$env:NM_CI_WINDOWS_DAEMON_RUN" "-skip=$env:NM_CI_WINDOWS_DAEMON_SKIP" ./internal/daemon
+
+      - name: Test on Windows (gate)
+        if: runner.os == 'Windows' && matrix.shard == 'gate'
+        shell: pwsh
+        env:
+          NM_CI_WINDOWS_GATE_RUN: ${{ matrix.gate_run }}
+          NM_CI_WINDOWS_GATE_SKIP: ${{ matrix.gate_skip }}
+        run: go test -v -timeout=15m "-run=$env:NM_CI_WINDOWS_GATE_RUN" "-skip=$env:NM_CI_WINDOWS_GATE_SKIP" ./internal/gate
 
       - name: Test on Windows (core)
         if: runner.os == 'Windows' && matrix.shard == 'core'

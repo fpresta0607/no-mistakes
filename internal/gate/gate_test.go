@@ -25,7 +25,17 @@ func TestMain(m *testing.M) {
 	// the in-directory use of the bare fixture repositories these tests
 	// create. Mirrors internal/git's TestMain.
 	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	os.Exit(m.Run())
+	// Fixtures must not inherit the developer's global git config: a
+	// commit.gpgsign=true there makes every fixture commit ask gpg to sign.
+	globalConfigDir, err := os.MkdirTemp("", "no-mistakes-gate-tests-")
+	if err != nil {
+		panic(err)
+	}
+	globalConfig := filepath.Join(globalConfigDir, "gitconfig")
+	os.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	code := m.Run()
+	os.RemoveAll(globalConfigDir)
+	os.Exit(code)
 }
 
 func TestProvisionGateDoesNotStampUnsupportedHookIsolation(t *testing.T) {
@@ -47,7 +57,7 @@ func TestProvisionGateDoesNotStampUnsupportedHookIsolation(t *testing.T) {
 	}
 	t.Cleanup(func() { ensureGateHooksPathIsolation = oldEnsure })
 
-	if err := provisionGate(ctx, bareDir, workDir, "https://example.com/repo.git", reposDir, false); err != nil {
+	if err := provisionGate(ctx, bareDir, workDir, "https://example.com/repo.git", reposDir); err != nil {
 		t.Fatal(err)
 	}
 	if gitpkg.GateConfigCurrent(bareDir) {

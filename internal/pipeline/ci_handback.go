@@ -12,7 +12,6 @@ import (
 
 const actionCIFollowup types.ApprovalAction = "ci-followup"
 
-var ErrDaemonShutdown = errors.New("daemon shutting down")
 var ErrCIHandbackSuspended = errors.New("CI handback remains parked for daemon recovery")
 
 func (e *Executor) approvalWaitError(ctx context.Context, runID string, step types.StepName) error {

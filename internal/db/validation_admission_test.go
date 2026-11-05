@@ -376,3 +376,16 @@ func TestValidationAdmissionContinuesOnlyACompletedAuthoredChild(t *testing.T) {
 		})
 	}
 }
+
+// Admissions and adoptions store their snapshot as JSON and compare it with a
+// fresh read, so a field JSON drops reads as changed history on every real run.
+func TestStoredSnapshotsKeepEveryFieldTheyAreComparedOn(t *testing.T) {
+	for _, record := range []any{Run{}, StepResult{}, StepRound{}} {
+		kind := reflect.TypeOf(record)
+		for index := 0; index < kind.NumField(); index++ {
+			if field := kind.Field(index); field.Tag.Get("json") == "-" {
+				t.Errorf("%s.%s is left out of stored snapshots", kind.Name(), field.Name)
+			}
+		}
+	}
+}

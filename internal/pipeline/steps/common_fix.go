@@ -39,6 +39,10 @@ type fixExecutionOptions struct {
 	// Workload records the bounded size of the change under fix for local
 	// telemetry. Optional; nil leaves the invocation's workload unknown.
 	Workload *agent.InvocationWorkload
+	// ReportBlockedVerification asks the fixer for the optional
+	// verification_blocked result field and logs it. Only the Review fix turn
+	// sets it: it is the one fix prompt that orders edits before verification.
+	ReportBlockedVerification bool
 }
 
 type commitSummary struct {
@@ -68,6 +72,34 @@ func fixerPrompt(prompt string) string {
 	return prompt + fixerRemovalRule + agent.MemoryFilesRule
 }
 
+const (
+	commitSubjectLimit      = 72
+	minFixSummaryBudget     = 20
+	fixSummaryBudgetProbe   = "x"
+	fixSummaryRuleTemplate  = "- The summary must be one concise sentence fragment suitable for a git commit subject.\n- Keep the summary under 10 words and at most %d characters: the commit subject adds a prefix and must stay within %d characters."
+	fixSummaryRuleUnbounded = "- The summary must be one concise sentence fragment suitable for a git commit subject.\n- Keep the summary under 10 words."
+)
+
+// fixSummaryRules renders the summary rules of a fix prompt, including the
+// character budget the configured commit.fix_message leaves for the summary.
+func fixSummaryRules(sctx *pipeline.StepContext, stepName types.StepName) string {
+	rendered, err := sctx.Config.Commit.RenderFixMessageForBranch(stepName, fixSummaryBudgetProbe, sctx.Run.Branch)
+	if err != nil {
+		return fixSummaryRuleUnbounded
+	}
+	doubled, err := sctx.Config.Commit.RenderFixMessageForBranch(stepName, fixSummaryBudgetProbe+fixSummaryBudgetProbe, sctx.Run.Branch)
+	if err != nil {
+		return fixSummaryRuleUnbounded
+	}
+	occurrences := utf8.RuneCountInString(doubled) - utf8.RuneCountInString(rendered)
+	if occurrences < 1 {
+		return fixSummaryRuleUnbounded
+	}
+	fixed := utf8.RuneCountInString(rendered) - occurrences*len(fixSummaryBudgetProbe)
+	budget := (commitSubjectLimit - fixed) / occurrences
+	return fmt.Sprintf(fixSummaryRuleTemplate, max(budget, minFixSummaryBudget), commitSubjectLimit)
+}
+
 var commitSummarySchema = json.RawMessage(fmt.Sprintf(`{
 	"type": "object",
 	"properties": {
@@ -75,6 +107,59 @@ var commitSummarySchema = json.RawMessage(fmt.Sprintf(`{
 	},
 	"required": ["summary"]
 }`, config.MaxFixMessageSummaryBytes))
+
+// maxVerificationBlockedBytes bounds the optional verification_blocked field
+// of a fix result. The field only reaches the step log.
+const maxVerificationBlockedBytes = 300
+
+// fixSummarySchema is commitSummarySchema plus the optional verification_blocked
+// field a fixer fills when the tool that would verify its edits is missing. It
+// stays optional so a fixer with nothing to report omits it.
+var fixSummarySchema = json.RawMessage(fmt.Sprintf(`{
+	"type": "object",
+	"properties": {
+		"summary": {"type": "string", "maxLength": %d},
+		"verification_blocked": {"type": "string", "maxLength": %d}
+	},
+	"required": ["summary"]
+}`, config.MaxFixMessageSummaryBytes, maxVerificationBlockedBytes))
+
+// blockedVerification returns the bounded, single-line verification_blocked
+// text of a fix result, or "" when the agent reported none or its output does
+// not parse. A parse failure is not worth failing a committed fix over: the
+// summary extraction already reports unparsable output.
+func blockedVerification(result *agent.Result) string {
+	if result == nil || result.Output == nil {
+		return ""
+	}
+	var parsed struct {
+		VerificationBlocked string `json:"verification_blocked"`
+	}
+	if err := json.Unmarshal(result.Output, &parsed); err != nil {
+		return ""
+	}
+	blocked := strings.Join(strings.Fields(parsed.VerificationBlocked), " ")
+	if len(blocked) > maxVerificationBlockedBytes {
+		blocked = strings.ToValidUTF8(blocked[:maxVerificationBlockedBytes], "")
+	}
+	return blocked
+}
+
+// logBlockedVerification makes a fix round whose verification could not run
+// visible in the step log. A round that produced a commit, whether the
+// pipeline committed the fixer's edits or the fixer ran `git commit` itself, is
+// labelled unverified; a round that changed nothing is labelled distinctly from
+// the ordinary "no agent changes to commit", which reads as "nothing needed
+// fixing".
+func logBlockedVerification(sctx *pipeline.StepContext, blocked string, produced bool) {
+	switch {
+	case blocked == "":
+	case produced:
+		sctx.Log(fmt.Sprintf("fixes committed unverified, verification blocked: %s", blocked))
+	default:
+		sctx.Log(fmt.Sprintf("agent made no edits and reported verification blocked: %s; the findings were not fixed", blocked))
+	}
+}
 
 // hasBlockingFindings returns true if any finding has error or warning severity.
 func hasBlockingFindings(items []Finding) bool {
@@ -405,6 +490,12 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
 		return false, err
 	}
+	render := func() (string, error) {
+		return renderFixCommitMessage(sctx, stepName, summary, fallbackSummary, producer)
+	}
+	if err := conformAgentCommits(sctx, stepName, render); err != nil {
+		return false, err
+	}
 	status, err := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
 	if err != nil {
 		return false, fmt.Errorf("check %s changes: %w", stepName, err)
@@ -417,19 +508,9 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 		}
 		return false, recordAgentFixHead(sctx, stepName, headSHA)
 	}
-	if summary == "" {
-		summary = fallbackSummary
-	}
-	if summary == "" {
-		summary = "apply fixes"
-	}
-	commitMessage, err := sctx.Config.Commit.RenderFixMessageForBranch(stepName, summary, sctx.Run.Branch)
+	commitMessage, err := render()
 	if err != nil {
-		return false, fmt.Errorf("render %s fix commit message: %w", stepName, err)
-	}
-	commitMessage, err = withCommitTrailers(sctx, commitMessage, producer)
-	if err != nil {
-		return false, fmt.Errorf("render %s fix commit trailers: %w", stepName, err)
+		return false, err
 	}
 	if err := stagePipelineChanges(sctx, before); err != nil {
 		return false, fmt.Errorf("stage %s changes: %w", stepName, err)
@@ -456,6 +537,27 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 		return false, err
 	}
 	return headSHA != headBeforeCommit, nil
+}
+
+// renderFixCommitMessage renders the commit.fix_message subject and the
+// commit.trailers for producer, the single message every pipeline-published fix
+// commit carries whether the pipeline or the agent created it.
+func renderFixCommitMessage(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string, producer *agent.Result) (string, error) {
+	if summary == "" {
+		summary = fallbackSummary
+	}
+	if summary == "" {
+		summary = "apply fixes"
+	}
+	message, err := sctx.Config.Commit.RenderFixMessageForBranch(stepName, summary, sctx.Run.Branch)
+	if err != nil {
+		return "", fmt.Errorf("render %s fix commit message: %w", stepName, err)
+	}
+	message, err = withCommitTrailers(sctx, message, producer)
+	if err != nil {
+		return "", fmt.Errorf("render %s fix commit trailers: %w", stepName, err)
+	}
+	return message, nil
 }
 
 func recordAgentFixHead(sctx *pipeline.StepContext, stepName types.StepName, headSHA string) error {
@@ -530,10 +632,14 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	if purpose == "" {
 		purpose = string(stepName) + "-fix"
 	}
+	schema := commitSummarySchema
+	if opts.ReportBlockedVerification {
+		schema = fixSummarySchema
+	}
 	runOpts := agent.RunOpts{
 		Prompt:     fixerPrompt(opts.Prompt),
 		CWD:        sctx.WorkDir,
-		JSONSchema: commitSummarySchema,
+		JSONSchema: schema,
 		OnChunk:    sctx.LogChunk,
 		Purpose:    purpose,
 		Workload:   opts.Workload,
@@ -541,6 +647,16 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	before, err := untrackedFiles(sctx)
 	if err != nil {
 		return "", err
+	}
+	// The fixer may commit its own work and leave a clean worktree, which
+	// commitAgentFixesWithResult reports as "not committed". HEAD movement is
+	// what tells that round apart from one that made no edits.
+	headBeforeAgent := ""
+	if opts.ReportBlockedVerification {
+		headBeforeAgent, err = git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+		if err != nil {
+			return "", fmt.Errorf("resolve head before %s fix: %w", stepName, err)
+		}
 	}
 	var result *agent.Result
 	if opts.RunAgent != nil {
@@ -569,6 +685,13 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	committed, err := commitAgentFixesWithResult(sctx, stepName, summary, opts.FallbackSummary, result, before)
 	if err != nil {
 		return "", err
+	}
+	if opts.ReportBlockedVerification {
+		headAfterAgent, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+		if err != nil {
+			return "", fmt.Errorf("resolve head after %s fix: %w", stepName, err)
+		}
+		logBlockedVerification(sctx, blockedVerification(result), committed || headAfterAgent != headBeforeAgent)
 	}
 	return fixResultSummary(committed), nil
 }

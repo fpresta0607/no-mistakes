@@ -39,7 +39,7 @@ func ciHandbackPR(sctx *pipeline.StepContext, run *db.Run, publishedHead string)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if pr.HeadSHA != publishedHead {
+	if pr.ObservedHeadSHA != publishedHead {
 		return nil, nil, nil, fmt.Errorf("live PR head moved before handback")
 	}
 	return host, pr, checks, nil
