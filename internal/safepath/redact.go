@@ -62,7 +62,7 @@ const Placeholder = "~"
 // https://users/list as https:~, and leaving the rare //home/<user> spelling
 // intact costs less than mangling every such URL.
 var genericHomePattern = regexp.MustCompile(
-	`(^|-[A-Za-z]|\\[nrt]|[^A-Za-z0-9_./\\-])((?i:file://)?(?:[A-Za-z]:)?(?:\\\\|[/\\])(?i:home|users)(?:\\\\|[/\\])[^/\\\s"'` + "`" + `<>()\[\]{},;:&|*?]+)`)
+	`(^|-[A-Za-z]|\\[nrt]|\\u0020|[^A-Za-z0-9_./\\-])((?i:file://)?(?:[A-Za-z]:)?(?:\\\\|[/\\])(?i:home|users)(?:\\\\|[/\\])[^/\\\s"'` + "`" + `<>()\[\]{},;:&|*?]+)`)
 
 // RedactText replaces every absolute home directory path in text with
 // Placeholder. It is unconditional: there is no detect-and-warn mode, because
@@ -127,6 +127,7 @@ func addBothSeparatorSpellings(add func(string), home string) {
 		add(html.EscapeString(candidate))
 		encoded, _ := json.Marshal(candidate)
 		add(string(encoded[1 : len(encoded)-1]))
+		add(strings.ReplaceAll(string(encoded[1:len(encoded)-1]), " ", `\u0020`))
 	}
 }
 
@@ -231,6 +232,9 @@ func boundaryBefore(text string, i int, specific bool) bool {
 		// The one slash that legitimately precedes an absolute path.
 		return strings.HasSuffix(text[:i], "://")
 	case c == '\\' || isPathNameByte(c):
+		if strings.HasSuffix(text[:i], `\u0020`) {
+			return true
+		}
 		// The letter of a JSON string escape (\n, \r, \t) is the tail of an
 		// escape sequence, not a name byte glued to the path - the shape
 		// JSON-escaped captured output prints for a line-initial home path.

@@ -580,9 +580,9 @@ func (s *PRStep) draftPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 	var pipelineMD, riskLine, testingMD, evidenceMD string
 	if !keepsPRUpdateText(sctx) {
 		pipelineMD, riskLine, testingMD, evidenceMD = s.buildPipelineSection(sctx, provider)
-		if marker := extractPipelineAttestationMarker(pipelineMD); marker != "" &&
-			((bodyLimit > 0 && scm.PRBodyLen(marker) > bodyLimit) || len(marker) > maxPullRequestBodyBytes) {
-			return prContent{}, fmt.Errorf("pipeline attestation exceeds PR body limit")
+		if metadata := carriedPipelineMetadata(pipelineMD); metadata != "" &&
+			((bodyLimit > 0 && scm.PRBodyLen(metadata) > bodyLimit) || len(metadata) > maxPullRequestBodyBytes) {
+			return prContent{}, fmt.Errorf("pipeline metadata exceeds PR body limit")
 		}
 	}
 
@@ -905,10 +905,7 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 		rounds[sr.ID] = r
 	}
 
-	policy := pipelineAttestationPolicy{}
-	if sctx.Config != nil {
-		policy.AllowTestCommandOverride = strings.TrimSpace(sctx.Config.Test.AllowApproveOverFailure)
-	}
+	policy := attestationPolicyFrom(sctx)
 	pipelineMD, riskLine = buildPipelineSummaryFor(steps, rounds, sctx.Run.HeadSHA, provider, policy)
 	// The review conversation rides inside the Pipeline section as an ordinary
 	// `### ` group, so the existing body-budget logic can drop it whole rather

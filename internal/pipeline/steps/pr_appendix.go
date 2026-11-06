@@ -111,8 +111,11 @@ func narrativeWithIntent(sctx *pipeline.StepContext, whatChanged string) string 
 }
 
 func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) string {
-	if bodyLimit > 0 && extractTestExceptionSection(pipelineMD) != "" && scm.PRBodyLen(pipelineSectionHeader(pipelineMD)) > bodyLimit {
-		return carriedPipelineMetadata(pipelineMD)
+	if extractTestExceptionSection(pipelineMD) != "" {
+		header := pipelineSectionHeader(pipelineMD)
+		if len(header) > maxPullRequestBodyBytes || (bodyLimit > 0 && scm.PRBodyLen(header) > bodyLimit) {
+			return carriedPipelineMetadata(pipelineMD)
+		}
 	}
 	switch appendixMode(sctx) {
 	case config.PRAppendixMinimal:

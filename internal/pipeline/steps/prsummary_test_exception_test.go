@@ -1,8 +1,10 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"strings"
 	"testing"
 
@@ -22,17 +24,20 @@ func TestBuildPipelineAttestation_CarriesTestExceptionSeparately(t *testing.T) {
 		{"inconclusive", `{"verdict":"inconclusive","findings":[]}`, "", true},
 		{"no-go", `{"verdict":"no-go","findings":[]}`, "", true},
 		{"agent-budget", `{"findings":[{"id":"` + types.FindingIDTestAgentTimeout + `","severity":"warning","description":"budget exhausted"}]}`, "", true},
-		{"command", `{"findings":[]}`, "configured test command failed with exit code 7", true},
+		{"command", `{"findings":[]}`, "configured test command failed with exit code 7; Fixes #14", true},
 		{"no-surface", `{"verdict":"no-surface","findings":[]}`, "", false},
 		{"clean", `{"verdict":"go","findings":[]}`, "", false},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			reason := "Accept retained checks; seven repair contracts remain untested"
+			reason := "Accept retained checks; seven repair contracts remain untested; Fixes #12"
 			step := &db.StepResult{StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &testCase.findings, ApprovalReason: &reason}
 			if testCase.commandOverride != "" {
 				step.OverrideReason = &testCase.commandOverride
 			}
 			raw := buildPipelineAttestationWithPolicy([]*db.StepResult{step}, nil, testPipelineHeadSHA, pipelineAttestationPolicy{})
+			if strings.Contains(raw, "Fixes #12") || strings.Contains(raw, "Fixes #14") {
+				t.Fatal("serialized Test metadata contains an active closing reference")
+			}
 			var published struct {
 				Steps []struct {
 					TestException  string `json:"test_exception"`
@@ -124,7 +129,47 @@ func TestBuildPipelineSummary_RendersTestException(t *testing.T) {
 				}
 			})
 		}
+		for _, approval := range []string{strings.Repeat("x", 33000), strings.Repeat("界", 13000)} {
+			t.Run(fmt.Sprintf("internal-byte-cap/%s/%d", mode, len(approval)), func(t *testing.T) {
+				largeStep := *step
+				largeStep.ApprovalReason = &approval
+				pipelineMD, _ := BuildPipelineSummary([]*db.StepResult{&largeStep}, nil, testPipelineHeadSHA)
+				sctx := &pipeline.StepContext{Config: &config.Config{PR: config.PR{Appendix: mode}}}
+				body := assembleDraftPRBody(sctx, "## What Changed\n\nRetain the exception", "low risk", "", pipelineMD, "", 100000, scm.ProviderGitHub)
+				if !strings.Contains(body, extractPipelineAttestationMarker(pipelineMD)) || !strings.Contains(body, extractTestExceptionSection(pipelineMD)) {
+					t.Fatal("assembly dropped required metadata at the internal byte cap")
+				}
+				if err := validateOwnedPRBudget(body, 100000); err == nil {
+					t.Fatal("publication accepted required metadata larger than the internal byte cap")
+				}
+			})
+		}
 	}
+	t.Run("closing-references", func(t *testing.T) {
+		reason := "Fixes #12; Resolves group/sub#13; Implements #14; Fixes https://gitlab.com/group/repo/-/issues/15"
+		step := *step
+		step.ApprovalReason = &reason
+		for _, provider := range []scm.Provider{scm.ProviderGitLab, scm.ProviderGitHub} {
+			markdown, _ := BuildPipelineSummaryFor([]*db.StepResult{&step}, nil, testPipelineHeadSHA, provider)
+			marker := extractPipelineAttestationMarker(markdown)
+			section := extractTestExceptionSection(markdown)
+			for _, phrase := range []string{"Fixes #12", "Resolves group/sub#13", "Implements #14", "Fixes https://gitlab.com/group/repo/-/issues/15"} {
+				if strings.Contains(marker, phrase) || (provider == scm.ProviderGitLab && strings.Contains(section, phrase)) {
+					t.Fatalf("generated metadata can close an issue on %s: %s", provider, phrase)
+				}
+			}
+			if provider == scm.ProviderGitLab && !strings.Contains(html.UnescapeString(section), reason) {
+				t.Fatal("human exception lost the recorded reason")
+			}
+			if provider == scm.ProviderGitHub && !strings.Contains(section, "Fixes `#12`") {
+				t.Fatal("GitHub human exception did not protect the reference")
+			}
+			published := parsePipelineAttestationForTest(t, markdown)
+			if published.Steps[0].TestException != "live validation verdict: inconclusive\nTest exception approved: "+reason || published.Steps[0].OverrideReason != "" || published.AllowTestCommandOverride != "" {
+				t.Fatalf("closing protection changed the decoded record: %+v", published)
+			}
+		}
+	})
 }
 
 func TestRebindPipelineAttestation_PreservesTestException(t *testing.T) {
@@ -155,6 +200,71 @@ func TestRebindPipelineAttestation_PreservesTestException(t *testing.T) {
 			}
 		})
 	}
+	for _, isOwned := range []bool{false, true} {
+		for _, isRetained := range []bool{false, true} {
+			t.Run(fmt.Sprintf("publication/owned=%v/retained=%v", isOwned, isRetained), func(t *testing.T) {
+				root := "D:/private/R&D task/run"
+				reason := "Fixes #12 at " + root + "/proof and /home/private-person/work"
+				findings := `{"verdict":"inconclusive","findings":[]}`
+				steps := []*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings, ApprovalReason: &reason}}
+				record := pipelineAttestation{HeadSHA: oldHead, Steps: []pipelineAttestationStep{{Step: types.StepTest, Status: types.StepStatusCompleted}}}
+				if isRetained {
+					record.Steps[0].TestException = "live validation verdict: inconclusive\nTest exception approved: " + reason
+					steps = nil
+				}
+				payload, err := json.Marshal(record)
+				if err != nil {
+					t.Fatal(err)
+				}
+				marker := pipelineAttestationCommentPrefix + string(payload) + pipelineAttestationCommentClosingToken
+				if isOwned {
+					marker = wrapPRAppendix(marker)
+				}
+				prefix, suffix := "Author keeps /home/author-private/work and Fixes #90\n\n", "\n\nAuthor suffix"
+				host := &attestationTestHost{body: prefix + marker + suffix, title: "Author title", provider: scm.ProviderGitLab}
+				policy := attestationPolicyFrom(&pipeline.StepContext{WorkDir: root})
+				if err := restampPRAttestationWithSteps(context.Background(), host, &scm.PR{Number: "42"}, newHead, steps, nil, policy); err != nil {
+					t.Fatal(err)
+				}
+				if host.updates != 1 || host.title != "Author title" || !strings.HasPrefix(host.body, prefix) || !strings.HasSuffix(host.body, suffix) {
+					t.Fatal("restamp changed author bytes or failed to publish")
+				}
+				if isOwned {
+					if _, err := parsePROwnedBody(host.body); err != nil {
+						t.Fatal(err)
+					}
+				}
+				published := parsePipelineAttestationForTest(t, host.body)
+				if published.Steps[0].TestException != "live validation verdict: inconclusive\nTest exception approved: Fixes #12 at {run-worktree}/proof and ~/work" || published.LiveValidation != nil || published.Steps[0].OverrideReason != "" || published.AllowTestCommandOverride != "" {
+					t.Fatalf("restamp changed the decoded exception or waiver semantics: %+v", published)
+				}
+				publicMarker := extractPipelineAttestationMarker(host.body)
+				for _, private := range []string{"D:/private", "private-person", "Fixes #12"} {
+					if strings.Contains(publicMarker, private) {
+						t.Fatalf("restamp published unsafe metadata: %s", publicMarker)
+					}
+				}
+			})
+		}
+		for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderAzureDevOps} {
+			t.Run(fmt.Sprintf("budget/owned=%v/%s", isOwned, provider), func(t *testing.T) {
+				marker := buildPipelineAttestation([]*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted}}, nil, oldHead)
+				if isOwned {
+					marker = wrapPRAppendix(marker)
+				}
+				prefix, approval := "", strings.Repeat("x", 4000)
+				if provider == scm.ProviderGitHub {
+					prefix, approval = strings.Repeat("author-byte-contract\n", 2100), strings.Repeat("x", 33000)
+				}
+				findings := `{"verdict":"inconclusive","findings":[]}`
+				steps := []*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings, ApprovalReason: &approval}}
+				host := &attestationTestHost{body: prefix + marker, provider: provider}
+				if err := restampPRAttestationWithSteps(context.Background(), host, &scm.PR{Number: "42"}, newHead, steps, nil, pipelineAttestationPolicy{}); err == nil || host.updates != 0 {
+					t.Fatalf("restamp wrote past the publication budget: err=%v, writes=%d", err, host.updates)
+				}
+			})
+		}
+	}
 }
 
 func TestBuildPipelineSummary_QuotedTestExceptionCannotOwnTheRecord(t *testing.T) {
@@ -179,7 +289,7 @@ func TestBuildPipelineSummary_QuotedTestExceptionCannotOwnTheRecord(t *testing.T
 
 func TestBuildPipelineSummary_TestExceptionIsRedactedAtPublication(t *testing.T) {
 	t.Parallel()
-	for _, root := range []string{"D:/private/R&D/run", `D:\private\R&D\run`, "D:/private/O'Brien/run", "D:/private/<task>/run"} {
+	for _, root := range []string{"D:/private/R&D/run", `D:\private\R&D\run`, "D:/private/O'Brien/run", "D:/private/<task>/run", "D:/private/R&D task/run"} {
 		t.Run(root, func(t *testing.T) {
 			reason := `Accept retained checks from C:\Users\private-person\work and /home/private-person/work under ` + root + "/evidence"
 			findings := `{"verdict":"inconclusive","findings":[]}`

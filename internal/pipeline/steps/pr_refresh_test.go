@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"html"
 	"strings"
 	"testing"
 
@@ -25,10 +27,16 @@ type refreshPRHost struct {
 	moveHeadAt, checks    int
 	reads, writes         int
 	writtenTitle          string
+	provider              scm.Provider
 }
 
 func (host *refreshPRHost) Capabilities() scm.Capabilities { return scm.Capabilities{} }
-func (host *refreshPRHost) Provider() scm.Provider         { return scm.ProviderGitHub }
+func (host *refreshPRHost) Provider() scm.Provider {
+	if host.provider != "" {
+		return host.provider
+	}
+	return scm.ProviderGitHub
+}
 
 func (host *refreshPRHost) FindPR(context.Context, string, string) (*scm.PR, error) {
 	copy := host.pr
@@ -179,13 +187,13 @@ func TestRefreshPublishedPR(t *testing.T) {
 
 func TestRefreshPublishedPR_RedactsStoredException(t *testing.T) {
 	t.Parallel()
-	for _, root := range []string{"D:/fixtures/private-worktree", "D:/private/R&D/run", `D:\private\R&D\run`, "D:/private/O'Brien/run", "D:/private/<task>/run"} {
+	for _, root := range []string{"D:/fixtures/private-worktree", "D:/private/R&D/run", `D:\private\R&D\run`, "D:/private/O'Brien/run", "D:/private/<task>/run", "D:/private/R&D task/run"} {
 		t.Run(root, func(t *testing.T) {
 			reason := "Retain checks under " + root + "/evidence; credential absent at /home/private-person/work."
 			findings := `{"verdict":"inconclusive","findings":[]}`
 			step := &db.StepResult{StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings, ApprovalReason: &reason}
 			body := buildPipelineAttestation([]*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted}}, nil, testPipelineHeadSHA)
-			updated, err := refreshPRTestException(body, testPipelineHeadSHA, []*db.StepResult{step}, root)
+			updated, err := refreshPRTestException(body, testPipelineHeadSHA, []*db.StepResult{step}, root, scm.ProviderGitHub)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -194,7 +202,7 @@ func TestRefreshPublishedPR_RedactsStoredException(t *testing.T) {
 					t.Fatalf("refresh published a private path: %s", updated)
 				}
 			}
-			if _, err := refreshPRTestException(updated, testPipelineHeadSHA, []*db.StepResult{step}, root); err != nil {
+			if _, err := refreshPRTestException(updated, testPipelineHeadSHA, []*db.StepResult{step}, root, scm.ProviderGitHub); err != nil {
 				t.Fatalf("redacted refresh is not repeatable: %v", err)
 			}
 		})
@@ -212,7 +220,7 @@ func TestRefreshPublishedPR_RedactsStoredException(t *testing.T) {
 			t.Fatal(err)
 		}
 		body = pipelineAttestationCommentPrefix + string(payloadBytes) + pipelineAttestationCommentClosingToken
-		updated, err := refreshPRTestException(body, testPipelineHeadSHA, []*db.StepResult{step}, root)
+		updated, err := refreshPRTestException(body, testPipelineHeadSHA, []*db.StepResult{step}, root, scm.ProviderGitHub)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -221,4 +229,50 @@ func TestRefreshPublishedPR_RedactsStoredException(t *testing.T) {
 			t.Fatalf("refresh changed command-only policy: %+v", published)
 		}
 	})
+	for _, isOwned := range []bool{false, true} {
+		for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderGitLab} {
+			t.Run(fmt.Sprintf("closing-references/owned=%v/%s", isOwned, provider), func(t *testing.T) {
+				root := "D:/private/R&D task/run"
+				reason, override := "Fixes #12 under "+root+"/proof", "Fixes #14"
+				step := &db.StepResult{StepName: types.StepTest, Status: types.StepStatusCompleted, OverrideReason: &override, ApprovalReason: &reason}
+				marker := pipelineAttestationCommentPrefix + `{"head_sha":"` + testPipelineHeadSHA + `","steps":[{"step":"test","status":"completed","override_reason":"Fixes #14"}],"allow_test_command_override":"Fixes #15"}` + pipelineAttestationCommentClosingToken
+				if isOwned {
+					marker = wrapPRAppendix(marker)
+				}
+				prefix, suffix := "Author preserves /home/author-private/work and Fixes #90\n\n", "\n\nAuthor suffix"
+				host := &refreshPRHost{pr: scm.PR{Number: "17", URL: "https://example.com/owner/repo/pull/17"}, body: prefix + marker + suffix, state: scm.PRStateOpen, observedHead: testPipelineHeadSHA, provider: provider}
+				sctx := &pipeline.StepContext{Ctx: context.Background(), WorkDir: root, Run: &db.Run{Branch: "feature", HeadSHA: testPipelineHeadSHA, PRURL: &host.pr.URL}}
+				isChanged, err := refreshPublishedPRWithHost(sctx, host, []*db.StepResult{step})
+				if err != nil || !isChanged || host.writes != 1 || !strings.HasPrefix(host.body, prefix) {
+					t.Fatalf("refresh changed author bytes or failed to publish: changed=%v, err=%v", isChanged, err)
+				}
+				if isOwned {
+					parts, err := parsePROwnedBody(host.body)
+					if err != nil || parts.before != prefix || parts.after != suffix {
+						t.Fatalf("refresh changed owned author bytes: %v", err)
+					}
+				} else if !strings.Contains(host.body, pipelineAttestationCommentClosingToken+suffix+"\n\n"+testExceptionStart) {
+					t.Fatal("refresh changed unowned author bytes before the appended section")
+				}
+				published := parsePipelineAttestationForTest(t, host.body)
+				if published.Steps[0].TestException != "Fixes #14\nTest exception approved: Fixes #12 under {run-worktree}/proof" || published.Steps[0].OverrideReason != override || published.AllowTestCommandOverride != "Fixes #15" {
+					t.Fatalf("refresh changed decoded records: %+v", published)
+				}
+				marker = extractPipelineAttestationMarker(host.body)
+				section := extractTestExceptionSection(host.body)
+				for _, phrase := range []string{"Fixes #12", "Fixes #14", "Fixes #15", "D:/private"} {
+					if strings.Contains(marker, phrase) || (provider == scm.ProviderGitLab && strings.Contains(section, phrase)) {
+						t.Fatalf("refresh published unsafe metadata: %s", phrase)
+					}
+				}
+				if provider == scm.ProviderGitLab && !strings.Contains(html.UnescapeString(section), "Fixes #12 under {run-worktree}/proof") {
+					t.Fatal("refresh lost the human exception")
+				}
+				isChanged, err = refreshPublishedPRWithHost(sctx, host, []*db.StepResult{step})
+				if err != nil || isChanged || host.writes != 1 {
+					t.Fatalf("normalized refresh is not idempotent: changed=%v, err=%v", isChanged, err)
+				}
+			})
+		}
+	}
 }
