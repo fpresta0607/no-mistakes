@@ -71,14 +71,12 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 			return "", err
 		}
 		gateDir := m.paths.RepoDir(repo.ID)
-		if request.TerminalGeneration != "" {
-			anchors, err := branchsync.TerminalValidationAnchors(ctx, gateDir, request.CallerDir, &snapshot.Run)
-			if err != nil {
-				return "", err
-			}
-			if !maps.Equal(anchors, request.SourceAnchors) {
-				return "", fmt.Errorf("terminal recovery anchors changed; inspect and bind every known anchor")
-			}
+		anchors, err := branchsync.TerminalValidationAnchors(ctx, m.db, gateDir, request.CallerDir, snapshot.Run.ID)
+		if err != nil {
+			return "", err
+		}
+		if request.TerminalGeneration != "" && !maps.Equal(anchors, request.SourceAnchors) {
+			return "", fmt.Errorf("terminal recovery anchors changed; inspect and bind every known anchor")
 		}
 		m.mu.Lock()
 		isPredecessorScheduled := m.runScheduledLocked(snapshot.Run.ID)
@@ -169,8 +167,16 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 			return "", err
 		}
 		isBoundGateHead := false
-		for historical := snapshot; historical != nil; {
+		history, err := m.db.ValidationHistory(snapshot.Run.ID)
+		if err != nil {
+			return "", err
+		}
+		for _, entry := range history {
+			historical := entry.Snapshot
 			heads := []*string{&historical.Run.HeadSHA, historical.Run.SubmittedHeadSHA, historical.Run.LastPushedSHA}
+			if entry.Adoption != nil {
+				heads = append(heads, &entry.Adoption.GateHead)
+			}
 			for _, rounds := range historical.Rounds {
 				for _, round := range rounds {
 					heads = append(heads, round.StartingHeadSHA, round.ReviewedHeadSHA)
@@ -180,14 +186,6 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 				if head != nil && gateHead == *head {
 					isBoundGateHead = true
 				}
-			}
-			predecessor, err := m.db.GetValidationPredecessor(historical.Run.ID)
-			if err != nil {
-				return "", err
-			}
-			historical = nil
-			if predecessor != nil {
-				historical = &predecessor.Snapshot
 			}
 		}
 		if !isBoundGateHead {
@@ -311,11 +309,9 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		if request.TerminalGeneration != "" {
-			anchors, err := branchsync.TerminalValidationAnchors(ctx, gateDir, request.CallerDir, &snapshot.Run)
-			if err != nil || !maps.Equal(anchors, request.SourceAnchors) {
-				return "", fmt.Errorf("terminal recovery anchors changed before acceptance: %v", err)
-			}
+		confirmedAnchors, err := branchsync.TerminalValidationAnchors(ctx, m.db, gateDir, request.CallerDir, snapshot.Run.ID)
+		if err != nil || !maps.Equal(anchors, confirmedAnchors) {
+			return "", fmt.Errorf("terminal recovery anchors changed before acceptance: %v", err)
 		}
 		if event == nil {
 			var plan *verificationplan.Snapshot

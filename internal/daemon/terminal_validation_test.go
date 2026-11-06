@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oklog/ulid/v2"
+
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/authoredvalidation"
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
@@ -41,7 +43,7 @@ func terminalValidationFixture(t *testing.T, factory StepFactory) (*RunManager, 
 	params.Request.TerminalGeneration = "independent-terminal-lane"
 	params.Request.AcceptUnknownSource = true
 	params.Request.LaunchAssertion = launchSelection(params.Request.LaunchAssertion.TrustedSHA, selectedCodex)
-	params.Request.SourceAnchors, err = branchsync.TerminalValidationAnchors(context.Background(), gate, repository.WorkingPath, parent)
+	params.Request.SourceAnchors, err = branchsync.TerminalValidationAnchors(context.Background(), database, gate, repository.WorkingPath, parent.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,5 +233,223 @@ func TestTerminalValidationRefusesChangedBindingsWithoutAdmission(t *testing.T) 
 				t.Fatalf("refusal changed runs: %v", readErr)
 			}
 		})
+	}
+}
+
+func TestTerminalValidationPreservesAdoptedGateOwnershipAndEveryBoundAnchor(t *testing.T) {
+	for _, descendant := range []string{"none", "authored", "terminal", "adopted archive"} {
+		changes := []string{"unchanged", "candidate moved", "candidate deleted", "lane moved", "lane deleted", "ancestor recovery moved", "ancestor recovery deleted", "archive moved", "archive deleted", "symbolic candidate", "noncommit lane", "unrelated gate"}
+		switch descendant {
+		case "authored":
+			changes = []string{"unchanged", "lane moved", "lane deleted"}
+		case "terminal":
+			changes = []string{"unchanged", "inherited recovery moved", "inherited recovery deleted"}
+		case "adopted archive":
+			changes = []string{"unchanged", "adopted archive moved", "adopted archive deleted"}
+		}
+		for _, change := range changes {
+			t.Run(descendant+"/"+change, func(t *testing.T) {
+				var calls atomic.Int32
+				manager, database, repo, params, gate := authoredAdmissionFixture(t, func() []pipeline.Step {
+					var result []pipeline.Step
+					for _, step := range steps.AllSteps() {
+						result = append(result, &authoredFixtureStep{name: step.Name(), calls: &calls})
+					}
+					return result
+				})
+				review, err := database.InsertStepResult(params.Request.PredecessorID, types.StepReview)
+				if err != nil {
+					t.Fatal(err)
+				}
+				findings, selected := `{"findings":[{"id":"spent","description":"dispatched repair"}]}`, `["spent"]`
+				round, err := database.InsertStepRound(review.ID, 1, "initial", &findings, nil, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := database.SetStepRoundSelection(round.ID, &selected, db.RoundSelectionSourceAutoFix); err != nil {
+					t.Fatal(err)
+				}
+				original, err := database.ReadContinuationSnapshot(params.Request.PredecessorID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				candidate := params.Request.CandidateSHA
+				successorID := ulid.Make().String()
+				candidateRef := "refs/no-mistakes/terminal-candidate/" + successorID
+				laneRef := "refs/no-mistakes/terminal-lane/" + successorID
+				recoveryRef := custody.RecoveryRef(original.Run.ID)
+				archiveRef := "refs/heads/archive/retained-terminal-source"
+				adoptedArchiveRef := "refs/heads/archive/adopted-terminal-source"
+				localRecoveryRef := custody.RecoveryLocalRef(original.Run.ID)
+				gitCmd(t, gate, "fetch", "--no-tags", repo.WorkingPath, candidate)
+				gitCmd(t, gate, "update-ref", candidateRef, candidate)
+				gitCmd(t, gate, "update-ref", laneRef, original.Run.HeadSHA)
+				gitCmd(t, gate, "update-ref", recoveryRef, original.Run.HeadSHA)
+				gitCmd(t, repo.WorkingPath, "update-ref", archiveRef, original.Run.HeadSHA)
+				gitCmd(t, repo.WorkingPath, "update-ref", localRecoveryRef, original.Run.HeadSHA)
+				if _, err := database.RecordRecoveryArchive(db.RecoveryArchive{RepoID: repo.ID, RunID: original.Run.ID, Branch: original.Run.Branch, RequiredHeadSHA: original.Run.HeadSHA, PreservedHeadSHA: original.Run.HeadSHA, ArchiveRef: archiveRef}); err != nil {
+					t.Fatal(err)
+				}
+				adoption, _, err := database.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *original, SuccessorID: successorID, CandidateSHA: candidate, CandidateTree: params.Request.CandidateTree, RetainedSHA: candidate, SourceRef: candidateRef, GateHead: original.Run.HeadSHA, RecoveryHead: original.Run.HeadSHA, CallerDir: params.CallerDir, CallerHead: original.Run.HeadSHA, Reason: "accept the retained committed correction", Operator: "fixture", Assertion: original.Run.LaunchAssertion, Proof: original.Run.LaunchAssertionProof})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := database.UpdateRunErrorStatus(adoption.SuccessorID, "provider quota exhausted", types.RunFailed); err != nil {
+					t.Fatal(err)
+				}
+				if descendant == "adopted archive" {
+					gitCmd(t, repo.WorkingPath, "update-ref", adoptedArchiveRef, candidate)
+					gitCmd(t, gate, "update-ref", custody.RecoveryRef(adoption.SuccessorID), candidate)
+					if _, err := database.RecordRecoveryArchive(db.RecoveryArchive{RepoID: repo.ID, RunID: adoption.SuccessorID, Branch: original.Run.Branch, RequiredHeadSHA: original.Run.HeadSHA, PreservedHeadSHA: candidate, ArchiveRef: adoptedArchiveRef}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				parentID := adoption.SuccessorID
+				hasValidationDescendant := descendant == "authored" || descendant == "terminal"
+				if hasValidationDescendant {
+					snapshot, err := database.ReadTerminalSnapshot(parentID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if descendant == "authored" {
+						if err := os.WriteFile(filepath.Join(repo.WorkingPath, "next.txt"), []byte("authored follow-up\n"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+						gitCmd(t, repo.WorkingPath, "add", "next.txt")
+						gitCmd(t, repo.WorkingPath, "commit", "-m", "author follow-up")
+					} else {
+						params.Request.TerminalGeneration, params.Request.AcceptUnknownSource = "first-terminal-lane", true
+						params.Request.LaunchAssertion = launchSelection(params.Request.LaunchAssertion.TrustedSHA, selectedCodex)
+						params.Request.SourceAnchors = map[string]string{
+							"gate/" + candidateRef: candidate, "gate/" + laneRef: original.Run.HeadSHA,
+							"gate/" + recoveryRef: original.Run.HeadSHA, "caller/" + archiveRef: original.Run.HeadSHA,
+							"caller/" + localRecoveryRef: original.Run.HeadSHA,
+						}
+					}
+					params.Request.PredecessorID, params.Request.SnapshotDigest = parentID, snapshot.Digest()
+					params.Request.LaunchNonce = *snapshot.Run.LaunchNonce
+					params.Request.CandidateSHA = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+					params.Request.CandidateTree = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD^{tree}")
+					proof, err := params.Request.LaunchAssertion.Verify(params.Request.LaunchAssertion.TrustedSHA, params.Request.LaunchAssertion.Profiles)
+					if err != nil {
+						t.Fatal(err)
+					}
+					admission, _, err := database.AcceptValidationAdmission(context.Background(), db.ValidationAdmission{Request: params.Request, Snapshot: *snapshot, AssertionProof: proof, WorktreeRoot: filepath.Dir(manager.paths.WorktreeDir(repo.ID, "pending")), Gates: "[]", Steps: types.AllSteps(), Operator: "fixture"})
+					if err != nil {
+						t.Fatal(err)
+					}
+					gitCmd(t, gate, "fetch", "--no-tags", repo.WorkingPath, params.Request.CandidateSHA)
+					gitCmd(t, gate, "update-ref", "refs/no-mistakes/authored-candidate/"+admission.ID, params.Request.CandidateSHA)
+					if err := database.UpdateRunErrorStatus(admission.ChildID, "provider quota exhausted", types.RunFailed); err != nil {
+						t.Fatal(err)
+					}
+					parentID = admission.ChildID
+				}
+				snapshot, err := database.ReadTerminalSnapshot(parentID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				params.Request.PredecessorID, params.Request.SnapshotDigest = parentID, snapshot.Digest()
+				params.Request.CandidateSHA, params.Request.LaunchNonce = snapshot.Run.HeadSHA, *snapshot.Run.LaunchNonce
+				params.Request.ValidationGeneration = *snapshot.Run.LaunchValidationGeneration
+				params.Request.TerminalGeneration, params.Request.AcceptUnknownSource = "independent-adopted-lane", true
+				params.Request.LaunchAssertion = launchSelection(params.Request.LaunchAssertion.TrustedSHA, selectedCodex)
+				params.Request.SourceAnchors = map[string]string{
+					"gate/" + candidateRef: candidate, "gate/" + laneRef: original.Run.HeadSHA,
+					"gate/" + recoveryRef: original.Run.HeadSHA, "caller/" + archiveRef: original.Run.HeadSHA,
+					"caller/" + localRecoveryRef: original.Run.HeadSHA,
+				}
+				if descendant == "adopted archive" {
+					params.Request.SourceAnchors["caller/"+adoptedArchiveRef] = candidate
+					params.Request.SourceAnchors["gate/"+custody.RecoveryRef(adoption.SuccessorID)] = candidate
+				}
+				if hasValidationDescendant {
+					admission, err := database.GetValidationPredecessor(parentID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					params.Request.SourceAnchors["gate/refs/no-mistakes/authored-candidate/"+admission.ID] = snapshot.Run.HeadSHA
+				}
+				directory, ref, replacement := gate, candidateRef, original.Run.HeadSHA
+				switch change {
+				case "lane moved", "lane deleted", "noncommit lane":
+					ref, replacement = laneRef, candidate
+				case "ancestor recovery moved", "ancestor recovery deleted":
+					ref, replacement = recoveryRef, candidate
+				case "archive moved", "archive deleted":
+					directory, ref, replacement = repo.WorkingPath, archiveRef, candidate
+				case "adopted archive moved", "adopted archive deleted":
+					directory, ref, replacement = repo.WorkingPath, adoptedArchiveRef, original.Run.HeadSHA
+				case "inherited recovery moved", "inherited recovery deleted":
+					directory, ref, replacement = repo.WorkingPath, localRecoveryRef, candidate
+				case "unrelated gate":
+					ref, replacement = "refs/heads/feature", gitOutput(t, repo.WorkingPath, "commit-tree", params.Request.CandidateTree, "-m", "unrelated history")
+					gitCmd(t, gate, "fetch", "--no-tags", repo.WorkingPath, replacement)
+				}
+				switch {
+				case change == "symbolic candidate":
+					gitCmd(t, gate, "symbolic-ref", candidateRef, "refs/heads/feature")
+				case change == "noncommit lane":
+					gitCmd(t, gate, "update-ref", laneRef, params.Request.CandidateTree)
+				case strings.HasSuffix(change, "deleted"):
+					gitCmd(t, directory, "update-ref", "-d", ref)
+					name := "gate"
+					if directory == repo.WorkingPath {
+						name = "caller"
+					}
+					delete(params.Request.SourceAnchors, name+"/"+ref)
+				case change != "unchanged":
+					gitCmd(t, directory, "update-ref", ref, replacement)
+					name := "gate"
+					if directory == repo.WorkingPath {
+						name = "caller"
+					}
+					if ref != "refs/heads/feature" {
+						params.Request.SourceAnchors[name+"/"+ref] = replacement
+					}
+				}
+				before, err := database.GetRunsByRepo(repo.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				result, err := manager.validateAuthored(context.Background(), params, os.Getpid())
+
+				if change != "unchanged" {
+					expected := "terminal recovery anchor"
+					if change == "unrelated gate" {
+						expected = "gate branch moved outside the immutable predecessor lineage"
+					}
+					if err == nil || !strings.Contains(err.Error(), expected) {
+						t.Fatalf("wrong refusal for changed bound provenance: %+v %v", result, err)
+					}
+					after, readErr := database.GetRunsByRepo(repo.ID)
+					if readErr != nil || !reflect.DeepEqual(before, after) || calls.Load() != 0 {
+						t.Fatalf("refusal mutated history or launched a stage: %v", readErr)
+					}
+					return
+				}
+				if err != nil || !result.Started {
+					t.Fatalf("retained adoption candidate refused: %+v %v", result, err)
+				}
+				if spending := result.Family.Spending[types.StepReview]; spending.Automatic != 1 || spending.Manual != 0 || spending.Remaining != 0 {
+					t.Fatalf("adoption ancestry renewed spent repair capacity: %+v", spending)
+				}
+				child := waitForRunTerminalState(t, database, result.Receipt.RunID)
+				manager.wg.Wait()
+				if child.Status != types.RunCompleted || child.HeadSHA != snapshot.Run.HeadSHA || calls.Load() != int32(len(steps.AllSteps())) {
+					t.Fatalf("candidate did not receive fresh validation: %+v calls=%d", child, calls.Load())
+				}
+				for _, previous := range before {
+					after, err := database.GetRun(previous.ID)
+					if err != nil || !reflect.DeepEqual(previous, after) {
+						t.Fatalf("admission rewrote predecessor %s: %v", previous.ID, err)
+					}
+				}
+				if gitOutput(t, gate, "rev-parse", "refs/heads/feature") != original.Run.HeadSHA || gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD") != snapshot.Run.HeadSHA {
+					t.Fatal("admission moved the preserved gate or caller branch")
+				}
+			})
+		}
 	}
 }

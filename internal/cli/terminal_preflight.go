@@ -72,7 +72,7 @@ func newAxiTerminalPreflightCmd() *cobra.Command {
 			if err != nil {
 				return emitError(command, 1, err.Error())
 			}
-			anchors, err := branchsync.TerminalValidationAnchors(ctx, root.RepoDir(repository.ID), directory, parent)
+			anchors, err := branchsync.TerminalValidationAnchors(ctx, database, root.RepoDir(repository.ID), directory, parent.ID)
 			if err != nil {
 				return emitError(command, 1, err.Error())
 			}

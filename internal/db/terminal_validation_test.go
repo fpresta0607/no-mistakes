@@ -122,6 +122,17 @@ func TestTerminalValidationPreservesSourceAdoptionSpendingAndRefusesUnsafeAncest
 			if err != nil || family.HasChildRepairs || family.Spending[types.StepReview].Automatic != 1 || family.Spending[types.StepReview].Manual != 2 || family.Spending[types.StepReview].Remaining != 0 {
 				t.Fatalf("source ancestry spending: %+v %v", family, err)
 			}
+			history, err := database.ValidationHistory(event.ChildID)
+			if err != nil || len(history) != 3 || history[0].Snapshot.Run.ID != event.ChildID || history[0].Admission == nil || history[1].Snapshot.Run.ID != adoption.SuccessorID || history[1].Adoption == nil || history[1].Adoption.GateHead != adoption.GateHead || history[2].Snapshot.Run.ID != source.Run.ID {
+				t.Fatalf("validation and source adoption must share one verified ancestry: %+v %v", history, err)
+			}
+			if err := database.UpdateRunHeadSHA(source.Run.ID, proposal.Request.CandidateTree); err == nil {
+				t.Fatal("source predecessor mutation was allowed")
+			}
+			after, err := database.ValidationHistory(event.ChildID)
+			if err != nil || !reflect.DeepEqual(history, after) {
+				t.Fatalf("refused source mutation changed verified ancestry: %v", err)
+			}
 		})
 	}
 }

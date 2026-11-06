@@ -11,6 +11,7 @@ import (
 func TestTerminalValidationAnchorsReadEveryKnownAnchorWithoutChangingRefs(t *testing.T) {
 	t.Parallel()
 	f := newRecoverFixture(t, types.RunFailed)
+	mustRun(t, f.local, "fetch", "--no-tags", "--no-write-fetch-head", f.gate, f.preserved)
 	ref := custody.RecoveryRef(f.run.ID)
 	for _, directory := range []string{f.gate, f.local} {
 		mustRun(t, directory, "update-ref", ref, f.preserved)
@@ -19,7 +20,7 @@ func TestTerminalValidationAnchorsReadEveryKnownAnchorWithoutChangingRefs(t *tes
 	}
 	before := mustRun(t, f.gate, "show-ref")
 
-	anchors, err := TerminalValidationAnchors(f.ctx, f.gate, f.local, f.run)
+	anchors, err := TerminalValidationAnchors(f.ctx, f.db, f.gate, f.local, f.run.ID)
 
 	expected := map[string]string{}
 	for _, name := range []string{"gate", "caller"} {
