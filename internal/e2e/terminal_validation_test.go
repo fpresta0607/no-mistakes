@@ -124,7 +124,7 @@ func TestAxiTerminalValidationKeepsTheReturnedCandidateAndProvesTheNewSelection(
 	if out, err := h.RunInDir(caller, "axi", "respond", "--action", "fix", "--findings", "sync-1"); err == nil || !strings.Contains(out, "zero") {
 		t.Fatalf("renewed manual repairs: %v\n%s", err, out)
 	}
-	if out, err := h.Run("daemon", "restart"); err != nil {
+	if out, err := h.Run("daemon", "restart", "--force"); err != nil {
 		t.Fatalf("restart: %v\n%s", err, out)
 	}
 	if out, err := h.RunInDir(caller, "axi", "validate-terminal", "--admission-file", admissionFile, "--wait", "5s"); err != nil || !strings.Contains(out, child.ID) || !strings.Contains(out, "started: false") {
