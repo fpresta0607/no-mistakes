@@ -210,8 +210,19 @@ func TestAxiHandbackBindsPostValidationReleaseThroughIPC(t *testing.T) {
 	}
 	select {
 	case request := <-requests:
-		if !request.RevalidatePublication || request.RunID != active.ID || request.RepoID != active.RepoID || request.Branch != branch || request.HeadSHA != published || request.PublishedHead != published || request.PushGeneration != *active.PushGeneration || request.RoundID != round.ID || request.CallerDir != local {
+		if !request.RevalidatePublication || request.RunID != active.ID || request.RepoID != active.RepoID || request.Branch != branch || request.HeadSHA != published || request.PublishedHead != published || request.PushGeneration != *active.PushGeneration || request.RoundID != round.ID {
 			t.Fatalf("CLI lost explicit custody or publication binding: %#v", request)
+		}
+		callerInfo, err := os.Stat(request.CallerDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		localInfo, err := os.Stat(local)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !os.SameFile(callerInfo, localInfo) {
+			t.Fatalf("CLI bound a different caller directory: %q, want %q", request.CallerDir, local)
 		}
 	default:
 		t.Fatal("CLI never reached native handback boundary")
