@@ -118,6 +118,38 @@ func TestValidationAdmissionPreservesThePredecessorAndStartsWithNoCertification(
 	}
 }
 
+func TestValidationAdmissionRejectsOutstandingNativeSafetyRefusalWithoutMutation(t *testing.T) {
+	database, proposal := admissionFixture(t)
+	step := proposal.Snapshot.Steps[0]
+	findings := `{"findings":[{"id":"agent-safety-refusal","severity":"error","description":"native provider refused execution","action":"ask-user"}]}`
+	if err := database.SetStepFindings(step.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := database.ReadTerminalSnapshot(proposal.Request.PredecessorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal.Snapshot, proposal.Request.SnapshotDigest = *snapshot, snapshot.Digest()
+	before, err := database.GetRunsByRepo(proposal.Request.RepoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = database.AcceptValidationAdmission(context.Background(), proposal)
+
+	if err == nil || !strings.Contains(err.Error(), "native agent safety refusal") {
+		t.Fatalf("authored admission did not refuse the native provider refusal: %v", err)
+	}
+	after, err := database.GetRunsByRepo(proposal.Request.RepoID)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("refusal changed run history: %v", err)
+	}
+	event, err := database.GetValidationAdmission(proposal.Request.PredecessorID)
+	if err != nil || event != nil {
+		t.Fatalf("refusal recorded an admission: %+v %v", event, err)
+	}
+}
+
 func TestValidationFamilyDetectsSourceChangesInNormalRounds(t *testing.T) {
 	for _, change := range []string{"recorded head", "starting head", "reviewed head"} {
 		t.Run(change, func(t *testing.T) {

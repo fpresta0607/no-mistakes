@@ -187,4 +187,59 @@ func TestAxiAuthoredValidationHasFreshStagesAndNoRepairAuthorityAfterCrash(t *te
 			t.Fatal("validation-only journey invoked a repair agent")
 		}
 	}
+
+	database, err = db.Open(root.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var refusedStep *db.StepResult
+	for _, step := range childSteps {
+		if step.StepName == types.StepReview {
+			refusedStep = step
+		}
+	}
+	if refusedStep == nil {
+		t.Fatal("terminal child has no review step")
+	}
+	if err := database.SetStepFindings(refusedStep.ID, `{"findings":[{"id":"agent-safety-refusal","severity":"error","description":"native provider refused execution","action":"ask-user"}]}`); err != nil {
+		t.Fatal(err)
+	}
+	refusedSnapshot, err := database.ReadTerminalSnapshot(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(caller, "feature.txt"), []byte("authored correction after refused turn\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	refusalContext, refusalCancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer refusalCancel()
+	for _, arguments := range [][]string{{"add", "feature.txt"}, {"commit", "-m", "author correction after refused turn"}} {
+		if output, err := h.runGit(refusalContext, caller, arguments...); err != nil {
+			t.Fatalf("author after refusal: %v\n%s", err, output)
+		}
+	}
+	newHead, err := h.runGit(refusalContext, caller, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newTree, err := h.runGit(refusalContext, caller, "rev-parse", "HEAD^{tree}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.PredecessorID, request.SnapshotDigest, request.LaunchNonce = child.ID, refusedSnapshot.Digest(), *refusedSnapshot.Run.LaunchNonce
+	request.CandidateSHA, request.CandidateTree = strings.TrimSpace(string(newHead)), strings.TrimSpace(string(newTree))
+	payload, err = json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(admissionFile, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := h.RunInDir(caller, "axi", "validate-authored", "--admission-file", admissionFile, "--wait", "5s"); err == nil || !strings.Contains(out, "native agent safety refusal") {
+		t.Fatalf("authored descendant bypassed native refusal: %v\n%s", err, out)
+	}
+	if event, err := database.GetValidationAdmission(child.ID); err != nil || event != nil {
+		t.Fatalf("refused descendant recorded an admission: %+v %v", event, err)
+	}
 }

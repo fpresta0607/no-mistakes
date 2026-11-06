@@ -8,7 +8,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-const safetyRefusalFindingID = "agent-safety-refusal"
+const safetyRefusalFindingID = types.FindingIDAgentSafetyRefusal
 
 // HasSafetyRefusal identifies a native refusal requiring an explicit decision.
 func HasSafetyRefusal(findingsJSON string) bool {
