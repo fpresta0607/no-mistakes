@@ -22,4 +22,9 @@ metadata:
 
 **Pre-Push Pipeline Attestation**
 
+- Broad Test approvals publish `StepResult.TestOverrideReason()` as the separate `steps[].test_exception` field and a marked human section; `override_reason` and `allow_test_command_override` remain command-only.
+  `axi refresh-pr --run` adds only this metadata to a settled latest run's existing, unchanged open PR, through guarded daemon ingress and the branch lock, without replaying validation or changing the run.
+  Refuse active executors, stale publication identity, unreadable or ambiguous markers, edited exception text, and uncertain writes; preserve owned-appendix integrity and author bytes.
+  Owners: `pr_test_exception.go`, `pr_refresh.go`, `daemon/pr_refresh.go`, `cli/axi_refresh_pr.go`; regressions: `TestRefreshPublishedPR`, `TestPRRefreshRunIdentity`, `TestHandleRefreshPR`, `TestAxiRefreshPR`.
+
 - `publishRunHead` must write an existing PR attestation for the proposed head before pushing it on every supported provider with raw content reads. `docs/src/content/docs/reference/repo-config.md` (`pr.template`) owns provider-specific ownership/budget and visible Bitbucket metadata caveats. The protocol has single-publisher scope because the daemon enforces one active run per repository branch; do not add cross-publisher coordination without a separate requirement. Detailed behavior is owned by `docs/src/content/docs/reference/pipeline-steps.md`; local rationale lives in `attestHeadBeforePush` and `publishRunHead`. Regressions: `TestPushStep_AttestsHeadBeforePush`, `TestPushStep_AttestationWriteFailureAbortsBeforePush`, `TestPushStep_UnavailableSCMLeavesStaleAttestationFailingClosed`, `TestPushStep_PushFailureAfterAttestationLeavesBodyAhead`, and `TestCIStep_PublishRepairRebindsAttestationAcrossRepairPushes`.

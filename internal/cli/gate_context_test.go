@@ -24,6 +24,7 @@ func TestGateControlPolicyCoversEveryMutationEntrypoint(t *testing.T) {
 		{args: []string{"sync", "--check"}, mutates: false},
 		{args: []string{"axi", "run"}, mutates: true},
 		{args: []string{"axi", "respond"}, mutates: true},
+		{args: []string{"axi", "refresh-pr"}, mutates: true},
 		{args: []string{"axi", "sync"}, mutates: true},
 		{args: []string{"axi", "sync", "--recover"}, mutates: true},
 		{args: []string{"axi", "sync", "--check"}, mutates: false},

@@ -78,6 +78,7 @@ type RunManager struct {
 	db              *db.DB
 	paths           *paths.Paths
 	steps           StepFactory
+	refreshPR       func(*pipeline.StepContext) (bool, error)
 
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
 
@@ -138,6 +139,7 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		ciMonitorActive: make(map[string]bool),
 		ciWakes:         make(map[string]chan struct{}),
 		db:              database,
+		refreshPR:       steps.RefreshPublishedPR,
 		paths:           p,
 		steps:           stepFactory,
 		subscribers:     make(map[string][]*eventMailbox),

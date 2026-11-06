@@ -406,12 +406,19 @@ When the Test step validated the same `head_sha`, the payload also includes `liv
 
 When [`commands.test_focused`](/no-mistakes/reference/repo-config/#commandstest_focused) re-checked a repair on the same `head_sha`, the payload also includes `focused_check` with `exit_code`, `tests` (the failures it was given), and `paths` (the repaired paths it was given). Its presence means the Test step ran the focused check on that head in place of `commands.test`; under [`side_by_side`](/no-mistakes/reference/global-config/#side_by_side) the Push step may still have run `commands.test` there, and says so in its note. It is omitted when no focused check ran there, the same way `live_validation` is.
 
-Two additional fields are additive and omitted when empty, so older attestations remain valid:
+Three additional fields are additive and omitted when empty, so older attestations remain valid:
 
 - `steps[].override_reason`: present on a Test step that was approved over a failing configured `commands.test`. Absent on an ordinary green completion and on pre-field attestations, which must be read as not approved over failure.
+- `steps[].test_exception`: the unresolved condition and recorded operator reason for a qualifying Test approval, including an inconclusive or `no-go` live verdict or an agent-budget cut.
+  The Pipeline section also shows this as a Test approval exception, while retaining the scenario results and reasons.
+  This field grants no configured-command waiver and makes no clean live-validation claim.
+  A restamp without new Test records preserves it; a restamp with current step records derives it from those records.
 - `allow_test_command_override`: the trusted [`test.allow_approve_over_failure`](/no-mistakes/reference/repo-config/#testallow_approve_over_failure) reason copied at PR-write time, including a CI-repair restamp, from the current trusted config rather than a previous attestation, and only when the Test step carries `override_reason`. The required check refuses a Test `override_reason` unless this field is a non-empty recorded reason.
 
 A CI step approved over still-failing checks also stores `override_reason` on the step result (and surfaces as `passed-with-override` in AXI), but that CI mark is not copied onto the attestation.
+
+For a settled run whose existing PR omitted its stored Test approval, [`axi refresh-pr --run <id>`](/no-mistakes/reference/cli/#no-mistakes-axi-refresh-pr) adds only the exception metadata and human text.
+It preserves the existing head binding, scenario history, author text and command-only waiver fields.
 
 Items follow pipeline order, with each repository gate immediately after its anchor. They represent the exact database snapshot when no-mistakes creates or updates the PR body. The attestation includes `pr` and `ci` records even though their human-readable details are not shown in `## Pipeline`; at the normal PR write point those records are commonly `running` and `pending`. The `head_sha` binds that snapshot to the commit it describes, so consumers can reject a stale comment after the PR head changes.
 
