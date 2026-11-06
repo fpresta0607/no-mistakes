@@ -30,7 +30,9 @@ flowchart TD
    - If issues remain, the step pauses for user approval
    - If no step-specific outstanding condition remains, the step completes and the pipeline moves on
 
-Review has an additional step-specific outstanding condition during carry-forward verification; missing coverage or silence can keep its gate parked even when no blocking-severity finding is reported. A clean review that omits its coverage record parks for approval the same way rather than certifying the head. A repair round's rereview reads the repair's own change, and a new finding outside it is recorded as a follow-up that spends no round, unless it names a concrete failing input and the wrong result that input produces. See the [Review step reference](/no-mistakes/reference/pipeline-steps/#review) for the authoritative carry-forward contract.
+Review has an additional step-specific outstanding condition during carry-forward verification; missing coverage or silence can keep its gate parked even when no blocking-severity finding is reported.
+A clean review that omits its coverage record parks for approval the same way rather than certifying the head.
+See the [Review step reference](/no-mistakes/reference/pipeline-steps/#review) for the authoritative carry-forward and repair-rereview contracts, including follow-up classification.
 
 The document step applies fixes during its initial pass instead of relying on a follow-up automatic fix loop.
 When `commands.lint` is empty, that same invocation is a combined documentation-and-lint housekeeping pass: it updates documentation, detects relevant linters and formatters, applies safe fixes, verifies both duties, and categorizes any unresolved findings for the document or lint gate.

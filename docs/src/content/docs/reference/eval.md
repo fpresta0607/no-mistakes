@@ -125,6 +125,9 @@ Effort is part of the candidate identity, so `codex,model=gpt-5.4,effort=low` an
 
 The replay restores each case into a fresh temporary bare gate and worktree, then invokes only the existing Review step. Branch-base resolution uses the captured default-branch commit restored as a local remote-tracking ref, without fetching an upstream remote. A case pool therefore needs no configured remote to replay. Push, PR, CI, test, lint, document, and fix loops are outside this subject under test.
 
+For a captured repair round, replay separates the recorded fix selection from unselected findings and restores the selections still awaiting verification since the most recent Review restart.
+It applies the same [repair-rereview contract](/no-mistakes/reference/pipeline-steps/#review) as a live run, so an unselected note does not become a verification obligation and an unverified selection cannot be treated as a follow-up.
+
 Replay scores each candidate finding against that gold:
 
 - **true-positive**: the candidate raises the same underlying issue as a true-issue gold finding (user Fix, auto-fix-merged, human-added miss, a confirmed post-PR miss, or an automatically ingested CI miss)

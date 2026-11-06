@@ -232,11 +232,11 @@ func (r *repairRoundScope) split(log func(string), findings *Findings) {
 }
 
 // isFollowUp reports whether a finding is shown to lie outside the repair and
-// names no concrete failure. Any doubt keeps it blocking: a finding with no
-// line, or a file that names no tracked path, cannot be placed, and a file no
-// earlier round judged is being reviewed for the first time. An ask-user
-// finding is a person's decision, and the intent and access rules that raise
-// one are not the pipeline's to waive.
+// names no concrete failure. Any doubt keeps it blocking: an anchor must name
+// an existing line in a readable tracked file, and a file no earlier round
+// judged is being reviewed for the first time. An ask-user finding is a
+// person's decision, and the intent and access rules that raise one are not
+// the pipeline's to waive.
 //
 // Nothing leaves Items until the rereview names closed every finding awaiting
 // verification. Any finding may be one of those moved, reworded or reported
