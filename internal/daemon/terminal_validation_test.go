@@ -241,9 +241,9 @@ func TestTerminalValidationPreservesAdoptedGateOwnershipAndEveryBoundAnchor(t *t
 		changes := []string{"unchanged", "candidate moved", "candidate deleted", "lane moved", "lane deleted", "ancestor recovery moved", "ancestor recovery deleted", "archive moved", "archive deleted", "symbolic candidate", "noncommit lane", "unrelated gate"}
 		switch descendant {
 		case "authored":
-			changes = []string{"unchanged", "lane moved", "lane deleted"}
+			changes = []string{"unchanged", "lane moved", "lane deleted", "admission candidate moved", "admission candidate deleted"}
 		case "terminal":
-			changes = []string{"unchanged", "inherited recovery moved", "inherited recovery deleted"}
+			changes = []string{"unchanged", "inherited recovery moved", "inherited recovery deleted", "admission candidate moved", "admission candidate deleted"}
 		case "adopted archive":
 			changes = []string{"unchanged", "adopted archive moved", "adopted archive deleted"}
 		}
@@ -363,15 +363,19 @@ func TestTerminalValidationPreservesAdoptedGateOwnershipAndEveryBoundAnchor(t *t
 					params.Request.SourceAnchors["caller/"+adoptedArchiveRef] = candidate
 					params.Request.SourceAnchors["gate/"+custody.RecoveryRef(adoption.SuccessorID)] = candidate
 				}
+				admissionCandidateRef := ""
 				if hasValidationDescendant {
 					admission, err := database.GetValidationPredecessor(parentID)
 					if err != nil {
 						t.Fatal(err)
 					}
-					params.Request.SourceAnchors["gate/refs/no-mistakes/authored-candidate/"+admission.ID] = snapshot.Run.HeadSHA
+					admissionCandidateRef = "refs/no-mistakes/authored-candidate/" + admission.ID
+					params.Request.SourceAnchors["gate/"+admissionCandidateRef] = snapshot.Run.HeadSHA
 				}
 				directory, ref, replacement := gate, candidateRef, original.Run.HeadSHA
 				switch change {
+				case "admission candidate moved", "admission candidate deleted":
+					ref = admissionCandidateRef
 				case "lane moved", "lane deleted", "noncommit lane":
 					ref, replacement = laneRef, candidate
 				case "ancestor recovery moved", "ancestor recovery deleted":
@@ -422,6 +426,9 @@ func TestTerminalValidationPreservesAdoptedGateOwnershipAndEveryBoundAnchor(t *t
 					}
 					if err == nil || !strings.Contains(err.Error(), expected) {
 						t.Fatalf("wrong refusal for changed bound provenance: %+v %v", result, err)
+					}
+					if strings.HasPrefix(change, "admission candidate") && !strings.Contains(err.Error(), admissionCandidateRef) {
+						t.Fatalf("refusal did not identify the changed admission candidate ref: %v", err)
 					}
 					after, readErr := database.GetRunsByRepo(repo.ID)
 					if readErr != nil || !reflect.DeepEqual(before, after) || calls.Load() != 0 {

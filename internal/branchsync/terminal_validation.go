@@ -45,6 +45,9 @@ func TerminalValidationAnchors(ctx context.Context, database *db.DB, gateDir, ca
 			}
 		}
 		if admission := entry.Admission; admission != nil {
+			if err := bind("gate/refs/no-mistakes/authored-candidate/"+admission.ID, admission.Request.CandidateSHA); err != nil {
+				return nil, err
+			}
 			for key, head := range admission.Request.SourceAnchors {
 				if err := bind(key, head); err != nil {
 					return nil, err
