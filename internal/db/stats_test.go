@@ -233,28 +233,32 @@ func TestGetStatsDoesNotCountTestBudgetCutsAsFixedMistakes(t *testing.T) {
 // An exhausted Review fix-round budget records the operator's budget, not a
 // defect: the notice counts as neither reported nor, once an answer round
 // clears the gate, fixed. The real defect beside it still counts.
-func TestGetStatsDoesNotCountReviewFixRoundBudgetAsMistake(t *testing.T) {
-	d := openTestDB(t)
-	repo, _ := d.InsertRepo("/repo/budget", "git@example.com:budget.git", "main")
-	run, _ := d.InsertRun(repo.ID, "budget", "head", "base")
-	review, _ := d.InsertStepResult(run.ID, types.StepReview)
-	initial := `{"findings":[{"id":"R1","severity":"error","file":"main.go","description":"nil deref","action":"auto-fix"}]}`
-	exhausted := `{"findings":[{"id":"R1","severity":"error","file":"main.go","description":"nil deref","action":"auto-fix"},{"id":"review-fix-rounds-exhausted","severity":"warning","description":"fix_rounds_exhausted: Review used 1/1 fix rounds","action":"ask-user"}]}`
-	if _, err := d.InsertStepRound(review.ID, 1, "initial", &initial, nil, 100); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := d.InsertStepRound(review.ID, 2, "auto_fix", &exhausted, nil, 100); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := d.InsertStepRound(review.ID, 3, "answer", nil, nil, 100); err != nil {
-		t.Fatal(err)
-	}
+func TestGetStatsDoesNotCountABudgetNoticeAsMistake(t *testing.T) {
+	for _, notice := range []string{types.FindingIDReviewFixRoundsExhausted, types.FindingIDRepairAgentBudget} {
+		t.Run(notice, func(t *testing.T) {
+			d := openTestDB(t)
+			repo, _ := d.InsertRepo("/repo/budget", "git@example.com:budget.git", "main")
+			run, _ := d.InsertRun(repo.ID, "budget", "head", "base")
+			review, _ := d.InsertStepResult(run.ID, types.StepReview)
+			initial := `{"findings":[{"id":"R1","severity":"error","file":"main.go","description":"nil deref","action":"auto-fix"}]}`
+			parked := `{"findings":[{"id":"R1","severity":"error","file":"main.go","description":"nil deref","action":"auto-fix"},{"id":"` + notice + `","severity":"warning","description":"a budget ran out","action":"ask-user"}]}`
+			if _, err := d.InsertStepRound(review.ID, 1, "initial", &initial, nil, 100); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.InsertStepRound(review.ID, 2, "auto_fix", &parked, nil, 100); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.InsertStepRound(review.ID, 3, "answer", nil, nil, 100); err != nil {
+				t.Fatal(err)
+			}
 
-	stats, err := d.StepFindingStats(review)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stats.ReportedFindings != 1 || stats.FixedFindings != 1 {
-		t.Fatalf("review step = reported %d fixed %d, want 1/1 (only R1)", stats.ReportedFindings, stats.FixedFindings)
+			stats, err := d.StepFindingStats(review)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stats.ReportedFindings != 1 || stats.FixedFindings != 1 {
+				t.Fatalf("review step = reported %d fixed %d, want 1/1 (only R1)", stats.ReportedFindings, stats.FixedFindings)
+			}
+		})
 	}
 }

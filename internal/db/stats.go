@@ -209,7 +209,7 @@ func findingItems(raw *string) []types.Finding {
 	}
 	return slices.DeleteFunc(findings.Items, func(item types.Finding) bool {
 		return item.ID == types.FindingIDTestAgentTimeout || item.ID == types.FindingIDTestAgentUnvalidatedWork ||
-			item.ID == types.FindingIDReviewFixRoundsExhausted
+			item.ID == types.FindingIDReviewFixRoundsExhausted || item.ID == types.FindingIDRepairAgentBudget
 	})
 }
 

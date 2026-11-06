@@ -997,7 +997,7 @@ func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead st
 		validatedHead = startHead
 	}
 	park.UnvalidatedSinceSHA = validatedHead
-	if work := unvalidatedTestWork(sctx, validatedHead); work != "" {
+	if work := unvalidatedWork(sctx, types.StepTest, validatedHead, nil); work != "" {
 		items = append(items, Finding{
 			ID:          types.FindingIDTestAgentUnvalidatedWork,
 			Severity:    types.FindingSeverityError,
@@ -1200,14 +1200,16 @@ func testRepairFindings(raw string) string {
 	return encoded
 }
 
-// unvalidatedTestWork names what the worktree holds beyond validatedHead - the
-// head the last completed evidence turn saw, else the head an earlier cut in
-// this fix chain measured from, else this execution's start -
-// with how to inspect it, or returns "" when there is nothing. A commit the
+// unvalidatedWork names what the worktree holds beyond validatedHead - for
+// Test, the head the last completed evidence turn saw, else the head an earlier
+// cut in this fix chain measured from, else this execution's start; for a
+// repair cut, the head its turn started from -
+// with how to inspect it, or returns "" when there is nothing. held lists the
+// files the worktree already held, which are no part of that work. A commit the
 // timed-out agent made is recorded as the run head so custody sees it, unless
 // an unfinished rebase or merge makes HEAD a partial result. An unreadable HEAD
 // or status fails closed.
-func unvalidatedTestWork(sctx *pipeline.StepContext, validatedHead string) string {
+func unvalidatedWork(sctx *pipeline.StepContext, stepName types.StepName, validatedHead string, held []string) string {
 	dir := sctx.WorkDir
 	var parts []string
 	head, err := stepGitHeadSHA(sctx)
@@ -1219,8 +1221,8 @@ func unvalidatedTestWork(sctx *pipeline.StepContext, validatedHead string) strin
 	case head != validatedHead:
 		where := "recorded locally as the run head and not pushed"
 		if head != sctx.Run.HeadSHA {
-			if recErr := recordAgentFixHead(sctx, types.StepTest, head); recErr != nil {
-				sctx.Log(fmt.Sprintf("warning: could not record timed-out test agent head %s: %v", head, recErr))
+			if recErr := recordAgentFixHead(sctx, stepName, head); recErr != nil {
+				sctx.Log(fmt.Sprintf("warning: could not record timed-out %s agent head %s: %v", stepName, head, recErr))
 				where = "left in the run worktree"
 			}
 		}
@@ -1229,7 +1231,7 @@ func unvalidatedTestWork(sctx *pipeline.StepContext, validatedHead string) strin
 	status, err := stepGitRunRaw(sctx, "status", "--porcelain")
 	if err != nil {
 		parts = append(parts, fmt.Sprintf("a worktree status that could not be read (%v)", err))
-	} else if changed := porcelainPaths(status); len(changed) > 0 {
+	} else if changed := slices.DeleteFunc(porcelainPaths(status), func(path string) bool { return slices.Contains(held, path) }); len(changed) > 0 {
 		parts = append(parts, fmt.Sprintf("uncommitted changes to %s (inspect with `git -C %s status` and `git -C %s diff`)", namedPaths(changed), dir, dir))
 	}
 	return strings.Join(parts, "; ")

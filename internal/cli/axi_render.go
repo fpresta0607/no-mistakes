@@ -743,6 +743,15 @@ func gateFieldsForRun(gate stepView, runID string) []toon.Field {
 		}
 		skip = "Do not skip this step: the steps after Test would commit and publish the unvalidated work, so skipping needs the operator's explicit decision"
 	}
+	if pipeline.HasRepairBudgetCut(gate.FindingsJSON) {
+		next := "Run `" + respond + " --action fix --findings " + types.FindingIDRepairAgentBudget + "` to keep that work and check it with no repair turn and no decision on any other finding, or list the other findings in `--findings` or `--ignore` as well to spend another budget on them (do not edit files yourself), or `no-mistakes axi abort" + runFlag(runID) + "` to stop the run"
+		skip = "Do not skip this step: the steps after it would commit and publish what the cut turn left, so skipping needs the operator's explicit decision"
+		if pipeline.HasReviewFixRoundLimit(gate.FindingsJSON) {
+			next = "The total Review fix-round budget is exhausted, so a fix request is refused and cannot check that work. Skip this step or run `no-mistakes axi abort" + runFlag(runID) + "` to stop the run. A new run gets a new budget; changing config does not extend this run."
+			skip = "Run `" + respond + " --action skip` to skip this step on the operator's explicit decision: the steps after it would commit and publish what the cut turn left"
+		}
+		help = []string{"Approve is rejected: a repair turn was cut at its agent budget, so this round checked nothing and approval would publish what it left. The findings name that work and how to inspect it.", next}
+	}
 	return gateFieldsWithHelp(gate, append(help,
 		skip,
 		fmt.Sprintf("Run `%s` to read the complete step summary and log", axiLogsFullCommand(gate.Name, runID)),
