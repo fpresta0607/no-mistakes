@@ -3,6 +3,7 @@ package branchsync
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -58,6 +59,29 @@ func copyGitFixture[T any](t *testing.T, key string, build func(t *testing.T, ro
 		}
 	}
 	return root, fixture.heads
+}
+
+// copyGitFixture reads a cached fixture while other tests copy it, so nothing
+// may still write there once build returns. Git's automatic maintenance
+// detaches and holds objects/maintenance.lock past the push that started it,
+// and a copy that listed the lock failed when it vanished before the open.
+// Git's trace is the oracle: it records every child process git starts.
+func TestFixtureBuildStartsNoBackgroundMaintenance(t *testing.T) {
+	trace := filepath.Join(t.TempDir(), "git-trace")
+	t.Setenv("GIT_TRACE", trace)
+
+	buildRecoverRepositoriesAtSubmittedHead(t, t.TempDir())
+
+	log, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(log), "receive-pack") {
+		t.Fatalf("trace missed the fixture's push, so it proves nothing:\n%s", log)
+	}
+	if strings.Contains(string(log), "git maintenance run") {
+		t.Fatalf("fixture build started automatic maintenance:\n%s", log)
+	}
 }
 
 func removeScratchClone(t *testing.T, dir string) {

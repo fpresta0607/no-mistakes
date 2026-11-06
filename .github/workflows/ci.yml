@@ -49,10 +49,10 @@ jobs:
           - os: windows-latest
             name: test (windows-git)
             shard: git
-          # pipeline/steps, daemon, and gate are each split by test name. The
-          # last row of a group skips the union of the other rows' patterns, so
-          # a new test always lands in exactly one shard; rebalance the ranges
-          # against the shards' -v timings (issue #1580, #1682).
+          # pipeline/steps, daemon, gate, and branchsync are each split by test
+          # name. The last row of a group skips the union of the other rows'
+          # patterns, so a new test always lands in exactly one shard; rebalance
+          # the ranges against the shards' -v timings (issue #1580, #1682, #58).
           - os: windows-latest
             name: test (windows-steps-1)
             shard: steps
@@ -93,6 +93,14 @@ jobs:
             name: test (windows-gate-3)
             shard: gate
             gate_skip: '^Test([A-I]|ReconcileStale)'
+          - os: windows-latest
+            name: test (windows-branchsync-1)
+            shard: branchsync
+            branchsync_run: '^Test([A-Q]|Recover[A-L])'
+          - os: windows-latest
+            name: test (windows-branchsync-2)
+            shard: branchsync
+            branchsync_skip: '^Test([A-Q]|Recover[A-L])'
     runs-on: ${{ matrix.os }}
     # Sized for each Windows shard, which still sets the floor: git.exe plus
     # Defender tax makes git-backed packages ~10x their Linux time (see the
@@ -100,10 +108,10 @@ jobs:
     # and then ran those packages sequentially, so total wall could exceed
     # timeout-minutes with no package hitting go test -timeout - an
     # evidence-free cancellation. Git-heavy packages are split from the core
-    # remainder; pipeline/steps, daemon, and gate are their own shards, each
-    # also split by test name, so a 15m per-package hang still dumps
-    # goroutines instead of cancelling the job. 40 is a runaway guard, not a
-    # target - Linux and macOS finish far inside it, and it still keeps a
+    # remainder; pipeline/steps, daemon, gate, and branchsync are their own
+    # shards, each also split by test name, so a 15m per-package hang still
+    # dumps goroutines instead of cancelling the job. 40 is a runaway guard,
+    # not a target - Linux and macOS finish far inside it, and it still keeps a
     # wedged runner well short of the six-hour default.
     timeout-minutes: 40
     steps:
@@ -155,15 +163,30 @@ jobs:
         run: go test -race -timeout=20m ./...
 
       # Git-heavy packages are the Windows wall floor. NM_CI_WINDOWS_GIT_EXCLUDE
-      # on the core shard is the union of the git, steps, daemon, and gate
-      # shards; the workflow tests resolve every shard through `go list` and
-      # fail if they drift or overlap. pipeline/steps, daemon, and gate are
-      # their own shards (daemon and gate also split by test name) so they run
-      # in parallel with the remaining git-heavy packages instead of setting a
-      # serial floor that hits go test -timeout (issue #1682).
+      # on the core shard is the union of the git, steps, daemon, gate, and
+      # branchsync shards; the workflow tests resolve every shard through
+      # `go list` and fail if they drift or overlap. pipeline/steps, daemon,
+      # gate, and branchsync are their own shards (each also split by test
+      # name) so they run in parallel with the remaining git-heavy packages
+      # instead of setting a serial floor that hits go test -timeout (issue
+      # #1682).
       - name: Test on Windows (git-heavy)
         if: runner.os == 'Windows' && matrix.shard == 'git'
-        run: go test -v -timeout=15m ./internal/git ./internal/branchsync ./internal/evidence ./internal/eval
+        run: go test -v -timeout=15m ./internal/git ./internal/evidence ./internal/eval
+
+      # branchsync's wall follows the CPU a runner can give it: whole on one
+      # runner it took up to 558s of this 15m budget even after daemon and gate
+      # left it, and timed out with no test hung while they shared it (issue
+      # #58). Split it for less work per runner. On four pinned local CPUs a
+      # whole-package shard of its own gained nothing, and a higher -parallel
+      # only took time from eval while the shard as a whole got slower.
+      - name: Test on Windows (branchsync)
+        if: runner.os == 'Windows' && matrix.shard == 'branchsync'
+        shell: pwsh
+        env:
+          NM_CI_WINDOWS_BRANCHSYNC_RUN: ${{ matrix.branchsync_run }}
+          NM_CI_WINDOWS_BRANCHSYNC_SKIP: ${{ matrix.branchsync_skip }}
+        run: go test -v -timeout=15m "-run=$env:NM_CI_WINDOWS_BRANCHSYNC_RUN" "-skip=$env:NM_CI_WINDOWS_BRANCHSYNC_SKIP" ./internal/branchsync
 
       - name: Test on Windows (pipeline/steps)
         if: runner.os == 'Windows' && matrix.shard == 'steps'

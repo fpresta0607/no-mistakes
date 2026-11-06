@@ -357,7 +357,6 @@ func TestNativeAgents_FinishedResultSurvivesEscapedStdoutHolder(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			dir := t.TempDir()
 			res, err := tt.run(t, dir, escapedStdoutHolder(t, dir))
 			if err != nil {
@@ -392,7 +391,6 @@ func TestNativeAgents_RequireCompletedChildrenRefusesActiveOwnedChild(t *testing
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			dir := t.TempDir()
 			_, err := tt.run(t, dir, ownedStdoutHolder(t, dir))
 			if errors.Is(err, context.DeadlineExceeded) && strings.Contains(err.Error(), "native check completion is unverified:") {
@@ -436,7 +434,6 @@ func TestNativeAgents_RequireCompletedChildrenAcceptsFinishingOwnedChild(t *test
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			dir := t.TempDir()
 			res, err := tt.run(t, dir, finishingOwnedChild(t, dir))
 			if err != nil {
@@ -473,6 +470,9 @@ func ownedStdoutHolder(t *testing.T, dir string) string {
 	return "sleep 120 &\necho $! > \"" + pidFile + "\"\n"
 }
 
+// The runFake*Result helpers write a script and exec it at once, so their
+// callers must stay sequential: a concurrent fork can inherit the script's
+// write descriptor for an instant, and the exec then fails with ETXTBSY.
 func runFakeClaudeResult(t *testing.T, dir, holder string, schema json.RawMessage) (*Result, error) {
 	t.Helper()
 	const events = `{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"ok"}]}}
