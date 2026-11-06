@@ -195,6 +195,9 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 		if _, err := stepGitRun(sctx, "merge-base", "--is-ancestor", *handback.AcceptedHead, headBeingPushed); err != nil {
 			return fmt.Errorf("publication must preserve the accepted CI follow-up and its released head as ancestors")
 		}
+		if err := verifyCIHandbackPublication(sctx, handback, headBeingPushed); err != nil {
+			return err
+		}
 	}
 	ref := normalizedBranchRef(sctx.Run.Branch)
 	branch := strings.TrimPrefix(ref, "refs/heads/")

@@ -606,6 +606,12 @@ no-mistakes axi handback --resume --receipt <id>
 Release requires the latest branch run's CI `awaiting_approval` gate, automatic CI repair disabled (`auto_fix.ci: 0`), and every preceding required step completed.
 A published GitHub CI merge conflict requires an unresolved merge-conflict finding and a clean, synchronized caller.
 An ordinary handback requires genuine provider-structured failed checks, exact completed Review and Test evidence for the published head, and no review-bot, transient, safety or protected-path refusal.
+When Document committed after Test, explicitly use `axi handback --revalidate-publication` instead.
+That route requires the submitted, reviewed, tested and published commits to form a verified ancestry chain, with completed steps and durable Review and Test rounds.
+It pins those historical rounds, evidence, repair limits and spending in the native receipt without certifying the published descendant or changing the old evidence heads.
+Changed historical evidence refuses release, acceptance and recovery.
+Resume uses the same `--resume --receipt <id>` command and requires fresh Review and Test before publication; it cannot renew repair authority or replace the run.
+Publication refuses if a later Document, Lint or formatting commit leaves that final head without exact fresh Review and Test evidence.
 An ordinary caller may be clean and genuinely divergent; release anchors its original head and the exact published head in both repositories without moving its branch.
 Follow `branch_sync.next_action.command` to integrate that preserved published output additively before committing the correction.
 Behind callers use the existing guarded synchronization first; dirty callers retain their work and refuse release.

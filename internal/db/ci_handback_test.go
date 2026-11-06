@@ -106,3 +106,84 @@ func TestCIHandbackKeepsConflictAndBudgetHistory(t *testing.T) {
 		t.Fatalf("accepted receipt = %#v %v", stored, err)
 	}
 }
+
+func TestCIHandbackValidationRejectsEvidenceChangesAtEachWrite(t *testing.T) {
+	for _, boundary := range []string{"release", "checkpoint", "acceptance"} {
+		t.Run(boundary, func(t *testing.T) {
+			database := openTestDB(t)
+			repo, err := database.InsertRepo("fixture", "https://github.com/example/fixture.git", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := database.InsertRun(repo.ID, "topic", "published", "base")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, err := range []error{
+				database.UpdateRunStatus(run.ID, types.RunRunning),
+				database.UpdateRunReviewApprovedHeadSHA(run.ID, "reviewed"),
+				database.UpdateRunPRURL(run.ID, "https://github.com/example/fixture/pull/1"),
+				database.UpdateRunPRState(run.ID, "open"),
+				database.UpdateRunPublication(run.ID, PushBinding{HeadSHA: "published", TargetKind: "upstream", TargetFingerprint: "target", Ref: "refs/heads/topic"}),
+			} {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			ci, err := database.InsertStepResult(run.ID, types.StepCI)
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings := `{"findings":[{"id":"ci-1","category":"ci-check","severity":"error","action":"auto-fix","check":"tests"}]}`
+			round, err := database.InsertStepRound(ci.ID, 1, "initial", &findings, nil, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.ParkStepForApproval(run.ID, ci.ID, types.StepStatusAwaitingApproval, 0, 10, &findings); err != nil {
+				t.Fatal(err)
+			}
+			run, err = database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			validation, err := database.ReadCIHandbackValidation(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			receipt := &CIHandback{RunID: run.ID, RoundID: round.ID, CallerDir: "caller", ReleasedHead: "published", PRURL: *run.PRURL, BaseBranch: "main", BaseHead: "base", PushGeneration: *run.PushGeneration, TargetFingerprint: "target", PushRef: "refs/heads/topic",
+				Source: &CIHandbackSource{CallerHead: "published", SubmittedHead: *run.SubmittedHeadSHA, ReviewHead: "reviewed", PushKind: "upstream", PushedAt: *run.LastPushedAt, Findings: findings, AutoFixLimits: map[types.StepName]int{types.StepCI: 0}, Validation: validation}}
+			if boundary != "release" {
+				if err := database.ReleaseCIHandback(receipt, run, repo, findings); err != nil {
+					t.Fatal(err)
+				}
+				stored, err := database.LatestCIHandback(run.ID)
+				if err != nil || !reflect.DeepEqual(receipt, stored) {
+					t.Fatalf("durable receipt lost historical evidence: %#v %v", stored, err)
+				}
+			}
+			if boundary == "acceptance" {
+				if err := database.PrepareCIHandback(receipt, "correction", "base", "HEAD", repo); err != nil {
+					t.Fatal(err)
+				}
+			}
+			selected := `["ci-1"]`
+			if err := database.SetStepRoundSelection(round.ID, &selected, RoundSelectionSourceAutoFix); err != nil {
+				t.Fatal(err)
+			}
+			switch boundary {
+			case "release":
+				err = database.ReleaseCIHandback(receipt, run, repo, findings)
+			case "checkpoint":
+				err = database.PrepareCIHandback(receipt, "correction", "base", "HEAD", repo)
+			case "acceptance":
+				err = database.AcceptCIHandback(receipt, "correction", repo)
+			}
+			if err == nil {
+				t.Fatal("changed spending was accepted")
+			}
+			if after, err := database.GetRun(run.ID); err != nil || !reflect.DeepEqual(run, after) {
+				t.Fatalf("rejected write changed publication or old review: %#v %v", after, err)
+			}
+		})
+	}
+}

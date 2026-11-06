@@ -32,7 +32,7 @@ type ciHandbackRecoveryFixture struct {
 	push      *mockPassStep
 }
 
-func newCIHandbackRecoveryFixture(t *testing.T, isOrdinary bool) *ciHandbackRecoveryFixture {
+func newCIHandbackRecoveryFixture(t *testing.T, isOrdinary, hasDocumentCommit bool) *ciHandbackRecoveryFixture {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -59,6 +59,14 @@ func newCIHandbackRecoveryFixture(t *testing.T, isOrdinary bool) *ciHandbackReco
 	}
 	gitCmd(t, caller, "add", "feature.txt")
 	gitCmd(t, caller, "commit", "-m", "published feature")
+	reviewed := gitOutput(t, caller, "rev-parse", "HEAD")
+	if hasDocumentCommit {
+		if err := os.WriteFile(filepath.Join(caller, "README.md"), []byte("document the reviewed feature\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		gitCmd(t, caller, "add", "README.md")
+		gitCmd(t, caller, "commit", "-m", "document reviewed feature")
+	}
 	published := gitOutput(t, caller, "rev-parse", "HEAD")
 	gitCmd(t, caller, "push", "gate", "feature")
 	remote := filepath.Join(t.TempDir(), "published.git")
@@ -76,11 +84,12 @@ func newCIHandbackRecoveryFixture(t *testing.T, isOrdinary bool) *ciHandbackReco
 	gitCmd(t, caller, "push", "origin", "main")
 	gitCmd(t, caller, "push", "gate", "main")
 	gitCmd(t, caller, "checkout", "feature")
-	run, err := database.InsertRun(repo.ID, "feature", published, baseHead)
+	run, err := database.InsertRun(repo.ID, "feature", reviewed, baseHead)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, err := range []error{
+		database.UpdateRunHeadSHA(run.ID, published),
 		database.UpdateRunStatus(run.ID, types.RunRunning),
 		database.UpdateRunPRURL(run.ID, "https://github.com/test/repo/pull/1"),
 		database.UpdateRunPRState(run.ID, "open"),
@@ -111,16 +120,19 @@ func newCIHandbackRecoveryFixture(t *testing.T, isOrdinary bool) *ciHandbackReco
 			t.Fatal(err)
 		}
 		clean := `{"findings":[],"summary":"previous validation"}`
+		if step.Name() == types.StepTest {
+			clean = `{"findings":[],"tested_head_sha":"` + reviewed + `"}`
+		}
 		if step.Name() == types.StepCI {
 			clean = findings
 		}
-		round, err := database.InsertStepRound(result.ID, 1, "initial", &clean, nil, 10)
+		round, err := database.InsertReviewStepRound(result.ID, 1, "initial", &clean, nil, reviewed, 10)
 		if err != nil {
 			t.Fatal(err)
 		}
 		switch step.Name() {
 		case types.StepReview:
-			err = database.CompleteReviewStep(result.ID, run.ID, published, 0, 10, "")
+			err = database.CompleteReviewStep(result.ID, run.ID, reviewed, 0, 10, "")
 		case types.StepCI:
 			selection := `["ci-1"]`
 			if err := database.SetStepRoundSelection(round.ID, &selection, db.RoundSelectionSourceAutoFix); err != nil {
@@ -133,6 +145,9 @@ func newCIHandbackRecoveryFixture(t *testing.T, isOrdinary bool) *ciHandbackReco
 			fixture.receipt = &db.CIHandback{RunID: run.ID, RoundID: round.ID, CallerDir: caller, ReleasedHead: published, PRURL: "https://github.com/test/repo/pull/1", BaseBranch: "main", BaseHead: baseHead, PushGeneration: 1, TargetFingerprint: branchsync.TargetFingerprint(repo.PushURL()), PushRef: "refs/heads/feature"}
 			err = database.ParkStepForApproval(run.ID, result.ID, types.StepStatusAwaitingApproval, 0, 30, &clean)
 		default:
+			if err := database.SetStepFindings(result.ID, clean); err != nil {
+				t.Fatal(err)
+			}
 			err = database.CompleteStepWithStatus(result.ID, types.StepStatusCompleted, 0, 10, "")
 		}
 		if err != nil {
@@ -153,7 +168,13 @@ func newCIHandbackRecoveryFixture(t *testing.T, isOrdinary bool) *ciHandbackReco
 		for _, name := range types.AllSteps() {
 			limits[name] = 0
 		}
-		fixture.receipt.Source = &db.CIHandbackSource{CallerHead: published, SubmittedHead: *run.SubmittedHeadSHA, ReviewHead: published, PushKind: *run.PushTargetKind, PushedAt: *run.LastPushedAt, Findings: findings, AutoFixLimits: limits}
+		fixture.receipt.Source = &db.CIHandbackSource{CallerHead: published, SubmittedHead: *run.SubmittedHeadSHA, ReviewHead: reviewed, PushKind: *run.PushTargetKind, PushedAt: *run.LastPushedAt, Findings: findings, AutoFixLimits: limits}
+		if hasDocumentCommit {
+			fixture.receipt.Source.Validation, err = database.ReadCIHandbackValidation(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
 		anchor := "refs/no-mistakes/ci-handback/" + run.ID + "/1"
 		for _, directory := range []string{caller, p.RepoDir(repo.ID)} {
 			gitCmd(t, directory, "update-ref", anchor+"/published", published)
@@ -186,7 +207,7 @@ func TestManagerCancelReleasedCIHandbackAfterRecoveryFailure(t *testing.T) {
 		{"conflict", false},
 	} {
 		t.Run(release.name, func(t *testing.T) {
-			fixture := newCIHandbackRecoveryFixture(t, release.isOrdinary)
+			fixture := newCIHandbackRecoveryFixture(t, release.isOrdinary, false)
 			manager := fixture.manager
 			if err := manager.db.ClearCIHandbackCandidate(fixture.receipt); err != nil {
 				t.Fatal(err)
@@ -325,7 +346,7 @@ func TestManagerCancelReleasedCIHandbackAfterRecoveryFailure(t *testing.T) {
 func TestManagerCancelReleasedCIHandbackRefusesWritersAndTransitions(t *testing.T) {
 	for _, state := range []string{"push writer", "agent writer", "active validation", "candidate", "accepted", "tracked executor"} {
 		t.Run(state, func(t *testing.T) {
-			fixture := newCIHandbackRecoveryFixture(t, true)
+			fixture := newCIHandbackRecoveryFixture(t, true, false)
 			manager, database := fixture.manager, fixture.manager.db
 			if state != "candidate" && state != "accepted" {
 				if err := database.ClearCIHandbackCandidate(fixture.receipt); err != nil {
@@ -403,20 +424,20 @@ func TestManagerCIHandbackCrashRecovery(t *testing.T) {
 		t.Fatalf("build fake forge: %v\n%s", err, output)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	for _, checkpoint := range []string{"before movement", "after movement", "accepted before reset", "accepted after reset", "dirty managed worktree", "unknown managed head", "unbound movement", "changed publication", "ambiguous ownership", "dirty caller", "changed caller", "changed target", "changed PR head", "changed gate lane", "active writer", "changed generation", "accepted with duplicate caller", "ordinary after movement", "ordinary accepted before reset", "ordinary source anchor changed", "ordinary validation identity changed", "ordinary stale managed origin", "ordinary changed clone source"} {
+	for _, checkpoint := range []string{"before movement", "after movement", "accepted before reset", "accepted after reset", "dirty managed worktree", "unknown managed head", "unbound movement", "changed publication", "ambiguous ownership", "dirty caller", "changed caller", "changed target", "changed PR head", "changed gate lane", "active writer", "changed generation", "accepted with duplicate caller", "ordinary after movement", "ordinary accepted before reset", "ordinary source anchor changed", "ordinary validation identity changed", "ordinary stale managed origin", "ordinary changed clone source", "ordinary document after movement", "ordinary document accepted before reset", "ordinary document accepted after reset", "ordinary document modified evidence"} {
 		t.Run(checkpoint, func(t *testing.T) {
-			fixture := newCIHandbackRecoveryFixture(t, strings.HasPrefix(checkpoint, "ordinary "))
+			fixture := newCIHandbackRecoveryFixture(t, strings.HasPrefix(checkpoint, "ordinary "), strings.Contains(checkpoint, "document"))
 			database, manager := fixture.manager.db, fixture.manager
 			if checkpoint != "before movement" {
 				gitCmd(t, fixture.managed, "merge", "--ff-only", "--no-edit", fixture.followup)
 			}
-			isAccepted := checkpoint == "accepted before reset" || checkpoint == "accepted after reset" || checkpoint == "accepted with duplicate caller" || checkpoint == "ordinary accepted before reset"
+			isAccepted := checkpoint == "accepted before reset" || checkpoint == "accepted after reset" || checkpoint == "accepted with duplicate caller" || checkpoint == "ordinary accepted before reset" || strings.Contains(checkpoint, "document accepted")
 			if isAccepted {
 				if err := database.AcceptCIHandback(fixture.receipt, fixture.followup, fixture.repo); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if checkpoint == "accepted after reset" {
+			if checkpoint == "accepted after reset" || checkpoint == "ordinary document accepted after reset" {
 				if err := database.ResetStepsFrom(fixture.run.ID, types.StepReview.Order()); err != nil {
 					t.Fatal(err)
 				}
@@ -426,6 +447,19 @@ func TestManagerCIHandbackCrashRecovery(t *testing.T) {
 			}
 			shouldRefuse := false
 			switch checkpoint {
+			case "ordinary document modified evidence":
+				shouldRefuse = true
+				results, err := database.GetStepsByRun(fixture.run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, result := range results {
+					if result.StepName == types.StepTest {
+						if err := database.SetStepFindings(result.ID, `{"findings":[],"tested_head_sha":"`+fixture.published+`"}`); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
 			case "ordinary stale managed origin":
 				staleSource := filepath.Join(t.TempDir(), "stale.git")
 				gitCmd(t, fixture.repo.WorkingPath, "init", "--bare", staleSource)
