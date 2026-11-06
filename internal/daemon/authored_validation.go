@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +37,9 @@ var authoredPRCommandOutput = (*exec.Cmd).Output
 
 func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAuthoredParams, operator int) (*ipc.ValidateAuthoredResult, error) {
 	request := params.Request
+	if len(request.SourceAnchors) == 0 {
+		request.SourceAnchors = nil
+	}
 	if operator <= 0 {
 		return nil, fmt.Errorf("authored admission requires an authenticated local operator")
 	}
@@ -66,10 +70,20 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err := proveAuthoredCheckout(ctx, params.CallerDir, &request, repo); err != nil {
 			return "", err
 		}
+		gateDir := m.paths.RepoDir(repo.ID)
+		if request.TerminalGeneration != "" {
+			anchors, err := branchsync.TerminalValidationAnchors(ctx, gateDir, request.CallerDir, &snapshot.Run)
+			if err != nil {
+				return "", err
+			}
+			if !maps.Equal(anchors, request.SourceAnchors) {
+				return "", fmt.Errorf("terminal recovery anchors changed; inspect and bind every known anchor")
+			}
+		}
 		m.mu.Lock()
-		predecessorExecutor := m.executors[snapshot.Run.ID]
+		isPredecessorScheduled := m.runScheduledLocked(snapshot.Run.ID)
 		m.mu.Unlock()
-		if predecessorExecutor != nil || !snapshot.Run.Status.Terminal() || snapshot.Run.PushActive {
+		if isPredecessorScheduled || !snapshot.Run.Status.Terminal() || snapshot.Run.PushActive {
 			return "", fmt.Errorf("predecessor must be terminal with no executor or publisher; it will never be restarted")
 		}
 		for _, step := range snapshot.Steps {
@@ -93,7 +107,10 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 			if run.Branch != request.Branch || run.ID == snapshot.Run.ID || event != nil && run.ID == event.ChildID {
 				continue
 			}
-			if !run.Status.Terminal() || run.ID > snapshot.Run.ID {
+			m.mu.Lock()
+			isRunScheduled := m.runScheduledLocked(run.ID)
+			m.mu.Unlock()
+			if !run.Status.Terminal() || run.ID > snapshot.Run.ID || isRunScheduled {
 				return "", fmt.Errorf("a newer or active run owns this branch; authored admission cannot replace it")
 			}
 		}
@@ -141,7 +158,9 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil {
 			return "", err
 		}
-		gateDir := m.paths.RepoDir(repo.ID)
+		if symbolic, err := git.Run(ctx, gateDir, "symbolic-ref", "-q", "refs/heads/"+request.Branch); err == nil && symbolic != "" {
+			return "", fmt.Errorf("gate branch is symbolic")
+		}
 		gateHead, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+request.Branch+"^{commit}")
 		if err != nil {
 			return "", fmt.Errorf("read existing gate branch: %w", err)
@@ -223,7 +242,12 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil {
 			return "", err
 		}
-		cfg, _, _, err := m.loadRunConfig(ctx, repo, global, candidateConfig, gateDir, trustedSHA, "", request.Branch, snapshot.Run.PiProfile)
+		pin := snapshot.Run.PiProfile
+		storedQuota := snapshot.Run.QuotaRouting
+		if request.TerminalGeneration != "" {
+			pin, storedQuota = nil, ""
+		}
+		cfg, _, _, err := m.loadRunConfig(ctx, repo, global, candidateConfig, gateDir, trustedSHA, "", request.Branch, pin)
 		if err != nil {
 			return "", err
 		}
@@ -251,7 +275,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err := proveAuthoredPublication(ctx, &snapshot.Run, repo, request.CallerDir, cfg, forge); err != nil {
 			return "", err
 		}
-		quotaRecord, err := replayQuotaRouting(cfg, snapshot.Run.QuotaRouting)
+		quotaRecord, err := replayQuotaRouting(cfg, storedQuota)
 		if err != nil {
 			return "", err
 		}
@@ -286,6 +310,12 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		}
 		if err := ctx.Err(); err != nil {
 			return "", err
+		}
+		if request.TerminalGeneration != "" {
+			anchors, err := branchsync.TerminalValidationAnchors(ctx, gateDir, request.CallerDir, &snapshot.Run)
+			if err != nil || !maps.Equal(anchors, request.SourceAnchors) {
+				return "", fmt.Errorf("terminal recovery anchors changed before acceptance: %v", err)
+			}
 		}
 		if event == nil {
 			var plan *verificationplan.Snapshot

@@ -34,13 +34,48 @@ func readValidationFamily(tx *sql.Tx, runID string) (*authoredvalidation.Family,
 	if err != nil {
 		return nil, err
 	}
-	if current.Run.RepoID != event.Request.RepoID || current.Run.Branch != event.Request.Branch || current.Run.SubmittedHeadSHA == nil || *current.Run.SubmittedHeadSHA != event.Request.CandidateSHA || !current.Run.LaunchAssertion.Matches(event.Request.LaunchAssertion) || current.Run.LaunchNonce == nil || event.InitialChild.LaunchNonce == nil || *current.Run.LaunchNonce != *event.InitialChild.LaunchNonce || current.Run.LaunchValidationGeneration == nil || *current.Run.LaunchValidationGeneration != event.Request.ValidationGeneration || current.Run.LaunchIntentDigest == nil || *current.Run.LaunchIntentDigest != event.Request.IntentDigest {
+	if current.Run.RepoID != event.Request.RepoID || current.Run.Branch != event.Request.Branch || current.Run.SubmittedHeadSHA == nil || *current.Run.SubmittedHeadSHA != event.Request.CandidateSHA || !current.Run.LaunchAssertion.Matches(event.Request.LaunchAssertion) || current.Run.LaunchNonce == nil || event.InitialChild.LaunchNonce == nil || *current.Run.LaunchNonce != *event.InitialChild.LaunchNonce || current.Run.LaunchValidationGeneration == nil || *current.Run.LaunchValidationGeneration != event.Request.SuccessorGeneration() || current.Run.LaunchIntentDigest == nil || *current.Run.LaunchIntentDigest != event.Request.IntentDigest {
 		return nil, fmt.Errorf("authored child source or launch provenance changed")
 	}
 	snapshots := []TerminalSnapshot{*current}
 	seen := map[string]bool{runID: true}
-	for event != nil {
+	validationChildren := make(map[string]bool)
+	for {
+		if event == nil {
+			source := snapshots[len(snapshots)-1].Run
+			adoption, err := readTerminalAdoption(tx.QueryRow(`SELECT id, successor_run_id, event_json FROM terminal_adoptions WHERE successor_run_id = ?`, source.ID), "")
+			if err != nil {
+				return nil, err
+			}
+			if adoption == nil {
+				break
+			}
+			parentID := adoption.Snapshot.Run.ID
+			if seen[parentID] || adoption.Successor.RepoID != source.RepoID || adoption.Successor.Branch != source.Branch {
+				return nil, fmt.Errorf("terminal source predecessor identity changed or cycled")
+			}
+			original, err := readContinuationSnapshot(tx, parentID)
+			if err != nil {
+				return nil, err
+			}
+			original.Repo = adoption.Snapshot.Repo
+			if !reflect.DeepEqual(original, &adoption.Snapshot) {
+				return nil, fmt.Errorf("immutable terminal source predecessor history changed")
+			}
+			seen[parentID] = true
+			history, err := readTerminalSnapshot(tx, parentID)
+			if err != nil {
+				return nil, err
+			}
+			snapshots = append(snapshots, *history)
+			event, err = readValidationAdmission(tx.QueryRow(`SELECT `+validationAdmissionColumns+` FROM validation_admissions WHERE child_id = ?`, parentID))
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
 		child := snapshots[len(snapshots)-1]
+		validationChildren[child.Run.ID] = true
 		if child.Run.HeadSHA != event.Request.CandidateSHA {
 			family.HasChildRepairs = true
 		}
@@ -70,6 +105,11 @@ func readValidationFamily(tx *sql.Tx, runID string) (*authoredvalidation.Family,
 		}
 	}
 	for snapshotIndex, snapshot := range snapshots {
+		if snapshotIndex > 0 {
+			if err := snapshot.validateNativeRefusals(); err != nil {
+				return nil, err
+			}
+		}
 		if len(snapshot.Steps) != len(snapshot.Rounds) {
 			return nil, fmt.Errorf("validation round ledger is incomplete")
 		}
@@ -77,7 +117,7 @@ func readValidationFamily(tx *sql.Tx, runID string) (*authoredvalidation.Family,
 			spending := family.Spending[step.StepName]
 			pending := ""
 			for _, round := range snapshot.Rounds[index] {
-				if snapshotIndex < len(snapshots)-1 && (round.IsFixRound() || round.SelectionSource != nil && (*round.SelectionSource == RoundSelectionSourceAutoFix || *round.SelectionSource == RoundSelectionSourceUser)) {
+				if validationChildren[snapshot.Run.ID] && (round.IsFixRound() || round.SelectionSource != nil && (*round.SelectionSource == RoundSelectionSourceAutoFix || *round.SelectionSource == RoundSelectionSourceUser)) {
 					family.HasChildRepairs = true
 				}
 				if round.IsFixRound() {

@@ -44,6 +44,8 @@ func newAxiCmd() *cobra.Command {
 
 	cmd.AddCommand(newAxiRunCmd())
 	cmd.AddCommand(newAxiValidateAuthoredCmd())
+	cmd.AddCommand(newAxiValidateTerminalCmd())
+	cmd.AddCommand(newAxiTerminalPreflightCmd())
 	cmd.AddCommand(newAxiRespondCmd())
 	cmd.AddCommand(newAxiHandbackCmd())
 	cmd.AddCommand(newAxiAnswerCmd())
