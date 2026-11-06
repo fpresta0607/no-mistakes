@@ -49,10 +49,10 @@ jobs:
           - os: windows-latest
             name: test (windows-git)
             shard: git
-          # pipeline/steps, daemon, gate, and branchsync are each split by test
+          # pipeline/steps, daemon, gate, branchsync, and cli are each split by test
           # name. The last row of a group skips the union of the other rows'
           # patterns, so a new test always lands in exactly one shard; rebalance
-          # the ranges against the shards' -v timings (issue #1580, #1682, #58).
+          # the ranges against the shards' -v timings (issue #1580, #1682, #58, #108).
           - os: windows-latest
             name: test (windows-steps-1)
             shard: steps
@@ -101,6 +101,14 @@ jobs:
             name: test (windows-branchsync-2)
             shard: branchsync
             branchsync_skip: '^Test([A-Q]|Recover[A-L])'
+          - os: windows-latest
+            name: test (windows-cli-1)
+            shard: cli
+            cli_run: '^TestAxi'
+          - os: windows-latest
+            name: test (windows-cli-2)
+            shard: cli
+            cli_skip: '^TestAxi'
     runs-on: ${{ matrix.os }}
     # Sized for each Windows shard, which still sets the floor: git.exe plus
     # Defender tax makes git-backed packages ~10x their Linux time (see the
@@ -108,7 +116,7 @@ jobs:
     # and then ran those packages sequentially, so total wall could exceed
     # timeout-minutes with no package hitting go test -timeout - an
     # evidence-free cancellation. Git-heavy packages are split from the core
-    # remainder; pipeline/steps, daemon, gate, and branchsync are their own
+    # remainder; pipeline/steps, daemon, gate, branchsync, and cli are their own
     # shards, each also split by test name, so a 15m per-package hang still
     # dumps goroutines instead of cancelling the job. 40 is a runaway guard,
     # not a target - Linux and macOS finish far inside it, and it still keeps a
@@ -163,10 +171,10 @@ jobs:
         run: go test -race -timeout=20m ./...
 
       # Git-heavy packages are the Windows wall floor. NM_CI_WINDOWS_GIT_EXCLUDE
-      # on the core shard is the union of the git, steps, daemon, gate, and
-      # branchsync shards; the workflow tests resolve every shard through
+      # on the core shard is the union of the git, steps, daemon, gate,
+      # branchsync, and cli shards; the workflow tests resolve every shard through
       # `go list` and fail if they drift or overlap. pipeline/steps, daemon,
-      # gate, and branchsync are their own shards (each also split by test
+      # gate, branchsync, and cli are their own shards (each also split by test
       # name) so they run in parallel with the remaining git-heavy packages
       # instead of setting a serial floor that hits go test -timeout (issue
       # #1682).
@@ -212,11 +220,23 @@ jobs:
           NM_CI_WINDOWS_GATE_SKIP: ${{ matrix.gate_skip }}
         run: go test -v -timeout=15m "-run=$env:NM_CI_WINDOWS_GATE_RUN" "-skip=$env:NM_CI_WINDOWS_GATE_SKIP" ./internal/gate
 
+      # internal/cli ran almost serially for 810-889s and twice hit the 15m
+      # budget (issue #108). In run 42085620356, TestAxi* took 440.5s and
+      # the remaining tests 364.2s, so complementary rows split the work
+      # without changing process-wide test isolation or the timeout.
+      - name: Test on Windows (cli)
+        if: runner.os == 'Windows' && matrix.shard == 'cli'
+        shell: pwsh
+        env:
+          NM_CI_WINDOWS_CLI_RUN: ${{ matrix.cli_run }}
+          NM_CI_WINDOWS_CLI_SKIP: ${{ matrix.cli_skip }}
+        run: go test -v -timeout=15m "-run=$env:NM_CI_WINDOWS_CLI_RUN" "-skip=$env:NM_CI_WINDOWS_CLI_SKIP" ./internal/cli
+
       - name: Test on Windows (core)
         if: runner.os == 'Windows' && matrix.shard == 'core'
         shell: pwsh
         env:
-          NM_CI_WINDOWS_GIT_EXCLUDE: '/internal/(git|branchsync|gate|evidence|pipeline/steps(/.*)?|daemon|eval)$'
+          NM_CI_WINDOWS_GIT_EXCLUDE: '/internal/(git|branchsync|gate|evidence|pipeline/steps(/.*)?|daemon|eval|cli)$'
         run: |
           $pkgs = go list ./... | Where-Object { $_ -notmatch $env:NM_CI_WINDOWS_GIT_EXCLUDE }
           go test -v -timeout=15m @pkgs
