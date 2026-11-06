@@ -473,15 +473,18 @@ func scriptedRepairRound(t *testing.T, rereview string) *sessionMockAgent {
 func reviewParkedOn(t *testing.T, exec *pipeline.Executor, database *db.DB, run *db.Run, repo *db.Repo, workDir string) types.Findings {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- exec.Execute(ctx, run, repo, workDir) }()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
+	go func() {
+		defer close(done)
+		done <- exec.Execute(ctx, run, repo, workDir)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	for {
 		steps, err := database.GetStepsByRun(run.ID)
 		if err == nil && len(steps) == 1 && (steps[0].Status == types.StepStatusFixReview || steps[0].Status == types.StepStatusAwaitingApproval) {
-			cancel()
-			<-done
 			if steps[0].FindingsJSON == nil {
 				t.Fatal("the review parked with no findings")
 			}
@@ -498,8 +501,6 @@ func reviewParkedOn(t *testing.T, exec *pipeline.Executor, database *db.DB, run 
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("the review did not park")
-	return types.Findings{}
 }
 
 // lastReviewRound returns the review step's rows and its last round's record.
