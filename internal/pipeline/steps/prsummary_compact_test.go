@@ -71,13 +71,13 @@ func TestPRTestingSummary_EvidenceCompact(t *testing.T) {
 					t.Errorf("compact output embeds screenshot:\n%s", md)
 				}
 			} else {
-				for _, want := range []string{"![Screen](" + links.rawBase + "screen.png)", "![Animation](" + links.rawBase + "animation.gif)", "<video src=\"" + links.rawBase + "demo.mp4\" controls></video>", "```text\nchecks passed\n```", "- Summary:", "- `go test ./internal/config`"} {
+				for _, want := range []string{"![Screen](" + links.rawBase + "screen.png)", "![Animation](" + links.rawBase + "animation.gif)", "<video src=\"" + links.rawBase + "demo.mp4\" controls></video>", "- Summary:", "- `go test ./internal/config`"} {
 					if !strings.Contains(md, want) {
 						t.Errorf("missing richer output %q:\n%s", want, md)
 					}
 				}
-				if strings.Contains(md, "<details>") {
-					t.Errorf("non-compact text is collapsed:\n%s", md)
+				if strings.Contains(md, "checks passed") {
+					t.Errorf("non-compact output inlined an evidence file:\n%s", md)
 				}
 			}
 		})

@@ -47,9 +47,7 @@ func TestReviewLoop_NativeSafetyRefusalPreservesWorkAndParks(t *testing.T) {
 		script = fmt.Sprintf("@echo off\r\necho call>>invocations.txt\r\nif \"%%2\"==\"resume\" goto refused\r\necho %s\r\nexit /b 0\r\n:refused\r\necho retained>retained.txt\r\necho retained>>feature.txt\r\necho %s\r\nexit /b 1\r\n", reviewEvent, refusalEvent)
 	}
 	bin := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeExecutable(t, bin, script)
 	native, err := agent.New(types.AgentCodex, bin, nil)
 	if err != nil {
 		t.Fatal(err)

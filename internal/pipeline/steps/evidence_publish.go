@@ -33,7 +33,7 @@ type evidenceLinks struct {
 // returns nil whenever evidence is not opted in, there is nothing to publish,
 // or publication failed. The renderer then omits evidence-branch links that
 // would not resolve; it may still use an uploaded media attachment, otherwise
-// the artifact keeps its local-path rendering.
+// the artifact renders as its label and SHA-256 digest.
 func publishRunEvidence(sctx *pipeline.StepContext) *evidenceLinks {
 	if sctx == nil || sctx.Config == nil || sctx.Repo == nil || sctx.Run == nil || !sctx.Config.Test.Evidence.StoreInRepo {
 		return nil
@@ -58,13 +58,13 @@ func publishRunEvidence(sctx *pipeline.StepContext) *evidenceLinks {
 	}
 	repoPath := githubRepoPath(linkURL)
 	if repoPath == "" {
-		sctx.Log("test evidence not published: this provider has no derivable file links, linking local paths instead")
+		sctx.Log("test evidence not published: this provider has no derivable file links, citing files by label and digest instead")
 		return nil
 	}
 
 	message, err := sctx.Config.Test.Evidence.RenderCommitMessage(branch, sctx.Run.ID)
 	if err != nil {
-		sctx.Log(fmt.Sprintf("test evidence not published, linking local paths instead: %v", err))
+		sctx.Log(fmt.Sprintf("test evidence not published, citing files by label and digest instead: %v", err))
 		return nil
 	}
 	result, err := evidence.Publish(sctx.Ctx, evidence.Request{
@@ -87,7 +87,7 @@ func publishRunEvidence(sctx *pipeline.StepContext) *evidenceLinks {
 		ForbiddenBranches: []string{branch, sctx.Repo.DefaultBranch},
 	})
 	if err != nil {
-		sctx.Log(fmt.Sprintf("test evidence not published, linking local paths instead: %v", err))
+		sctx.Log(fmt.Sprintf("test evidence not published, citing files by label and digest instead: %v", err))
 		return nil
 	}
 	if result == nil || result.CommitSHA == "" {
