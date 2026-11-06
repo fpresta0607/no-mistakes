@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -434,6 +435,26 @@ func replayRoundContext(p *paths.Paths, c Case, workDir string) (*db.DB, string,
 			previousFindings = stringValue(round.UserFindingsJSON)
 			if previousFindings == "" {
 				previousFindings = stringValue(round.FindingsJSON)
+			}
+			if previousFindings != "" {
+				findings, err := types.ParseFindingsJSON(previousFindings)
+				if err != nil {
+					return fail(fmt.Errorf("read captured selected findings: %w", err))
+				}
+				var selectedIDs []string
+				if round.SelectedFindingIDs != nil {
+					if err := json.Unmarshal([]byte(*round.SelectedFindingIDs), &selectedIDs); err != nil {
+						return fail(fmt.Errorf("read captured finding selection: %w", err))
+					}
+				}
+				selectedFindings := types.FindingsMetadata(findings)
+				if len(selectedIDs) > 0 {
+					selectedFindings = types.FilterFindings(findings, selectedIDs)
+				}
+				previousFindings, err = types.MarshalFindingsJSON(selectedFindings)
+				if err != nil {
+					return fail(fmt.Errorf("restore captured selected findings: %w", err))
+				}
 			}
 			deferredFindings = pipeline.DeferredFindingsJSON(stringValue(round.FindingsJSON), previousFindings)
 			if recorded, err := types.ParseFindingsJSON(stringValue(round.FindingsJSON)); err == nil {

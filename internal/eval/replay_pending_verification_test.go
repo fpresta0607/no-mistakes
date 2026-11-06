@@ -79,7 +79,7 @@ func TestReplayOfARepairRoundCarriesWhatALiveRoundCanClear(t *testing.T) {
 	onlyFirst := `{"findings":[` + firstBug + `],` + record + `,` + allPaths + `}`
 	both := `{"findings":[` + firstBug + `,` + secondBug + `],` + record + `,` + allPaths + `}`
 	verified := `{"findings":[],` + record + `,` + allPaths + `}`
-	onlySecond := `{"findings":[` + secondBug + `],` + record + `}`
+	withNote := `{"findings":[` + secondBug + `,{"id":"note","severity":"info","file":"feature3.txt","line":1,"description":"worth knowing","action":"no-op"}],` + record + `,` + allPaths + `}`
 	firstID, secondID := `["f-1"]`, `["f-2"]`
 
 	cases := []struct {
@@ -92,7 +92,7 @@ func TestReplayOfARepairRoundCarriesWhatALiveRoundCanClear(t *testing.T) {
 			name: "an earlier selection still awaits verification",
 			rounds: []sourceRound{
 				{Round: 1, Trigger: "initial", FindingsJSON: &onlyFirst, SelectedFindingIDs: &firstID},
-				{Round: 2, Trigger: "auto_fix", FindingsJSON: &both, UserFindingsJSON: &onlySecond, SelectedFindingIDs: &secondID},
+				{Round: 2, Trigger: "auto_fix", FindingsJSON: &both, SelectedFindingIDs: &secondID},
 			},
 			wantPending: []string{"f-1", "f-2"},
 		},
@@ -101,7 +101,15 @@ func TestReplayOfARepairRoundCarriesWhatALiveRoundCanClear(t *testing.T) {
 			rounds: []sourceRound{
 				{Round: 1, Trigger: "initial", FindingsJSON: &onlyFirst, SelectedFindingIDs: &firstID},
 				{Round: 2, Trigger: "auto_fix", FindingsJSON: &verified},
-				{Round: 3, Trigger: "initial", FindingsJSON: &both, UserFindingsJSON: &onlySecond, SelectedFindingIDs: &secondID},
+				{Round: 3, Trigger: "initial", FindingsJSON: &both, SelectedFindingIDs: &secondID},
+			},
+			wantPending:  []string{"f-2"},
+			wantFollowUp: true,
+		},
+		{
+			name: "an automatic selection leaves an informational note deferred",
+			rounds: []sourceRound{
+				{Round: 1, Trigger: "initial", FindingsJSON: &withNote, SelectedFindingIDs: &secondID},
 			},
 			wantPending:  []string{"f-2"},
 			wantFollowUp: true,

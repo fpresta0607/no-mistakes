@@ -1,9 +1,12 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -42,6 +45,7 @@ type lineSpan struct {
 // it.
 type repairRoundScope struct {
 	startHead string
+	workDir   string
 	// changed maps each file the repair touched to its hunks, context lines
 	// included, so a finding anchored a few lines off still counts as inside. A
 	// file with no hunks, such as a binary or deleted one, is inside as a whole.
@@ -91,6 +95,7 @@ func newRepairRoundScope(ctx context.Context, workDir, startHead string, changed
 	}
 	scope := &repairRoundScope{
 		startHead:    startHead,
+		workDir:      workDir,
 		changed:      make(map[string][]lineSpan, len(changedSinceStart)),
 		tracked:      tracked,
 		firstLook:    uncoveredReviewablePaths(previouslyReviewed, reviewable),
@@ -273,7 +278,15 @@ func (r *repairRoundScope) isFollowUp(finding Finding) bool {
 			return false
 		}
 	}
-	return true
+	content, err := os.ReadFile(filepath.Join(r.workDir, file))
+	if err != nil {
+		return false
+	}
+	lineCount := bytes.Count(content, []byte{'\n'})
+	if len(content) > 0 && content[len(content)-1] != '\n' {
+		lineCount++
+	}
+	return finding.Line <= lineCount
 }
 
 // repeatsFinding compares descriptions as the prompt showed them.

@@ -29,7 +29,7 @@ func TestReplayRoundContextPreservesDeferredFindings(t *testing.T) {
 		userFindings *string
 		wantDeferred []string
 	}{
-		{name: "automatic selection retains recorded findings", trigger: "auto_fix"},
+		{name: "automatic selection preserves deferred anchored and fileless findings", trigger: "auto_fix", wantDeferred: []string{"b", "c"}},
 		{name: "user selection preserves deferred anchored and fileless findings", trigger: "user_fix", userFindings: &selected, wantDeferred: []string{"b", "c"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -56,11 +56,15 @@ func TestReplayRoundContextPreservesDeferredFindings(t *testing.T) {
 			if !fixing || previous == "" || len(reviewed) != 2 {
 				t.Fatalf("replay context lost fix or previous coverage: fixing=%v previous=%q reviewed=%v", fixing, previous, reviewed)
 			}
-			if len(tc.wantDeferred) == 0 {
-				if deferred != "" {
-					t.Fatalf("deferred = %q, want none", deferred)
-				}
-				return
+			selectedFindings, err := types.ParseFindingsJSON(previous)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(selectedFindings.Items) != 1 || selectedFindings.Items[0].ID != "a" {
+				t.Fatalf("selected = %+v, want only a", selectedFindings.Items)
+			}
+			if tc.userFindings != nil && selectedFindings.Items[0].UserInstructions != "fix it" {
+				t.Fatalf("selected = %+v, want the recorded user instructions", selectedFindings.Items)
 			}
 			findings, err := types.ParseFindingsJSON(deferred)
 			if err != nil {

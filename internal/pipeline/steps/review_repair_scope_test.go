@@ -86,6 +86,15 @@ func TestRepairRoundCanNarrow(t *testing.T) {
 
 func TestRepairRoundScopeSplit(t *testing.T) {
 	t.Parallel()
+	workDir := t.TempDir()
+	for _, file := range []string{"other.go", "repaired.go", "internal/repaired.go", "binary.dat", "selected.go", "first-look.go", "deferred.go", "earlier.go"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(workDir, file)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(workDir, file), []byte(numberedLines(100)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	const selectedDefect = "the selected  defect\nsecond line"
 	outside := Finding{File: "other.go", Line: 3, Description: "a new thought", Action: types.ActionAutoFix}
 	withFile := func(finding Finding, file string, line int) Finding {
@@ -116,6 +125,9 @@ func TestRepairRoundScopeSplit(t *testing.T) {
 		{name: "a file no earlier round judged", finding: withFile(outside, "first-look.go", 3)},
 		{name: "no file cannot be shown outside", finding: withFile(outside, "", 0)},
 		{name: "no line cannot be shown outside", finding: withFile(outside, "other.go", 0)},
+		{name: "a negative line cannot be placed", finding: withFile(outside, "other.go", -1)},
+		{name: "a line past the file cannot be placed", finding: withFile(outside, "other.go", 101)},
+		{name: "the last existing line can be placed", finding: withFile(outside, "other.go", 100), wantFollowUp: true},
 		{
 			name:    "it names the input and the wrong result",
 			finding: Finding{File: "other.go", Line: 3, Description: "d", Action: types.ActionAutoFix, FailingInput: "an empty list", WrongResult: "it panics"},
@@ -149,6 +161,7 @@ func TestRepairRoundScopeSplit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			scope := &repairRoundScope{
+				workDir:   workDir,
 				changed:   map[string][]lineSpan{"repaired.go": {{10, 20}}, "internal/repaired.go": {{10, 20}}, "binary.dat": nil, "selected.go": {{1, 5}}},
 				tracked:   map[string]bool{"other.go": true, "repaired.go": true, "internal/repaired.go": true, "binary.dat": true, "selected.go": true, "first-look.go": true, "deferred.go": true, "earlier.go": true},
 				firstLook: []string{"first-look.go"},
@@ -175,7 +188,11 @@ func TestRepairRoundScopeSplit(t *testing.T) {
 
 func TestRepairRoundScopeSplitRestatesTheSummaryOfWhatItMoved(t *testing.T) {
 	t.Parallel()
-	scope := &repairRoundScope{tracked: map[string]bool{"a.go": true}}
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "a.go"), []byte(numberedLines(3)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scope := &repairRoundScope{workDir: workDir, tracked: map[string]bool{"a.go": true}}
 	moved := Finding{File: "a.go", Line: 3, Description: "d", Action: types.ActionAutoFix}
 	blocked := Finding{Description: "no anchor", Action: types.ActionAutoFix}
 	cases := []struct {
@@ -263,6 +280,10 @@ func TestNewRepairRoundScopeReadsTheRepairFromTheWorktree(t *testing.T) {
 	}
 	writeFile("long.txt", numberedLines(40))
 	writeFile(bracketed, numberedLines(40))
+	writeFile("shortened.txt", numberedLines(100))
+	writeFile("unterminated.txt", strings.TrimSuffix(numberedLines(40), "\n"))
+	writeFile("empty.txt", numberedLines(1))
+	writeFile("missing.txt", numberedLines(1))
 	gitCmd(t, dir, "add", "-A")
 	gitCmd(t, dir, "commit", "-m", "add long files")
 	startHead := gitCmd(t, dir, "rev-parse", "HEAD")
@@ -270,8 +291,13 @@ func TestNewRepairRoundScopeReadsTheRepairFromTheWorktree(t *testing.T) {
 	gitCmd(t, dir, "add", "-A")
 	gitCmd(t, dir, "commit", "-m", "the repair's commit")
 	writeFile(bracketed, strings.Replace(numberedLines(40), "line 30\n", "line thirty\n", 1))
+	writeFile("shortened.txt", numberedLines(20))
+	writeFile("empty.txt", "")
+	if err := os.Remove(filepath.Join(dir, "missing.txt")); err != nil {
+		t.Fatal(err)
+	}
 
-	scope, err := newRepairRoundScope(context.Background(), dir, startHead, []string{"long.txt", bracketed}, []string{"long.txt", bracketed}, []string{"long.txt", bracketed}, Findings{}, nil, nil)
+	scope, err := newRepairRoundScope(context.Background(), dir, startHead, []string{"long.txt", bracketed, "shortened.txt", "empty.txt", "missing.txt"}, []string{"long.txt", bracketed}, []string{"long.txt", bracketed}, Findings{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,6 +311,13 @@ func TestNewRepairRoundScopeReadsTheRepairFromTheWorktree(t *testing.T) {
 		{"long.txt", 17, false},
 		{"long.txt", 16, true},
 		{"long.txt", 24, true},
+		{"long.txt", 40, true},
+		{"long.txt", 41, false},
+		{"shortened.txt", 100, false},
+		{"unterminated.txt", 40, true},
+		{"unterminated.txt", 41, false},
+		{"empty.txt", 1, false},
+		{"missing.txt", 1, false},
 		{bracketed, 30, false},
 		{bracketed, 10, true},
 		{"./long.txt", 30, true},
@@ -597,6 +630,115 @@ func TestReviewLoop_AFindingNamingAConcreteFailureOutsideTheRepairStillBlocks(t 
 	}
 	if len(parked.FollowUps) != 0 {
 		t.Fatalf("follow-ups = %+v, want none", parked.FollowUps)
+	}
+}
+
+func TestReviewLoop_AnOutOfRangeAnchorKeepsTheRepairBlocking(t *testing.T) {
+	for _, purpose := range []string{"review", "review-coverage"} {
+		t.Run(purpose, func(t *testing.T) {
+			invalid := fmt.Sprintf(`{"findings":[{"id":"n-1","severity":"error","file":"feature.txt","line":40,"description":"the old anchor no longer exists","action":"auto-fix"}],"closed_findings":["f-1"],"reviewed_paths":["feature.txt"],%s}`, cleanRereview)
+			rereview := invalid
+			if purpose == "review-coverage" {
+				rereview = fmt.Sprintf(`{"findings":[],"closed_findings":["f-1"],"reviewed_paths":[],%s}`, cleanRereview)
+			}
+			mock := scriptedRepairRound(t, rereview)
+			answerReview := mock.respond
+			mock.respond = func(opts agent.RunOpts) *agent.Result {
+				if opts.Purpose == "review-fix" {
+					if err := os.WriteFile(filepath.Join(opts.CWD, "feature.txt"), []byte(numberedLines(20)), 0o644); err != nil {
+						t.Errorf("shorten the file: %v", err)
+					}
+					return &agent.Result{Output: []byte(`{"summary":"shorten the file"}`)}
+				}
+				if opts.Purpose == "review-coverage" {
+					return &agent.Result{Output: []byte(invalid)}
+				}
+				return answerReview(opts)
+			}
+			exec, database, run, repo, workDir := longFeatureHarness(t, mock)
+
+			parked := reviewParkedOn(t, exec, database, run, repo, workDir)
+
+			if len(parked.FollowUps) != 0 {
+				t.Fatalf("follow-ups = %+v, want the unplaceable finding blocking", parked.FollowUps)
+			}
+			hasInvalidAnchor := false
+			for _, finding := range parked.Items {
+				if finding.Description == "the old anchor no longer exists" && finding.Line == 40 {
+					hasInvalidAnchor = true
+				}
+			}
+			if !hasInvalidAnchor {
+				t.Fatalf("parked items = %+v, want the unplaceable finding", parked.Items)
+			}
+		})
+	}
+}
+
+func TestReviewStep_AnswerOnlyQuestionsDoNotWidenRepairScope(t *testing.T) {
+	for _, file := range []string{"", "feature2.txt"} {
+		for _, isSelected := range []bool{false, true} {
+			t.Run(fmt.Sprintf("file=%q/selected=%v", file, isSelected), func(t *testing.T) {
+				workDir, baseSHA, startHead := twoFileRepo(t)
+				if err := os.WriteFile(filepath.Join(workDir, "feature.txt"), []byte("fixed feature\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, workDir, "add", "-A")
+				gitCmd(t, workDir, "commit", "-m", "repair feature")
+				head := gitCmd(t, workDir, "rev-parse", "HEAD")
+				mock := &sessionMockAgent{respond: func(opts agent.RunOpts) *agent.Result {
+					if opts.Purpose != "review" {
+						t.Errorf("unexpected agent purpose %q", opts.Purpose)
+					}
+					return &agent.Result{Output: []byte(fmt.Sprintf(`{"findings":[],"closed_findings":["f-1"],"reviewed_paths":["feature.txt"],%s}`, cleanRereview))}
+				}}
+				sctx := withReviewConversation(newTestContextWithDBRecords(t, mock, workDir, baseSHA, head, config.Commands{}))
+				sctx.Fixing = true
+				sctx.SkipFixExecution = true
+				sctx.ReviewStartingHeadSHA = startHead
+				sctx.PreviousReviewedPaths = []string{"feature.txt", "feature2.txt"}
+				sctx.PendingVerificationIDs = []string{"f-1"}
+				selected := Findings{Items: []Finding{{ID: "f-1", File: "feature.txt", Line: 1, Description: "selected defect", Action: types.ActionAutoFix}}}
+				question := Finding{ID: "question-q1", File: file, Line: 1, Description: "Keep the route?", Action: types.ActionAskUser, Category: types.FindingCategoryReviewQuestion}
+				if isSelected {
+					selected.Items = append(selected.Items, question)
+				} else {
+					var err error
+					sctx.DeferredFindings, err = types.MarshalFindingsJSON(Findings{Items: []Finding{question}})
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				var err error
+				sctx.PreviousFindings, err = types.MarshalFindingsJSON(selected)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := appendAgentQuestionLine(reviewConversationDir(sctx), `{"id":"q1","question":"Keep the route?","options":["Keep","Remove"]}`); err != nil {
+					t.Fatal(err)
+				}
+
+				outcome, err := (&ReviewStep{}).Execute(sctx)
+
+				if err != nil {
+					t.Fatal(err)
+				}
+				calls := mock.snapshot()
+				if len(calls) != 1 || !strings.Contains(calls[0].Prompt, "only this repair's change since starting head "+startHead) {
+					t.Fatalf("review calls = %+v, want one repair-scoped turn", calls)
+				}
+				if !reflect.DeepEqual(outcome.ReviewedPaths, []string{"feature.txt", "feature2.txt"}) {
+					t.Fatalf("reviewed paths = %v, want the repair and carried coverage", outcome.ReviewedPaths)
+				}
+				findings, err := types.ParseFindingsJSON(outcome.Findings)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !outcome.NeedsApproval || !types.HasReviewQuestion(findings) {
+					t.Fatalf("outcome = %+v, want the question's answer gate", outcome)
+				}
+			})
+		}
 	}
 }
 
