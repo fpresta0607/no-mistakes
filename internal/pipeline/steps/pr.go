@@ -1302,6 +1302,14 @@ func splitPipelineSectionHeader(pipelineMD string) (string, string) {
 			}
 		}
 	}
+	if strings.HasPrefix(pipelineMD[headerEnd:], testExceptionStart) {
+		if section := extractTestExceptionSection(pipelineMD[headerEnd:]); section != "" {
+			headerEnd += len(section)
+			if strings.HasPrefix(pipelineMD[headerEnd:], "\n\n") {
+				headerEnd += len("\n\n")
+			}
+		}
+	}
 	return pipelineMD[:headerEnd], pipelineMD[headerEnd:]
 }
 

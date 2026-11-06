@@ -21,6 +21,8 @@
 package safepath
 
 import (
+	"encoding/json"
+	"html"
 	"os"
 	"regexp"
 	"sort"
@@ -120,10 +122,12 @@ func homeCandidates() []string {
 // candidate set - and therefore what gets redacted - would differ between a
 // Linux test run and a Windows one.
 func addBothSeparatorSpellings(add func(string), home string) {
-	add(home)
-	add(strings.ReplaceAll(home, `\`, "/"))
-	add(strings.ReplaceAll(home, "/", `\`))
-	add(strings.ReplaceAll(home, `\`, `\\`))
+	for _, candidate := range []string{home, strings.ReplaceAll(home, `\`, "/"), strings.ReplaceAll(home, "/", `\`), strings.ReplaceAll(home, `\`, `\\`)} {
+		add(candidate)
+		add(html.EscapeString(candidate))
+		encoded, _ := json.Marshal(candidate)
+		add(string(encoded[1 : len(encoded)-1]))
+	}
 }
 
 // usableHomeCandidate rejects values too short or too broad to be a home

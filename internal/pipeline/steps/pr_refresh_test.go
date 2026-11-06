@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -40,6 +41,9 @@ func (host *refreshPRHost) GetPRState(context.Context, *scm.PR) (scm.PRState, er
 
 func (host *refreshPRHost) GetChecks(_ context.Context, pr *scm.PR) ([]scm.Check, error) {
 	host.checks++
+	if pr.HeadSHA != testPipelineHeadSHA || pr.ObservedHeadSHA != "" {
+		return nil, errors.New("head observation requires the expected head and a cleared observation")
+	}
 	pr.ObservedHeadSHA = host.observedHead
 	if host.moveHeadAt != 0 && host.checks >= host.moveHeadAt {
 		pr.ObservedHeadSHA = strings.Repeat("d", 40)
@@ -78,6 +82,10 @@ func TestRefreshPublishedPR(t *testing.T) {
 		{"exact", func(*refreshPRHost) {}, false},
 		{"owned", func(host *refreshPRHost) {
 			host.body = "Author prefix\n\n" + wrapPRAppendix(host.body) + "\nAuthor suffix"
+		}, false},
+		{"stale-discovered-head", func(host *refreshPRHost) {
+			host.pr.HeadSHA = strings.Repeat("e", 40)
+			host.pr.ObservedHeadSHA = strings.Repeat("f", 40)
 		}, false},
 		{"wrong-pr", func(host *refreshPRHost) { host.pr.URL = "https://github.com/owner/repo/pull/18" }, true},
 		{"moved-head", func(host *refreshPRHost) { host.observedHead = strings.Repeat("b", 40) }, true},
@@ -144,22 +152,73 @@ func TestRefreshPublishedPR(t *testing.T) {
 			if err != nil || isChanged || host.writes != 1 {
 				t.Fatalf("repeat refreshed again: changed=%v error=%v writes=%d", isChanged, err, host.writes)
 			}
+			if testCase.name == "exact" || testCase.name == "owned" {
+				body := host.body
+				var parts prOwnedBody
+				if testCase.name == "owned" {
+					parts, err = parsePROwnedBody(host.body)
+					if err != nil {
+						t.Fatal(err)
+					}
+					body = parts.appendix
+				}
+				start := strings.Index(body, testExceptionStart)
+				end := strings.Index(body, testExceptionEnd) + len(testExceptionEnd)
+				host.body = body[:start] + body[end:]
+				if testCase.name == "owned" {
+					host.body = parts.before + wrapPRAppendix(host.body) + parts.after
+				}
+				isChanged, err = refreshPublishedPRWithHost(sctx, host, []*db.StepResult{step})
+				if err == nil || isChanged || host.writes != 1 {
+					t.Fatalf("deleted human section was recreated: changed=%v error=%v writes=%d", isChanged, err, host.writes)
+				}
+			}
 		})
 	}
 }
 
 func TestRefreshPublishedPR_RedactsStoredException(t *testing.T) {
 	t.Parallel()
-	root := "D:/fixtures/private-worktree"
-	reason := "Retain checks under " + root + "/evidence; credential absent at /home/private-person/work."
-	findings := `{"verdict":"inconclusive","findings":[]}`
-	step := &db.StepResult{StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings, ApprovalReason: &reason}
-	body := buildPipelineAttestation([]*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted}}, nil, testPipelineHeadSHA)
-	updated, err := refreshPRTestException(body, testPipelineHeadSHA, []*db.StepResult{step}, root)
-	if err != nil {
-		t.Fatal(err)
+	for _, root := range []string{"D:/fixtures/private-worktree", "D:/private/R&D/run", `D:\private\R&D\run`, "D:/private/O'Brien/run", "D:/private/<task>/run"} {
+		t.Run(root, func(t *testing.T) {
+			reason := "Retain checks under " + root + "/evidence; credential absent at /home/private-person/work."
+			findings := `{"verdict":"inconclusive","findings":[]}`
+			step := &db.StepResult{StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings, ApprovalReason: &reason}
+			body := buildPipelineAttestation([]*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted}}, nil, testPipelineHeadSHA)
+			updated, err := refreshPRTestException(body, testPipelineHeadSHA, []*db.StepResult{step}, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, private := range []string{"private-worktree", "private-person", "D:/private", `D:\private`, `D:\\private`} {
+				if strings.Contains(updated, private) {
+					t.Fatalf("refresh published a private path: %s", updated)
+				}
+			}
+			if _, err := refreshPRTestException(updated, testPipelineHeadSHA, []*db.StepResult{step}, root); err != nil {
+				t.Fatalf("redacted refresh is not repeatable: %v", err)
+			}
+		})
 	}
-	if strings.Contains(updated, "private-worktree") || strings.Contains(updated, "private-person") {
-		t.Fatalf("refresh published a private path: %s", updated)
-	}
+	t.Run("command-override", func(t *testing.T) {
+		root := "D:/private/R&D/run"
+		reason := "Accept retained command failure"
+		override := "  test wrapper refused " + root + "/check and /home/private-person/work\x1b[31m\x01  "
+		step := &db.StepResult{StepName: types.StepTest, Status: types.StepStatusCompleted, OverrideReason: &override, ApprovalReason: &reason}
+		body := redactPRContent(prContent{Body: buildPipelineAttestationWithPolicy([]*db.StepResult{step}, nil, testPipelineHeadSHA, pipelineAttestationPolicy{AllowTestCommandOverride: "existing opt-in"})}, root, "").Body
+		attestation := parsePipelineAttestationForTest(t, body)
+		attestation.Steps[0].TestException = ""
+		payloadBytes, err := json.Marshal(attestation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body = pipelineAttestationCommentPrefix + string(payloadBytes) + pipelineAttestationCommentClosingToken
+		updated, err := refreshPRTestException(body, testPipelineHeadSHA, []*db.StepResult{step}, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		published := parsePipelineAttestationForTest(t, updated)
+		if published.Steps[0].OverrideReason != "test wrapper refused {run-worktree}/check and ~/work\ufffd" || published.AllowTestCommandOverride != "existing opt-in" {
+			t.Fatalf("refresh changed command-only policy: %+v", published)
+		}
+	})
 }

@@ -45,6 +45,7 @@ func refreshPublishedPRWithHost(sctx *pipeline.StepContext, host scm.Host, steps
 		if err != nil || state != scm.PRStateOpen {
 			return nil, fmt.Errorf("PR refresh refused: live PR is not verifiably open: %v", err)
 		}
+		pr.HeadSHA = sctx.Run.HeadSHA
 		pr.ObservedHeadSHA = ""
 		if _, err := host.GetChecks(sctx.Ctx, pr); err != nil {
 			return nil, fmt.Errorf("PR refresh cannot verify the live head: %w", err)
@@ -149,7 +150,7 @@ func refreshPRTestException(body, head string, steps []*db.StepResult, workDir s
 		return "", fmt.Errorf("PR refresh refused: malformed attested steps: %w", err)
 	}
 	exception := redactPRContent(prContent{Body: testStep.TestOverrideReason()}, workDir, nmWorktreesRoot()).Body
-	var isTestRecorded bool
+	var isTestRecorded, isExceptionPublished bool
 	for _, step := range recordedSteps {
 		var name types.StepName
 		if json.Unmarshal(step["step"], &name) != nil {
@@ -169,12 +170,13 @@ func refreshPRTestException(body, head string, steps []*db.StepResult, workDir s
 		}
 		storedOverride := ""
 		if testStep.OverrideReason != nil {
-			storedOverride = neutralizePRControls(*testStep.OverrideReason)
+			storedOverride = redactPRContent(prContent{Body: strings.TrimSpace(*testStep.OverrideReason)}, workDir, nmWorktreesRoot()).Body
 		}
 		if commandOverride != storedOverride {
 			return "", fmt.Errorf("PR refresh refused: command override differs from the stored record")
 		}
 		if raw, isPresent := step["test_exception"]; isPresent {
+			isExceptionPublished = true
 			var recorded string
 			if json.Unmarshal(raw, &recorded) != nil || recorded != exception {
 				return "", fmt.Errorf("PR refresh refused: published Test exception differs from the stored record")
@@ -195,6 +197,9 @@ func refreshPRTestException(body, head string, steps []*db.StepResult, workDir s
 	section := redactPRContent(prContent{Body: renderTestExceptionSection(steps)}, workDir, nmWorktreesRoot()).Body
 	starts, ends := strings.Count(updated, testExceptionStart), strings.Count(updated, testExceptionEnd)
 	if starts == 0 && ends == 0 {
+		if isExceptionPublished {
+			return "", fmt.Errorf("PR refresh refused: published Test exception section was deleted")
+		}
 		return updated + "\n\n" + section, nil
 	}
 	if starts != 1 || ends != 1 || !strings.Contains(updated, section) {

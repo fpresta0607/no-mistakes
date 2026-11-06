@@ -21,3 +21,15 @@ func renderTestExceptionSection(steps []*db.StepResult) string {
 	}
 	return ""
 }
+
+func extractTestExceptionSection(body string) string {
+	start := strings.Index(body, testExceptionStart)
+	if start < 0 {
+		return ""
+	}
+	end := strings.Index(body[start:], testExceptionEnd)
+	if end < 0 {
+		return ""
+	}
+	return body[start : start+end+len(testExceptionEnd)]
+}
