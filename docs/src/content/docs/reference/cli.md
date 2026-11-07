@@ -407,6 +407,7 @@ The input is one operator-owned UTF-8 JSON object, at most 64 KiB, with these fi
 | `reason` | A nonempty explicit reason, at most 4096 bytes |
 
 The daemon checks the authenticated caller, registered Git identity, exact clean source, immutable predecessor history, launch selection and publication facts before accepting the child.
+An unresolved native agent safety refusal in the predecessor, or unreadable predecessor findings, refuses admission.
 The declared candidate must differ from the predecessor's submitted, terminal and published heads; this operation does not replace ordinary validation of those historical targets.
 It imports the exact candidate object without overwriting an author branch or the gate branch.
 Historical findings, failed checks, automatic and manual spending, and the unknown historical source completeness stay attached to the lineage.
