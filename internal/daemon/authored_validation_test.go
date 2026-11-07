@@ -411,6 +411,7 @@ func TestAuthoredAdmissionAcceptsATerminalAdoptionsOriginalSubmittedHead(t *test
 	if child.Status != types.RunCompleted || calls.Load() != int32(len(types.AllSteps())) {
 		t.Fatalf("fresh stages: status=%s calls=%d", child.Status, calls.Load())
 	}
+	manager.wg.Wait()
 	if result.Family.HistoricalSourceCompleteness != "unknown" || result.Family.HasChildRepairs {
 		t.Fatalf("admission changed uncertainty or repair authority: %+v", result.Family)
 	}
