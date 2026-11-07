@@ -361,6 +361,9 @@ CI logs:
 
 	conclusion, conclusionErr := extractCIFixConclusion(result)
 	if conclusionErr != nil {
+		if errors.Is(conclusionErr, errRejectedCommitSummary) {
+			return ciRepairResult{}, fmt.Errorf("validate CI fix summary: %w", conclusionErr)
+		}
 		sctx.Log(fmt.Sprintf("warning: could not parse CI repair conclusion: %v", conclusionErr))
 	}
 	if rebase {
