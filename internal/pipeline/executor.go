@@ -2997,17 +2997,28 @@ func (e *Executor) reconcileTerminalRunHead(run *db.Run) (string, bool) {
 	if observed == "" {
 		return "", false
 	}
-	if observed == recorded {
-		if !e.preserveUnpublishedTerminalHead(ctx, recordedRun, observed) {
+	if observed != recorded {
+		if _, err := git.Run(ctx, e.workDir, "merge-base", "--is-ancestor", recorded, observed); err != nil {
+			slog.Warn("worktree head is not a verified descendant before terminalization", "run", run.ID, "error", err)
 			return "", false
 		}
-		return recorded, true
-	}
-	if _, err := git.Run(ctx, e.workDir, "merge-base", "--is-ancestor", recorded, observed); err != nil {
-		slog.Warn("worktree head is not a verified descendant before terminalization", "run", run.ID, "error", err)
-		return "", false
 	}
 	if !e.preserveUnpublishedTerminalHead(ctx, recordedRun, observed) {
+		return "", false
+	}
+	isDirty, statusErr := git.HasUncommittedChangesIncludingHidden(ctx, e.workDir)
+	sourceState := "clean:" + observed
+	if statusErr != nil {
+		sourceState = "unreadable"
+	} else if isDirty {
+		sourceState = "dirty:" + observed
+	}
+	if err := e.db.RecordTerminalSourceState(run.ID, sourceState); err != nil {
+		slog.Warn("failed to record source before terminalization", "run", run.ID, "error", err)
+		return "", false
+	}
+	if statusErr != nil || isDirty {
+		slog.Warn("managed worktree still holds dirty or unreadable source before terminalization", "run", run.ID, "error", statusErr)
 		return "", false
 	}
 	return observed, true

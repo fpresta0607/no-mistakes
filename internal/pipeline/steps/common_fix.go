@@ -615,6 +615,13 @@ func extractCommitSummary(result *agent.Result) (string, error) {
 	}
 	cleaned := strings.Join(strings.Fields(summary.Summary), " ")
 	cleaned = strings.Trim(cleaned, " \t\r\n\"'.;:,-")
+	if utf8.RuneCountInString(cleaned) > commitSubjectLimit {
+		// Validate the entire summary so shortening cannot hide an unsafe suffix.
+		if _, err := (config.Commit{FixMessage: "{{.Summary}}"}).RenderFixMessage("", cleaned); err != nil {
+			return "", fmt.Errorf("%w: %v", errRejectedCommitSummary, err)
+		}
+		cleaned = string([]rune(cleaned)[:commitSubjectLimit])
+	}
 	return cleaned, nil
 }
 
@@ -670,6 +677,10 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		}
 		return "", fmt.Errorf("%s: %w", opts.ErrorPrefix, err)
 	}
+	if result.Text != "" && result.Text != string(result.Output) {
+		sctx.LogFile(result.Text)
+	}
+	sctx.LogFile(string(result.Output))
 	if opts.AfterAgentRun != nil {
 		if err := opts.AfterAgentRun(result); err != nil {
 			return "", err
