@@ -15,6 +15,14 @@ import (
 )
 
 func newAxiValidateAuthoredCmd() *cobra.Command {
+	return newValidationAdmissionCmd(false)
+}
+
+func newAxiValidateTerminalCmd() *cobra.Command {
+	return newValidationAdmissionCmd(true)
+}
+
+func newValidationAdmissionCmd(isTerminal bool) *cobra.Command {
 	var admissionFile string
 	var wait time.Duration
 	command := &cobra.Command{
@@ -32,6 +40,9 @@ func newAxiValidateAuthoredCmd() *cobra.Command {
 			request, err := authoredvalidation.Read(admissionFile)
 			if err != nil {
 				return emitError(command, 2, err.Error())
+			}
+			if (request.TerminalGeneration != "") != isTerminal {
+				return emitError(command, 2, "use validate-terminal for a terminal_generation and validate-authored for a new authored candidate")
 			}
 			directory, err := os.Getwd()
 			if err != nil {
@@ -53,7 +64,7 @@ func newAxiValidateAuthoredCmd() *cobra.Command {
 			if err := environment.client.CallWithContext(command.Context(), ipc.MethodValidateAuthored, &ipc.ValidateAuthoredParams{Request: *request, CallerDir: directory}, &result, 2*time.Minute); err != nil {
 				return emitError(command, 1, fmt.Sprintf("authored admission refused: %v", err), "Preserve the declared source and predecessor; inspect axi status before changing the admission request")
 			}
-			if result.Family == nil || result.Family.PredecessorID != request.PredecessorID || result.Family.ControllerPolicy != request.ControllerPolicy || result.Family.PolicyOrigin != "controller_assertion" || result.Family.HistoricalSourceCompleteness != "unknown" || result.Family.HasChildRepairs || result.Receipt.RunID == "" || result.Receipt.RunID == request.PredecessorID || result.Receipt.Branch != request.Branch || result.Receipt.SubmittedHeadSHA != request.CandidateSHA || result.Receipt.HeadSHA != request.CandidateSHA || result.Receipt.ValidationGeneration != request.ValidationGeneration || result.Receipt.IntentDigest != request.IntentDigest {
+			if result.Family == nil || result.Family.PredecessorID != request.PredecessorID || result.Family.ControllerPolicy != request.ControllerPolicy || result.Family.PolicyOrigin != "controller_assertion" || result.Family.HistoricalSourceCompleteness != "unknown" || result.Family.HasChildRepairs || result.Receipt.RunID == "" || result.Receipt.RunID == request.PredecessorID || result.Receipt.Branch != request.Branch || result.Receipt.SubmittedHeadSHA != request.CandidateSHA || result.Receipt.HeadSHA != request.CandidateSHA || result.Receipt.ValidationGeneration != request.SuccessorGeneration() || result.Receipt.IntentDigest != request.IntentDigest || result.Receipt.LaunchNonce == request.LaunchNonce {
 				return emitError(command, 1, "daemon returned a conflicting authored admission proof")
 			}
 			if err := result.Receipt.LaunchAssertionProof.Check(request.LaunchAssertion); err != nil {
@@ -76,6 +87,11 @@ func newAxiValidateAuthoredCmd() *cobra.Command {
 			}
 			return renderDriveResult(command, run, ready)
 		},
+	}
+	if isTerminal {
+		command.Use = "validate-terminal"
+		command.Short = "Validate an exact terminal candidate with an explicit fresh harness selection and zero repairs"
+		command.Long = "Admit the exact committed terminal head for fresh validation in a distinct generation.\nExplicitly accept unknown historical dirty/untracked source and select the successor\nharness in the admission file. The predecessor and every known recovery anchor\nremain intact; no gate certification or repair allowance is inherited."
 	}
 	command.Flags().StringVar(&admissionFile, "admission-file", "", "operator-owned JSON binding the predecessor, canonical clean candidate, launch, publication and controller policy assertion")
 	bindAxiWaitFlag(command, &wait)
