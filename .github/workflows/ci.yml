@@ -168,15 +168,25 @@ jobs:
       # 594s and timed out at 600s with no test hung on runners up to ~1.9x
       # slower across the board, and internal/daemon and internal/cli reached
       # the same limit (issue #73). 20m clears that variation for every one of
-      # them. Packages run one at a time: pipeline/steps alone needs most of
-      # that budget, and sharing a three-core runner with the other heavy
-      # race-instrumented packages is what took it from 1112s to a 1201s
-      # timeout with no test hung, so it now gets the runner to itself. The
-      # per-package 20m still lands a real hang as a goroutine dump well before
-      # timeout-minutes cancels the job.
+      # them. pipeline/steps then outgrew it again: it timed out at 1201s in the
+      # merge train while internal/daemon passed the same run at 1136s, with
+      # every parked goroutine a t.Parallel waiter and the three running tests a
+      # second old or less - exhausted capacity, not a hang. Its tests now run
+      # as two complementary -run/-skip halves, the shard split the Windows rows
+      # already use, so each half has its own budget while the rest of the suite
+      # runs beside them (-p=2 keeps three test binaries on the runner, as
+      # before). No test, timeout or coverage is given up, and a hang in any
+      # half still lands as a goroutine dump inside timeout-minutes.
       - name: Test on Unix
         if: runner.os != 'Windows'
-        run: go test -race -timeout=20m -p=1 ./...
+        run: |
+          go test -race -timeout=20m -p=2 $(go list ./... | grep -v '/internal/pipeline/steps$') &
+          rest=$!
+          status=0
+          go test -race -timeout=20m -run '^Test[A-Q]' ./internal/pipeline/steps || status=1
+          go test -race -timeout=20m -skip '^Test[A-Q]' ./internal/pipeline/steps || status=1
+          wait $rest || status=1
+          exit $status
 
       # Git-heavy packages are the Windows wall floor. NM_CI_WINDOWS_GIT_EXCLUDE
       # on the core shard is the union of the git, steps, daemon, gate,

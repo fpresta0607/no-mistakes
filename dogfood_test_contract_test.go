@@ -151,16 +151,33 @@ func TestRepoConfigDocs_CommandsTestIsTargetedContract(t *testing.T) {
 }
 
 // Remote CI must keep the complete race-enabled Go suite as the broad
-// regression owner after local Test stops duplicating it.
+// regression owner after local Test stops duplicating it. The steps package is
+// split into two complementary halves so each stays inside its own budget, so
+// the contract is the whole suite: a race-enabled command over the rest of the
+// packages plus both halves of internal/pipeline/steps.
 func TestCIWorkflow_RetainsFullRaceSuiteAsBroadRegressionOwner(t *testing.T) {
 	commands := workflowCommandsMatching(ciTestJob(t).Steps, func(step wfStep) bool {
 		return exactRunnerOSCondition(step.If, "!=", "Windows")
 	})
-	want := []string{"test", "-race", "-timeout=20m", "-p=1", "./..."}
+	var runsRest, runsFirstHalf, runsSecondHalf bool
 	for _, command := range commands {
-		if command.name == "go" && slices.Equal(command.args, want) {
-			return
+		if command.name != "go" || len(command.args) == 0 || command.args[0] != "test" || !command.hasArg("-race") {
+			continue
+		}
+		if slices.Contains(goTestPackagePatterns(command), "./...") {
+			runsRest = true
+		}
+		if !slices.Equal(goTestPackagePatterns(command), []string{"./internal/pipeline/steps"}) {
+			continue
+		}
+		if _, ok := commandFlagValue(command, "-run"); ok {
+			runsFirstHalf = true
+		}
+		if _, ok := commandFlagValue(command, "-skip"); ok {
+			runsSecondHalf = true
 		}
 	}
-	t.Fatalf("CI workflow must still run go %s on its Unix legs as the broad regression owner; Unix-only commands: %#v", strings.Join(want, " "), commands)
+	if !runsRest || !runsFirstHalf || !runsSecondHalf {
+		t.Fatalf("CI workflow must still run the complete race-enabled suite on its Unix legs as the broad regression owner (rest=%t, steps first half=%t, steps second half=%t); Unix-only commands: %#v", runsRest, runsFirstHalf, runsSecondHalf, commands)
+	}
 }
