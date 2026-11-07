@@ -299,7 +299,7 @@ Provider contract tests use fake CLI/API responses and local HTTP fixtures, not 
 
 ### pr.publish_intent
 
-Opt in to publishing validation intent in the **generated `Intent` section** and PR-drafting context, independently of intent extraction and validation input.
+Opt in to publishing validation intent in the **generated `Intent` section**, PR-drafting context, and recorded validation text, independently of intent extraction and validation input.
 
 | | |
 | --- | --- |
@@ -312,16 +312,22 @@ By default, and with explicit `false`, the generated section is omitted and PR-d
 They draft from the final diff and commit messages instead.
 This works without `pr.template` and does not enable template mode.
 When intent publication is suppressed, no brief is generated.
-Full intent and its source binding remain available for validation; evidence, attestation, and author-written sections named `Intent` are unchanged.
+Full intent and its source binding remain available for validation; local evidence, attestation, and author-written sections named `Intent` are unchanged.
 
 A contributor can withhold intent even when the repository opts in: `axi run --no-publish-intent` records a tighten-only omission on the run, and an operator can set the global `intent.publish_intent: false` default.
 Both compose with this field and can only reduce publication: a caller can never publish intent without the trusted repository's explicit opt-in.
 Neither signal changes what review, test, document, lint, or CI auto-fix prompts receive.
 Intent is withheld from public drafting, never scanned out of its output.
 
-Recorded review and test output (finding descriptions, risk rationale, testing summary, and scenario names) comes from validation turns that receive the full intent, so it can quote or paraphrase the intent.
-That output is published in the generated Risk, Testing, and Pipeline sections, as [`pr.appendix`](#prappendix) shapes them, whatever `pr.publish_intent` says.
-This setting is not a privacy filter: generated narrative and other evidence can still contain sensitive information from the intent, the diff, or recorded results, and this setting does not filter those sources.
+Recorded validation output can quote or paraphrase the full intent, so when publication is off its free-form text is withheld from the generated PR body in every appendix mode.
+This includes finding descriptions, risk rationale, testing summaries, scenario names and evidence, fix summaries, errors, review conversations, and embedded or attached Test artifacts.
+The PR step also skips evidence-branch publication while validation publication is off.
+The body instead reports step lifecycle statuses and recorded finding counts with an explicit withholding notice; the machine-readable attestation retains its original head binding, statuses, override metadata, and live-validation counts.
+Finding counts label each round and the final snapshot separately, including retained rounds for carried steps, rather than summing repeated observations of the same findings.
+Missing or unreadable snapshots report unavailable counts.
+Full findings and proof remain in the local run record, and validation agents still receive the complete intent.
+Trusted opt-in restores the recorded validation text; caller-side omission withholds it even when the repository opts in.
+This does not filter author-written narrative or sensitive information present in the diff, or remove artifacts published by earlier runs.
 No caller-written public-body override is introduced by this setting.
 
 ### pr.intent
@@ -348,7 +354,8 @@ This format structures the Intent section; it is not a general PR-body privacy f
 
 ### pr.appendix
 
-Choose how much of the generated Risk, Testing, and Pipeline tail is visible after the narrative. Intent publication stays under [`pr.publish_intent`](#prpublish_intent).
+Choose how much of the generated Risk, Testing, and Pipeline tail is visible after the narrative.
+Intent and recorded validation publication follow [`pr.publish_intent`](#prpublish_intent) in every mode.
 
 | | |
 | --- | --- |
@@ -357,11 +364,15 @@ Choose how much of the generated Risk, Testing, and Pipeline tail is visible aft
 | Default | Missing or empty inherits machine-local defaults; see [appendix precedence](/no-mistakes/reference/global-config/#prappendix) |
 | Trust | Trusted default branch only, regardless of `allow_repo_commands`; the pushed branch cannot choose this mode |
 
-`full` is today's body: `## Risk Assessment`, `## Testing`, and `## Pipeline` follow the narrative, in that order.
+`full` places `## Risk Assessment`, `## Testing` (when published), and `## Pipeline` after the narrative, in that order.
 
 `collapsed` folds those three sections into one closed `Validation` details block. The narrative, and the Intent section when it is published, stay outside the block. Within the body limit, opening the block shows the same recorded evidence `full` would have published. If an ordinary body exceeds the limit, Testing is dropped before pipeline history is shortened; the attestation is retained. Bitbucket Cloud escapes raw HTML, so `collapsed` stays on the `full` appendix there instead of printing the details tags as text.
 
-`minimal` keeps a single risk line (the recorded level and rationale, on one line) and the pipeline attestation. Testing logs, pipeline round history, and the Risk and Pipeline headings are omitted. The attestation marker stays in its host-specific form: an HTML comment on GitHub, GitLab, Gitea, Forgejo, Azure, Cursor Origin, and provider plugins, and a visible text fence on an owned Bitbucket description. Ordinary unowned Bitbucket descriptions still omit the comment.
+`minimal` keeps a single risk line and the pipeline attestation.
+The line contains the recorded level and rationale when publication is permitted, or the withholding notice and finding counts otherwise.
+Testing logs, pipeline round history, and the Risk and Pipeline headings are omitted.
+The attestation marker stays in its host-specific form: an HTML comment on GitHub, GitLab, Gitea, Forgejo, Azure, Cursor Origin, and provider plugins, and a visible text fence on an owned Bitbucket description.
+Ordinary unowned Bitbucket descriptions still omit the comment.
 
 GitLab's separate image Evidence section is unaffected by this setting; see [Pull request](/no-mistakes/reference/pipeline-steps/#pull-request).
 
@@ -532,7 +543,7 @@ review:
 
 **Opting in.** Commit that block to your **default branch** (the same copy the daemon reads `commands` and `agent` from). It takes effect on the next run of every branch in the repository; a branch cannot opt itself in or out, in either direction. A contributor must not be able to make their own review park for a human answer, and once you have asked for the conversation a pushed branch must not be able to decline it.
 
-**On**, the review step gains a question channel. The reviewer emits each larger question the moment it has one, keeps reviewing while it is open, and re-reads answers at its own checkpoints. A pass that ends with an unanswered question parks with one `ask-user` warning per question; you answer each with [`no-mistakes axi answer`](/no-mistakes/reference/cli/#no-mistakes-axi-answer), and once none are open the reviewer finishes its pass with your answers - resuming that same session when [`session_reuse`](/no-mistakes/reference/global-config/#session_reuse) is on, cold otherwise. Answers are recorded per branch, reach every later cold reviewer as settled, and are published in the PR body.
+**On**, the review step gains a question channel. The reviewer emits each larger question the moment it has one, keeps reviewing while it is open, and re-reads answers at its own checkpoints. A pass that ends with an unanswered question parks with one `ask-user` warning per question; you answer each with [`no-mistakes axi answer`](/no-mistakes/reference/cli/#no-mistakes-axi-answer), and once none are open the reviewer finishes its pass with your answers - resuming that same session when [`session_reuse`](/no-mistakes/reference/global-config/#session_reuse) is on, cold otherwise. Answers are recorded per branch, reach every later cold reviewer as settled, and are published in the PR body when [`pr.publish_intent`](#prpublish_intent) permits validation text.
 
 **Off (the default)**, the review step is the monologue it has always been: the reviewer is told nothing about a channel, no conversation files are written, no question findings are produced, and the PR body grows no conversation group. A repository that never opted in cannot have a conversation on disk, so for it every review turn also runs session-free and `no-mistakes axi answer` refuses and names this setting. A question asked while the setting was on stays answerable if you turn it off mid-run - see [Turning the setting off does not strand a question already asked](/no-mistakes/concepts/review-conversation/). Upgrading no-mistakes never starts a conversation under a repository that did not ask for one.
 

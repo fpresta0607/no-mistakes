@@ -299,6 +299,7 @@ func TestPRStep_ExecuteRedactsAbsoluteHomePathsBeforePublishing(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	publishValidationTextForTest(sctx)
 	sctx.Env = env
 	sctx.EvidenceDir = fixtureEvidenceDir
 
@@ -615,6 +616,7 @@ func TestPRStep_BuildPRContentRedactsRunWorktreePaths(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	publishValidationTextForTest(sctx)
 	if err := os.MkdirAll(sctx.EvidenceDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
