@@ -322,6 +322,8 @@ Intent is withheld from public drafting, never scanned out of its output.
 Recorded validation output can quote or paraphrase the full intent, so when publication is off its free-form text is withheld from the generated PR body in every appendix mode.
 This includes finding descriptions, risk rationale, testing summaries, scenario names and evidence, fix summaries, errors, review conversations, and embedded or attached Test artifacts.
 The body instead reports step lifecycle statuses and recorded finding counts with an explicit withholding notice; the machine-readable attestation retains its original head binding, statuses, override metadata, and live-validation counts.
+Finding counts label each round and the final snapshot separately, including retained rounds for carried steps, rather than summing repeated observations of the same findings.
+Missing or unreadable snapshots report unavailable counts.
 Full findings and proof remain in the local run record, and validation agents still receive the complete intent.
 Trusted opt-in restores the recorded validation text; caller-side omission withholds it even when the repository opts in.
 This does not filter author-written narrative, sensitive information present in the diff, or files separately published through opt-in evidence storage.

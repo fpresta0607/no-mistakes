@@ -111,7 +111,7 @@ func TestPRIntentWithoutConfigurationStaysPrivate(t *testing.T) {
 func TestPRPrivateIntentCannotLeakThroughRecordedValidation(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []string{config.PRAppendixFull, config.PRAppendixCollapsed, config.PRAppendixMinimal} {
-		for _, path := range []string{"ordinary", "fallback", "template", "supplied", "keep"} {
+		for _, path := range []string{"ordinary", "fallback", "template", "supplied", "keep", "carried-keep"} {
 			t.Run(mode+"/"+path, func(t *testing.T) {
 				sctx, ag, _ := templateTestContext(t)
 				if path != "template" {
@@ -126,7 +126,38 @@ func TestPRPrivateIntentCannotLeakThroughRecordedValidation(t *testing.T) {
 					RiskLevel: "high", RiskRationale: leakedText,
 					Items: []types.Finding{{ID: "r1", Severity: "warning", Action: "ask-user", Description: leakedText}},
 				})
-				insertCompletedStep(t, sctx, types.StepReview, review, "")
+				initialReview := findingsJSON(t, types.Findings{Items: []types.Finding{
+					{ID: "r1", Severity: "warning", Description: leakedText},
+					{ID: "r2", Severity: "error", Description: leakedText},
+				}})
+				steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+				if err != nil || len(steps) != 1 || steps[0].StepName != types.StepReview {
+					t.Fatalf("expected the template fixture's Review step: %+v, %v", steps, err)
+				}
+				reviewStep := steps[0]
+				if _, err := sctx.DB.InsertStepRound(reviewStep.ID, 1, "initial", &initialReview, nil, 10); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := sctx.DB.InsertStepRound(reviewStep.ID, 2, "auto_fix", &review, &leakedText, 10); err != nil {
+					t.Fatal(err)
+				}
+				if err := sctx.DB.SetStepFindings(reviewStep.ID, review); err != nil {
+					t.Fatal(err)
+				}
+				if path == "carried-keep" {
+					source, err := sctx.DB.GetStepResult(reviewStep.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					retry, err := sctx.DB.InsertRun(sctx.Repo.ID, sctx.Run.Branch, sctx.Run.HeadSHA, sctx.Run.BaseSHA)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := sctx.DB.InsertCarriedStepResult(retry.ID, source); err != nil {
+						t.Fatal(err)
+					}
+					sctx.Run = retry
+				}
 				testing := findingsJSON(t, types.Findings{
 					Verdict: "go", TestedHeadSHA: sctx.Run.HeadSHA,
 					TestingSummary: leakedText, Tested: []string{leakedText},
@@ -143,11 +174,10 @@ func TestPRPrivateIntentCannotLeakThroughRecordedValidation(t *testing.T) {
 						return nil, errors.New("draft unavailable")
 					}
 				}
-				if path == "keep" {
+				if path == "keep" || path == "carried-keep" {
 					sctx.Config.PR.UpdateText = "keep"
 				}
 				var content prContent
-				var err error
 				if path == "supplied" {
 					title, body := "fix: parser", "Author supplied description."
 					sctx.Run.PRTitle, sctx.Run.PRBody = &title, &body
@@ -160,6 +190,13 @@ func TestPRPrivateIntentCannotLeakThroughRecordedValidation(t *testing.T) {
 				}
 				if strings.Contains(content.Body, leakedText) || strings.Contains(content.Body, sctx.UserIntent) {
 					t.Errorf("private criterion escaped through recorded validation:\n%s", content.Body)
+				}
+				finalCount := "1"
+				if path == "carried-keep" {
+					finalCount = "unavailable"
+				}
+				if !strings.Contains(content.Body, "Recorded finding counts by snapshot: Review: final "+finalCount+", rounds [1: 2, 2: 1]") {
+					t.Errorf("private publication lost recorded finding counts:\n%s", content.Body)
 				}
 				attestation := parsePipelineAttestationForTest(t, content.Body)
 				if attestation.HeadSHA != sctx.Run.HeadSHA || attestation.LiveValidation == nil || attestation.LiveValidation.Live != 1 || attestation.LiveValidation.Total != 1 {
@@ -174,6 +211,50 @@ func TestPRPrivateIntentCannotLeakThroughRecordedValidation(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestPRPrivateValidationCountsSnapshots(t *testing.T) {
+	t.Parallel()
+	const privateText = "Synthetic private finding text"
+	one := findingsJSON(t, types.Findings{Items: []types.Finding{{ID: "r1", Description: privateText}}})
+	two := findingsJSON(t, types.Findings{Items: []types.Finding{{ID: "r1", Description: privateText}, {ID: "r2", Description: privateText}}})
+	clean := findingsJSON(t, types.Findings{})
+	malformed := "invalid " + privateText
+	for _, tc := range []struct {
+		name   string
+		final  *string
+		rounds []*db.StepRound
+		want   string
+	}{
+		{name: "final only", final: &one, want: "Review: final 1"},
+		{name: "repaired", final: &clean, rounds: []*db.StepRound{{Round: 1, FindingsJSON: &two}, {Round: 2, FindingsJSON: &one}, {Round: 3, FindingsJSON: &clean}}, want: "Review: final 0, rounds [1: 2, 2: 1, 3: 0]"},
+		{name: "repeated snapshots", final: &one, rounds: []*db.StepRound{{Round: 1, FindingsJSON: &one}, {Round: 2, FindingsJSON: &one}}, want: "Review: final 1, rounds [1: 1, 2: 1]"},
+		{name: "rounds only", rounds: []*db.StepRound{{Round: 1, FindingsJSON: &two}, {Round: 2, FindingsJSON: &one}}, want: "Review: final unavailable, rounds [1: 2, 2: 1]"},
+		{name: "missing", rounds: []*db.StepRound{{Round: 1}}, want: "Review: final unavailable, rounds [1: unavailable]"},
+		{name: "unreadable", final: &malformed, rounds: []*db.StepRound{{Round: 1, FindingsJSON: &malformed}}, want: "Review: final unavailable, rounds [1: unavailable]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			step := &db.StepResult{ID: "review", StepName: types.StepReview, Status: types.StepStatusCompleted, FindingsJSON: tc.final}
+			steps := []*db.StepResult{step}
+			rounds := map[string][]*db.StepRound{step.ID: tc.rounds}
+			publicSummary, _ := BuildPipelineSummaryFor(steps, rounds, testPipelineHeadSHA, scm.ProviderGitHub)
+
+			privateSummary, notice := buildPipelineSummaryWithVisibility(steps, rounds, testPipelineHeadSHA, scm.ProviderGitHub, pipelineAttestationPolicy{}, false)
+
+			if !strings.Contains(notice, "Recorded finding counts by snapshot: "+tc.want+".") {
+				t.Fatalf("recorded snapshot counts = %q, want %q", notice, tc.want)
+			}
+			if strings.Contains(privateSummary+notice, privateText) {
+				t.Fatal("snapshot counts published private finding text")
+			}
+			if extractPipelineAttestationMarker(privateSummary) != extractPipelineAttestationMarker(publicSummary) {
+				t.Fatal("snapshot counts changed the machine-readable attestation")
+			}
+			if !strings.Contains(privateSummary, "**Review**: completed") {
+				t.Fatal("snapshot counts lost the lifecycle status")
+			}
+		})
 	}
 }
 
@@ -202,13 +283,19 @@ func TestPRValidationTextPublicationUsesTrustedPolicy(t *testing.T) {
 			sctx.Config = config.Merge(config.DefaultGlobalConfig(), config.EffectiveRepoConfig(pushed, trusted, true))
 			sctx.Run.OmitIntent = tc.shouldOmit
 			const recordedText = "Synthetic criterion paraphrase: preserve C:/synthetic/operator/private-run."
-			insertCompletedStep(t, sctx, types.StepReview, findingsJSON(t, types.Findings{RiskLevel: "high", RiskRationale: recordedText}), "")
+			insertCompletedStep(t, sctx, types.StepReview, findingsJSON(t, types.Findings{
+				RiskLevel: "high", RiskRationale: recordedText,
+				Items: []types.Finding{{ID: "r1", Description: recordedText}},
+			}), "")
 			insertCompletedStep(t, sctx, types.StepTest, findingsJSON(t, types.Findings{TestingSummary: recordedText}), "")
 
 			pipelineMD, risk, testing, evidence := (&PRStep{}).buildPipelineSection(sctx, scm.ProviderGitHub)
 
 			if got := strings.Contains(pipelineMD+risk+testing+evidence, recordedText); got != tc.shouldPublish {
 				t.Fatalf("recorded validation text published = %v, want %v", got, tc.shouldPublish)
+			}
+			if !tc.shouldPublish && !strings.Contains(risk, "Review: final 1, rounds [1: 1]") {
+				t.Fatalf("private publication lost recorded counts: %s", risk)
 			}
 			if attestation := parsePipelineAttestationForTest(t, pipelineMD); attestation.HeadSHA != head || len(attestation.Steps) != 2 {
 				t.Fatalf("publication changed attestation: %+v", attestation)
