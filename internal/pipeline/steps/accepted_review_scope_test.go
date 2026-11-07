@@ -235,6 +235,7 @@ func TestAcceptedReviewScopeRunsOneBaselineAfterReview(t *testing.T) {
 					}
 					executor = pipeline.NewExecutor(database, appPaths, cfg, ag, steps, emit)
 					ctx, cancel = context.WithCancelCause(context.Background())
+					defer cancel(pipeline.ErrDaemonShutdown)
 					done = make(chan error, 1)
 					finished = make(chan struct{})
 					go func() { defer close(finished); done <- executor.Resume(ctx, run, repo, dir) }()
