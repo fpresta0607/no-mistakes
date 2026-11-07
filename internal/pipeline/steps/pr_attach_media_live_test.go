@@ -115,7 +115,7 @@ func TestPRMediaOptOutWithRealGH(t *testing.T) {
 						t.Errorf("published artifact %s changed: %q", name, got)
 					}
 				}
-			} else if !strings.Contains(markdown, "local file:") {
+			} else if !strings.Contains(markdown, "private run evidence") {
 				t.Errorf("missing local-path fallback: %s", markdown)
 			}
 			if tc.attach && !strings.Contains(strings.Join(logs, "\n"), "skipping GitHub media attachments for 3 pending file(s)") {
