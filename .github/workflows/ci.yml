@@ -171,21 +171,38 @@ jobs:
       # them. pipeline/steps then outgrew it again: it timed out at 1201s in the
       # merge train while internal/daemon passed the same run at 1136s, with
       # every parked goroutine a t.Parallel waiter and the three running tests a
-      # second old or less - exhausted capacity, not a hang. Its tests now run
-      # as two complementary -run/-skip halves, the shard split the Windows rows
-      # already use, so each half has its own budget while the rest of the suite
-      # runs beside them (-p=2 keeps three test binaries on the runner, as
-      # before). No test, timeout or coverage is given up, and a hang in any
-      # half still lands as a goroutine dump inside timeout-minutes.
+      # second old or less - exhausted capacity, not a hang. Running the
+      # packages one at a time (-p=1) gave that package the runner but overran
+      # the 40m job cap on both Unix legs, so the suite keeps its concurrency and
+      # pipeline/steps gets its own budget instead: its tests run as two
+      # complementary -run/-skip halves, the shard split the Windows rows already
+      # use, so each half has its own budget while the rest of the suite runs
+      # beside them (-p=2 keeps three test binaries on the runner, as before).
+      # The remainder package set is computed once from go list filtered by
+      # NM_CI_UNIX_STEPS_EXCLUDE, and the step fails closed when that listing
+      # fails or leaves nothing, so a resolution failure cannot quietly run the
+      # repository root alone. No test, timeout or coverage is given up, and a
+      # hang in any half still lands as a goroutine dump inside timeout-minutes.
       - name: Test on Unix
         if: runner.os != 'Windows'
+        env:
+          NM_CI_UNIX_STEPS_EXCLUDE: '/internal/pipeline/steps$'
         run: |
-          go test -race -timeout=20m -p=2 $(go list ./... | grep -v '/internal/pipeline/steps$') &
-          rest=$!
+          if ! packages=$(go list ./...); then
+            echo "::error::go list ./... failed; refusing to run a narrowed suite" >&2
+            exit 1
+          fi
+          rest=$(printf '%s\n' "$packages" | grep -Ev "$NM_CI_UNIX_STEPS_EXCLUDE" || true)
+          if [ -z "$rest" ]; then
+            echo "::error::go list ./... left no Unix remainder packages; refusing to run a narrowed suite" >&2
+            exit 1
+          fi
+          go test -race -timeout=20m -p=2 $rest &
+          rest_pid=$!
           status=0
           go test -race -timeout=20m -run '^Test[A-Q]' ./internal/pipeline/steps || status=1
           go test -race -timeout=20m -skip '^Test[A-Q]' ./internal/pipeline/steps || status=1
-          wait $rest || status=1
+          wait $rest_pid || status=1
           exit $status
 
       # Git-heavy packages are the Windows wall floor. NM_CI_WINDOWS_GIT_EXCLUDE

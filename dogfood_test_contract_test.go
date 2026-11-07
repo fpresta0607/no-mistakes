@@ -164,8 +164,9 @@ func TestCIWorkflow_RetainsFullRaceSuiteAsBroadRegressionOwner(t *testing.T) {
 		if command.name != "go" || len(command.args) == 0 || command.args[0] != "test" || !command.hasArg("-race") {
 			continue
 		}
-		if slices.Contains(goTestPackagePatterns(command), "./...") {
+		if len(goTestPackagePatterns(command)) == 0 {
 			runsRest = true
+			continue
 		}
 		if !slices.Equal(goTestPackagePatterns(command), []string{"./internal/pipeline/steps"}) {
 			continue
@@ -176,6 +177,11 @@ func TestCIWorkflow_RetainsFullRaceSuiteAsBroadRegressionOwner(t *testing.T) {
 		if _, ok := commandFlagValue(command, "-skip"); ok {
 			runsSecondHalf = true
 		}
+	}
+	covered := append(unixRemainderPackages(t), goListPackages(t, "./internal/pipeline/steps")...)
+	slices.Sort(covered)
+	if all := goListPackages(t, "./..."); !slices.Equal(covered, all) {
+		t.Fatalf("CI workflow must run every package exactly once on its Unix legs as the broad regression owner: covered %v, module %v", covered, all)
 	}
 	if !runsRest || !runsFirstHalf || !runsSecondHalf {
 		t.Fatalf("CI workflow must still run the complete race-enabled suite on its Unix legs as the broad regression owner (rest=%t, steps first half=%t, steps second half=%t); Unix-only commands: %#v", runsRest, runsFirstHalf, runsSecondHalf, commands)
