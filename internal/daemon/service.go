@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
@@ -46,6 +47,7 @@ type managedServiceState int
 
 type managedServiceLaunch struct {
 	windowsRunGeneration string
+	notBefore            time.Time
 }
 
 const (

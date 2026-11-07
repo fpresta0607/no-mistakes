@@ -277,6 +277,12 @@ func runWithOptionsLocked(p *paths.Paths, d *db.DB, globalCfg *config.GlobalConf
 	if err != nil {
 		return fmt.Errorf("build pid file: %w", err)
 	}
+	startupRuns, err := d.GetActiveRuns()
+	if err != nil {
+		return fmt.Errorf("snapshot startup runs: %w", err)
+	}
+	mgr.startup = newStartupProgress(pidPath, pidRecord, startupRuns)
+	pidRecord = mgr.startup.record
 	if err := writeDaemonPIDFile(pidPath, pidRecord); err != nil {
 		return fmt.Errorf("write pid file: %w", err)
 	}
@@ -328,6 +334,8 @@ func runWithOptionsLocked(p *paths.Paths, d *db.DB, globalCfg *config.GlobalConf
 		return fmt.Errorf("bind IPC: %w", err)
 	}
 	logStartupPhase("ipc_bind", bindStarted)
+	mgr.startup.complete("ipc_bind")
+	mgr.startup = nil
 
 	serveErrCh := make(chan error, 1)
 	// Held pushes from before a restart start ahead of any fresh push.
@@ -438,6 +446,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	orphanStarted := time.Now()
 	reapOrphanedServers(p)
 	logStartupPhase("orphan_servers", orphanStarted)
+	mgr.startup.complete("orphan_servers")
 
 	gateStarted := time.Now()
 	gateStats := migrateGateConfigs(context.Background(), d, p)
@@ -448,6 +457,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 		"rejected", gateStats.Rejected,
 		"failed", gateStats.Failed,
 	)
+	mgr.startup.complete("gate_migration")
 
 	terminalPRStarted := time.Now()
 	terminalPRCount, err := d.ReconcileTerminalPRRuns()
@@ -461,6 +471,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 		logStartupPhase("terminal_pr_runs", terminalPRStarted, "reconciled", terminalPRCount)
 	}
 
+	mgr.startup.complete("terminal_pr_runs")
 	parkedStarted := time.Now()
 	plans, preserved := mgr.recoverableParkedRuns(context.Background())
 	active, err := d.GetActiveRuns()
@@ -497,6 +508,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 		}
 	}
 	logStartupPhase("parked_runs", parkedStarted, "preserved", len(preserved))
+	mgr.startup.complete("parked_runs")
 
 	// Read while the runs that were executing when this daemon started still say
 	// so: recovery below turns them terminal, and they are the ones whose
@@ -518,6 +530,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 		slog.Info("recovered stale runs from previous crash", "count", count)
 	}
 	logStartupPhase("stale_runs", staleStarted, "recovered", count)
+	mgr.startup.complete("stale_runs")
 
 	reportUnusableWorktreeRoots(d, layout)
 	leftover := leftoverRecordedRunWorktrees(d, p)
@@ -538,6 +551,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	orphanProcStarted := time.Now()
 	sweepOrphanRunProcesses(d, p, sweepableWorktrees(leftover, activeWorktrees), retainedDefaultTreeRunIDs(d, p, wtPolicy, now))
 	logStartupPhase("orphan_processes", orphanProcStarted)
+	mgr.startup.complete("orphan_processes")
 
 	// reapWorktrees applies the operator's retention policy to the default
 	// <NM_HOME>/worktrees tree before cleanupOrphanWorktrees runs its
@@ -548,6 +562,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	mgr.reapWorktrees(wtPolicy, now)
 	cleanupOrphanWorktrees(d, p, leftover)
 	logStartupPhase("worktree_cleanup", worktreeStarted)
+	mgr.startup.complete("worktree_cleanup")
 
 	// Evidence is reaped after stale-run recovery for the same reason worktrees
 	// are: every run's status is settled by now, so the active-run guard can
@@ -560,6 +575,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	}
 	reapRunLogs(d, p.LogsDir(), policy, now)
 	logStartupPhase("evidence_cleanup", evidenceStarted)
+	mgr.startup.complete("evidence_cleanup")
 
 	mgr.resumeRecoveredRuns(plans)
 }

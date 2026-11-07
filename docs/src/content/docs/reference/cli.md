@@ -383,8 +383,8 @@ A daemon that proves assertions but cannot apply them refuses the unknown `apply
 
 ## no-mistakes axi validate-authored
 
-Validate one explicitly declared, clean authored commit and tree linked to an immutable terminal predecessor: a failed, cancelled, or `ci_monitor_interrupted` run (which is never resumed), or a completed authored child.
-A branch with authored lineage can therefore validate a follow-up change after its child completes, while a completed run that was not itself admitted through `validate-authored` is refused as a predecessor.
+Validate one explicitly declared, clean authored commit and tree linked to an immutable terminal predecessor: a failed, cancelled, or `ci_monitor_interrupted` run (which is never resumed), or a completed validation-only child.
+A branch with validation-only lineage can therefore validate a follow-up change after its child completes, while a completed run that was not itself admitted through `validate-authored` or `validate-terminal` is refused as a predecessor.
 This is a new validation-only child: the predecessor stays terminal, and every core stage and current trusted custom gate starts fresh without an inherited pass, review approval, CI-ready state, exception or agent session.
 All automatic and manual repair authority is zero, including stages the predecessor never reached.
 Fix selections, skips, CI handbacks, ordinary fresh launches that would drop the lineage, and repair dispatch after restart are refused.
@@ -412,13 +412,14 @@ The declared authored candidate must differ from the predecessor's submitted, te
 It imports the exact candidate object without overwriting an author branch or the gate branch.
 Historical findings, failed checks, automatic and manual spending, and the unknown historical source completeness stay attached to the lineage.
 Cumulative spending counts the predecessor, its validation-only descendants and linked terminal source-adoption predecessors from the native round ledger.
-Runs on the branch before the predecessor are outside that ledger; they appear only through the controller policy assertion and the unknown historical source completeness.
+Older branch runs outside this linked source lineage are excluded from that ledger; they appear only through the controller policy assertion and the unknown historical source completeness.
 Later changes to the repository's registered path, URLs or default branch, and custody-return bookkeeping on the predecessor, do not change its validation history; the live publication target is verified again at admission.
 The output and subsequent status include `authored_validation`, cumulative per-stage spending, zero remaining repair authority and `policy_origin: controller_assertion`.
 This command grants no authority to install the candidate or operate another run.
 
 An exact repeated request returns the same admission and child.
-After a crash, an untouched pending acceptance remains idle until the exact request is explicitly replayed and revalidated.
+A fresh accepted admission schedules its child for execution.
+An untouched, unscheduled pending acceptance left by an interrupted admission or daemon restart remains idle until the exact request is explicitly replayed and revalidated.
 A progressed child is observed or recovered through its existing execution; a cancelled child is never restarted by replay.
 Later authored descendants must preserve the same controller policy assertion, historical uncertainty and zero repair authority.
 Continuing from a published predecessor requires a GitHub repository with the predecessor's PR open.
@@ -467,7 +468,8 @@ Known anchors are preserved, and a missing historical managed checkout is never 
 Current staged, tracked, untracked and submodule changes still refuse admission.
 The successor uses only its explicit selection, without inheriting an old per-run profile or quota-routing order or changing shared configuration.
 An identical admission observes the same child, including after restart; changing any bound input refuses.
-An untouched pending acceptance must be explicitly replayed before execution, and a cancelled child is never restarted by replay.
+A fresh accepted admission schedules its child; explicit replay is required only for an untouched, unscheduled pending acceptance left by an interrupted admission or daemon restart.
+A cancelled child is never restarted by replay.
 Use `validate-authored` for a later authored commit and `validate-terminal` for the next unchanged terminal child; both retain the same historical controller assertion, uncertainty and zero repair authority.
 These commands grant no authority to install a binary, upgrade a daemon, edit a database, cancel another run or adopt a live fleet candidate.
 
