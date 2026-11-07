@@ -37,6 +37,7 @@ no-mistakes daemon start
 ```
 
 This installs or refreshes the managed service (launchd, systemd user service, or Task Scheduler), then starts it. If service install or startup fails, it falls back to a detached daemon.
+Replacing a running daemon first requires the [lifecycle guard](/no-mistakes/concepts/daemon/#starting-and-stopping), including shutdown acknowledgement for ordinary maintenance.
 
 ### Check logs
 
@@ -60,15 +61,14 @@ Check that process, then run `no-mistakes daemon start`.
 This error always means a genuinely live daemon: the lock it reports cannot go stale (see [Daemon & Worktrees](/no-mistakes/concepts/daemon/) for the singleton-lock model).
 Manage that daemon with `no-mistakes daemon status` and `no-mistakes daemon stop` instead of deleting the lock file - deleting the file does not release the lock and only weakens the guard.
 
-If the socket exists and the process is running but stuck or unresponsive, `no-mistakes` bounds the connection wait with [`daemon_connect_timeout`](/no-mistakes/reference/global-config/#daemon_connect_timeout) and fails fast with an error naming the socket path instead of silently starting a second daemon. Restart the stuck daemon:
+If the socket exists and the process is running but stuck or unresponsive, `no-mistakes` bounds the connection wait with [`daemon_connect_timeout`](/no-mistakes/reference/global-config/#daemon_connect_timeout) and fails fast with an error naming the socket path instead of silently starting a second daemon.
+Ordinary `no-mistakes daemon stop` requires a successful `prepare_shutdown` acknowledgement; if the daemon cannot answer, it refuses before stopping a service or using a PID fallback.
+If an ordinary stop succeeds, run `no-mistakes daemon start` to start the replacement.
+For an unresponsive or older daemon that cannot acknowledge shutdown, follow the owner's [explicit-force, containment and bootstrap prerequisites](/no-mistakes/concepts/daemon/#starting-and-stopping) before choosing a forced stop.
+An idle database snapshot does not establish those prerequisites.
 
-```sh
-no-mistakes daemon stop
-no-mistakes daemon start
-```
-
-If you see a `connect to daemon socket` error with a `(run 'no-mistakes daemon start' to recover)` hint, run `no-mistakes daemon start` directly to recover.
-See [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) for endpoint ownership checks and the Windows dead-owner recovery case.
+If you see a `connect to daemon socket` error with a `(run 'no-mistakes daemon start' to recover)` hint, `daemon start` can recover a provably dead owner but still refuses ordinary replacement when a live daemon cannot acknowledge shutdown.
+The same [owner section](/no-mistakes/concepts/daemon/#starting-and-stopping) describes endpoint ownership checks and the Windows dead-owner recovery case.
 
 ### "configured worktree placement is unusable"
 
@@ -98,11 +98,10 @@ The [`ci_timeout` reference](/no-mistakes/reference/global-config/#ci_timeout) o
 After upgrading from an older release, starting the daemon automatically completes stale active rows that already have a persisted merged or closed PR state.
 Do not edit `state.sqlite` directly.
 
-Only when you have confirmed it is acceptable for every remaining listed active run to fail, force the lifecycle operation:
+Only when you have confirmed it is acceptable for every remaining listed active run to fail, and met the owner's [force and bootstrap prerequisites](/no-mistakes/concepts/daemon/#starting-and-stopping), force the intended lifecycle operation, for example:
 
 ```sh
-no-mistakes daemon stop --force
-no-mistakes update
+no-mistakes update --force
 ```
 
 ## Agent binary not detected
@@ -368,11 +367,14 @@ no-mistakes daemon start
 
 ## Reset everything
 
-When state is genuinely wedged:
+When state is genuinely wedged, first inspect retained work and confirm that it can be discarded.
+Before the following cleanup, independently exclude every launch, resume and hook producer as described in the owner's [bootstrap guidance](/no-mistakes/concepts/daemon/#starting-and-stopping).
+Continue to cleanup only after the forced stop succeeds; a refusal leaves this recipe stopped too.
+Keep the lock files in place.
 
 ```sh
 no-mistakes daemon stop --force
-rm -rf ~/.no-mistakes/worktrees ~/.no-mistakes/servers ~/.no-mistakes/socket ~/.no-mistakes/daemon.pid ~/.no-mistakes/daemon.lock
+rm -rf ~/.no-mistakes/worktrees ~/.no-mistakes/servers ~/.no-mistakes/socket ~/.no-mistakes/daemon.pid
 no-mistakes daemon start
 ```
 
