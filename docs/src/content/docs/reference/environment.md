@@ -38,8 +38,8 @@ This setting applies only to tests built with `-tags=e2e`.
 | Default | `1`                  |
 
 For example, set `$env:NM_E2E_TIMEOUT_SCALE = '4'` in PowerShell before `make e2e` to give a 30-second gate push two minutes, a 60-second command four minutes, and a 90-second run wait six minutes.
-The scale also applies to harness ref reads, worktree operations, daemon startup, daemon ownership acquisition, and shared run and step status waits.
-It does not change the five-second daemon stop safety bound, polling intervals, product timeout settings, or deadlines written directly in individual tests.
+The scale also applies to harness ref reads, worktree operations, daemon startup and shutdown, daemon ownership acquisition, and shared run and step status waits.
+It does not change the inventory-wide recovery reaper's five-second daemon stop bound, polling intervals, product timeout settings, or deadlines written directly in individual tests.
 Invalid, non-positive, fractional, or overflowing values fail the test instead of silently using the default.
 
 Go's package timeout remains the outer limit.
