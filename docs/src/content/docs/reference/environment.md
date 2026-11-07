@@ -124,6 +124,29 @@ Absolute path to the file that tells [`commands.test_focused`](/no-mistakes/refe
 
 This is a command-child variable, not a daemon setting. no-mistakes sets it only around the configured checks of a focused re-run, in the step's scratch directory outside the worktree, and agent turns never see it. See that key for the file's format.
 
+## `NO_MISTAKES_TEST_BASH`
+
+Absolute path to the native Git Bash executable verified by Test on Windows.
+This is supplied to Test commands and agent turns, not a daemon configuration setting.
+
+Before behavioral checks or either repair or evidence turn, Test looks beside the Git executable found on `PATH` and in the standard Program Files Git locations, excludes Windows-system executables, and verifies that the candidate is MSYS Bash.
+A WSL launcher earlier on `PATH` is never a fallback.
+The Test prompt names the verified executable and directs the agent to invoke that exact path with `--noprofile --norc -o igncr` for existing Bash scripts, allowing CRLF checkouts without editing source.
+When verification fails, the prompt directs the agent to report Bash-dependent scenarios as `untested` with the missing prerequisite and continue checks using available native tools.
+
+## `TMP`, `TEMP`, `TMPDIR`, `GOTMPDIR` in Test
+
+Test sets all four variables for its commands and agent turns to one uniquely owned temporary directory outside the worktree and recorded evidence directory.
+The directory is created before checks or either agent turn and is shared only within that Test execution.
+Disposable Git repositories, build trees, and other temporary testing files belong there; retained artifacts belong in the recorded [evidence directory](/no-mistakes/reference/global-config/#evidence_dir).
+
+On Windows, the scratch path must fit within 60 UTF-16 code units, leaving room for nested test and Git paths.
+Test normally uses the process temporary root; if a nested temporary root leaves insufficient room, it uses the existing per-user Windows `Temp` directory instead.
+If the resulting path is still too long, Test removes the newly created directory and refuses execution with a request for a shorter `TEMP` directory.
+
+When Test returns, including on failure or cancellation, it attempts to remove only its owned scratch directory and logs any cleanup failure.
+Retained evidence and other executions' temporary directories are left in place.
+
 ## `NO_MISTAKES_BITBUCKET_EMAIL`
 
 Bitbucket Cloud account email used for PR creation and CI monitoring.

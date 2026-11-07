@@ -762,8 +762,7 @@ Validation errors:
 }
 
 // testScratchGuidance gives the evidence and repair turns their disposable
-// workspace, scratchDir, which this step deletes itself (see
-// testScratchDirName).
+// workspace, scratchDir, allocated by newTestScratch and deleted by this step.
 func testScratchGuidance(scratchDir string) string {
 	return fmt.Sprintf("- Your disposable workspace is this scratch directory outside the worktree: %s. Put everything you create only to drive or check the change there, never in the worktree: throwaway scripts, data, logs, and the profiles and caches of what you run. no-mistakes deletes it when this step ends, so keep evidence files and intended source or test changes out of it.", scratchDir)
 }

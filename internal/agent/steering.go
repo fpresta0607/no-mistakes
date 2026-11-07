@@ -33,8 +33,9 @@ import (
 // pipeline agent is steered; the one exception is a rebase or merge that the
 // step's own prompt asks for (the Rebase step and CI's base-branch repair).
 //
-// evidenceRoot is the one out-of-worktree location the preamble permits, and it
-// is supplied by the caller rather than computed here. This used to be a
+// evidenceRoot is the retained-evidence location the preamble permits; a Test
+// prompt may separately name disposable scratch. The caller supplies the
+// evidence path; this function does not compute it. This used to be a
 // package-level string that rebuilt the evidence path from os.TempDir()
 // independently of the test step - two copies of one fact, either of which
 // could move without the other. The caller owns the path; this owns the wording.
@@ -87,7 +88,7 @@ func (s steeredAgent) NeutralizesGateInstructions() bool {
 }
 
 // WithSteering wraps an agent so every invocation is steered to keep writes
-// inside the worktree, naming evidenceRoot as the one permitted out-of-worktree
+// inside the worktree, naming evidenceRoot as the permitted evidence
 // destination. Wrapping is idempotent: an already-steered agent is returned
 // unchanged so the preamble is never added twice.
 func WithSteering(a Agent, evidenceRoot string) Agent {
