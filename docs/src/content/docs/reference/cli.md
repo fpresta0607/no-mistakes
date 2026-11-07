@@ -408,7 +408,10 @@ The input is one operator-owned UTF-8 JSON object, at most 64 KiB, with these fi
 
 The daemon checks the authenticated caller, registered Git identity, exact clean source, immutable predecessor history, launch selection and publication facts before accepting the child.
 An unresolved native agent safety refusal in the predecessor, or unreadable predecessor findings, refuses admission.
-The declared authored candidate must differ from the predecessor's submitted, terminal and published heads; use [terminal validation](#no-mistakes-axi-validate-terminal) to explicitly validate its unchanged terminal head instead.
+The declared authored candidate must differ from every head bound in the immutable validation family: submitted, terminal, published and approved review heads, review-round starting and reviewed heads, and linked terminal source-adoption candidate, retained, gate, recovery and caller heads.
+This checks recorded identities, never arbitrary Git ancestry.
+Use [terminal validation](#no-mistakes-axi-validate-terminal) to explicitly validate an unchanged failed or cancelled child's terminal head after an infrastructure failure, including an interrupted daemon or a pending acceptance cancelled after the trusted source changed.
+Every stage still runs fresh with zero repair authority; replay never implicitly retries a progressed or cancelled child, and no cosmetic commit is needed.
 It imports the exact candidate object without overwriting an author branch or the gate branch.
 Historical findings, failed checks, automatic and manual spending, and the unknown historical source completeness stay attached to the lineage.
 Cumulative spending counts the predecessor, its validation-only descendants and linked terminal source-adoption predecessors from the native round ledger.
@@ -423,6 +426,8 @@ An untouched, unscheduled pending acceptance left by an interrupted admission or
 A progressed child is observed or recovered through its existing execution; a cancelled child is never restarted by replay.
 Later authored descendants must preserve the same controller policy assertion, historical uncertainty and zero repair authority.
 Continuing from a published predecessor requires a GitHub repository with the predecessor's PR open.
+A predecessor that inherited an open PR URL through a same-head relaunch or `rerun`, but never recorded its own complete push binding, is ineligible even if that PR is still open.
+An inherited PR URL alone proves neither publication nor an unpublished predecessor, so admission fails closed rather than inferring a binding from the live PR.
 A child that publishes but then cannot run its PR or CI stage fails and cannot itself be continued, so confirm forge access before admission.
 An accepted pending child can be cancelled with `axi abort`.
 Ordinary explicit gate acknowledgements and review-question answers retain their existing meaning; they do not create repair capacity or turn an approved failure into a clean pass.

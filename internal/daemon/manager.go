@@ -624,6 +624,18 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		m.wg.Add(1)
 		go func() {
 			startedAt := time.Now()
+			trigger := "recovery"
+			if plan.admission != nil {
+				trigger = "authored"
+				telemetry.Track("run", telemetry.Fields{
+					"action":      "started",
+					"trigger":     trigger,
+					"agent":       string(plan.cfg.Agent),
+					"branch_role": telemetryBranchRole(plan.run.Branch, plan.repo.DefaultBranch),
+					"step_count":  len(plan.steps),
+					"demo_mode":   steps.IsDemoMode(),
+				})
+			}
 			defer m.wg.Done()
 			defer close(done)
 			parkedAtShutdown := false
@@ -693,7 +705,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			}
 			fields := telemetry.Fields{
 				"action":      "finished",
-				"trigger":     "recovery",
+				"trigger":     trigger,
 				"agent":       string(plan.cfg.Agent),
 				"branch_role": telemetryBranchRole(plan.run.Branch, plan.repo.DefaultBranch),
 				"status":      string(plan.run.Status),
