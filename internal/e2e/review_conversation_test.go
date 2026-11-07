@@ -444,7 +444,7 @@ func TestReviewConversationNeverReachesTheEvidenceBranch(t *testing.T) {
 	t.Setenv("FAKEAGENT_GH_LOG", filepath.Join(filepath.Dir(h.AgentLog), "gh-evidence.log"))
 	t.Setenv("FAKEAGENT_GH_PARENT", "owner/no-mistakes")
 
-	pushMainRepoConfig(t, h, trustedRepoConfigWithConversationAndEvidenceBranch)
+	pushMainRepoConfig(t, h, trustedRepoConfigWithConversationAndEvidenceBranch+"\npr:\n  publish_intent: true\n")
 
 	h.CommitChange("init-evidence-conversation", "seed.txt", "seed\n", "seed for the evidence journey")
 	initWorktree := h.AddWorktree("init-evidence-conversation")

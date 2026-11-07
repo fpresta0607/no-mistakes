@@ -93,6 +93,7 @@ func writeFinalPRScopeScenario(t *testing.T) string {
 // never told the Test step's own target commit is the shipped branch.
 func TestPRWhatChangedScopesToFinalDiffWhileEvidenceStaysStepScoped(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: writeFinalPRScopeScenario(t)})
+	commitTrustedRepoConfig(t, h, "pr:\n  publish_intent: true\n")
 	ctx := context.Background()
 
 	parentURL := "https://github.com/example/no-mistakes.git"
