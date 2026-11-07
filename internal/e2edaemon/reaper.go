@@ -41,14 +41,14 @@ func (inv *Inventory) ReapAll() ReapResult {
 	}
 	result.Entries = len(entries)
 	for _, e := range entries {
-		if err := inv.reapEntry(e, &result); err != nil {
+		if err := inv.reapEntry(e, &result, 5*time.Second); err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", e.ID, err))
 		}
 	}
 	return result
 }
 
-func (inv *Inventory) reapEntry(e Entry, result *ReapResult) error {
+func (inv *Inventory) reapEntry(e Entry, result *ReapResult, stopTimeout time.Duration) error {
 	if !isAllowedTempRoot(e.NMHome) {
 		result.Skipped++
 		// Drop the unsafe inventory row so it cannot be retried forever,
@@ -59,7 +59,7 @@ func (inv *Inventory) reapEntry(e Entry, result *ReapResult) error {
 	}
 
 	// Prefer graceful stop via the recorded binary when available.
-	if stopped := tryDaemonStop(e); stopped {
+	if stopped := tryDaemonStop(e, stopTimeout); stopped {
 		result.Stopped++
 	}
 
@@ -141,7 +141,7 @@ func isAllowedTempRoot(nmHome string) bool {
 	return false
 }
 
-func tryDaemonStop(e Entry) bool {
+func tryDaemonStop(e Entry, timeout time.Duration) bool {
 	bin := e.NMBin
 	if bin == "" {
 		return false
@@ -149,7 +149,7 @@ func tryDaemonStop(e Entry) bool {
 	if _, err := os.Stat(bin); err != nil {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, "daemon", "stop")
 	cmd.Env = append(os.Environ(),
@@ -196,11 +196,12 @@ func processMatchesHash(pid int, expected string) bool {
 
 // Ownership tracks one harness's inventory entry and concurrency slot.
 type Ownership struct {
-	Inv    *Inventory
-	ID     string
-	NMHome string
-	NMBin  string
-	Slot   *Slot
+	Inv         *Inventory
+	ID          string
+	NMHome      string
+	NMBin       string
+	Slot        *Slot
+	StopTimeout time.Duration
 }
 
 // Acquire creates inventory ownership for a temp NM_HOME under the suite
@@ -220,11 +221,12 @@ func Acquire(nmHome, nmBin string, slotTimeout time.Duration) (*Ownership, error
 	}
 	id := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
 	own := &Ownership{
-		Inv:    inv,
-		ID:     id,
-		NMHome: filepath.Clean(nmHome),
-		NMBin:  nmBin,
-		Slot:   slot,
+		Inv:         inv,
+		ID:          id,
+		NMHome:      filepath.Clean(nmHome),
+		NMBin:       nmBin,
+		Slot:        slot,
+		StopTimeout: 5 * time.Second,
 	}
 	if err := inv.Register(id, own.NMHome, nmBin, 0, os.Getpid()); err != nil {
 		slot.Release()
@@ -288,7 +290,7 @@ func (o *Ownership) StopBestEffort() {
 		ID:     o.ID,
 		NMHome: o.NMHome,
 		NMBin:  o.NMBin,
-	})
+	}, o.StopTimeout)
 }
 
 // Release stops best-effort, reaps any leftover matched process for this
@@ -302,7 +304,7 @@ func (o *Ownership) Release() {
 		if err == nil {
 			for _, entry := range entries {
 				if entry.ID == o.ID {
-					_ = o.Inv.reapEntry(entry, &ReapResult{})
+					_ = o.Inv.reapEntry(entry, &ReapResult{}, o.StopTimeout)
 					break
 				}
 			}
