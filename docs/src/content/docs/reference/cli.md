@@ -407,12 +407,15 @@ The input is one operator-owned UTF-8 JSON object, at most 64 KiB, with these fi
 | `reason` | A nonempty explicit reason, at most 4096 bytes |
 
 The daemon checks the authenticated caller, registered Git identity, exact clean source, immutable predecessor history, launch selection and publication facts before accepting the child.
-An unresolved native agent safety refusal in the predecessor, or unreadable predecessor findings, refuses admission.
+The gate branch may still name a head bound by an earlier immutable authored admission or terminal adoption, including the adopted root's original submitted head.
+Terminal-adoption links must retain their recorded source, lane and recovery anchors; unrelated Git ancestry supplies no ownership evidence.
+An unresolved native agent safety refusal or unreadable findings anywhere in that immutable lineage refuses admission.
 The declared candidate must differ from the predecessor's submitted, terminal and published heads; this operation does not replace ordinary validation of those historical targets.
 It imports the exact candidate object without overwriting an author branch or the gate branch.
 Historical findings, failed checks, automatic and manual spending, and the unknown historical source completeness stay attached to the lineage.
 Cumulative spending counts the predecessor and its authored descendants from the native round ledger.
 Runs on the branch before the predecessor are outside that ledger; they appear only through the controller policy assertion and the unknown historical source completeness.
+Following a terminal-adoption link for source ownership neither certifies nor adds its separate old native ledger to authored-validation spending.
 Later changes to the repository's registered path, URLs or default branch, and custody-return bookkeeping on the predecessor, do not change its validation history; the live publication target is verified again at admission.
 The output and subsequent status include `authored_validation`, cumulative per-stage spending, zero remaining repair authority and `policy_origin: controller_assertion`.
 This command grants no authority to install the candidate or operate another run.

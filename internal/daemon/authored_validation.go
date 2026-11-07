@@ -149,30 +149,8 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if _, err := m.db.ValidationFamily(snapshot.Run.ID); err != nil {
 			return "", err
 		}
-		isBoundGateHead := false
-		for historical := snapshot; historical != nil; {
-			heads := []*string{&historical.Run.HeadSHA, historical.Run.SubmittedHeadSHA, historical.Run.LastPushedSHA}
-			for _, rounds := range historical.Rounds {
-				for _, round := range rounds {
-					heads = append(heads, round.StartingHeadSHA, round.ReviewedHeadSHA)
-				}
-			}
-			for _, head := range heads {
-				if head != nil && gateHead == *head {
-					isBoundGateHead = true
-				}
-			}
-			predecessor, err := m.db.GetValidationPredecessor(historical.Run.ID)
-			if err != nil {
-				return "", err
-			}
-			historical = nil
-			if predecessor != nil {
-				historical = &predecessor.Snapshot
-			}
-		}
-		if !isBoundGateHead {
-			return "", fmt.Errorf("gate branch moved outside the immutable predecessor lineage; reconcile its owner before admission")
+		if err := m.proveAuthoredGateLineage(ctx, snapshot, gateDir, gateHead); err != nil {
+			return "", err
 		}
 		// Import only the exact object, without changing a branch, tracking ref or FETCH_HEAD.
 		if _, err := git.Run(ctx, gateDir, "fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", request.CallerDir, request.CandidateSHA); err != nil {
@@ -281,6 +259,9 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil || confirmedGateHead != gateHead {
 			return "", fmt.Errorf("gate branch changed during authored admission")
 		}
+		if err := m.proveAuthoredGateLineage(ctx, snapshot, gateDir, gateHead); err != nil {
+			return "", err
+		}
 		if err := proveAuthoredPublication(ctx, &snapshot.Run, repo, request.CallerDir, cfg, forge); err != nil {
 			return "", err
 		}
@@ -347,6 +328,90 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		return child.ID, nil
 	})
 	return result, err
+}
+
+func (m *RunManager) proveAuthoredGateLineage(ctx context.Context, snapshot *db.TerminalSnapshot, gateDir, gateHead string) error {
+	isBoundGateHead := false
+	seen := make(map[string]bool)
+	for historical := snapshot; historical != nil; {
+		if seen[historical.Run.ID] {
+			return fmt.Errorf("immutable predecessor lineage contains a cycle")
+		}
+		seen[historical.Run.ID] = true
+		if err := historical.ValidateAuthoredSafety(); err != nil {
+			return err
+		}
+		heads := []*string{&historical.Run.HeadSHA, historical.Run.SubmittedHeadSHA, historical.Run.LastPushedSHA}
+		for _, rounds := range historical.Rounds {
+			for _, round := range rounds {
+				heads = append(heads, round.StartingHeadSHA, round.ReviewedHeadSHA)
+			}
+		}
+		for _, head := range heads {
+			if head != nil && gateHead == *head {
+				isBoundGateHead = true
+			}
+		}
+		predecessor, err := m.db.GetValidationPredecessor(historical.Run.ID)
+		if err != nil {
+			return err
+		}
+		adoption, err := m.db.GetTerminalPredecessor(historical.Run.ID)
+		if err != nil {
+			return err
+		}
+		if predecessor != nil && adoption != nil || historical.IsAuthoredChild && predecessor == nil {
+			return fmt.Errorf("immutable predecessor lineage is contradictory or incomplete")
+		}
+		if adoption != nil {
+			successor := &adoption.Successor
+			current := &historical.Run
+			if current.RepoID != adoption.Snapshot.Run.RepoID || current.Branch != adoption.Snapshot.Run.Branch || current.SubmittedHeadSHA == nil || *current.SubmittedHeadSHA != adoption.CandidateSHA || successor.RepoID != current.RepoID || successor.Branch != current.Branch || successor.HeadSHA != adoption.CandidateSHA || !reflect.DeepEqual(current.SubmittedHeadSHA, successor.SubmittedHeadSHA) {
+				return fmt.Errorf("terminal adoption successor source binding changed")
+			}
+			if !reflect.DeepEqual(current.LaunchNonce, successor.LaunchNonce) || !reflect.DeepEqual(current.LaunchValidationGeneration, successor.LaunchValidationGeneration) || !reflect.DeepEqual(current.LaunchIntentDigest, successor.LaunchIntentDigest) || !current.LaunchAssertion.Matches(adoption.Assertion) {
+				return fmt.Errorf("terminal adoption successor source or launch binding changed")
+			}
+			original, err := m.db.ReadContinuationSnapshot(adoption.Snapshot.Run.ID)
+			if err != nil {
+				return err
+			}
+			original.Repo = adoption.Snapshot.Repo
+			if !reflect.DeepEqual(original, &adoption.Snapshot) {
+				return fmt.Errorf("immutable terminal predecessor history changed")
+			}
+			if adoption.SourceRef != "refs/no-mistakes/terminal-candidate/"+current.ID {
+				return fmt.Errorf("terminal adoption source anchor identity changed")
+			}
+			anchors := []struct{ ref, head string }{{adoption.SourceRef, adoption.CandidateSHA}, {"refs/no-mistakes/terminal-lane/" + current.ID, adoption.GateHead}}
+			if adoption.RecoveryHead != "" {
+				anchors = append(anchors, struct{ ref, head string }{custody.RecoveryRef(adoption.Snapshot.Run.ID), adoption.RecoveryHead})
+			}
+			for _, anchor := range anchors {
+				head, exists, err := git.DirectRefTarget(ctx, gateDir, anchor.ref)
+				if err != nil || !exists || head != anchor.head {
+					return fmt.Errorf("terminal adoption anchor %s changed or is unreadable", anchor.ref)
+				}
+			}
+			tree, err := git.Run(ctx, gateDir, "rev-parse", adoption.CandidateSHA+"^{tree}")
+			if err != nil || tree != adoption.CandidateTree {
+				return fmt.Errorf("terminal adoption candidate tree changed or is unreadable")
+			}
+			historical, err = m.db.ReadTerminalSnapshot(adoption.Snapshot.Run.ID)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		historical = nil
+		if predecessor != nil {
+			historical = &predecessor.Snapshot
+		}
+	}
+	if !isBoundGateHead {
+		return fmt.Errorf("gate branch moved outside the immutable predecessor lineage; reconcile its owner before admission")
+	}
+	return nil
 }
 
 func proveAuthoredCheckout(ctx context.Context, actualDir string, request *authoredvalidation.Request, repo *db.Repo) error {

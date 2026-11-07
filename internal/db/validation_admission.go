@@ -43,19 +43,8 @@ func (snapshot TerminalSnapshot) ValidateAuthoredRequest(request authoredvalidat
 	if !parent.Status.Terminal() || (parent.Status == types.RunCompleted && !snapshot.IsAuthoredChild) || parent.PushActive || parent.LaunchNonce == nil || parent.LaunchValidationGeneration == nil || parent.LaunchIntentDigest == nil || parent.LaunchAssertion == nil {
 		return fmt.Errorf("authored admission requires a terminal predecessor that did not complete, or a completed authored child, with its original launch receipt and no active publisher")
 	}
-	for _, step := range snapshot.Steps {
-		if step.FindingsJSON == nil {
-			continue
-		}
-		findings, err := types.ParseFindingsJSON(*step.FindingsJSON)
-		if err != nil {
-			return fmt.Errorf("authored admission cannot inspect predecessor %s findings: %w", step.StepName, err)
-		}
-		for _, finding := range findings.Items {
-			if finding.ID == types.FindingIDAgentSafetyRefusal {
-				return fmt.Errorf("authored admission refuses a predecessor with an unresolved native agent safety refusal in %s", step.StepName)
-			}
-		}
+	if err := snapshot.ValidateAuthoredSafety(); err != nil {
+		return err
 	}
 	if request.CandidateSHA == parent.HeadSHA || parent.SubmittedHeadSHA != nil && request.CandidateSHA == *parent.SubmittedHeadSHA || parent.LastPushedSHA != nil && request.CandidateSHA == *parent.LastPushedSHA {
 		return fmt.Errorf("authored admission requires a newly authored candidate, not a submitted, terminal or published predecessor head")
@@ -80,6 +69,24 @@ func (snapshot TerminalSnapshot) ValidateAuthoredRequest(request authoredvalidat
 		}
 	} else if parent.PushGeneration == nil || parent.PushTargetFingerprint == nil || request.PublishedHeadSHA != *parent.LastPushedSHA || request.PushGeneration != *parent.PushGeneration || request.PushTargetFingerprint != *parent.PushTargetFingerprint {
 		return fmt.Errorf("authored admission publication head, target or generation changed")
+	}
+	return nil
+}
+
+func (snapshot TerminalSnapshot) ValidateAuthoredSafety() error {
+	for _, step := range snapshot.Steps {
+		if step.FindingsJSON == nil {
+			continue
+		}
+		findings, err := types.ParseFindingsJSON(*step.FindingsJSON)
+		if err != nil {
+			return fmt.Errorf("authored admission cannot inspect predecessor %s findings: %w", step.StepName, err)
+		}
+		for _, finding := range findings.Items {
+			if finding.ID == types.FindingIDAgentSafetyRefusal {
+				return fmt.Errorf("authored admission refuses a predecessor with an unresolved native agent safety refusal in %s", step.StepName)
+			}
+		}
 	}
 	return nil
 }
