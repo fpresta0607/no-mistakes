@@ -841,7 +841,7 @@ func (h *Harness) shutdown() {
 	if _, err := os.Stat(h.NMBin); err != nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), h.timeout(5*time.Second))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.NMBin, "daemon", "stop")
 	winproc.Harden(cmd)
