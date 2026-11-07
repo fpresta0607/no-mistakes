@@ -2,25 +2,33 @@ package daemon
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestReviewScopeDecisionIPCRequiresAuthorityBeforeDispatch(t *testing.T) {
-	manager, root, runID, executor := liveParkedGateFixture(t)
+	manager, _, runID, executor := liveParkedGateFixture(t)
 	t.Cleanup(func() { _ = executor.Respond(types.StepReview, types.ActionAbort, nil) })
+	socketRoot, err := os.MkdirTemp("", "dtest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(socketRoot)
+	socket := paths.WithRoot(socketRoot).Socket()
 	server := ipc.NewServer()
 	registerHandlers(server, manager, manager.db, func() {})
-	if err := server.Listen(root.Socket()); err != nil {
+	if err := server.Listen(socket); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
 	go func() { done <- server.ServeReady() }()
 	defer func() { server.Close(); <-done }()
-	client, err := ipc.Dial(root.Socket())
+	client, err := ipc.Dial(socket)
 	if err != nil {
 		t.Fatal(err)
 	}
