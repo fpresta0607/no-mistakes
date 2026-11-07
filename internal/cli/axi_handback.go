@@ -20,6 +20,7 @@ import (
 
 func newAxiHandbackCmd() *cobra.Command {
 	var shouldResume bool
+	var shouldRevalidatePublication bool
 	var wait time.Duration
 	var expectationPath, receiptID string
 	command := &cobra.Command{
@@ -35,7 +36,9 @@ func newAxiHandbackCmd() *cobra.Command {
 			"worktree to submit that head to the same run for fresh validation from Review.\n" +
 			"No fixer runs during release. No approval, skip, rebase or force-push is used.\n" +
 			"GitHub head verification is required. --resume follows the next decision\n" +
-			"point with the usual bounded --wait.",
+			"point with the usual bounded --wait.\n" +
+			"Use --revalidate-publication to release an ordinary published descendant\n" +
+			"of the recorded Review and Test heads without certifying that descendant.",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -87,7 +90,7 @@ func newAxiHandbackCmd() *cobra.Command {
 			if active.Run == nil {
 				return emitError(command, 1, "no active run on the current branch to hand back")
 			}
-			request := ipc.CIHandbackParams{RepoID: env.repo.ID, RunID: active.Run.ID, Branch: branch, CallerDir: caller, HeadSHA: head, Resume: shouldResume, ReceiptID: receiptID, Expect: expected}
+			request := ipc.CIHandbackParams{RepoID: env.repo.ID, RunID: active.Run.ID, Branch: branch, CallerDir: caller, HeadSHA: head, Resume: shouldResume, RevalidatePublication: shouldRevalidatePublication, ReceiptID: receiptID, Expect: expected}
 			stored, err := env.d.GetRun(active.Run.ID)
 			if err != nil || stored == nil || stored.LastPushedSHA == nil || stored.PushGeneration == nil {
 				return emitError(command, 1, "cannot bind handback to the published run")
@@ -175,6 +178,7 @@ func newAxiHandbackCmd() *cobra.Command {
 		},
 	}
 	command.Flags().BoolVar(&shouldResume, "resume", false, "submit the additive follow-up for fresh validation in the same run")
+	command.Flags().BoolVar(&shouldRevalidatePublication, "revalidate-publication", false, "release an ordinary post-validation publication with its historical evidence pinned")
 	command.Flags().StringVar(&expectationPath, "expect", "", "compare all identities with this exact binding JSON file before changing custody")
 	command.Flags().StringVar(&receiptID, "receipt", "", "exact native handback receipt id (required for --resume)")
 	bindAxiWaitFlag(command, &wait)

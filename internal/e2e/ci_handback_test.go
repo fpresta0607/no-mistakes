@@ -327,7 +327,36 @@ func TestAxiPublishedCIConflictHandback(t *testing.T) {
 }
 
 func TestAxiOrdinaryCIHandbackRevalidatesAuthoredCorrection(t *testing.T) {
+	ordinaryCIHandbackRevalidatesAuthoredCorrection(t, false)
+}
+
+func TestAxiPostDocumentCIHandbackRevalidatesAuthoredCorrection(t *testing.T) {
+	ordinaryCIHandbackRevalidatesAuthoredCorrection(t, true)
+}
+
+func ordinaryCIHandbackRevalidatesAuthoredCorrection(t *testing.T, hasDocumentCommit bool) {
+	t.Helper()
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: branchSyncScenario(t)})
+	if hasDocumentCommit {
+		original, err := os.ReadFile(h.Scenario)
+		if err != nil {
+			t.Fatal(err)
+		}
+		documentAction := `actions:
+  - match: "report only what you could not resolve.\n\nContext:\n- branch: feature/ordinary-handback"
+    text: "document the reviewed feature"
+    edits:
+      - path: "README.md"
+        old: "# e2e\n"
+        new: "# e2e\n\nAccurate feature usage.\n"
+    structured:
+      findings: []
+      summary: "document accurate feature usage"
+`
+		if err := os.WriteFile(h.Scenario, []byte(documentAction+strings.TrimPrefix(string(original), "actions:\n")), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	const remoteURL = "https://github.com/example/ordinary-handback.git"
 	configureGitURLRewrite(t, h, remoteURL, h.UpstreamDir)
 	mustGit := func(directory string, args ...string) string {
@@ -367,7 +396,7 @@ func TestAxiOrdinaryCIHandbackRevalidatesAuthoredCorrection(t *testing.T) {
 		}
 	}
 	writeState("FAILURE")
-	h.CommitChange("main", ".no-mistakes.yaml", "allow_repo_commands: true\ncommands:\n  test: git diff --check\n", "configure deterministic fixture validation")
+	h.CommitChange("main", ".no-mistakes.yaml", "allow_repo_commands: true\ncommands:\n  test: git diff --check\n  lint: git diff --check\n", "configure deterministic fixture validation")
 	mustGit(h.WorkDir, "push", "origin", "main")
 	h.CommitChange("init-ordinary", "seed.txt", "seed\n", "seed init")
 	initFromOwnWorktree(t, h, "init-ordinary")
@@ -401,6 +430,14 @@ func TestAxiOrdinaryCIHandbackRevalidatesAuthoredCorrection(t *testing.T) {
 	before, err := database.GetRun(parked.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if hasDocumentCommit {
+		if before.ReviewApprovedHeadSHA == nil || *before.ReviewApprovedHeadSHA == before.HeadSHA || !strings.Contains(mustGit(operator, "show", before.HeadSHA+":README.md"), "Accurate feature usage.") {
+			t.Fatalf("Document did not commit after Review and Test: %#v", before)
+		}
+		if out, err := h.RunInDir(operator, "axi", "handback"); err == nil {
+			t.Fatalf("default route accepted an unreviewed publication: %s", out)
+		}
 	}
 	review, _ := findStep(parked.Steps, types.StepReview)
 	priorReview, err := database.GetRoundsByStep(review.ID)
@@ -436,7 +473,11 @@ func TestAxiOrdinaryCIHandbackRevalidatesAuthoredCorrection(t *testing.T) {
 	binding.RunID = before.ID
 	writeBinding()
 	for range 2 {
-		if out, err := h.RunInDir(operator, "axi", "handback", "--expect", bindingPath); err != nil || !strings.Contains(out, "released") || !strings.Contains(out, "receipt:") {
+		arguments := []string{"axi", "handback", "--expect", bindingPath}
+		if hasDocumentCommit {
+			arguments = append(arguments, "--revalidate-publication")
+		}
+		if out, err := h.RunInDir(operator, arguments...); err != nil || !strings.Contains(out, "released") || !strings.Contains(out, "receipt:") {
 			t.Fatalf("ordinary release/replay: %v\n%s", err, out)
 		}
 	}
