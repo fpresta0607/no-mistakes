@@ -123,11 +123,15 @@ func goListPackages(t *testing.T, patterns ...string) []string {
 	return packages
 }
 
+// goTestPackagePatterns keeps only the package patterns a go test command
+// names directly. Flags, @file arguments and the shell words of a go list
+// substitution are not patterns, so a command that computes its package set
+// (the Windows core remainder, the Unix remainder) reports none of them.
 func goTestPackagePatterns(command workflowCommand) []string {
 	var patterns []string
 	for _, arg := range command.args[1:] {
 		arg = unquoteWorkflowArg(arg)
-		if strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "@") {
+		if !strings.HasPrefix(arg, "./") && arg != "." {
 			continue
 		}
 		patterns = append(patterns, arg)
