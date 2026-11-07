@@ -834,7 +834,6 @@ func (h *Harness) repoID() string {
 func (h *Harness) shutdown() {
 	if h.daemonOwn != nil {
 		h.daemonOwn.NMBin = h.NMBin
-		h.daemonOwn.StopTimeout = h.timeout(5 * time.Second)
 		h.daemonOwn.Release()
 		h.daemonOwn = nil
 		return
@@ -842,7 +841,7 @@ func (h *Harness) shutdown() {
 	if _, err := os.Stat(h.NMBin); err != nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), h.timeout(5*time.Second))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.NMBin, "daemon", "stop")
 	winproc.Harden(cmd)
