@@ -42,9 +42,19 @@ type Request struct {
 	LaunchAssertion              *launchassert.Expectation `json:"launch_assertion"`
 	HistoricalSourceCompleteness string                    `json:"historical_source_completeness"`
 	Reason                       string                    `json:"reason"`
+	TerminalGeneration           string                    `json:"terminal_generation,omitempty"`
+	AcceptUnknownSource          bool                      `json:"accept_unknown_source,omitempty"`
+	SourceAnchors                map[string]string         `json:"source_anchors,omitempty"`
 }
 
 func (request Request) Validate() error {
+	if request.TerminalGeneration != "" {
+		if strings.TrimSpace(request.TerminalGeneration) != request.TerminalGeneration || len(request.TerminalGeneration) > 128 || request.TerminalGeneration == request.ValidationGeneration || !request.AcceptUnknownSource || request.LaunchAssertion == nil || !request.LaunchAssertion.Apply {
+			return fmt.Errorf("terminal validation requires a distinct generation, explicit unknown-source acceptance and an explicit launch selection")
+		}
+	} else if request.AcceptUnknownSource || len(request.SourceAnchors) != 0 {
+		return fmt.Errorf("terminal source acceptance requires a terminal validation generation")
+	}
 	if request.PredecessorID == "" || request.RepoID == "" || request.Branch == "" || request.CallerDir == "" || strings.TrimSpace(request.Reason) == "" || len(request.Reason) > 4096 {
 		return fmt.Errorf("authored admission requires predecessor, repository, branch, caller checkout and explicit reason")
 	}
@@ -92,7 +102,7 @@ func Decode(data []byte) (*Request, error) {
 			return nil, fmt.Errorf("invalid authored admission field")
 		}
 		switch key {
-		case "predecessor_id", "snapshot_digest", "repo_id", "branch", "caller_dir", "candidate_sha", "candidate_tree", "launch_nonce", "validation_generation", "intent_digest", "published_head_sha", "push_generation", "push_target_fingerprint", "controller_policy", "launch_assertion", "historical_source_completeness", "reason":
+		case "predecessor_id", "snapshot_digest", "repo_id", "branch", "caller_dir", "candidate_sha", "candidate_tree", "launch_nonce", "validation_generation", "intent_digest", "published_head_sha", "push_generation", "push_target_fingerprint", "controller_policy", "launch_assertion", "historical_source_completeness", "reason", "terminal_generation", "accept_unknown_source", "source_anchors":
 		default:
 			return nil, fmt.Errorf("unknown or non-canonical authored admission field %q", key)
 		}
@@ -143,4 +153,11 @@ func Read(path string) (*Request, error) {
 func (request Request) Digest() string {
 	payload, _ := json.Marshal(request)
 	return fmt.Sprintf("%x", sha256.Sum256(payload))
+}
+
+func (request Request) SuccessorGeneration() string {
+	if request.TerminalGeneration != "" {
+		return request.TerminalGeneration
+	}
+	return request.ValidationGeneration
 }

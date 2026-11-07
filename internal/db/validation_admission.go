@@ -43,21 +43,14 @@ func (snapshot TerminalSnapshot) ValidateAuthoredRequest(request authoredvalidat
 	if !parent.Status.Terminal() || (parent.Status == types.RunCompleted && !snapshot.IsAuthoredChild) || parent.PushActive || parent.LaunchNonce == nil || parent.LaunchValidationGeneration == nil || parent.LaunchIntentDigest == nil || parent.LaunchAssertion == nil {
 		return fmt.Errorf("authored admission requires a terminal predecessor that did not complete, or a completed authored child, with its original launch receipt and no active publisher")
 	}
-	for _, step := range snapshot.Steps {
-		if step.FindingsJSON == nil {
-			continue
-		}
-		findings, err := types.ParseFindingsJSON(*step.FindingsJSON)
-		if err != nil {
-			return fmt.Errorf("authored admission cannot inspect predecessor %s findings: %w", step.StepName, err)
-		}
-		for _, finding := range findings.Items {
-			if finding.ID == types.FindingIDAgentSafetyRefusal {
-				return fmt.Errorf("authored admission refuses a predecessor with an unresolved native agent safety refusal in %s", step.StepName)
-			}
-		}
+	if err := snapshot.validateNativeRefusals(); err != nil {
+		return err
 	}
-	if request.CandidateSHA == parent.HeadSHA || parent.SubmittedHeadSHA != nil && request.CandidateSHA == *parent.SubmittedHeadSHA || parent.LastPushedSHA != nil && request.CandidateSHA == *parent.LastPushedSHA {
+	if request.TerminalGeneration != "" {
+		if request.CandidateSHA != parent.HeadSHA || parent.Status == types.RunCompleted {
+			return fmt.Errorf("terminal validation requires the exact uncompleted predecessor head")
+		}
+	} else if request.CandidateSHA == parent.HeadSHA || parent.SubmittedHeadSHA != nil && request.CandidateSHA == *parent.SubmittedHeadSHA || parent.LastPushedSHA != nil && request.CandidateSHA == *parent.LastPushedSHA {
 		return fmt.Errorf("authored admission requires a newly authored candidate, not a submitted, terminal or published predecessor head")
 	}
 	if request.LaunchNonce != *parent.LaunchNonce || request.ValidationGeneration != *parent.LaunchValidationGeneration || request.IntentDigest != *parent.LaunchIntentDigest {
@@ -71,7 +64,7 @@ func (snapshot TerminalSnapshot) ValidateAuthoredRequest(request authoredvalidat
 	}
 	expected := *request.LaunchAssertion
 	expected.TrustedSHA = parent.LaunchAssertion.TrustedSHA
-	if !expected.Matches(parent.LaunchAssertion) {
+	if request.TerminalGeneration == "" && !expected.Matches(parent.LaunchAssertion) {
 		return fmt.Errorf("authored admission cannot change the original agent selection")
 	}
 	if parent.LastPushedSHA == nil {
@@ -80,6 +73,24 @@ func (snapshot TerminalSnapshot) ValidateAuthoredRequest(request authoredvalidat
 		}
 	} else if parent.PushGeneration == nil || parent.PushTargetFingerprint == nil || request.PublishedHeadSHA != *parent.LastPushedSHA || request.PushGeneration != *parent.PushGeneration || request.PushTargetFingerprint != *parent.PushTargetFingerprint {
 		return fmt.Errorf("authored admission publication head, target or generation changed")
+	}
+	return nil
+}
+
+func (snapshot TerminalSnapshot) validateNativeRefusals() error {
+	for _, step := range snapshot.Steps {
+		if step.FindingsJSON == nil {
+			continue
+		}
+		findings, err := types.ParseFindingsJSON(*step.FindingsJSON)
+		if err != nil {
+			return fmt.Errorf("authored admission cannot inspect predecessor %s findings: %w", step.StepName, err)
+		}
+		for _, finding := range findings.Items {
+			if finding.ID == types.FindingIDAgentSafetyRefusal {
+				return fmt.Errorf("authored admission refuses a predecessor with an unresolved native agent safety refusal in %s", step.StepName)
+			}
+		}
 	}
 	return nil
 }
@@ -130,6 +141,9 @@ func (d *DB) GetValidationPredecessor(childID string) (*ValidationAdmission, err
 // AcceptValidationAdmission records new launch authority only on a fresh child.
 // The write transaction compares the entire predecessor before making either row.
 func (d *DB) AcceptValidationAdmission(ctx context.Context, proposal ValidationAdmission) (*ValidationAdmission, bool, error) {
+	if len(proposal.Request.SourceAnchors) == 0 {
+		proposal.Request.SourceAnchors = nil
+	}
 	if err := validateAdmissionBinding(&proposal); err != nil {
 		return nil, false, err
 	}
@@ -195,6 +209,11 @@ func (d *DB) AcceptValidationAdmission(ctx context.Context, proposal ValidationA
 		return nil, false, fmt.Errorf("authored admission cannot drop the original verification input")
 	}
 	workDir, nonce := filepath.Join(proposal.WorktreeRoot, childID), "authored-"+childID
+	generation := proposal.Request.SuccessorGeneration()
+	piProfile, quotaRouting := current.Run.PiProfile, current.Run.QuotaRouting
+	if proposal.Request.TerminalGeneration != "" {
+		piProfile, quotaRouting = nil, ""
+	}
 	var evidenceDir *string
 	if proposal.EvidenceRoot != "" {
 		resolved := filepath.Join(proposal.EvidenceRoot, childID)
@@ -202,17 +221,17 @@ func (d *DB) AcceptValidationAdmission(ctx context.Context, proposal ValidationA
 	}
 	if _, err := tx.Exec(`INSERT INTO runs
 		(id, repo_id, branch, head_sha, base_sha, submitted_head_sha, worktree_dir, no_mistakes_version, no_mistakes_build_sha, status,
-		intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest,
+		intent, intent_source, intent_session_id, intent_score, intent_check_json, launch_nonce, launch_validation_generation, launch_intent_digest,
 		launch_assertion, launch_assertion_proof, pr_base_branch, omit_intent, pi_profile, quota_routing, pr_title, pr_body, verification_plan, gates_json,
 		pr_url, pr_state, pr_state_observed_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation,
 		closing_issue_refs, closing_issue_refs_locked_at, evidence_dir, created_at, updated_at)
 		SELECT ?, repo_id, branch, ?, base_sha, ?, ?, ?, ?, 'pending',
-		intent, intent_source, intent_session_id, intent_score, ?, launch_validation_generation, launch_intent_digest,
-		?, ?, pr_base_branch, omit_intent, pi_profile, quota_routing, pr_title, pr_body, ?, ?,
+		intent, intent_source, intent_session_id, intent_score, intent_check_json, ?, ?, launch_intent_digest,
+		?, ?, pr_base_branch, omit_intent, ?, ?, pr_title, pr_body, ?, ?,
 		pr_url, pr_state, pr_state_observed_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation,
 		closing_issue_refs, closing_issue_refs_locked_at, ?, ?, ? FROM runs WHERE id = ?`,
-		childID, proposal.Request.CandidateSHA, proposal.Request.CandidateSHA, workDir, buildinfo.CurrentVersion(), buildinfo.Commit, nonce,
-		proposal.Request.LaunchAssertion, proposal.AssertionProof, proposal.Plan, proposal.Gates, evidenceDir, timestamp, timestamp, current.Run.ID); err != nil {
+		childID, proposal.Request.CandidateSHA, proposal.Request.CandidateSHA, workDir, buildinfo.CurrentVersion(), buildinfo.Commit, nonce, generation,
+		proposal.Request.LaunchAssertion, proposal.AssertionProof, piProfile, quotaRouting, proposal.Plan, proposal.Gates, evidenceDir, timestamp, timestamp, current.Run.ID); err != nil {
 		return nil, false, err
 	}
 	proposal.ID, proposal.CreatedAt, proposal.ChildID = newID(), timestamp, childID
@@ -227,6 +246,13 @@ func (d *DB) AcceptValidationAdmission(ctx context.Context, proposal ValidationA
 	}
 	if _, err := tx.Exec(`INSERT INTO validation_admissions (id, predecessor_id, child_id, request_digest, event_json) VALUES (?, ?, ?, ?, ?)`, proposal.ID, current.Run.ID, childID, proposal.Request.Digest(), string(payload)); err != nil {
 		return nil, false, err
+	}
+	family, err = readValidationFamily(tx, childID)
+	if err != nil {
+		return nil, false, err
+	}
+	if family == nil || family.HasChildRepairs {
+		return nil, false, fmt.Errorf("validation-only admission has conflicting inherited repair history")
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, false, err
