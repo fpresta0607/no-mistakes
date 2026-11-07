@@ -14,21 +14,17 @@ import (
 )
 
 func TestManagedStopClearsStaleOwnerUnderRetainedLocks(t *testing.T) {
-	p := paths.WithRoot(t.TempDir())
-	if err := p.EnsureDirs(); err != nil {
-		t.Fatal(err)
-	}
+	var p *paths.Paths
 	if runtime.GOOS == "windows" {
+		p = paths.WithRoot(t.TempDir())
+		if err := p.EnsureDirs(); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(p.Socket(), []byte("stale endpoint"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	} else {
-		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: p.Socket(), Net: "unix"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		listener.SetUnlinkOnClose(false)
-		listener.Close()
+		p = staleDaemonRoot(t, []byte("424242"))
 	}
 	started := time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)
 	writeDaemonPIDRecord(t, p.PIDFile(), daemonPIDFile{PID: 424242, StartedAt: started})
