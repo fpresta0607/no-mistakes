@@ -47,6 +47,7 @@ type managedServiceState int
 
 type managedServiceLaunch struct {
 	windowsRunGeneration string
+	notBefore            time.Time
 }
 
 const (
@@ -413,6 +414,7 @@ func startPreparedManagedDaemon(p *paths.Paths) error {
 		return err
 	}
 	defer release()
+	launchStarted := daemonStartupNow()
 	if runtimeGOOS == "darwin" && !serviceManagerBypassed() {
 		domain, err := launchdDomainTarget()
 		if err != nil {
@@ -425,7 +427,7 @@ func startPreparedManagedDaemon(p *paths.Paths) error {
 	} else if _, err := startManagedService(p); err != nil {
 		return err
 	}
-	return waitForDaemonStart(p, 0, time.Time{})
+	return waitForDaemonStartWithProcess(p, nil, nil, 0, time.Time{}, managedServiceLaunch{notBefore: launchStarted})
 }
 
 func reloadManagedServiceDefinition(p *paths.Paths) error {

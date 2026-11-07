@@ -80,6 +80,7 @@ type RunManager struct {
 	db              *db.DB
 	paths           *paths.Paths
 	steps           StepFactory
+	startup         *startupProgress
 
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
 
@@ -187,6 +188,7 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) ([]recoveredRunP
 			continue
 		}
 		plan, err := m.prepareRecoveredRun(ctx, run)
+		m.startup.complete("run:" + run.ID)
 		if err != nil {
 			slog.Warn("active run cannot be safely resumed", "run_id", run.ID, "error", err)
 			continue

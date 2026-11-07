@@ -113,7 +113,14 @@ The removal happens only while holding the singleton lock and only if the PID fi
 When the endpoint exists but nothing answers and its owner has not been proven dead, those commands fail fast instead of silently starting a replacement daemon; `no-mistakes daemon start` self-heals past a stale endpoint.
 After accepting a shutdown request, `daemon stop` waits for the daemon process itself to exit before returning success. Losing IPC health is not enough because the listener closes near the start of shutdown, while the singleton lock and other process-owned resources are released only at process exit. `daemon restart` uses the same complete-stop handoff before starting the replacement, so the old and new processes do not contend for the root.
 
-Process launch and daemon readiness are separate states. After taking the singleton lock, the daemon publishes its PID before exclusive crash recovery begins, but startup is not successful until the IPC server returns a real health response. `daemon start` allows up to 45 seconds for cold environment setup and recovery, reports a child that exits before readiness promptly, and never treats the PID file or a bound socket as proof that the daemon is ready. If detached startup times out, the command kills and reaps that child before returning; if managed startup fails, it cleans up the managed attempt before trying the detached fallback and preserves both errors when both paths fail.
+Process launch and daemon readiness are separate states.
+After taking the singleton lock, the daemon publishes its PID before exclusive crash recovery begins, but startup is not successful until the IPC server returns a real health response.
+On Windows, `daemon start` allows 45 seconds without completed startup work; Unix also allows for its login-shell preparation.
+Each distinct completed recovery phase or run check from the startup snapshot can renew that window, up to a ten-minute readiness wait.
+Progress is published atomically in the PID record and must match the launched process generation; repeated counters, changed snapshots, unreadable records, and another process's evidence grant no extra time.
+Recovery still finishes before normal IPC requests are admitted, and a child that exits before readiness is reported promptly.
+Neither the PID file nor a bound socket proves readiness.
+If detached startup times out, the command kills and reaps that child before returning; if managed startup fails, it cleans up the managed attempt before trying the detached fallback and preserves both errors when both paths fail.
 
 Only one live daemon can own an `NM_HOME` at a time.
 At startup - before crash recovery runs and before the socket is bound - the daemon takes an exclusive OS file lock on `~/.no-mistakes/daemon.lock` and holds it for the life of the process.
