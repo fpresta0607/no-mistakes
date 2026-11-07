@@ -33,7 +33,7 @@ var allowInsecureDownloads bool
 var currentGOOS = runtime.GOOS
 var daemonIsRunning = daemon.IsRunning
 var daemonExecutablePath = runningDaemonExecutablePath
-var daemonStop = daemon.StopForced
+var daemonStop = daemon.StopPrepared
 var daemonStart = daemon.Start
 var daemonStartExecutable = runDaemonStart
 var windowsExecutablePathForPID = defaultWindowsExecutablePathForPID
@@ -272,15 +272,18 @@ func (u *updater) run(ctx context.Context) error {
 	releaseShutdown := func() {}
 	if !u.force && !u.restartWhenIdle {
 		releaseShutdown, err = daemon.PrepareShutdownIfIdle(u.paths)
-		if err != nil {
-			return err
-		}
+	} else {
+		releaseShutdown, err = daemon.PrepareForcedShutdown(u.paths)
+	}
+	if err != nil {
+		return err
 	}
 	defer releaseShutdown()
 	if err := replaceExecutable(u.executablePath, binaryData); err != nil {
 		return err
 	}
 	if u.restartWhenIdle {
+		releaseShutdown()
 		status, err := u.scheduleRestart()
 		if err != nil {
 			return fmt.Errorf("updated %s to %s, but could not schedule the daemon restart: %w; run `%s daemon restart --when-idle`", u.appName, plan.LatestVersion, err, u.appName)

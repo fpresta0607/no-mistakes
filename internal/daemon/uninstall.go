@@ -36,13 +36,14 @@ func UninstallGuarded(p *paths.Paths, beforeStop func() (func(), error)) (string
 		}
 		return "", fmt.Errorf("inspect managed service %s: %w", definition, err)
 	}
-	if beforeStop != nil {
-		release, err := beforeStop()
-		if err != nil {
-			return "", err
-		}
-		defer release()
+	if beforeStop == nil {
+		beforeStop = func() (func(), error) { return PrepareForcedShutdown(p) }
 	}
+	release, err := beforeStop()
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	instance := captureRunningDaemon(p)
 	if err := stopLaunchAgent(p); err != nil {
 		return "", fmt.Errorf("stop managed service: %w", err)

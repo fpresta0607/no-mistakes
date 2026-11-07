@@ -31,3 +31,8 @@ func unlockFile(f *os.File) error {
 	ol := &windows.Overlapped{Offset: lockByteOffset}
 	return windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, ol)
 }
+
+func trySharedLockFile(f *os.File) error {
+	ol := &windows.Overlapped{Offset: lockByteOffset}
+	return windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, ol)
+}

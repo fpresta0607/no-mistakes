@@ -23,7 +23,7 @@ var (
 	daemonRun                  = daemon.RunRestartable
 	daemonStartFn              = daemon.Start
 	daemonStartGuardedFn       = daemon.StartGuarded
-	daemonStopFn               = daemon.StopForced
+	daemonStopFn               = daemon.StopPrepared
 	daemonScheduleRestartFn    = daemon.ScheduleRestart
 	daemonUninstallFn          = daemon.UninstallGuarded
 	daemonUninstallSupportedFn = daemon.UninstallSupported
@@ -725,14 +725,14 @@ func guardDestructiveDaemonLifecycle(p *paths.Paths, stderr io.Writer, action st
 	}
 	if len(runs) == 0 {
 		if force {
-			return func() {}, nil
+			return daemon.PrepareForcedShutdown(p)
 		}
 		return daemon.PrepareShutdownIfIdle(p)
 	}
 	if force {
 		fmt.Fprintf(stderr, "FORCE: %s will stop/restart the daemon while %d active pipeline runs are in progress\n", action, len(runs))
 		fmt.Fprint(stderr, lifecycle.RunList(runs))
-		return func() {}, nil
+		return daemon.PrepareForcedShutdown(p)
 	}
 	return nil, fmt.Errorf("refusing %s because %d active pipeline runs are in progress; pass --force to stop/restart the daemon anyway\n%s", action, len(runs), lifecycle.RunList(runs))
 }

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -14,6 +15,16 @@ func PrepareShutdownIfIdle(p *paths.Paths) (func(), error) {
 	if p == nil {
 		return func() {}, nil
 	}
+	release, err := acquireLifecycleLock(p, true)
+	if err != nil {
+		return nil, err
+	}
+	isPrepared := false
+	defer func() {
+		if !isPrepared {
+			release()
+		}
+	}()
 	client, err := daemonDial(p.Socket())
 	if err != nil {
 		isStale, inspectErr := staleDaemonArtifacts(p)
@@ -24,7 +35,11 @@ func PrepareShutdownIfIdle(p *paths.Paths) (func(), error) {
 			}
 			isStale, inspectErr = staleDaemonArtifacts(p)
 			if inspectErr == nil && isStale {
-				return lock.Release, nil
+				isPrepared = true
+				return sync.OnceFunc(func() {
+					lock.Release()
+					release()
+				}), nil
 			}
 			lock.Release()
 		}
@@ -38,5 +53,6 @@ func PrepareShutdownIfIdle(p *paths.Paths) (func(), error) {
 	if !result.OK {
 		return nil, fmt.Errorf("daemon did not confirm admission closure; refusing lifecycle operation")
 	}
-	return func() {}, nil
+	isPrepared = true
+	return release, nil
 }

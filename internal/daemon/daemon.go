@@ -64,7 +64,12 @@ func Run() (retErr error) {
 	if err := p.EnsureDirs(); err != nil {
 		return fmt.Errorf("create directories: %w", err)
 	}
+	releaseStartup, err := acquireLifecycleLock(p, false)
+	if err != nil {
+		return err
+	}
 	lock, err := acquireSingletonLock(p)
+	releaseStartup()
 	if err != nil {
 		return err
 	}
@@ -220,7 +225,12 @@ func RunWithOptions(p *paths.Paths, d *db.DB, stepFactory StepFactory) error {
 	// live daemon's active runs as crashed and delete worktrees out from
 	// under it (see "Daemon Singleton Lock" in
 	// .agents/skills/daemon-runtime/SKILL.md).
+	releaseStartup, err := acquireLifecycleLock(p, false)
+	if err != nil {
+		return err
+	}
 	lock, err := acquireSingletonLock(p)
+	releaseStartup()
 	if err != nil {
 		return err
 	}

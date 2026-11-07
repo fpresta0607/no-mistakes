@@ -90,7 +90,13 @@ func StartGuarded(p *paths.Paths, beforeRestart func() (func(), error)) error {
 	if err := p.EnsureDirs(); err != nil {
 		return err
 	}
+	releaseStartup, err := acquireLifecycleLock(p, false)
+	if err != nil {
+		return err
+	}
+	defer releaseStartup()
 	if alive, _ := daemonHealthCheck(p); alive {
+		releaseStartup()
 		reloaded, err := reinstallManagedServiceIfChanged(p, beforeRestart)
 		if err != nil {
 			return err
@@ -218,13 +224,23 @@ func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() (func
 	if err != nil {
 		return false, err
 	}
-	defer release()
+	defer func() { release() }()
 	restoreMode := os.FileMode(0o644)
 	if info, err := os.Stat(installPath); err == nil {
 		restoreMode = info.Mode().Perm()
 	}
 	stoppedForRefresh := false
 	restoreOnFailure := func(cause error) (bool, error) {
+		if stoppedForRefresh {
+			releaseRestoration, err := prepare()
+			if err != nil {
+				return false, fmt.Errorf("%w; cannot guard service restoration: %v", cause, err)
+			}
+			release = releaseRestoration
+			if err := stopCurrentDaemonBeforeManagedRestart(p); err != nil {
+				return false, fmt.Errorf("%w; stop failed replacement before restoration: %v", cause, err)
+			}
+		}
 		if err := writeFileAtomic(installPath, existing, restoreMode); err != nil {
 			return false, fmt.Errorf("%w; restore managed service definition: %v", cause, err)
 		}
@@ -233,7 +249,7 @@ func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() (func
 		}
 		if stoppedForRefresh {
 			release()
-			if _, err := restartManagedService(p); err != nil {
+			if err := startPreparedManagedDaemon(p); err != nil {
 				return false, fmt.Errorf("%w; restart restored managed service: %v", cause, err)
 			}
 		}
@@ -248,10 +264,7 @@ func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() (func
 	}
 	stoppedForRefresh = true
 	release()
-	if _, err := restartManagedService(p); err != nil {
-		return restoreOnFailure(err)
-	}
-	if err := waitForDaemonStart(p, 0, time.Time{}); err != nil {
+	if err := startPreparedManagedDaemon(p); err != nil {
 		return restoreOnFailure(err)
 	}
 	return true, nil
@@ -339,6 +352,12 @@ func waitForManagedServiceExit(p *paths.Paths, timeout time.Duration) error {
 }
 
 func startDetachedDaemon(p *paths.Paths) error {
+	releaseStartup, err := acquireLifecycleLock(p, false)
+	if err != nil {
+		return err
+	}
+	defer releaseStartup()
+
 	cleanupDaemonArtifacts(p)
 
 	exe, err := os.Executable()
@@ -355,6 +374,12 @@ func startDetachedDaemon(p *paths.Paths) error {
 // output appended to the bootstrap log, and waits until that exact child
 // answers on the daemon socket.
 func launchDetachedDaemon(p *paths.Paths, cmd *exec.Cmd) error {
+	releaseStartup, err := acquireLifecycleLock(p, false)
+	if err != nil {
+		return err
+	}
+	defer releaseStartup()
+
 	logFile, err := os.OpenFile(p.DaemonBootstrapLog(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return fmt.Errorf("open daemon bootstrap log: %w", err)
@@ -395,6 +420,12 @@ func launchDetachedDaemon(p *paths.Paths, cmd *exec.Cmd) error {
 }
 
 func startManagedDaemon(p *paths.Paths) error {
+	releaseStartup, err := acquireLifecycleLock(p, false)
+	if err != nil {
+		return err
+	}
+	defer releaseStartup()
+
 	launch, err := prepareManagedDaemonLaunch(p)
 	if err != nil {
 		return fmt.Errorf("inspect managed daemon before launch: %w", err)
@@ -595,12 +626,22 @@ func Stop(p *paths.Paths) error {
 		return err
 	}
 	defer release()
-	return StopForced(p)
+	return StopPrepared(p)
 }
 
-// StopForced stops the daemon without an idle check. Callers must have either
-// prepared shutdown or received an explicit force instruction.
+// StopForced stops the daemon under startup exclusion without an idle check.
 func StopForced(p *paths.Paths) error {
+	release, err := PrepareForcedShutdown(p)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return StopPrepared(p)
+}
+
+// StopPrepared requires the caller to retain the preparation's release callback
+// until this function and any further teardown have finished.
+func StopPrepared(p *paths.Paths) error {
 	instance := captureRunningDaemon(p)
 	if managed, err := stopManagedService(p); managed {
 		var detachedErr error

@@ -327,7 +327,7 @@ func TestStartRestartsSystemdUnitWhenDefinitionChanged(t *testing.T) {
 		switch command {
 		case "systemctl --user stop " + systemdServiceName(p):
 			running = false
-		case "systemctl --user restart " + systemdServiceName(p):
+		case "systemctl --user start " + systemdServiceName(p):
 			running = true
 		}
 		return nil, nil
@@ -342,7 +342,7 @@ func TestStartRestartsSystemdUnitWhenDefinitionChanged(t *testing.T) {
 		"systemctl --user daemon-reload",
 		"systemctl --user enable " + systemdServiceName(p),
 		"systemctl --user stop " + systemdServiceName(p),
-		"systemctl --user restart " + systemdServiceName(p),
+		"systemctl --user start " + systemdServiceName(p),
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %v, want %v", commands, want)
@@ -388,7 +388,7 @@ func TestStartStopsDetachedDaemonBeforeRestartingStaleManagedService(t *testing.
 	serviceCommandRunner = func(name string, args ...string) ([]byte, error) {
 		command := name + " " + strings.Join(args, " ")
 		commands = append(commands, command)
-		if command == "systemctl --user restart "+systemdServiceName(p) {
+		if command == "systemctl --user start "+systemdServiceName(p) {
 			// Same Windows race as above: a socket file still being deleted by
 			// the stopped daemon stats as "Access is denied", which means stopped.
 			alive, err := oldHealthCheck(p)
@@ -594,7 +594,7 @@ func TestStartRestartsRestoredSystemdUnitWhenRefreshRestartFails(t *testing.T) {
 		switch command {
 		case "systemctl --user stop " + systemdServiceName(p):
 			stopped = true
-		case "systemctl --user restart " + systemdServiceName(p):
+		case "systemctl --user start " + systemdServiceName(p):
 			restartAttempts++
 			if restartAttempts == 1 {
 				return nil, fmt.Errorf("restart failed")

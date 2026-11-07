@@ -80,14 +80,21 @@ If the daemon executable path cannot be determined, the update aborts before rep
 The daemon makes the final idle check and closes admission together, including launches still preparing their run row, queued runs, and parked or recovered active runs.
 If admission wins, ordinary maintenance refuses without changing that run.
 If shutdown wins, later launches, source claims, hook admission, and gate responses refuse before changing run state.
-Before stopping a managed service or using a PID fallback, ordinary maintenance requires the daemon's `prepare_shutdown` acknowledgement; a busy, unreadable, or unsupported response aborts the operation.
+Before closing admission, maintenance takes an exclusive OS lock on `daemon-lifecycle.lock` in the same `NM_HOME` as the socket, PID file and singleton lock.
+Every daemon startup entrypoint takes shared access before touching startup resources; a startup parent and its child can hold shared access together without deadlocking on readiness.
+The daemon releases its startup access once it owns the singleton, so an idle live daemon can still be stopped normally.
+Maintenance retains exclusive access through binary replacement, service stop, process exit and artifact cleanup; the old daemon exiting cannot admit a replacement in that interval.
+A conflicting or unreadable lock refuses immediately without retrying or changing admission, and the OS releases ownership if its holder crashes.
+Before stopping a managed service or using a PID fallback, ordinary maintenance also requires the daemon's `prepare_shutdown` acknowledgement; a busy, unreadable, or unsupported response aborts the operation and releases maintenance ownership.
 The acknowledgement leaves the daemon alive with admission closed so the caller can stop its managed service before keep-alive restarts it.
-If no daemon is running, maintenance holds the existing singleton lock through binary replacement and service or PID teardown, excluding daemon startup until teardown finishes.
-Restart operations release that ownership before starting the replacement daemon.
+If no daemon is running, maintenance also holds the existing singleton lock through teardown.
+Explicit force skips the idle acknowledgement but retains the same maintenance exclusion and recursive containment.
+Restart operations release maintenance ownership only after teardown, before starting the intended replacement.
+A prepared service start uses non-destructive start operations rather than stopping a replacement that may already have started; any failed-start rollback must establish maintenance ownership and idle admission again before restoring shared service resources.
 If a later file replacement or service operation fails, admission stays closed until the daemon is stopped and restarted; the command reports its failure.
 An older running daemon cannot gain this boundary from a newly compiled client or binary replacement: a client that cannot obtain the acknowledgement refuses ordinary maintenance.
 Safe bootstrap from such a daemon requires independently established exclusion of every launch, resume, and hook producer before an operator-authorized stop; an idle database snapshot or singleton lock alone does not establish that exclusion.
-This boundary does not coordinate separate concurrent lifecycle operators or prevent an external service manager or operating-system signal from stopping the daemon.
+Concurrent lifecycle operations that cannot acquire the lock refuse; this boundary does not prevent an external service manager or operating-system signal from stopping the daemon, or coordinate startup binaries that predate the lock.
 `no-mistakes daemon start` applies it when it would restart a running daemon to refresh a changed service definition or replace an older daemon that does not support the gate-context RPC; it then refuses before stopping the daemon or rewriting the definition, and takes `--force` the same way.
 When a running daemon does not support that RPC, `daemon start`, `daemon stop`, `daemon restart`, `daemon uninstall`, and `update` check gate execution context locally, including process ancestry, and still refuse callers inside validation steps. `daemon start` then stops the older daemon and installs the current binary in the managed service definition before starting it, as `daemon restart` does.
 That `--force` override is available only to an ordinary top-level caller. A
