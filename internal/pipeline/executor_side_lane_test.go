@@ -19,7 +19,7 @@ func TestExecutor_SideLaneContextIsOfferedToTheReviewStepAlone(t *testing.T) {
 
 	var reviewOffered, testOffered bool
 	var lane *StepContext
-	var laneOK, reviewLaneOK, absentLaneOK bool
+	var laneOK, reviewLaneOK, testLaneOK, absentLaneOK bool
 	var reviewShared *RunShared
 	review := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
 		reviewOffered = sctx.SideLaneContext != nil
@@ -27,9 +27,10 @@ func TestExecutor_SideLaneContextIsOfferedToTheReviewStepAlone(t *testing.T) {
 			return &StepOutcome{}, nil
 		}
 		reviewShared = sctx.Shared
-		lane, laneOK = sctx.SideLaneContext(types.StepTest)
+		lane, laneOK = sctx.SideLaneContext(types.StepDocument)
+		_, testLaneOK = sctx.SideLaneContext(types.StepTest)
 		_, reviewLaneOK = sctx.SideLaneContext(types.StepReview)
-		_, absentLaneOK = sctx.SideLaneContext(types.StepDocument)
+		_, absentLaneOK = sctx.SideLaneContext(types.StepLint)
 		if laneOK {
 			lane.Run.HeadSHA = "moved-by-the-lane"
 		}
@@ -45,7 +46,7 @@ func TestExecutor_SideLaneContextIsOfferedToTheReviewStepAlone(t *testing.T) {
 		}
 		return &StepOutcome{}, nil
 	}}
-	executor := NewExecutor(database, p, cfg, nil, []Step{review, test}, nil)
+	executor := NewExecutor(database, p, cfg, nil, []Step{review, test, newPassStep(types.StepDocument)}, nil)
 	if err := executor.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +58,10 @@ func TestExecutor_SideLaneContextIsOfferedToTheReviewStepAlone(t *testing.T) {
 		t.Fatal("the Test step was offered a side lane context, want the review step alone")
 	}
 	if !laneOK || lane == nil {
-		t.Fatal("no side lane context for the Test step")
+		t.Fatal("no side lane context for the Document step")
+	}
+	if testLaneOK {
+		t.Fatal("Test was offered speculative execution before Review settled")
 	}
 	if reviewLaneOK {
 		t.Fatal("the review step was offered a side lane of itself")
@@ -75,14 +79,14 @@ func TestExecutor_SideLaneContextIsOfferedToTheReviewStepAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var testStepID string
+	var documentStepID string
 	for _, step := range steps {
-		if step.StepName == types.StepTest {
-			testStepID = step.ID
+		if step.StepName == types.StepDocument {
+			documentStepID = step.ID
 		}
 	}
-	if testStepID == "" || lane.StepResultID != testStepID {
-		t.Fatalf("lane step result = %q, want the Test step's own %q", lane.StepResultID, testStepID)
+	if documentStepID == "" || lane.StepResultID != documentStepID {
+		t.Fatalf("lane step result = %q, want the Document step's own %q", lane.StepResultID, documentStepID)
 	}
 	if lane.Config != cfg || lane.Repo != repo || lane.DB != database {
 		t.Fatal("the lane context does not carry the run's config, repository and database")
@@ -126,15 +130,15 @@ func TestExecutor_NoSideLaneForASkippedStep(t *testing.T) {
 			t.Error("the review step was not offered a side lane context under side_by_side")
 			return &StepOutcome{}, nil
 		}
-		_, laneOK = sctx.SideLaneContext(types.StepTest)
+		_, laneOK = sctx.SideLaneContext(types.StepDocument)
 		return &StepOutcome{}, nil
 	}}
-	test := &adaptiveCallStep{name: types.StepTest, fn: func(*StepContext) (*StepOutcome, error) {
-		t.Error("the skipped Test step ran")
+	test := &adaptiveCallStep{name: types.StepDocument, fn: func(*StepContext) (*StepOutcome, error) {
+		t.Error("the skipped Document step ran")
 		return &StepOutcome{}, nil
 	}}
 	executor := NewExecutor(database, p, &config.Config{SideBySide: true}, nil, []Step{review, test}, nil)
-	executor.SetSkippedSteps([]types.StepName{types.StepTest})
+	executor.SetSkippedSteps([]types.StepName{types.StepDocument})
 	if err := executor.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
 		t.Fatal(err)
 	}

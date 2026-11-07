@@ -34,6 +34,7 @@ const (
 	MethodRetryRun                  = "retry_run"
 	MethodSubscribe                 = "subscribe"
 	MethodRespond                   = "respond"
+	MethodRespondReviewScope        = "respond_review_scope"
 	MethodCIHandback                = "ci_handback"
 	MethodAnswerReview              = "answer_review_question"
 	MethodCancelRun                 = "cancel_run"
@@ -364,14 +365,15 @@ type SubscribeParams struct {
 // already decided it, and the daemon refuses the response (leaving the gate
 // parked) when one is left out. An omission is never a decline.
 type RespondParams struct {
-	Origin           types.ResponseOrigin `json:"origin,omitempty"`
-	Coverage         *CoverageBinding     `json:"coverage,omitempty"`
-	RunID            string               `json:"run_id"`
-	Step             types.StepName       `json:"step"`
-	Action           types.ApprovalAction `json:"action"`
-	FindingIDs       []string             `json:"finding_ids,omitempty"`
-	IgnoreFindingIDs []string             `json:"ignore_finding_ids,omitempty"`
-	Instructions     map[string]string    `json:"instructions,omitempty"`
+	ScopeDecision    *types.ReviewScopeDecision `json:"scope_decision,omitempty"`
+	Origin           types.ResponseOrigin       `json:"origin,omitempty"`
+	Coverage         *CoverageBinding           `json:"coverage,omitempty"`
+	RunID            string                     `json:"run_id"`
+	Step             types.StepName             `json:"step"`
+	Action           types.ApprovalAction       `json:"action"`
+	FindingIDs       []string                   `json:"finding_ids,omitempty"`
+	IgnoreFindingIDs []string                   `json:"ignore_finding_ids,omitempty"`
+	Instructions     map[string]string          `json:"instructions,omitempty"`
 	// InstructionsFromDriver marks Instructions as an agent driver's fix
 	// guidance rather than the user's own words.
 	InstructionsFromDriver bool            `json:"instructions_from_driver,omitempty"`
@@ -512,12 +514,13 @@ type RerunResult struct {
 // transport failure: the gate is intact, the caller's response was wrong, and
 // the caller can correct it. Refusal is non-empty exactly when OK is false.
 type RespondResult struct {
-	OK      bool     `json:"ok"`
-	Fixed   []string `json:"fixed,omitempty"`
-	Ignored []string `json:"ignored,omitempty"`
-	Kept    []string `json:"kept,omitempty"`
-	Refusal string   `json:"refusal,omitempty"`
-	Missing []string `json:"missing,omitempty"`
+	ScopeDecisionID string   `json:"scope_decision_id,omitempty"`
+	OK              bool     `json:"ok"`
+	Fixed           []string `json:"fixed,omitempty"`
+	Ignored         []string `json:"ignored,omitempty"`
+	Kept            []string `json:"kept,omitempty"`
+	Refusal         string   `json:"refusal,omitempty"`
+	Missing         []string `json:"missing,omitempty"`
 	// DeclinedEarlierFix names the findings the response tried to decline that
 	// an earlier round of the same step already chose to fix. Reverting an
 	// applied fix is out of scope for a gate response, so the response was

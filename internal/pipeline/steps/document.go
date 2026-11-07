@@ -95,7 +95,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	// Under global side_by_side this pass may have started beside the review.
 	// Its commit is taken only when the run's head is still the commit it was
 	// made on.
-	if outcome, ok, err := takeSideLane(sctx, s.Name()); ok || err != nil {
+	if outcome, ok, err := takeSideLane(sctx); ok || err != nil {
 		return outcome, err
 	}
 	ctx := sctx.Ctx
