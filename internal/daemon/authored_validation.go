@@ -166,30 +166,8 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if _, err := m.db.ValidationFamily(snapshot.Run.ID); err != nil {
 			return "", err
 		}
-		isBoundGateHead := false
-		history, err := m.db.ValidationHistory(snapshot.Run.ID)
-		if err != nil {
+		if err := m.proveAuthoredGateLineage(ctx, snapshot, gateDir, gateHead); err != nil {
 			return "", err
-		}
-		for _, entry := range history {
-			historical := entry.Snapshot
-			heads := []*string{&historical.Run.HeadSHA, historical.Run.SubmittedHeadSHA, historical.Run.LastPushedSHA}
-			if entry.Adoption != nil {
-				heads = append(heads, &entry.Adoption.GateHead)
-			}
-			for _, rounds := range historical.Rounds {
-				for _, round := range rounds {
-					heads = append(heads, round.StartingHeadSHA, round.ReviewedHeadSHA)
-				}
-			}
-			for _, head := range heads {
-				if head != nil && gateHead == *head {
-					isBoundGateHead = true
-				}
-			}
-		}
-		if !isBoundGateHead {
-			return "", fmt.Errorf("gate branch moved outside the immutable predecessor lineage; reconcile its owner before admission")
 		}
 		// Import only the exact object, without changing a branch, tracking ref or FETCH_HEAD.
 		if _, err := git.Run(ctx, gateDir, "fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", request.CallerDir, request.CandidateSHA); err != nil {
@@ -303,6 +281,9 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil || confirmedGateHead != gateHead {
 			return "", fmt.Errorf("gate branch changed during authored admission")
 		}
+		if err := m.proveAuthoredGateLineage(ctx, snapshot, gateDir, gateHead); err != nil {
+			return "", err
+		}
 		if err := proveAuthoredPublication(ctx, &snapshot.Run, repo, request.CallerDir, cfg, forge); err != nil {
 			return "", err
 		}
@@ -373,6 +354,57 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		return child.ID, nil
 	})
 	return result, err
+}
+
+func (m *RunManager) proveAuthoredGateLineage(ctx context.Context, snapshot *db.TerminalSnapshot, gateDir, gateHead string) error {
+	history, err := m.db.ValidationHistory(snapshot.Run.ID)
+	if err != nil {
+		return err
+	}
+	isBoundGateHead := false
+	for _, entry := range history {
+		historical := entry.Snapshot
+		heads := []*string{&historical.Run.HeadSHA, historical.Run.SubmittedHeadSHA, historical.Run.LastPushedSHA}
+		if entry.Adoption != nil {
+			heads = append(heads, &entry.Adoption.GateHead)
+		}
+		for _, rounds := range historical.Rounds {
+			for _, round := range rounds {
+				heads = append(heads, round.StartingHeadSHA, round.ReviewedHeadSHA)
+			}
+		}
+		for _, head := range heads {
+			if head != nil && gateHead == *head {
+				isBoundGateHead = true
+			}
+		}
+		if adoption := entry.Adoption; adoption != nil {
+			if adoption.Successor.HeadSHA != adoption.CandidateSHA || !reflect.DeepEqual(historical.Run.SubmittedHeadSHA, adoption.Successor.SubmittedHeadSHA) {
+				return fmt.Errorf("terminal adoption successor source binding changed")
+			}
+			if adoption.SourceRef != "refs/no-mistakes/terminal-candidate/"+historical.Run.ID {
+				return fmt.Errorf("terminal adoption source anchor identity changed")
+			}
+			anchors := []struct{ ref, head string }{{adoption.SourceRef, adoption.CandidateSHA}, {"refs/no-mistakes/terminal-lane/" + historical.Run.ID, adoption.GateHead}}
+			if adoption.RecoveryHead != "" {
+				anchors = append(anchors, struct{ ref, head string }{custody.RecoveryRef(adoption.Snapshot.Run.ID), adoption.RecoveryHead})
+			}
+			for _, anchor := range anchors {
+				head, exists, err := git.DirectRefTarget(ctx, gateDir, anchor.ref)
+				if err != nil || !exists || head != anchor.head {
+					return fmt.Errorf("terminal adoption anchor %s changed or is unreadable", anchor.ref)
+				}
+			}
+			tree, err := git.Run(ctx, gateDir, "rev-parse", adoption.CandidateSHA+"^{tree}")
+			if err != nil || tree != adoption.CandidateTree {
+				return fmt.Errorf("terminal adoption candidate tree changed or is unreadable")
+			}
+		}
+	}
+	if !isBoundGateHead {
+		return fmt.Errorf("gate branch moved outside the immutable predecessor lineage; reconcile its owner before admission")
+	}
+	return nil
 }
 
 func proveAuthoredCheckout(ctx context.Context, actualDir string, request *authoredvalidation.Request, repo *db.Repo) error {

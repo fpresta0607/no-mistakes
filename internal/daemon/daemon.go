@@ -1768,7 +1768,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return mgr.HandleCIHandback(ctx, request)
 	})
 
-	srv.Handle(ipc.MethodRespond, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+	respond := func(ctx context.Context, params json.RawMessage, isScopeResponse bool) (interface{}, error) {
 		if err := refuseNested(ctx, false); err != nil {
 			return nil, err
 		}
@@ -1776,7 +1776,10 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		dispositions, err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, respondInstructions(p), p.AddedFindings, p.ApprovalReason, pipeline.ResponseOptions{Origin: p.Origin, Coverage: p.Coverage})
+		if isScopeResponse && p.ScopeDecision == nil {
+			return nil, fmt.Errorf("respond_review_scope requires scope_decision")
+		}
+		dispositions, err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, respondInstructions(p), p.AddedFindings, p.ApprovalReason, pipeline.ResponseOptions{Origin: p.Origin, Coverage: p.Coverage, ScopeDecision: p.ScopeDecision})
 		if err != nil {
 			// A refused fix response is the caller's input to fix, not a
 			// transport failure: the gate is still parked. Report it as a
@@ -1788,7 +1791,17 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			}
 			return nil, err
 		}
-		return &ipc.RespondResult{OK: true, Fixed: dispositions.Fixed, Ignored: dispositions.Ignored, Kept: dispositions.Kept}, nil
+		result := &ipc.RespondResult{OK: true, Fixed: dispositions.Fixed, Ignored: dispositions.Ignored, Kept: dispositions.Kept}
+		if p.ScopeDecision != nil {
+			result.ScopeDecisionID = p.ScopeDecision.DecisionID
+		}
+		return result, nil
+	}
+	srv.Handle(ipc.MethodRespond, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		return respond(ctx, params, false)
+	})
+	srv.Handle(ipc.MethodRespondReviewScope, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		return respond(ctx, params, true)
 	})
 
 	srv.Handle(ipc.MethodAnswerReview, func(ctx context.Context, params json.RawMessage) (interface{}, error) {

@@ -312,6 +312,16 @@ CREATE TABLE IF NOT EXISTS run_retries (
 // were created before the referenced columns existed. Each statement must be
 // idempotent via its error being tolerated when the column already exists.
 var migrationStatements = []string{
+	`CREATE TABLE IF NOT EXISTS review_scope_decisions (
+		id TEXT PRIMARY KEY,
+		run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+		step_result_id TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+		round_id TEXT NOT NULL UNIQUE REFERENCES step_rounds(id) ON DELETE CASCADE,
+		decision_json TEXT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS review_scope_decisions_run ON review_scope_decisions(run_id)`,
+	`CREATE TRIGGER IF NOT EXISTS review_scope_decisions_immutable BEFORE UPDATE ON review_scope_decisions BEGIN SELECT RAISE(ABORT, 'review scope decisions are immutable'); END`,
+	`CREATE TRIGGER IF NOT EXISTS review_scope_decisions_no_delete BEFORE DELETE ON review_scope_decisions WHEN EXISTS (SELECT 1 FROM runs WHERE id = OLD.run_id) BEGIN SELECT RAISE(ABORT, 'review scope decisions are immutable'); END`,
 	`CREATE TRIGGER IF NOT EXISTS terminal_adoptions_no_delete BEFORE DELETE ON terminal_adoptions WHEN EXISTS (SELECT 1 FROM runs WHERE id = OLD.run_id) BEGIN SELECT RAISE(ABORT, 'terminal adoption is immutable'); END`,
 	`ALTER TABLE terminal_adoptions ADD COLUMN successor_run_id TEXT REFERENCES runs(id)`,
 	`CREATE UNIQUE INDEX IF NOT EXISTS terminal_adoptions_successor ON terminal_adoptions(successor_run_id)`,

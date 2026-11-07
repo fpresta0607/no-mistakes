@@ -407,7 +407,9 @@ The input is one operator-owned UTF-8 JSON object, at most 64 KiB, with these fi
 | `reason` | A nonempty explicit reason, at most 4096 bytes |
 
 The daemon checks the authenticated caller, registered Git identity, exact clean source, immutable predecessor history, launch selection and publication facts before accepting the child.
-An unresolved native agent safety refusal in the predecessor, or unreadable predecessor findings, refuses admission.
+The gate branch may still name a head bound by an earlier immutable authored admission or terminal adoption, including the adopted root's original submitted head.
+Terminal-adoption links must retain their recorded source, lane and recovery anchors; unrelated Git ancestry supplies no ownership evidence.
+An unresolved native agent safety refusal or unreadable findings anywhere in that immutable lineage refuses admission.
 The declared authored candidate must differ from every head bound in the immutable validation family: submitted, terminal, published and approved review heads, starting and reviewed heads from every stage's rounds, linked terminal source-adoption candidate, retained, gate, recovery and caller heads, and every source-anchor value recorded by an admission.
 This checks recorded identities, never arbitrary Git ancestry.
 Use [terminal validation](#no-mistakes-axi-validate-terminal) to explicitly validate an unchanged failed or cancelled child's terminal head after an infrastructure failure, including an interrupted daemon or a pending acceptance cancelled after the trusted source changed.
@@ -489,6 +491,7 @@ no-mistakes axi respond --action fix --findings F1,F2 --instructions "optional g
 no-mistakes axi respond --action fix --findings F1,F2 --ignore F3
 no-mistakes axi respond --action fix --add-finding '{"description":"...","action":"auto-fix"}'
 no-mistakes axi respond --action fix --findings F1 --instructions-file ./guidance.md
+no-mistakes axi respond --run <id> --step review --action fix --findings F1 --scope-decision-file ./decision.json
 no-mistakes axi respond --action fix --add-finding-file ./finding.json
 no-mistakes axi respond --action skip
 no-mistakes axi respond --step review --action complete-coverage
@@ -532,6 +535,46 @@ Revalidation, a new fix round, or skipping the step clears that current-step app
 This is separate from the configured-command waiver and trusted repository opt-in used by [PR enforcement](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation); neither that policy nor approval authority changes.
 `--instructions` remains fix guidance, not an approval-reason input.
 It is recorded as the driving agent's `driver_instructions`, apart from the TUI's per-finding user instructions: the step's own round history names it as driver guidance that scoped that fix round only, and the decision history carried to other steps and later runs never repeats it as the user's choice.
+
+`--scope-decision-file` carries an explicit accepted scope correction on a Review fix response, separately from `--instructions-file` guidance.
+It requires a single JSON object of at most 32 KiB and refuses `--yes`.
+The managed controller must authenticate its decision maker before submission; native authority is honestly recorded as `controller_assertion`, not proof of a registered primary role.
+Caller-supplied origin or actor text supplies no authentication, and old fixer instructions are never promoted.
+For example:
+
+```json
+{
+  "version": 1,
+  "decision_id": "controller-stable-decision-id",
+  "authority": "controller_assertion",
+  "run_id": "observed-run-id",
+  "step_result_id": "observed-review-step-id",
+  "round_id": "observed-round-id",
+  "source_head_sha": "observed-reviewed-head",
+  "source_base_sha": "observed-run-base",
+  "trusted_config_sha": "observed-trusted-config",
+  "finding": {
+    "id": "F1",
+    "severity": "error",
+    "description": "Original finding text",
+    "action": "ask-user"
+  },
+  "accepted_scope": "Scale command/startup/run-wait budgets; retain fixed cleanup/reaper/fallback bounds."
+}
+```
+
+Copy the original finding's complete typed content, including its file, line, source and category when present, rather than reconstructing it from terminal prose.
+Read the bound round and its provenance with `axi rounds --step review --run <id> --json`, and the current head and base with `axi status --run <id>`.
+Acceptance requires that reviewed head in a readable, clean run worktree and the executor's current trusted configuration identity.
+The named finding must be selected in the same response; all other fix-response accounting rules still apply.
+Acceptance atomically stores the scope assertion and selection before dispatch and returns `accepted_scope` with the bound record.
+The native IPC method is `respond_review_scope`, using ordinary respond parameters plus a required, non-null `scope_decision`; its success includes the matching `scope_decision_id`.
+An older daemon refuses the unknown method without receiving an ordinary response; there is no fallback.
+Identical retries on the same still-parked round retain one record; changed identities, source, finding content or scope are refused.
+Only one scope decision may be accepted per round, and total scope history is bounded to 64 KiB without silently dropping accepted decisions.
+The read-only [`axi rounds`](#no-mistakes-axi-rounds) export exposes the stored decision and source identities.
+Original intent, findings, failed evidence and cumulative spending remain historical records; a scope decision grants no pass or extra repair allowance and never transfers to another run.
+Managed-driver role enforcement and forwarding are required before claiming end-to-end activation.
 
 `--action abort` rejects the parked gate and is the same gate-level abort the executor already has, now reachable from the agent surface.
 It requires `--reason`, so a rejection is never recorded without the operator's explanation.
@@ -889,8 +932,11 @@ An active run's export is a snapshot; a subsequent call may include more rounds 
 ### JSON contract (version 1)
 
 The top-level keys are `schema_version` (currently `1`), `run_id`, `step`, and `rounds` (an ordered array).
+Review exports also include `scope_decisions` when accepted decisions exist, using the [`--scope-decision-file`](#no-mistakes-axi-respond) record shape.
 Each round has these fields:
 
+- `id` and `step_result_id`: the stored round and owning step identities.
+- `reviewed_head_sha` and `trusted_config_sha`: the recorded reviewed head and trusted configuration identity, or `null` when unavailable.
 - `round`: the step-local round number; identify a round by `(run_id, step, round)`, not by finding ID alone.
 - `trigger`: the recorded execution trigger, such as `initial`, `auto_fix`, legacy `user_fix`, `coverage`, `answer`, or `retry`; consumers must allow new trigger values.
 - `summary` and `findings`: the round's complete summary and array of finding objects, or `null` when absent.
@@ -908,7 +954,7 @@ Each round has these fields:
 - `duration_ms` and `created_at`: recorded duration in milliseconds and creation time in Unix seconds.
 
 Consumers should tolerate additive fields and new source/origin values; incompatible changes require a new `schema_version`.
-The export excludes internal configuration snapshots and does not publish anything remotely, but finding descriptions and instructions can still contain private repository information.
+The export excludes internal configuration snapshots and does not publish anything remotely, but finding descriptions, instructions and accepted scope can still contain private repository information.
 
 ## no-mistakes axi handoff
 
