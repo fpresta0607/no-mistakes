@@ -68,15 +68,28 @@ func verifyCIHandbackValidationHeads(sctx *pipeline.StepContext, run *db.Run, va
 		return fmt.Errorf("publication revalidation requires historical validation proof")
 	}
 	testedHead := ""
+	firstReviewedHead := ""
+	hasCompletedRebase := false
 	hasReviewedHead := false
 	for index, step := range validation.Steps {
 		rounds := validation.Rounds[index]
-		if len(rounds) == 0 {
+		if step.RunID != run.ID || len(rounds) == 0 {
 			return fmt.Errorf("publication revalidation has no historical %s round", step.StepName)
 		}
+		for _, round := range rounds {
+			if round.StepResultID != step.ID {
+				return fmt.Errorf("publication revalidation round ownership changed")
+			}
+		}
 		latest := rounds[len(rounds)-1]
+		if step.StepName == types.StepRebase {
+			hasCompletedRebase = step.Status == types.StepStatusCompleted && step.ExitCode != nil && *step.ExitCode == 0
+		}
 		if step.StepName == types.StepReview {
 			hasReviewedHead = latest.ReviewedHeadSHA != nil && *latest.ReviewedHeadSHA == *run.ReviewApprovedHeadSHA
+			if hasCompletedRebase && rounds[0].ReviewedHeadSHA != nil {
+				firstReviewedHead = *rounds[0].ReviewedHeadSHA
+			}
 		}
 		if step.StepName == types.StepTest {
 			if step.FindingsJSON == nil || latest.FindingsJSON == nil || *step.FindingsJSON != *latest.FindingsJSON {
@@ -93,11 +106,35 @@ func verifyCIHandbackValidationHeads(sctx *pipeline.StepContext, run *db.Run, va
 		return fmt.Errorf("publication revalidation requires recorded Review and Test heads")
 	}
 	heads := []string{*run.SubmittedHeadSHA, *run.ReviewApprovedHeadSHA, testedHead, run.HeadSHA}
+	if _, err := stepGitRun(sctx, "merge-base", "--is-ancestor", heads[0], heads[1]); err != nil {
+		// Rebase may rewrite the submitted object before Review. Prove that
+		// exact replay at the first reviewed boundary, never at a later head
+		// that could include repair or post-validation commits.
+		if firstReviewedHead == "" {
+			return fmt.Errorf("publication revalidation requires a completed Rebase and its first Review head")
+		}
+		fork, err := stepGitRun(sctx, "merge-base", heads[0], firstReviewedHead)
+		if err != nil {
+			return fmt.Errorf("publication revalidation submitted source has no Rebase history")
+		}
+		commits, err := linearChain(sctx, fork, heads[0])
+		if err != nil || len(commits) == 0 {
+			return fmt.Errorf("publication revalidation submitted source is not a replayable chain")
+		}
+		base, err := stepGitRun(sctx, "rev-parse", "--verify", fmt.Sprintf("%s~%d^{commit}", firstReviewedHead, len(commits)))
+		if err != nil {
+			return fmt.Errorf("publication revalidation Rebase target is missing")
+		}
+		if reason := pureReplayGap(sctx, heads[0], base, firstReviewedHead); reason != "" {
+			return fmt.Errorf("publication revalidation cannot prove submitted source through Rebase: %s", reason)
+		}
+		heads = append([]string{heads[0], firstReviewedHead}, heads[1:]...)
+	}
 	for index, head := range heads {
 		if resolved, err := stepGitRun(sctx, "rev-parse", "--verify", head+"^{commit}"); err != nil || resolved != head {
 			return fmt.Errorf("publication revalidation head is missing or ambiguous")
 		}
-		if index > 0 {
+		if index > 0 && !(index == 1 && head == firstReviewedHead) {
 			if _, err := stepGitRun(sctx, "merge-base", "--is-ancestor", heads[index-1], head); err != nil {
 				return fmt.Errorf("publication revalidation requires submitted, reviewed, tested and published ancestry")
 			}
