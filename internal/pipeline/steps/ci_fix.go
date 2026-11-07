@@ -357,6 +357,7 @@ CI logs:
 		}
 		return ciRepairResult{}, fmt.Errorf("agent CI fix: %w", err)
 	}
+	logRepairResult(sctx, result)
 
 	conclusion, conclusionErr := extractCIFixConclusion(result)
 	if conclusionErr != nil {

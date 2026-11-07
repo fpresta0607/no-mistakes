@@ -677,10 +677,7 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		}
 		return "", fmt.Errorf("%s: %w", opts.ErrorPrefix, err)
 	}
-	if result.Text != "" && result.Text != string(result.Output) {
-		sctx.LogFile(result.Text)
-	}
-	sctx.LogFile(string(result.Output))
+	logRepairResult(sctx, result)
 	if opts.AfterAgentRun != nil {
 		if err := opts.AfterAgentRun(result); err != nil {
 			return "", err
@@ -705,6 +702,13 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		logBlockedVerification(sctx, blockedVerification(result), committed || headAfterAgent != headBeforeAgent)
 	}
 	return fixResultSummary(committed), nil
+}
+
+func logRepairResult(sctx *pipeline.StepContext, result *agent.Result) {
+	if result.Text != "" && result.Text != string(result.Output) {
+		sctx.LogFile(result.Text)
+	}
+	sctx.LogFile(string(result.Output))
 }
 
 func updateNonSharedBranchRef(sctx *pipeline.StepContext, headSHA string) error {

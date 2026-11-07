@@ -3006,6 +3006,13 @@ func (e *Executor) reconcileTerminalRunHead(run *db.Run) (string, bool) {
 	if !e.preserveUnpublishedTerminalHead(ctx, recordedRun, observed) {
 		return "", false
 	}
+	if observed != recorded {
+		if err := e.db.UpdateRunHeadSHA(run.ID, observed); err != nil {
+			slog.Warn("failed to record preserved terminal head", "run", run.ID, "error", err)
+			return "", false
+		}
+		run.HeadSHA = observed
+	}
 	isDirty, statusErr := git.HasUncommittedChangesIncludingHidden(ctx, e.workDir)
 	sourceState := "clean:" + observed
 	if statusErr != nil {

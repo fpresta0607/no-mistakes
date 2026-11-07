@@ -13,9 +13,11 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -28,6 +30,7 @@ func TestReviewExecutor_FixSummaryPreservesSourceAndCustody(t *testing.T) {
 		commit           config.Commit
 		shouldRefuse     bool
 		shouldFailCommit bool
+		hasAgentCommit   bool
 		hasNoOutput      bool
 		priorFixes       int
 	}{
@@ -46,6 +49,11 @@ func TestReviewExecutor_FixSummaryPreservesSourceAndCustody(t *testing.T) {
 			FixMessage: strings.Repeat("{{.Branch}}", 15) + "{{.Summary}}", BranchPattern: "(feature)", BranchReplacement: strings.Repeat("b", 300) + "${1}",
 		}},
 		{name: "commit refusal after prior repair", summary: "repair source", shouldRefuse: true, shouldFailCommit: true, priorFixes: 1},
+		{name: "summary refusal after agent commit", summary: strings.Repeat("a", 4097), shouldRefuse: true, hasAgentCommit: true},
+		{name: "render refusal after agent commit", summary: "repair source", shouldRefuse: true, hasAgentCommit: true, commit: config.Commit{
+			FixMessage: strings.Repeat("{{.Branch}}", 15) + "{{.Summary}}", BranchPattern: "(feature)", BranchReplacement: strings.Repeat("b", 300) + "${1}",
+		}},
+		{name: "commit refusal after conforming agent commit", summary: "repair source", shouldRefuse: true, shouldFailCommit: true, hasAgentCommit: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -62,6 +70,13 @@ func TestReviewExecutor_FixSummaryPreservesSourceAndCustody(t *testing.T) {
 			ag := &mockAgent{name: "fixture", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 				if opts.Purpose == "review-fix" {
 					fixes++
+					if test.hasAgentCommit {
+						if err := os.WriteFile(filepath.Join(opts.CWD, "agent-committed.txt"), []byte("committed repair\n"), 0o600); err != nil {
+							return nil, err
+						}
+						gitCmd(t, opts.CWD, "add", "agent-committed.txt")
+						gitCmd(t, opts.CWD, "commit", "-m", "agent repair")
+					}
 					for _, name := range []string{"feature.txt", "staged.txt", "untracked.txt"} {
 						if err := os.WriteFile(filepath.Join(opts.CWD, name), []byte("completed repair\n"), 0o600); err != nil {
 							return nil, err
@@ -75,7 +90,9 @@ func TestReviewExecutor_FixSummaryPreservesSourceAndCustody(t *testing.T) {
 						if err := os.WriteFile(filepath.Join(opts.CWD, "untracked.txt"), []byte("completed second repair\n"), 0o600); err != nil {
 							return nil, err
 						}
-						if err := os.WriteFile(filepath.Join(opts.CWD, ".git", "HEAD.lock"), nil, 0o600); err != nil {
+						if test.hasAgentCommit {
+							gitCmd(t, opts.CWD, "config", "commit.cleanup", "invalid")
+						} else if err := os.WriteFile(filepath.Join(opts.CWD, ".git", "HEAD.lock"), nil, 0o600); err != nil {
 							return nil, err
 						}
 					}
@@ -101,6 +118,14 @@ func TestReviewExecutor_FixSummaryPreservesSourceAndCustody(t *testing.T) {
 			}
 			sctx.Config.AutoFix.Review = test.priorFixes + 1
 			sctx.Config.Commit = test.commit
+			callerDir := ""
+			if test.hasAgentCommit {
+				callerDir = t.TempDir()
+				gitCmd(t, callerDir, "clone", "--branch", "feature", workDir, ".")
+				if err := sctx.DB.SetRunWorktreeDir(sctx.Run.ID, workDir); err != nil {
+					t.Fatal(err)
+				}
+			}
 			appPaths := paths.WithRoot(t.TempDir())
 			executor := pipeline.NewExecutor(sctx.DB, appPaths, sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -110,6 +135,9 @@ func TestReviewExecutor_FixSummaryPreservesSourceAndCustody(t *testing.T) {
 
 			if (err != nil) != test.shouldRefuse {
 				t.Fatalf("Execute error = %v, should refuse = %v", err, test.shouldRefuse)
+			}
+			if test.hasAgentCommit && test.shouldFailCommit && !strings.Contains(err.Error(), "commit review changes") {
+				t.Fatalf("Execute error = %v, want refusal after conforming the agent commit", err)
 			}
 			if fixes != test.priorFixes+1 {
 				t.Fatalf("fix calls = %d, want %d", fixes, test.priorFixes+1)
@@ -174,6 +202,37 @@ func TestReviewExecutor_FixSummaryPreservesSourceAndCustody(t *testing.T) {
 				if staged := gitCmd(t, workDir, "show", ":staged.txt"); staged != "completed repair" {
 					t.Errorf("staged source lost: %q", staged)
 				}
+				if test.hasAgentCommit {
+					preserved := gitCmd(t, workDir, "rev-parse", "HEAD")
+					if preserved == head || snapshot.Run.HeadSHA != preserved || sctx.Run.HeadSHA != preserved {
+						t.Fatalf("terminal head = %s, in-memory head = %s, want preserved descendant %s", snapshot.Run.HeadSHA, sctx.Run.HeadSHA, preserved)
+					}
+					if anchored := gitCmd(t, workDir, "rev-parse", custody.RecoveryRef(sctx.Run.ID)); anchored != preserved {
+						t.Fatalf("recovery anchor = %s, want %s", anchored, preserved)
+					}
+					if snapshot.Run.TerminalSourceState == nil || *snapshot.Run.TerminalSourceState != "dirty:"+preserved || gitCmd(t, workDir, "show", "HEAD:agent-committed.txt") != "committed repair" {
+						t.Fatal("terminal source observation lost the committed repair")
+					}
+					if test.shouldFailCommit {
+						if got := lastCommitMessage(t, workDir); got != "no-mistakes(review): repair source" {
+							t.Fatalf("agent commit was not conformed before refusal: %q", got)
+						}
+						gitCmd(t, workDir, "config", "--unset", "commit.cleanup")
+					}
+					service.WorkDir = callerDir
+					if _, err := service.TerminalSource(ctx, &snapshot.Run); err == nil {
+						t.Fatal("dirty source was accepted for continuation")
+					}
+					gitCmd(t, workDir, "add", "-A")
+					gitCmd(t, workDir, "commit", "-m", "preserve remaining repair")
+					source, err := service.TerminalSource(ctx, &snapshot.Run)
+					if err != nil {
+						t.Fatalf("committed repair cannot continue: %v", err)
+					}
+					if source.RecoveryHead != preserved || source.Head != gitCmd(t, workDir, "rev-parse", "HEAD") {
+						t.Fatalf("continuation lost preserved repair: %+v", source)
+					}
+				}
 				return
 			}
 			if snapshot.Run.Status != types.RunCompleted || gitCmd(t, workDir, "status", "--porcelain") != "" {
@@ -193,6 +252,69 @@ func TestReviewExecutor_FixSummaryPreservesSourceAndCustody(t *testing.T) {
 			}
 			if len(test.summary) > 4000 && utf8.RuneCountInString(subject) > 100 {
 				t.Error("generated summary was not bounded for a commit subject")
+			}
+		})
+	}
+}
+
+func TestRepairResult_RenderRefusalPreservesRawOutput(t *testing.T) {
+	t.Parallel()
+	for _, step := range []types.StepName{types.StepLint, types.StepCI} {
+		t.Run(string(step), func(t *testing.T) {
+			t.Parallel()
+			workDir, base, head := setupGitRepo(t)
+			output := json.RawMessage(`{"findings":[],"summary":"repair source","code_change_needed":true}`)
+			const rawText = "raw structured repair explanation"
+			ag := &mockAgent{name: "fixture", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				if err := os.WriteFile(filepath.Join(opts.CWD, "feature.txt"), []byte("completed repair\n"), 0o600); err != nil {
+					return nil, err
+				}
+				return &agent.Result{Output: output, Text: rawText}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, workDir, base, head, config.Commands{})
+			sctx.Config.Commit = config.Commit{
+				FixMessage: strings.Repeat("{{.Branch}}", 15) + "{{.Summary}}", BranchPattern: "(feature)", BranchReplacement: strings.Repeat("b", 300) + "${1}",
+			}
+			logPath := filepath.Join(t.TempDir(), string(step)+".log")
+			log, err := os.Create(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { log.Close() })
+			sctx.LogFile = func(text string) {
+				if _, err := log.WriteString(text + "\n"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var visibleLog strings.Builder
+			sctx.Log = func(text string) { visibleLog.WriteString(text + "\n") }
+
+			if step == types.StepLint {
+				_, err = (&LintStep{}).Execute(sctx)
+			} else {
+				pr := &scm.PR{Number: "42", URL: "https://github.com/test/repo/pull/42"}
+				_, err = (&CIStep{}).autoFixCI(sctx, &forgejoLogTestHost{}, pr, ciTargetsFor([]string{"test"}, false))
+			}
+
+			if err == nil || !strings.Contains(err.Error(), "must not render to more than 4096 bytes") {
+				t.Fatalf("repair error = %v, want rendered-message refusal", err)
+			}
+			if len(ag.calls) != 1 {
+				t.Fatalf("agent calls = %d, want one repair turn", len(ag.calls))
+			}
+			if err := log.Close(); err != nil {
+				t.Fatal(err)
+			}
+			recorded, err := os.ReadFile(logPath)
+			if err != nil || !strings.Contains(string(recorded), string(output)) || !strings.Contains(string(recorded), rawText) {
+				t.Fatalf("file-only log lost the raw repair result: %q, error=%v", recorded, err)
+			}
+			if strings.Contains(visibleLog.String(), string(output)) || strings.Contains(visibleLog.String(), rawText) {
+				t.Fatal("raw repair result escaped the file-only log")
+			}
+			content, err := os.ReadFile(filepath.Join(workDir, "feature.txt"))
+			if err != nil || string(content) != "completed repair\n" || gitCmd(t, workDir, "rev-parse", "HEAD") != head {
+				t.Fatalf("rendering refusal lost completed source or moved HEAD: %v", err)
 			}
 		})
 	}

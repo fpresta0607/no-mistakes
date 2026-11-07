@@ -141,6 +141,7 @@ Previous lint findings to address:
 		if err != nil {
 			return nil, fmt.Errorf("agent lint: %w", err)
 		}
+		logRepairResult(sctx, result)
 
 		var findings Findings
 		if result.Output == nil {
