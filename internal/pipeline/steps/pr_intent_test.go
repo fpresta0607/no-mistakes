@@ -258,6 +258,87 @@ func TestPRPrivateValidationCountsSnapshots(t *testing.T) {
 	}
 }
 
+func TestPRPrivateValidationMetadataSurvivesAzureCap(t *testing.T) {
+	t.Parallel()
+	const privateText = "Synthetic private acceptance criterion"
+	const notice = "Validation text withheld because intent publication is disabled. Full results remain in the local run record."
+	const counts = "Recorded finding counts by snapshot: Review: final 1, rounds [1: 2, 2: 1]; Test: final 0, rounds [1: 0]."
+	for _, mode := range []string{config.PRAppendixFull, config.PRAppendixCollapsed, config.PRAppendixMinimal} {
+		for _, path := range []string{"ordinary", "fallback"} {
+			t.Run(mode+"/"+path, func(t *testing.T) {
+				dir, base, _ := setupGitRepo(t)
+				for index := range 80 {
+					name := fmt.Sprintf("synthetic-%03d-%s.txt", index, strings.Repeat("x", 48))
+					if err := os.WriteFile(filepath.Join(dir, name), []byte("public fixture\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				gitCmd(t, dir, "add", ".")
+				gitCmd(t, dir, "commit", "-m", "add synthetic paths")
+				head := gitCmd(t, dir, "rev-parse", "HEAD")
+				finalDiff := gitCmd(t, dir, "diff", "--name-status", base+".."+head)
+				if len(finalDiff) <= 4000 {
+					t.Fatal("fallback fixture must exceed Azure's description cap")
+				}
+				ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					if path == "fallback" {
+						return nil, errors.New("draft unavailable")
+					}
+					body := "## What Changed\n\nPublic description to preserve.\n" + strings.Repeat("- Public change notes \U0001F600.\n", 300)
+					output, err := json.Marshal(prContent{Title: "fix: update synthetic paths", Body: body})
+					return &agent.Result{Output: output}, err
+				}}
+				sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+				sctx.Config.PR.Appendix = mode
+				sctx.UserIntent = privateText
+				sctx.ClosingIssueRefs = []string{"64"}
+				initial := findingsJSON(t, types.Findings{Items: []types.Finding{{ID: "r1", Description: privateText}, {ID: "r2", Description: privateText}}})
+				final := findingsJSON(t, types.Findings{Items: []types.Finding{{ID: "r1", Description: privateText}}})
+				review := insertCompletedStep(t, sctx, types.StepReview, initial, "")
+				if _, err := sctx.DB.InsertStepRound(review.ID, 2, "auto_fix", &final, nil, 10); err != nil {
+					t.Fatal(err)
+				}
+				if err := sctx.DB.SetStepFindings(review.ID, final); err != nil {
+					t.Fatal(err)
+				}
+				testing := findingsJSON(t, types.Findings{
+					TestingSummary: privateText, Verdict: "go", TestedHeadSHA: head,
+					Scenarios: []types.TestScenario{{Name: privateText, Result: "pass", Live: true, Evidence: privateText}},
+				})
+				insertCompletedStep(t, sctx, types.StepTest, testing, "")
+
+				content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", base, scm.ProviderAzureDevOps, 4000)
+
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scm.PRBodyLen(content.Body) > 4000 {
+					t.Fatalf("Azure description exceeds 4000 UTF-16 units: %d", scm.PRBodyLen(content.Body))
+				}
+				for _, required := range []string{notice, counts, "## What Changed", "Closes #64"} {
+					if !strings.Contains(content.Body, required) {
+						t.Errorf("capped description lost %q:\n%s", required, content.Body)
+					}
+				}
+				if path == "ordinary" && !strings.Contains(content.Body, "Public description to preserve.") {
+					t.Error("capped description discarded the start of the public narrative")
+				}
+				expectedAttestation := pipelineAttestationCommentPrefix + fmt.Sprintf(`{"head_sha":%q,"steps":[{"step":"review","status":"completed"},{"step":"test","status":"completed"}],"live_validation":{"verdict":"go","live":1,"total":1}}`, head) + pipelineAttestationCommentClosingToken
+				if extractPipelineAttestationMarker(content.Body) != expectedAttestation || strings.Count(content.Body, pipelineAttestationCommentPrefix) != 1 {
+					t.Error("capped description changed the exact head-bound attestation or lifecycle statuses")
+				}
+				if strings.Contains(content.Body, privateText) {
+					t.Error("capped description published private validation text")
+				}
+				stored, err := sctx.DB.GetRoundsByStep(review.ID)
+				if err != nil || len(stored) != 2 || stored[0].FindingsJSON == nil || *stored[0].FindingsJSON != initial || stored[1].FindingsJSON == nil || *stored[1].FindingsJSON != final {
+					t.Fatalf("publication changed the local finding snapshots: %+v, %v", stored, err)
+				}
+			})
+		}
+	}
+}
+
 func TestPRValidationTextPublicationUsesTrustedPolicy(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

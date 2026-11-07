@@ -1008,7 +1008,8 @@ func assemblePRBodyCoreWithinLimit(sctx *pipeline.StepContext, whatChanged, risk
 	if prefixBudget <= 0 {
 		return header
 	}
-	prefix = scm.ClampPRBody(prefix, prefixBudget)
+	riskTail := generatedEssentialSections(neutralizeAttestationMarkers(provider, riskLine), "")
+	prefix = shrinkMeasuredKeepingTail(prefix, riskTail, prefixBudget, scm.PRBodyLen, scm.ClampPRBody)
 	if scm.PRBodyLen(prefix) > prefixBudget {
 		prefix = ""
 		separator = ""
