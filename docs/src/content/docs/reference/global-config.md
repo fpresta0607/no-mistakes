@@ -1822,6 +1822,7 @@ Local review-evaluation corpus settings for [`no-mistakes eval`](/no-mistakes/re
 | `eval.diversified_size`   | `int`  | `32`    | Cap on the official gold-only `diversified` set; `0` is one gold case per stratum |
 
 `capture_provenance` is what makes a review pass replayable at all. It is recorded when the round is written and cannot be added afterwards, because the pinned configuration is a point-in-time snapshot, so a run reviewed with it off can never be captured later.
+New Review rounds retain their trusted configuration SHA even with this setting off, so [explicit scope decisions](/no-mistakes/reference/cli/#no-mistakes-axi-respond) remain source-bound without storing eval configuration snapshots.
 
 `auto_capture` collects without any command: when an eligible run finishes, its decided review rounds become cases and fixed `ci-check` and `ci-review-bot` findings become Review false negatives. It does nothing while `capture_provenance` is off. Collection runs after the pipeline has already reported its outcome and can never change it; a failure is logged and nothing else. The [Evaluation toolkit](/no-mistakes/reference/eval/#how-cases-are-collected) owns eligibility and labeling details.
 

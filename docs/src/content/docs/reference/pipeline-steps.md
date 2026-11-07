@@ -76,8 +76,7 @@ Every subsequent agent turn in that run, including Review repair and rereview, T
 It supersedes conflicting historical requirements only for the named concern; actual failed evidence remains intact, and new correctness or security regressions still block with concrete evidence.
 Ordinary fix guidance never becomes scope authority, and another run never inherits this assertion or a pass from it.
 Changed bindings, conflicting replays, malformed records and unavailable authority refuse acceptance or the next agent turn with an actionable error; the gate response remains unapplied when acceptance fails.
-Test starts only after Review and its accepted scope have settled, including after daemon recovery.
-Speculative Document results are discarded when Review accepts an explicit scope decision, so Document validates the accepted scope at its own turn.
+The [`side_by_side` reference](/no-mistakes/reference/global-config/#side_by_side) owns ordered Test execution and speculative Document invalidation after a scope decision.
 This changes prompt context, not the repair ledger, frozen policy, source certification or the evidence required to publish.
 
 ## Intent
@@ -291,7 +290,7 @@ Updates matching documentation for code changes and reports only unresolved gaps
 - In both standalone and combined document+lint passes, treats runtime-loaded prompt files and text as executable behavior, including Markdown or prose, and prohibits rewording them as documentation cleanup. It also prohibits restoring tests or content deliberately removed by the branch, using the diff and intent to distinguish deliberate removals from stale documentation
 - `document.instructions` can add trusted default-branch ownership rules for the repository, and a matching machine-local [`repository_overrides`](/no-mistakes/reference/global-config/#machine-local-review-documentation-and-test-guidance) entry can add the operator's own, in a separate labeled section
 - When `commands.lint` is empty, performs documentation and agent-driven lint in one combined housekeeping invocation, categorizing findings for the document or lint gate; if that pass is skipped, its structured output is unusable, or a daemon restart loses the in-memory result, lint runs its own agent pass instead
-- With global [`side_by_side`](/no-mistakes/reference/global-config/#side_by_side) set and `commands.lint` configured, the pass may already have run beside the review in a throwaway clone. Its commit is taken at the step's turn, as a fast-forward, only when the run's head is still the commit the review read and the commit changes no path the run's worktree holds uncommitted changes to. Otherwise it says why in the step log and runs here, subject to the refusal exception in the global reference
+- Global [`side_by_side`](/no-mistakes/reference/global-config/#side_by_side) may start this pass beside Review; that reference owns eligibility, adoption and refusal rules.
 - Includes user intent when available and instructs the agent to respect its file restrictions, with later recorded human decisions superseding conflicting original intent. A documentation repair that cannot respect those restrictions is reported as an unresolved finding
 - Returns findings only for unresolved documentation gaps or human judgment calls
 - Requires approval whenever any unresolved documentation finding is returned, including `info` findings

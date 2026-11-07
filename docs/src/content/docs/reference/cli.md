@@ -563,13 +563,14 @@ For example:
 
 Copy the original finding's complete typed content, including its file, line, source and category when present, rather than reconstructing it from terminal prose.
 Read the bound round and its provenance with `axi rounds --step review --run <id> --json`, and the current head and base with `axi status --run <id>`.
+Acceptance requires that reviewed head in a readable, clean run worktree and the executor's current trusted configuration identity.
 The named finding must be selected in the same response; all other fix-response accounting rules still apply.
 Acceptance atomically stores the scope assertion and selection before dispatch and returns `accepted_scope` with the bound record.
-The native IPC method is `respond_review_scope`, using ordinary respond parameters plus `scope_decision`; its success includes the matching `scope_decision_id`.
+The native IPC method is `respond_review_scope`, using ordinary respond parameters plus a required, non-null `scope_decision`; its success includes the matching `scope_decision_id`.
 An older daemon refuses the unknown method without receiving an ordinary response; there is no fallback.
 Identical retries on the same still-parked round retain one record; changed identities, source, finding content or scope are refused.
 Only one scope decision may be accepted per round, and total scope history is bounded to 64 KiB without silently dropping accepted decisions.
-Review's `axi rounds` export includes the accepted `scope_decisions` and round IDs, step IDs, reviewed heads and trusted configuration identities.
+The read-only [`axi rounds`](#no-mistakes-axi-rounds) export exposes the stored decision and source identities.
 Original intent, findings, failed evidence and cumulative spending remain historical records; a scope decision grants no pass or extra repair allowance and never transfers to another run.
 Managed-driver role enforcement and forwarding are required before claiming end-to-end activation.
 
@@ -929,8 +930,11 @@ An active run's export is a snapshot; a subsequent call may include more rounds 
 ### JSON contract (version 1)
 
 The top-level keys are `schema_version` (currently `1`), `run_id`, `step`, and `rounds` (an ordered array).
+Review exports also include `scope_decisions` when accepted decisions exist, using the [`--scope-decision-file`](#no-mistakes-axi-respond) record shape.
 Each round has these fields:
 
+- `id` and `step_result_id`: the stored round and owning step identities.
+- `reviewed_head_sha` and `trusted_config_sha`: the recorded reviewed head and trusted configuration identity, or `null` when unavailable.
 - `round`: the step-local round number; identify a round by `(run_id, step, round)`, not by finding ID alone.
 - `trigger`: the recorded execution trigger, such as `initial`, `auto_fix`, legacy `user_fix`, `coverage`, `answer`, or `retry`; consumers must allow new trigger values.
 - `summary` and `findings`: the round's complete summary and array of finding objects, or `null` when absent.
@@ -948,7 +952,7 @@ Each round has these fields:
 - `duration_ms` and `created_at`: recorded duration in milliseconds and creation time in Unix seconds.
 
 Consumers should tolerate additive fields and new source/origin values; incompatible changes require a new `schema_version`.
-The export excludes internal configuration snapshots and does not publish anything remotely, but finding descriptions and instructions can still contain private repository information.
+The export excludes internal configuration snapshots and does not publish anything remotely, but finding descriptions, instructions and accepted scope can still contain private repository information.
 
 ## no-mistakes axi handoff
 
