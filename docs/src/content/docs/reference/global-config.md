@@ -1686,7 +1686,7 @@ For PR-drafting context and publication, see [`pr.publish_intent`](/no-mistakes/
 
 Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `pi`, and `copilot`.
 
-`intent.publish_intent: false` records a caller-side omission of intent from the generated `## Intent` section and PR-drafting context.
+`intent.publish_intent: false` records a caller-side omission under the repository's [intent and validation publication policy](/no-mistakes/reference/repo-config/#prpublish_intent).
 The default `true` leaves publication to the repository's trusted [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
 A run records the folded decision (the `axi run --no-publish-intent` flag OR this global default) at start; reruns inherit it, and a mid-run config change never re-publishes.
 This field is global-only: a pushed branch's `.no-mistakes.yaml` cannot express it.
@@ -1741,7 +1741,9 @@ For GitLab image uploads from that run directory, see [Pull request](/no-mistake
 ### test.evidence
 
 Test-step evidence storage settings.
-By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>`. [`evidence_dir`](#evidence_dir) moves that parent for new runs. On GitHub.com/GHEC, supported image and video artifacts are also uploaded when the PR is rendered; see `attach_media` below.
+By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>`.
+[`evidence_dir`](#evidence_dir) moves that parent for new runs.
+PR artifact rendering, uploads, and evidence-branch publication described below follow [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
 
 |      |          |
 | ---- | -------- |

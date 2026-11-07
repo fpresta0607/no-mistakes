@@ -321,12 +321,13 @@ Intent is withheld from public drafting, never scanned out of its output.
 
 Recorded validation output can quote or paraphrase the full intent, so when publication is off its free-form text is withheld from the generated PR body in every appendix mode.
 This includes finding descriptions, risk rationale, testing summaries, scenario names and evidence, fix summaries, errors, review conversations, and embedded or attached Test artifacts.
+The PR step also skips evidence-branch publication while validation publication is off.
 The body instead reports step lifecycle statuses and recorded finding counts with an explicit withholding notice; the machine-readable attestation retains its original head binding, statuses, override metadata, and live-validation counts.
 Finding counts label each round and the final snapshot separately, including retained rounds for carried steps, rather than summing repeated observations of the same findings.
 Missing or unreadable snapshots report unavailable counts.
 Full findings and proof remain in the local run record, and validation agents still receive the complete intent.
 Trusted opt-in restores the recorded validation text; caller-side omission withholds it even when the repository opts in.
-This does not filter author-written narrative, sensitive information present in the diff, or files separately published through opt-in evidence storage.
+This does not filter author-written narrative or sensitive information present in the diff, or remove artifacts published by earlier runs.
 No caller-written public-body override is introduced by this setting.
 
 ### pr.intent
@@ -353,7 +354,8 @@ This format structures the Intent section; it is not a general PR-body privacy f
 
 ### pr.appendix
 
-Choose how much of the generated Risk, Testing, and Pipeline tail is visible after the narrative. Intent publication stays under [`pr.publish_intent`](#prpublish_intent).
+Choose how much of the generated Risk, Testing, and Pipeline tail is visible after the narrative.
+Intent and recorded validation publication follow [`pr.publish_intent`](#prpublish_intent) in every mode.
 
 | | |
 | --- | --- |
@@ -362,11 +364,15 @@ Choose how much of the generated Risk, Testing, and Pipeline tail is visible aft
 | Default | Missing or empty inherits machine-local defaults; see [appendix precedence](/no-mistakes/reference/global-config/#prappendix) |
 | Trust | Trusted default branch only, regardless of `allow_repo_commands`; the pushed branch cannot choose this mode |
 
-`full` is today's body: `## Risk Assessment`, `## Testing`, and `## Pipeline` follow the narrative, in that order.
+`full` places `## Risk Assessment`, `## Testing` (when published), and `## Pipeline` after the narrative, in that order.
 
 `collapsed` folds those three sections into one closed `Validation` details block. The narrative, and the Intent section when it is published, stay outside the block. Within the body limit, opening the block shows the same recorded evidence `full` would have published. If an ordinary body exceeds the limit, Testing is dropped before pipeline history is shortened; the attestation is retained. Bitbucket Cloud escapes raw HTML, so `collapsed` stays on the `full` appendix there instead of printing the details tags as text.
 
-`minimal` keeps a single risk line (the recorded level and rationale, on one line) and the pipeline attestation. Testing logs, pipeline round history, and the Risk and Pipeline headings are omitted. The attestation marker stays in its host-specific form: an HTML comment on GitHub, GitLab, Gitea, Forgejo, Azure, Cursor Origin, and provider plugins, and a visible text fence on an owned Bitbucket description. Ordinary unowned Bitbucket descriptions still omit the comment.
+`minimal` keeps a single risk line and the pipeline attestation.
+The line contains the recorded level and rationale when publication is permitted, or the withholding notice and finding counts otherwise.
+Testing logs, pipeline round history, and the Risk and Pipeline headings are omitted.
+The attestation marker stays in its host-specific form: an HTML comment on GitHub, GitLab, Gitea, Forgejo, Azure, Cursor Origin, and provider plugins, and a visible text fence on an owned Bitbucket description.
+Ordinary unowned Bitbucket descriptions still omit the comment.
 
 GitLab's separate image Evidence section is unaffected by this setting; see [Pull request](/no-mistakes/reference/pipeline-steps/#pull-request).
 
