@@ -414,7 +414,11 @@ func startPreparedManagedDaemon(p *paths.Paths) error {
 		return err
 	}
 	defer release()
-	launchStarted := daemonStartupNow()
+	launch, err := prepareManagedDaemonLaunch(p)
+	if err != nil {
+		return fmt.Errorf("inspect managed daemon before launch: %w", err)
+	}
+	launch.notBefore = daemonStartupNow()
 	if runtimeGOOS == "darwin" && !serviceManagerBypassed() {
 		domain, err := launchdDomainTarget()
 		if err != nil {
@@ -427,7 +431,7 @@ func startPreparedManagedDaemon(p *paths.Paths) error {
 	} else if _, err := startManagedService(p); err != nil {
 		return err
 	}
-	return waitForDaemonStartWithProcess(p, nil, nil, 0, time.Time{}, managedServiceLaunch{notBefore: launchStarted})
+	return waitForDaemonStartWithProcess(p, nil, nil, 0, time.Time{}, launch)
 }
 
 func reloadManagedServiceDefinition(p *paths.Paths) error {

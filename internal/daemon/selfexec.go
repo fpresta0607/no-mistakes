@@ -97,7 +97,9 @@ func StartGuarded(p *paths.Paths, beforeRestart func() (func(), error)) error {
 		return err
 	}
 	defer releaseStartup()
-	if alive, _ := daemonHealthCheck(p); alive {
+	if alive, err := daemonHealthCheck(p); err != nil {
+		return fmt.Errorf("cannot confirm daemon ownership; refusing start: %w", err)
+	} else if alive {
 		releaseStartup()
 		reloaded, err := reinstallManagedServiceIfChanged(p, beforeRestart)
 		if err != nil {
@@ -108,18 +110,20 @@ func StartGuarded(p *paths.Paths, beforeRestart func() (func(), error)) error {
 		}
 		return fmt.Errorf("daemon already running")
 	}
-	// Canonical socket is dead. A daemon for the same logical root may still be
-	// alive under a different path spelling (symlinked or relative NM_HOME),
-	// which the socket-keyed health check above cannot see. Detect via the OS
-	// process list: refuse if a healthy stray is serving this root, or reap a
-	// stale stray (including a crash-looping managed unit) before starting.
-	if err := reconcileCollidingDaemons(p); err != nil {
+	releaseStartup()
+	releasePreparation, err := prepareAbsentDaemonStartup(p)
+	if err != nil {
 		return err
+	}
+	defer releasePreparation()
+	if managedServiceInstalled(p) {
+		resetFailedManagedService(p)
 	}
 	var managedErr error
 	if managed, err := installManagedService(p); err == nil {
 		if managed {
-			if err := startManagedDaemon(p); err == nil {
+			releasePreparation()
+			if err := startPreparedManagedDaemon(p); err == nil {
 				return nil
 			} else {
 				managedErr = err
@@ -138,6 +142,7 @@ func StartGuarded(p *paths.Paths, beforeRestart func() (func(), error)) error {
 		managedErr = fmt.Errorf("install managed service: %w", err)
 	}
 
+	releasePreparation()
 	fallbackErr := startDetachedDaemon(p)
 	if fallbackErr == nil {
 		return nil
@@ -305,6 +310,14 @@ func stopCurrentDaemonBeforeManagedRestart(p *paths.Paths) error {
 }
 
 func stopManagedFallback(p *paths.Paths) error {
+	if err := reconcileCollidingDaemons(p); err != nil {
+		return fmt.Errorf("inspect managed cleanup ownership: %w", err)
+	}
+	release, err := PrepareShutdownIfIdle(p)
+	if err != nil {
+		return fmt.Errorf("prepare managed cleanup: %w", err)
+	}
+	defer release()
 	managed, err := stopManagedService(p)
 	if !managed {
 		return nil
@@ -354,13 +367,11 @@ func waitForManagedServiceExit(p *paths.Paths, timeout time.Duration) error {
 }
 
 func startDetachedDaemon(p *paths.Paths) error {
-	releaseStartup, err := acquireLifecycleLock(p, false)
+	releasePreparation, err := prepareAbsentDaemonStartup(p)
 	if err != nil {
 		return err
 	}
-	defer releaseStartup()
-
-	cleanupDaemonArtifacts(p)
+	defer releasePreparation()
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -369,6 +380,7 @@ func startDetachedDaemon(p *paths.Paths) error {
 
 	cmd := exec.Command(exe, "daemon", "run", "--root", p.Root())
 	cmd.Env = upsertEnv(os.Environ(), "NM_HOME", p.Root())
+	releasePreparation()
 	return launchDetachedDaemon(p, cmd)
 }
 
@@ -419,28 +431,6 @@ func launchDetachedDaemon(p *paths.Paths, cmd *exec.Cmd) error {
 		exitCh <- waitErr
 	}()
 	return waitForDaemonStartWithProcess(p, cmd.Process, exitCh, pid, startedAt, managedServiceLaunch{})
-}
-
-func startManagedDaemon(p *paths.Paths) error {
-	releaseStartup, err := acquireLifecycleLock(p, false)
-	if err != nil {
-		return err
-	}
-	defer releaseStartup()
-
-	launch, err := prepareManagedDaemonLaunch(p)
-	if err != nil {
-		return fmt.Errorf("inspect managed daemon before launch: %w", err)
-	}
-	launch.notBefore = daemonStartupNow()
-	if _, err := startManagedService(p); err != nil {
-		if alive, _ := daemonHealthCheck(p); alive {
-			return nil
-		}
-		return err
-	}
-	slog.Info("managed daemon launched")
-	return waitForDaemonStartWithProcess(p, nil, nil, 0, time.Time{}, launch)
 }
 
 func waitForDaemonStart(p *paths.Paths, pid int, startedAt time.Time) error {
@@ -849,13 +839,13 @@ func staleDaemonArtifacts(p *paths.Paths) (bool, error) {
 	if err != nil && !missingSocket {
 		return false, fmt.Errorf("stat daemon socket: %w", err)
 	}
-	if err == nil && info.Mode()&os.ModeSocket == 0 && !daemonEndpointUsesRegularFile() {
-		return true, nil
-	}
 	pid, err := ReadPID(p)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if missingSocket {
+				return true, nil
+			}
+			if info.Mode()&os.ModeSocket == 0 && !daemonEndpointUsesRegularFile() {
 				return true, nil
 			}
 			if daemonEndpointUsesRegularFile() {
@@ -1058,6 +1048,7 @@ func EnsureDaemon(p *paths.Paths) error {
 	if alive {
 		return nil
 	}
+	releaseStartup()
 	return daemonStart(p)
 }
 

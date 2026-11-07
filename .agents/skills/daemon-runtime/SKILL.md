@@ -35,6 +35,7 @@ metadata:
   `lifecycle_lock.go` owns one OS lock at `paths.LifecycleLockFile`: startup entrypoints take shared access before resources or singleton acquisition, and maintenance takes exclusive access before preparing admission through complete teardown.
   Parent and child startup access is compatible; the running daemon releases startup access after singleton acquisition, so live idle maintenance still works.
   Order is lifecycle then singleton, never the reverse; conflicts fail immediately and process death releases the OS lock.
+  `prepareAbsentDaemonStartup` retains both locks through stale cleanup and installation; collision inspection is read-only, and `stopManagedFallback` requires ordinary shutdown preparation.
   Ordinary callers require `prepare_shutdown`, with busy/unreadable/unsupported daemons failing closed; force skips that idle check but takes the same maintenance lock.
   `Stop` acquires its own preparation; CLI/updater callers retain ordinary or explicit force preparation while using `StopPrepared`, avoiding nested exclusive acquisition.
   `UninstallGuarded` checks service existence before invoking preparation.

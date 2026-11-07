@@ -36,11 +36,9 @@ func PrepareShutdownIfIdle(p *paths.Paths) (func(), error) {
 			}
 			isStale, inspectErr = staleDaemonArtifacts(p)
 			if inspectErr == nil && isStale {
-				for _, artifact := range []string{p.Socket(), p.PIDFile()} {
-					if err := os.Remove(artifact); err != nil && !os.IsNotExist(err) {
-						lock.Release()
-						return nil, fmt.Errorf("remove stale daemon artifact %s: %w; refusing lifecycle operation", artifact, err)
-					}
+				if err := removeStaleDaemonArtifacts(p); err != nil {
+					lock.Release()
+					return nil, err
 				}
 				isPrepared = true
 				return sync.OnceFunc(func() {
@@ -62,4 +60,50 @@ func PrepareShutdownIfIdle(p *paths.Paths) (func(), error) {
 	}
 	isPrepared = true
 	return release, nil
+}
+
+// prepareAbsentDaemonStartup retains both locks while startup replaces stale
+// artifacts and service definitions. A live owner requires shutdown preparation
+// through the ordinary or explicitly forced lifecycle path instead.
+func prepareAbsentDaemonStartup(p *paths.Paths) (func(), error) {
+	releaseLifecycle, err := acquireLifecycleLock(p, true)
+	if err != nil {
+		return nil, err
+	}
+	lock, err := acquireSingletonLock(p)
+	if err != nil {
+		releaseLifecycle()
+		return nil, fmt.Errorf("cannot establish absent daemon ownership; refusing start: %w", err)
+	}
+	release := sync.OnceFunc(func() {
+		lock.Release()
+		releaseLifecycle()
+	})
+	if err := reconcileCollidingDaemons(p); err != nil {
+		release()
+		return nil, err
+	}
+	isStale, err := staleDaemonArtifacts(p)
+	if err != nil {
+		release()
+		return nil, fmt.Errorf("inspect absent daemon ownership; refusing start: %w", err)
+	}
+	if !isStale {
+		release()
+		return nil, fmt.Errorf("daemon ownership is not proven absent; refusing start")
+	}
+	if err := removeStaleDaemonArtifacts(p); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
+}
+
+func removeStaleDaemonArtifacts(p *paths.Paths) error {
+	for _, artifact := range []string{p.Socket(), p.PIDFile()} {
+		if err := os.Remove(artifact); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove stale daemon artifact %s: %w; refusing lifecycle operation", artifact, err)
+		}
+	}
+	return nil
 }

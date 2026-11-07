@@ -111,6 +111,9 @@ A refusal leaves the daemon running and the service definition unchanged; `--for
 When a running daemon does not support that RPC, `daemon start`, `daemon stop`, `daemon restart`, `daemon uninstall`, and `update` check gate execution context locally, including process ancestry, and still refuse callers inside validation steps.
 That local check does not supply a `prepare_shutdown` acknowledgement: ordinary `daemon start` and `daemon restart` refuse an older daemon that cannot confirm admission closure.
 Replacing such a daemon requires the independently established bootstrap exclusion described above, not merely a new client or an idle database snapshot.
+Ordinary startup refuses an unreadable process listing or a live, unresponsive owner under another spelling of the same root instead of killing it.
+For a proven absent owner, startup retains lifecycle and singleton ownership through stale-artifact cleanup and service installation, then releases them before the non-destructive replacement start.
+Cleanup after a failed managed start must establish ordinary shutdown preparation before stopping the service or attempting a detached fallback.
 That `--force` override is available only to an ordinary top-level caller. A
 process descended from an active validation-step agent cannot start, stop,
 restart, uninstall, or update the daemon; recursive containment refuses the command before

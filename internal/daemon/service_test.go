@@ -1788,3 +1788,232 @@ func stubServiceRuntime(t *testing.T) func() {
 		serviceManagerBypassed = oldServiceBypass
 	}
 }
+
+func TestStartGuardedRefusesUnconfirmedOwnerBeforeMutation(t *testing.T) {
+	for _, scenario := range []string{"health_error", "live_pid_without_socket", "unreadable_pid", "alternate_unresponsive", "enumeration_error", "singleton_without_pid"} {
+		t.Run(scenario, func(t *testing.T) {
+			p := paths.WithRoot(t.TempDir())
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			defer stubServiceRuntime(t)()
+			runtimeGOOS = "linux"
+			home := t.TempDir()
+			serviceUserHomeDir = func() (string, error) { return home, nil }
+			serviceExecutablePath = func() (string, error) { return "/new/no-mistakes", nil }
+			definition := systemdUserServicePath(p)
+			if err := os.MkdirAll(filepath.Dir(definition), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			original := []byte("[Service]\nExecStart=/old/no-mistakes daemon run\n")
+			if err := os.WriteFile(definition, original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			oldList, oldRunning, oldKill := daemonListDaemonProcesses, daemonProcessRunning, daemonKillPID
+			t.Cleanup(func() { daemonListDaemonProcesses, daemonProcessRunning, daemonKillPID = oldList, oldRunning, oldKill })
+			daemonProcessRunning = func(int) (bool, error) { return true, nil }
+			var kills int
+			daemonKillPID = func(int) error { kills++; return nil }
+			daemonListDaemonProcesses = func() ([]daemonProcessInfo, error) {
+				switch scenario {
+				case "enumeration_error":
+					return nil, errors.New("ownership inspection unavailable")
+				case "alternate_unresponsive":
+					return []daemonProcessInfo{{PID: 424242, Root: p.Root() + string(os.PathSeparator)}}, nil
+				case "health_error":
+					return []daemonProcessInfo{{PID: 424242, Root: p.Root()}}, nil
+				default:
+					return nil, nil
+				}
+			}
+			if scenario == "live_pid_without_socket" || scenario == "health_error" {
+				writeDaemonPIDRecord(t, p.PIDFile(), daemonPIDFile{PID: 424242})
+			}
+			if scenario == "unreadable_pid" {
+				if err := os.WriteFile(p.PIDFile(), []byte("unreadable identity"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "singleton_without_pid" {
+				lock, err := acquireSingletonLock(p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer lock.Release()
+			}
+			beforePID, pidErr := os.ReadFile(p.PIDFile())
+			daemonHealthCheck = func(*paths.Paths) (bool, error) {
+				if scenario == "health_error" {
+					return false, errors.New("health response unavailable")
+				}
+				return false, nil
+			}
+			var commands []string
+			serviceCommandRunner = func(name string, args ...string) ([]byte, error) {
+				command := name + " " + strings.Join(args, " ")
+				commands = append(commands, command)
+				if strings.Contains(command, " start ") || strings.Contains(command, " stop ") {
+					return nil, errors.New("fake service refuses launch and cleanup")
+				}
+				return nil, nil
+			}
+			if err := StartGuarded(p, func() (func(), error) {
+				return nil, errors.New("ordinary restart not authorized")
+			}); err == nil {
+				t.Error("ordinary start accepted unconfirmed ownership")
+			}
+			if kills != 0 || len(commands) != 0 {
+				t.Errorf("unconfirmed owner reached mutation: kills=%d service=%v", kills, commands)
+			}
+			if data, err := os.ReadFile(definition); err != nil || string(data) != string(original) {
+				t.Errorf("unconfirmed owner service definition changed: %q, %v", data, err)
+			}
+			afterPID, afterErr := os.ReadFile(p.PIDFile())
+			if string(afterPID) != string(beforePID) || os.IsNotExist(afterErr) != os.IsNotExist(pidErr) {
+				t.Errorf("unconfirmed owner identity changed: %q, %v", afterPID, afterErr)
+			}
+			if _, err := os.Stat(p.DaemonBootstrapLog()); !os.IsNotExist(err) {
+				t.Errorf("unconfirmed owner reached detached launch: %v", err)
+			}
+		})
+	}
+}
+
+func TestManagedFallbackRefusesUnconfirmedOwnerBeforeServiceStop(t *testing.T) {
+	for _, scenario := range []string{"live_owner", "unreadable_listing"} {
+		t.Run(scenario, func(t *testing.T) {
+			p := paths.WithRoot(t.TempDir())
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			defer stubServiceRuntime(t)()
+			runtimeGOOS = "linux"
+			home := t.TempDir()
+			serviceUserHomeDir = func() (string, error) { return home, nil }
+			definition := systemdUserServicePath(p)
+			if err := os.MkdirAll(filepath.Dir(definition), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(definition, []byte("[Service]\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "live_owner" {
+				writeDaemonPIDRecord(t, p.PIDFile(), daemonPIDFile{PID: 424242})
+			}
+			oldRunning, oldList := daemonProcessRunning, daemonListDaemonProcesses
+			t.Cleanup(func() { daemonProcessRunning, daemonListDaemonProcesses = oldRunning, oldList })
+			daemonListDaemonProcesses = func() ([]daemonProcessInfo, error) {
+				if scenario == "unreadable_listing" {
+					return nil, errors.New("ownership inspection unavailable")
+				}
+				return nil, nil
+			}
+			daemonProcessRunning = func(int) (bool, error) { return true, nil }
+			daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, errors.New("health unavailable") }
+			var commands []string
+			serviceCommandRunner = func(name string, args ...string) ([]byte, error) {
+				commands = append(commands, name+" "+strings.Join(args, " "))
+				return nil, errors.New("fake service stop failed")
+			}
+			if err := stopManagedFallback(p); err == nil {
+				t.Fatal("fallback accepted an unconfirmed live owner")
+			}
+			if len(commands) != 0 {
+				t.Fatalf("unconfirmed owner reached fallback teardown: %v", commands)
+			}
+		})
+	}
+}
+
+func TestEnsureDaemonRecoversDeadOwnerUnderBothLocksBeforeManagedStart(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.Socket(), []byte("dead endpoint"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeDaemonPIDRecord(t, p.PIDFile(), daemonPIDFile{PID: 424242})
+	defer stubServiceRuntime(t)()
+	runtimeGOOS = "linux"
+	home := t.TempDir()
+	serviceUserHomeDir = func() (string, error) { return home, nil }
+	serviceExecutablePath = func() (string, error) { return "/new/no-mistakes", nil }
+	definition := systemdUserServicePath(p)
+	if err := os.MkdirAll(filepath.Dir(definition), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(definition, []byte("[Service]\nExecStart=/old/no-mistakes daemon run\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldList, oldRunning, oldStart := daemonListDaemonProcesses, daemonProcessRunning, daemonStart
+	t.Cleanup(func() { daemonListDaemonProcesses, daemonProcessRunning, daemonStart = oldList, oldRunning, oldStart })
+	daemonStart = Start
+	daemonListDaemonProcesses = func() ([]daemonProcessInfo, error) {
+		return []daemonProcessInfo{{PID: 424242, Root: p.Root() + string(os.PathSeparator)}}, nil
+	}
+	daemonProcessRunning = func(int) (bool, error) { return false, nil }
+	isReady := false
+	daemonHealthCheck = func(*paths.Paths) (bool, error) { return isReady, nil }
+	var commands []string
+	serviceCommandRunner = func(name string, args ...string) ([]byte, error) {
+		command := name + " " + strings.Join(args, " ")
+		commands = append(commands, command)
+		if strings.Contains(command, " start ") {
+			lock, err := acquireSingletonLock(p)
+			if err != nil {
+				t.Fatalf("replacement cannot acquire singleton: %v", err)
+			}
+			lock.Release()
+			release, err := acquireLifecycleLock(p, false)
+			if err != nil {
+				t.Fatalf("replacement startup still excluded: %v", err)
+			}
+			release()
+			isReady = true
+		} else {
+			if release, err := acquireLifecycleLock(p, false); err == nil {
+				release()
+				t.Error("service installation lost maintenance exclusion")
+			}
+			if lock, err := acquireSingletonLock(p); err == nil {
+				lock.Release()
+				t.Error("service installation lost absent-owner singleton")
+			}
+		}
+		if socket, pid := artifactsExist(p); socket || pid {
+			t.Error("dead-owner artifacts survived into service installation")
+		}
+		return nil, nil
+	}
+	if err := EnsureDaemon(p); err != nil {
+		t.Fatalf("dead-owner recovery failed: %v", err)
+	}
+	if !isReady || len(commands) != 4 || !containsCmd(commands, "systemctl --user reset-failed "+systemdServiceName(p)) {
+		t.Fatalf("missing managed start: ready=%t, commands=%v", isReady, commands)
+	}
+}
+
+func TestDetachedStartRefusesHeldSingletonBeforeArtifactCleanup(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.Socket(), []byte("retain endpoint"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := acquireSingletonLock(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	if err := startDetachedDaemon(p); !errors.Is(err, ErrSingletonLockHeld) {
+		t.Fatalf("held singleton did not refuse detached start: %v", err)
+	}
+	if data, err := os.ReadFile(p.Socket()); err != nil || string(data) != "retain endpoint" {
+		t.Fatalf("held owner endpoint changed: %q, %v", data, err)
+	}
+	if _, err := os.Stat(p.DaemonBootstrapLog()); !os.IsNotExist(err) {
+		t.Fatalf("held owner reached replacement launch: %v", err)
+	}
+}

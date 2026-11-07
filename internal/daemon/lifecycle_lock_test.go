@@ -82,7 +82,6 @@ func TestMaintenanceBlocksEveryStartupEntrypoint(t *testing.T) {
 		"start":     func() error { return Start(p) },
 		"ensure":    func() error { return EnsureDaemon(p) },
 		"detached":  func() error { return startDetachedDaemon(p) },
-		"managed":   func() error { return startManagedDaemon(p) },
 		"launch":    func() error { return launchDetachedDaemon(p, exec.Command("must-not-launch")) },
 		"prepared":  func() error { return startPreparedManagedDaemon(p) },
 	} {
