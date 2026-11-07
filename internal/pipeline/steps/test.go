@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -134,13 +134,18 @@ func (s *TestStep) execute(sctx *pipeline.StepContext, desktop string) (*pipelin
 	if evidenceDir == "" {
 		return nil, fmt.Errorf("test evidence dir is not configured for this run")
 	}
-	scratchDir := filepath.Join(evidenceDir, testScratchDirName)
-	if err := os.MkdirAll(scratchDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create test scratch dir: %w", err)
+	if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create test evidence dir: %w", err)
+	}
+	scratchDir, err := newTestScratch("", runtime.GOOS)
+	if err != nil {
+		return nil, err
 	}
 	defer func() {
 		if err := os.RemoveAll(scratchDir); err != nil {
 			sctx.Log(fmt.Sprintf("warning: failed to remove test scratch dir %s: %v", scratchDir, err))
+		} else {
+			sctx.Log("removed owned Test scratch: " + scratchDir)
 		}
 	}()
 	// Every command and agent this step starts keeps its temporary files there
@@ -148,8 +153,8 @@ func (s *TestStep) execute(sctx *pipeline.StepContext, desktop string) (*pipelin
 	// existed, its agent pointed TEMP into the worktree instead, and the runs
 	// left 597 files in it (fpresta0607/code-goblins#1316).
 	env := sctx.Env
-	sctx.Env = append(append([]string(nil), env...), "TMP="+scratchDir, "TEMP="+scratchDir, "TMPDIR="+scratchDir)
 	defer func() { sctx.Env = env }()
+	hostGuidance := prepareTestHost(sctx, scratchDir)
 
 	// Agent-only preparation is an explicit eager opt-in, not a claim from
 	// the agent that dependencies exist. Use the same worktree receipt and
@@ -219,7 +224,7 @@ Rules:
 			baseSHA,
 			sctx.Run.HeadSHA,
 			testRunbookSections(sctx),
-			testScratchGuidance(scratchDir)+testDesktopGuidance(desktop),
+			hostGuidance+testDesktopGuidance(desktop),
 			fixSummaryRules(sctx, s.Name()),
 			historySection,
 		) + testRepairScopeRules
@@ -440,7 +445,7 @@ Rules:
 		configuredTestCommand,
 		runbook,
 		evidenceTurnLimit(sctx),
-		testScratchGuidance(scratchDir)+testDesktopGuidance(desktop),
+		hostGuidance+testDesktopGuidance(desktop),
 		evidenceGuidance,
 		fallbackGuidance,
 		reassessHistory,
@@ -755,8 +760,7 @@ Validation errors:
 }
 
 // testScratchGuidance gives the evidence and repair turns their disposable
-// workspace, scratchDir, which this step deletes itself (see
-// testScratchDirName).
+// workspace, scratchDir, allocated by newTestScratch and deleted by this step.
 func testScratchGuidance(scratchDir string) string {
 	return fmt.Sprintf("- Your disposable workspace is this scratch directory outside the worktree: %s. Put everything you create only to drive or check the change there, never in the worktree: throwaway scripts, data, logs, and the profiles and caches of what you run. no-mistakes deletes it when this step ends, so keep evidence files and intended source or test changes out of it.", scratchDir)
 }

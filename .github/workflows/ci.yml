@@ -168,12 +168,55 @@ jobs:
       # 594s and timed out at 600s with no test hung on runners up to ~1.9x
       # slower across the board, and internal/daemon and internal/cli reached
       # the same limit (issue #73). 20m clears that variation for every one of
-      # them. The heavy packages queue behind each other, so pipeline/steps can
-      # start ~12 minutes into this step; 20m still lands a real hang as a
-      # goroutine dump well before timeout-minutes cancels the job.
+      # them. pipeline/steps then outgrew it again: it timed out at 1201s in the
+      # merge train while internal/daemon passed the same run at 1136s, with
+      # every parked goroutine a t.Parallel waiter and the three running tests a
+      # second old or less - exhausted capacity, not a hang. Running the whole
+      # suite one package at a time (-p=1) gave each package the runner but
+      # summed every package's wall and overran the 40m job cap on both Unix
+      # legs, so the two packages whose own wall exceeds the budget are split by
+      # test name, the -run/-skip partition the Windows rows already use, and
+      # every binary starts at once: pipeline/steps into three complementary
+      # shards, internal/daemon into two, and the rest of the suite at -p=2
+      # beside them. Each shard is about 600s of one core's wall, so no binary
+      # approaches its own 20m budget while the leg still finishes near 30m.
+      # The remainder package set is computed once from go list filtered by
+      # NM_CI_UNIX_SHARD_EXCLUDE, and the step fails closed when that listing
+      # fails or leaves nothing, so a resolution failure cannot quietly run the
+      # repository root alone. No test, timeout or coverage is given up, and a
+      # hang in any shard still lands as a goroutine dump inside
+      # timeout-minutes.
       - name: Test on Unix
         if: runner.os != 'Windows'
-        run: go test -race -timeout=20m ./...
+        env:
+          NM_CI_UNIX_SHARD_EXCLUDE: '/(internal/pipeline/steps|internal/daemon)$'
+        run: |
+          if ! packages=$(go list ./...); then
+            echo "::error::go list ./... failed; refusing to run a narrowed suite" >&2
+            exit 1
+          fi
+          rest=$(printf '%s\n' "$packages" | grep -Ev "$NM_CI_UNIX_SHARD_EXCLUDE" || true)
+          if [ -z "$rest" ]; then
+            echo "::error::go list ./... left no Unix remainder packages; refusing to run a narrowed suite" >&2
+            exit 1
+          fi
+          status=0
+          go test -race -timeout=20m -p=2 $rest &
+          pids=$!
+          go test -race -timeout=20m -run '^Test[A-K]' ./internal/pipeline/steps &
+          pids="$pids $!"
+          go test -race -timeout=20m -run '^Test[L-Q]' ./internal/pipeline/steps &
+          pids="$pids $!"
+          go test -race -timeout=20m -skip '^Test[A-Q]' ./internal/pipeline/steps &
+          pids="$pids $!"
+          go test -race -timeout=20m -run '^Test[A-O]' ./internal/daemon &
+          pids="$pids $!"
+          go test -race -timeout=20m -skip '^Test[A-O]' ./internal/daemon &
+          pids="$pids $!"
+          for pid in $pids; do
+            wait "$pid" || status=1
+          done
+          exit $status
 
       # Git-heavy packages are the Windows wall floor. NM_CI_WINDOWS_GIT_EXCLUDE
       # on the core shard is the union of the git, steps, daemon, gate,

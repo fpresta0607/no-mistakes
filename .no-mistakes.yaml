@@ -2,8 +2,9 @@
 # Local Test is intentionally empty: the Test step is targeted validation of the
 # requested intent (agent-driven smallest relevant checks + evidence), never a
 # repository-wide regression suite. Broad race-enabled Go coverage stays in
-# remote CI (`go test -race ./...` in .github/workflows/ci.yml) and remains
-# mandatory before a PR is ready. See docs/src/content/docs/reference/repo-config.md
+# remote CI (see .github/workflows/ci.yml and
+# .agents/skills/testing-conventions/SKILL.md) and remains mandatory before a
+# PR is ready. See docs/src/content/docs/reference/repo-config.md
 # (commands.test) and docs/src/content/docs/reference/pipeline-steps.md (Test).
 # Lint and format stay explicit so those gates stay deterministic.
 
