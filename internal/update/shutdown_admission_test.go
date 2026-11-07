@@ -14,6 +14,37 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
 
+func TestDefaultResetDaemonStartsExpectedDaemonWithoutArtifacts(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	release, err := daemon.PrepareShutdownIfIdle(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	oldRunning, oldStop, oldStart := daemonIsRunning, daemonStop, daemonStart
+	t.Cleanup(func() { daemonIsRunning, daemonStop, daemonStart = oldRunning, oldStop, oldStart })
+	daemonIsRunning, daemonStop = daemon.IsRunning, daemon.StopPrepared
+	isStarted := false
+	daemonStart = func(p *paths.Paths) error {
+		releaseStartup, err := daemon.PrepareForcedShutdown(p)
+		if err != nil {
+			return fmt.Errorf("replacement still excluded: %w", err)
+		}
+		releaseStartup()
+		isStarted = true
+		return nil
+	}
+	if err := defaultResetDaemon(p, true, "", release); err != nil {
+		t.Fatal(err)
+	}
+	if !isStarted {
+		t.Fatal("cleared artifacts discarded the earlier daemonExpected snapshot")
+	}
+}
+
 func TestUpdaterRetainsStartupExclusionThroughReset(t *testing.T) {
 	for _, mode := range []string{"absent", "live", "force"} {
 		t.Run(mode, func(t *testing.T) {

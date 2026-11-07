@@ -36,7 +36,7 @@ metadata:
   Parent and child startup access is compatible; the running daemon releases startup access after singleton acquisition, so live idle maintenance still works.
   Order is lifecycle then singleton, never the reverse; conflicts fail immediately and process death releases the OS lock.
   Ordinary callers require `prepare_shutdown`, with busy/unreadable/unsupported daemons failing closed; force skips that idle check but takes the same maintenance lock.
-  `Stop` and `StopForced` acquire their own preparation; CLI/updater callers retain preparation while using `StopPrepared`, avoiding nested exclusive acquisition.
+  `Stop` acquires its own preparation; CLI/updater callers retain ordinary or explicit force preparation while using `StopPrepared`, avoiding nested exclusive acquisition.
   `UninstallGuarded` checks service existence first, and both absent-daemon singleton ownership and live-daemon maintenance ownership survive actual teardown.
   Release before replacement startup; a prepared service start never bootouts, restarts or uses kickstart -k, and rollback must reacquire preparation before touching shared service resources.
   Regressions: `TestMaintenanceRetainsExclusionAfterLiveDaemonExit`, `TestMaintenanceBlocksEveryStartupEntrypoint`, `TestLifecycleStartupParentAndChildShareExclusion`, `TestLifecycleLockCrashReleasesMaintenance`, `TestIdleMaintenanceStopsLiveDaemonAndReleasesStartup`, `TestBusyMaintenanceRefusalReleasesExclusionAndKeepsAdmission`, `TestDaemonLifecycleRetainsStartupExclusion`, `TestUpdaterRetainsStartupExclusionThroughReset`.

@@ -1,14 +1,128 @@
 package daemon
 
 import (
+	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
+
+func TestManagedStopClearsStaleOwnerUnderRetainedLocks(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		if err := os.WriteFile(p.Socket(), []byte("stale endpoint"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: p.Socket(), Net: "unix"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		listener.SetUnlinkOnClose(false)
+		listener.Close()
+	}
+	started := time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)
+	writeDaemonPIDRecord(t, p.PIDFile(), daemonPIDFile{PID: 424242, StartedAt: started})
+	fakeDaemonProcess(t, false, started)
+	defer stubServiceRuntime(t)()
+	runtimeGOOS = "windows"
+	daemonHealthCheck = daemonIsRunningViaIPC
+	t.Setenv("NM_TEST_DAEMON_STOP_TIMEOUT", "25ms")
+	oldKill := daemonKillPID
+	t.Cleanup(func() { daemonKillPID = oldKill })
+	daemonKillPID = func(int) error { t.Error("attempted to kill a dead owner"); return fmt.Errorf("unexpected kill") }
+	isStopped := false
+	serviceCommandRunner = func(_ string, args ...string) ([]byte, error) {
+		if args[0] == "/Query" {
+			return nil, nil
+		}
+		if args[0] != "/End" {
+			t.Fatalf("unexpected service command: %v", args)
+		}
+		isStopped = true
+		if socket, pid := artifactsExist(p); socket || pid {
+			t.Error("proven stale artifacts reached managed teardown")
+		}
+		if release, err := acquireLifecycleLock(p, false); err == nil {
+			release()
+			t.Error("startup was admitted during managed teardown")
+		}
+		if lock, err := acquireSingletonLock(p); err == nil {
+			lock.Release()
+			t.Error("singleton was released before managed teardown")
+		}
+		return nil, nil
+	}
+	if err := Stop(p); err != nil {
+		t.Fatalf("managed stop of a proven dead owner failed: %v", err)
+	}
+	if !isStopped {
+		t.Fatal("artifact removal skipped installed service teardown")
+	}
+	if alive, err := IsRunning(p); err != nil || alive {
+		t.Fatalf("health after managed stop = %t, %v", alive, err)
+	}
+	if release, err := acquireLifecycleLock(p, false); err != nil {
+		t.Fatal(err)
+	} else {
+		release()
+	}
+}
+
+func TestStaleArtifactRemovalFailureRefusesManagedTeardown(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(p.Socket(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(p.Socket(), "unremovable"), []byte("retain"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)
+	writeDaemonPIDRecord(t, p.PIDFile(), daemonPIDFile{PID: 424242, StartedAt: started})
+	fakeDaemonProcess(t, false, started)
+	defer stubServiceRuntime(t)()
+	runtimeGOOS = "windows"
+	daemonHealthCheck = daemonIsRunningViaIPC
+	t.Setenv("NM_TEST_DAEMON_STOP_TIMEOUT", "25ms")
+	serviceCommandRunner = func(string, ...string) ([]byte, error) {
+		t.Error("artifact removal failure reached service teardown")
+		return nil, nil
+	}
+	oldKill := daemonKillPID
+	t.Cleanup(func() { daemonKillPID = oldKill })
+	daemonKillPID = func(int) error {
+		t.Error("artifact removal failure reached PID kill")
+		return fmt.Errorf("unexpected kill")
+	}
+	if err := Stop(p); err == nil || !strings.Contains(err.Error(), p.Socket()) {
+		t.Fatalf("missing artifact removal refusal: %v", err)
+	}
+	if socket, pid := artifactsExist(p); !socket || !pid {
+		t.Fatal("failed cleanup removed unprocessed artifacts")
+	}
+	release, err := acquireLifecycleLock(p, false)
+	if err != nil {
+		t.Fatalf("failed preparation retained lifecycle ownership: %v", err)
+	}
+	release()
+	lock, err := acquireSingletonLock(p)
+	if err != nil {
+		t.Fatalf("failed preparation retained singleton ownership: %v", err)
+	}
+	lock.Release()
+}
 
 // staleDaemonRoot leaves what an exited daemon leaves behind: a socket file
 // that refuses connections and a PID file naming its process.

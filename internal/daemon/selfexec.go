@@ -629,16 +629,6 @@ func Stop(p *paths.Paths) error {
 	return StopPrepared(p)
 }
 
-// StopForced stops the daemon under startup exclusion without an idle check.
-func StopForced(p *paths.Paths) error {
-	release, err := PrepareForcedShutdown(p)
-	if err != nil {
-		return err
-	}
-	defer release()
-	return StopPrepared(p)
-}
-
 // StopPrepared requires the caller to retain the preparation's release callback
 // until this function and any further teardown have finished.
 func StopPrepared(p *paths.Paths) error {

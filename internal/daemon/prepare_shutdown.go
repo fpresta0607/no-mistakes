@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -35,6 +36,12 @@ func PrepareShutdownIfIdle(p *paths.Paths) (func(), error) {
 			}
 			isStale, inspectErr = staleDaemonArtifacts(p)
 			if inspectErr == nil && isStale {
+				for _, artifact := range []string{p.Socket(), p.PIDFile()} {
+					if err := os.Remove(artifact); err != nil && !os.IsNotExist(err) {
+						lock.Release()
+						return nil, fmt.Errorf("remove stale daemon artifact %s: %w; refusing lifecycle operation", artifact, err)
+					}
+				}
 				isPrepared = true
 				return sync.OnceFunc(func() {
 					lock.Release()

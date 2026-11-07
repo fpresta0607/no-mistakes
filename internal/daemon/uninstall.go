@@ -21,7 +21,7 @@ func Uninstall(p *paths.Paths) (string, error) {
 }
 
 // UninstallGuarded invokes beforeStop only when a managed service exists,
-// before any service mutation. A nil guard requires explicit force authority.
+// before any service mutation. The caller must supply the preparation callback.
 func UninstallGuarded(p *paths.Paths, beforeStop func() (func(), error)) (string, error) {
 	if serviceManagerBypassed() || !UninstallSupported() {
 		return "", nil
@@ -35,9 +35,6 @@ func UninstallGuarded(p *paths.Paths, beforeStop func() (func(), error)) (string
 			return "", nil
 		}
 		return "", fmt.Errorf("inspect managed service %s: %w", definition, err)
-	}
-	if beforeStop == nil {
-		beforeStop = func() (func(), error) { return PrepareForcedShutdown(p) }
 	}
 	release, err := beforeStop()
 	if err != nil {
