@@ -151,39 +151,53 @@ func TestRepoConfigDocs_CommandsTestIsTargetedContract(t *testing.T) {
 }
 
 // Remote CI must keep the complete race-enabled Go suite as the broad
-// regression owner after local Test stops duplicating it. The steps package is
-// split into two complementary halves so each stays inside its own budget, so
-// the contract is the whole suite: a race-enabled command over the rest of the
-// packages plus both halves of internal/pipeline/steps.
+// regression owner after local Test stops duplicating it. internal/pipeline/steps
+// and internal/daemon are each split into complementary shards so every binary
+// stays inside its own budget, so the contract is the whole suite: a
+// race-enabled command over the rest of the packages plus a -run and a -skip
+// shard of both split packages.
 func TestCIWorkflow_RetainsFullRaceSuiteAsBroadRegressionOwner(t *testing.T) {
 	commands := workflowCommandsMatching(ciTestJob(t).Steps, func(step wfStep) bool {
 		return exactRunnerOSCondition(step.If, "!=", "Windows")
 	})
-	var runsRest, runsFirstHalf, runsSecondHalf bool
+	type shardFlags struct{ run, skip bool }
+	var runsRest bool
+	sharded := map[string]*shardFlags{
+		"./internal/pipeline/steps": {},
+		"./internal/daemon":         {},
+	}
 	for _, command := range commands {
 		if command.name != "go" || len(command.args) == 0 || command.args[0] != "test" || !command.hasArg("-race") {
 			continue
 		}
-		if len(goTestPackagePatterns(command)) == 0 {
+		patterns := goTestPackagePatterns(command)
+		if len(patterns) == 0 {
 			runsRest = true
 			continue
 		}
-		if !slices.Equal(goTestPackagePatterns(command), []string{"./internal/pipeline/steps"}) {
+		flags, ok := sharded[patterns[0]]
+		if !ok {
 			continue
 		}
 		if _, ok := commandFlagValue(command, "-run"); ok {
-			runsFirstHalf = true
+			flags.run = true
 		}
 		if _, ok := commandFlagValue(command, "-skip"); ok {
-			runsSecondHalf = true
+			flags.skip = true
 		}
 	}
 	covered := append(unixRemainderPackages(t), goListPackages(t, "./internal/pipeline/steps")...)
+	covered = append(covered, goListPackages(t, "./internal/daemon")...)
 	slices.Sort(covered)
 	if all := goListPackages(t, "./..."); !slices.Equal(covered, all) {
 		t.Fatalf("CI workflow must run every package exactly once on its Unix legs as the broad regression owner: covered %v, module %v", covered, all)
 	}
-	if !runsRest || !runsFirstHalf || !runsSecondHalf {
-		t.Fatalf("CI workflow must still run the complete race-enabled suite on its Unix legs as the broad regression owner (rest=%t, steps first half=%t, steps second half=%t); Unix-only commands: %#v", runsRest, runsFirstHalf, runsSecondHalf, commands)
+	if !runsRest {
+		t.Fatalf("CI workflow must still run the race-enabled rest of the suite on its Unix legs as the broad regression owner; Unix-only commands: %#v", commands)
+	}
+	for pkg, flags := range sharded {
+		if !flags.run || !flags.skip {
+			t.Fatalf("CI workflow must still run %s as complementary -run and -skip race shards on its Unix legs (run=%t, skip=%t); Unix-only commands: %#v", pkg, flags.run, flags.skip, commands)
+		}
 	}
 }

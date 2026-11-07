@@ -38,23 +38,23 @@ func TestCIWorkflowRunsTestsOnAllSupportedDesktopPlatforms(t *testing.T) {
 func unixTestStep(t *testing.T) wfStep {
 	t.Helper()
 	for _, step := range ciTestJob(t).Steps {
-		if exactRunnerOSCondition(step.If, "!=", "Windows") && step.Env["NM_CI_UNIX_STEPS_EXCLUDE"] != "" {
+		if exactRunnerOSCondition(step.If, "!=", "Windows") && step.Env["NM_CI_UNIX_SHARD_EXCLUDE"] != "" {
 			return step
 		}
 	}
-	t.Fatal("CI workflow has no Unix test step declaring NM_CI_UNIX_STEPS_EXCLUDE")
+	t.Fatal("CI workflow has no Unix test step declaring NM_CI_UNIX_SHARD_EXCLUDE")
 	return wfStep{}
 }
 
-// unixStepsExcludePattern reads the exclusion the Unix step declares so a guard
+// unixShardExcludePattern reads the exclusion the Unix step declares so a guard
 // resolves the package set the step actually runs instead of trusting the word
 // ./... to sit somewhere in the script.
-func unixStepsExcludePattern(t *testing.T, step wfStep) *regexp.Regexp {
+func unixShardExcludePattern(t *testing.T, step wfStep) *regexp.Regexp {
 	t.Helper()
-	pattern := step.Env["NM_CI_UNIX_STEPS_EXCLUDE"]
+	pattern := step.Env["NM_CI_UNIX_SHARD_EXCLUDE"]
 	compiled, err := regexp.Compile(pattern)
 	if err != nil {
-		t.Fatalf("NM_CI_UNIX_STEPS_EXCLUDE %q: %v", pattern, err)
+		t.Fatalf("NM_CI_UNIX_SHARD_EXCLUDE %q: %v", pattern, err)
 	}
 	return compiled
 }
@@ -64,7 +64,7 @@ func unixStepsExcludePattern(t *testing.T, step wfStep) *regexp.Regexp {
 // match.
 func unixRemainderPackages(t *testing.T) []string {
 	t.Helper()
-	return filterPackages(goListPackages(t, "./..."), unixStepsExcludePattern(t, unixTestStep(t)), false)
+	return filterPackages(goListPackages(t, "./..."), unixShardExcludePattern(t, unixTestStep(t)), false)
 }
 
 func unixGoTestCommands(t *testing.T) []workflowCommand {
@@ -91,66 +91,94 @@ func TestCIWorkflowUsesRaceTestsOnUnixRunners(t *testing.T) {
 	}
 }
 
-// internal/pipeline/steps outgrew its per-package budget on macos-latest: it
-// timed out at 1201s in the merge train while internal/daemon passed the same
-// run at 1136s, every parked goroutine in the dump was a t.Parallel waiter and
-// the three running tests were a second old or less. That is exhausted
-// capacity, not a hang - the signature the testing-conventions skill records -
-// so the suite runs its own tests in two complementary -run/-skip halves, the
-// same shard split the Windows rows use, with the rest of the packages running
-// beside them. Each half then has its own budget while no test, timeout or
-// coverage is given up. The remainder must exclude the steps package or the
-// halves would run it a third time.
-func TestCIWorkflow_UnixShardsTheStepsPackageIntoTwoHalves(t *testing.T) {
+// internal/pipeline/steps and internal/daemon each outgrew the per-package
+// budget on macos-latest: pipeline/steps timed out at 1201s in the merge train
+// while internal/daemon passed the same run at 1136s, every parked goroutine in
+// the dump was a t.Parallel waiter and the three running tests were a second
+// old or less. That is exhausted capacity, not a hang - the signature the
+// testing-conventions skill records - so both packages run their own tests in
+// complementary -run/-skip shards, the same split the Windows rows use, and
+// every shard starts beside the rest of the suite. Serializing the suite
+// instead (-p=1) summed the package walls and overran the job cap, so the
+// remainder keeps its concurrency and only the two packages that exceed the
+// budget on their own are sharded. Each shard owns its own budget while no
+// test, timeout or coverage is given up, so the shards and the remainder must
+// cover go list ./... exactly once and select every declared test exactly once.
+func TestCIWorkflow_UnixShardsThePackagesThatOutgrewTheBudget(t *testing.T) {
+	wantShards := map[string]int{
+		"./internal/pipeline/steps": 3,
+		"./internal/daemon":         2,
+	}
+	var wanted []string
+	for pkg := range wantShards {
+		wanted = append(wanted, pkg)
+	}
+	slices.Sort(wanted)
+
 	commands := unixGoTestCommands(t)
-	var halves []namedTestShard
 	var remainder *workflowCommand
+	shardsByPackage := make(map[string][]namedTestShard, len(wantShards))
 	for index, command := range commands {
-		if !slices.Equal(goTestPackagePatterns(command), []string{"./internal/pipeline/steps"}) {
+		patterns := goTestPackagePatterns(command)
+		if len(patterns) == 0 {
 			if remainder != nil {
-				t.Fatalf("Unix go test runs a second non-steps package set: %#v and %#v", remainder.args, command.args)
+				t.Fatalf("Unix go test runs a second computed package set: %#v and %#v", remainder.args, command.args)
 			}
 			remainder = &commands[index]
 			continue
 		}
-		halves = append(halves, namedTestShard{
+		if len(patterns) != 1 {
+			t.Fatalf("each Unix shard must name one package, got %v", patterns)
+		}
+		if _, ok := wantShards[patterns[0]]; !ok {
+			t.Fatalf("Unix go test shards %v; only %v exceed the per-package budget on their own", patterns[0], wanted)
+		}
+		shardsByPackage[patterns[0]] = append(shardsByPackage[patterns[0]], namedTestShard{
 			name: strings.Join(command.args, " "),
 			run:  namedTestPattern(t, command, "-run"),
 			skip: namedTestPattern(t, command, "-skip"),
 		})
 	}
-	if len(halves) != 2 {
-		t.Fatalf("Unix go test runs internal/pipeline/steps %d times, want 2 complementary halves so each stays inside -timeout: %#v", len(halves), commands)
-	}
 	if remainder == nil {
-		t.Fatalf("Unix go test must still run the rest of the suite beside the steps halves: %#v", commands)
+		t.Fatalf("Unix go test must still run the rest of the suite beside the shards: %#v", commands)
 	}
 	if patterns := goTestPackagePatterns(*remainder); len(patterns) != 0 {
 		t.Fatalf("the Unix command that runs the rest of the suite must run the computed go list package set, not the literal patterns %v", patterns)
 	}
-	covered := append(unixRemainderPackages(t), goListPackages(t, "./internal/pipeline/steps")...)
-	slices.Sort(covered)
-	if all := goListPackages(t, "./..."); !slices.Equal(covered, all) {
-		t.Fatalf("the Unix remainder plus the two steps halves must cover go list ./... exactly once: covered %v, module %v", covered, all)
-	}
 
-	names := append(declaredTestNames(t, filepath.Join("internal", "pipeline", "steps")), "Test", "Test_Probe")
-	for c := 'A'; c <= 'Z'; c++ {
-		names = append(names, "Test"+string(c)+"Probe")
-	}
-	for c := '0'; c <= '9'; c++ {
-		names = append(names, "Test"+string(c)+"Probe")
-	}
-	for _, name := range names {
-		var selectedBy []string
-		for _, half := range halves {
-			if half.selects(name) {
-				selectedBy = append(selectedBy, half.name)
+	covered := unixRemainderPackages(t)
+	for _, pkg := range wanted {
+		shards, ok := shardsByPackage[pkg]
+		if !ok {
+			t.Fatalf("Unix go test does not shard %s, whose own wall exceeds the per-package budget: %#v", pkg, commands)
+		}
+		if want := wantShards[pkg]; len(shards) != want {
+			t.Fatalf("Unix go test runs %s as %d shards, want %d complementary shards so each stays inside -timeout: %#v", pkg, len(shards), want, commands)
+		}
+		covered = append(covered, goListPackages(t, pkg)...)
+
+		names := append(declaredTestNames(t, filepath.FromSlash(strings.TrimPrefix(pkg, "./"))), "Test", "Test_Probe")
+		for c := 'A'; c <= 'Z'; c++ {
+			names = append(names, "Test"+string(c)+"Probe")
+		}
+		for c := '0'; c <= '9'; c++ {
+			names = append(names, "Test"+string(c)+"Probe")
+		}
+		for _, name := range names {
+			var selectedBy []string
+			for _, shard := range shards {
+				if shard.selects(name) {
+					selectedBy = append(selectedBy, shard.name)
+				}
+			}
+			if len(selectedBy) != 1 {
+				t.Errorf("%s is selected by %d Unix %s shards (%v), want exactly 1", name, len(selectedBy), pkg, selectedBy)
 			}
 		}
-		if len(selectedBy) != 1 {
-			t.Errorf("%s is selected by %d Unix steps halves (%v), want exactly 1", name, len(selectedBy), selectedBy)
-		}
+	}
+	slices.Sort(covered)
+	if all := goListPackages(t, "./..."); !slices.Equal(covered, all) {
+		t.Fatalf("the Unix remainder plus every sharded package must cover go list ./... exactly once: covered %v, module %v", covered, all)
 	}
 }
 
@@ -184,45 +212,33 @@ func commandFlagValue(command workflowCommand, flag string) (string, bool) {
 
 // The Unix legs ran on go test's implicit 10m per-package budget until
 // internal/pipeline/steps, internal/daemon and internal/cli outran it on a slow
-// macos-latest runner with no test hung (issue #73). The budget has to stay
-// above that default and still fire before the job cap for the package that
-// starts last, so a real hang lands as a goroutine dump rather than a cancelled
-// job.
+// macos-latest runner with no test hung (issue #73). Every shard binary starts
+// with the rest, so its own budget is all the slack there is: it has to stay
+// above that default and still fire before the job cap, so a real hang lands as
+// a goroutine dump rather than a cancelled job.
 func TestCIWorkflow_UnixPackageBudgetExceedsGoDefaultAndFiresBeforeJobCap(t *testing.T) {
 	job := ciTestJob(t)
-	commands := unixGoTestCommands(t)
 
-	const goDefaultPackageBudget = 10 * time.Minute
-	var budgets []time.Duration
-	var halved []time.Duration
-	for _, command := range commands {
+	const deliberatePackageBudget = 20 * time.Minute
+	// Checkout, setup-go and the go list run before the first test binary
+	// starts; they took a couple of minutes on the macos-latest legs that were
+	// cancelled.
+	const measuredPrelude = 5 * time.Minute
+
+	for _, command := range unixGoTestCommands(t) {
 		budget := goTestTimeout(t, command)
-		budgets = append(budgets, budget)
-		if budget <= goDefaultPackageBudget {
-			t.Errorf("Unix go test -timeout is %s; it must exceed go test's %s default that the suite outgrew on macOS", budget, goDefaultPackageBudget)
+		if budget != deliberatePackageBudget {
+			t.Errorf("Unix go test -timeout is %s, want the unchanged %s package budget that clears go test's 10m default for every shard: %v", budget, deliberatePackageBudget, command.args)
 		}
-		if slices.Equal(goTestPackagePatterns(command), []string{"./internal/pipeline/steps"}) {
-			halved = append(halved, budget)
+		if jobCap := time.Duration(job.TimeoutMinutes) * time.Minute; budget+measuredPrelude >= jobCap {
+			t.Errorf("Unix go test -timeout %s plus the %s measured prelude reaches the %s job cap; the Go timeout must fire first so a hang in any shard produces a goroutine dump", budget, measuredPrelude, jobCap)
 		}
-	}
-	if len(halved) != 2 {
-		t.Fatalf("Unix steps halves with a per-binary budget = %d, want 2; commands: %#v", len(halved), commands)
-	}
-	// The steps halves are the last commands to start: the A-Q half is 61% of
-	// the package's macos-latest wall measured when it timed out at 1201s (the
-	// same share the Windows rows show at 25m of 41m), so the second half starts
-	// about 14 minutes into this step including checkout and setup, and its own
-	// budget still fires inside the job cap.
-	const latestMeasuredHalfStart = 14 * time.Minute
-	secondHalfBudget := halved[len(halved)-1]
-	if jobCap := time.Duration(job.TimeoutMinutes) * time.Minute; secondHalfBudget+latestMeasuredHalfStart >= jobCap {
-		t.Errorf("Unix go test -timeout %s plus the %s latest measured steps-half start reaches the %s job cap; the Go timeout must fire first so a hang in the last half to start produces a goroutine dump", secondHalfBudget, latestMeasuredHalfStart, jobCap)
 	}
 }
 
 // The Unix remainder's package set comes from go list, so a failed or empty
 // listing must fail the step. An empty expansion runs go test against the
-// repository root alone while both steps halves still report green, and
+// repository root alone while every shard still reports green, and
 // internal/daemon, internal/cli, internal/git and the rest of the suite would
 // never run on that leg.
 func TestCIWorkflow_UnixStepFailsClosedWhenTheRemainderPackageSetIsEmpty(t *testing.T) {
@@ -256,11 +272,14 @@ func TestCIWorkflow_UnixStepFailsClosedWhenTheRemainderPackageSetIsEmpty(t *test
 		},
 		{
 			name:   "resolved listing",
-			goList: "github.com/kunchenguid/no-mistakes\ngithub.com/kunchenguid/no-mistakes/internal/daemon\ngithub.com/kunchenguid/no-mistakes/internal/pipeline/steps\n",
+			goList: "github.com/kunchenguid/no-mistakes\ngithub.com/kunchenguid/no-mistakes/internal/daemon\ngithub.com/kunchenguid/no-mistakes/internal/pipeline/steps\ngithub.com/kunchenguid/no-mistakes/internal/git\n",
 			wantTests: []string{
-				"test -race -timeout=20m -p=1 github.com/kunchenguid/no-mistakes github.com/kunchenguid/no-mistakes/internal/daemon",
-				"test -race -timeout=20m -run ^Test[A-Q] ./internal/pipeline/steps",
+				"test -race -timeout=20m -p=2 github.com/kunchenguid/no-mistakes github.com/kunchenguid/no-mistakes/internal/git",
+				"test -race -timeout=20m -run ^Test[A-K] ./internal/pipeline/steps",
+				"test -race -timeout=20m -run ^Test[L-Q] ./internal/pipeline/steps",
 				"test -race -timeout=20m -skip ^Test[A-Q] ./internal/pipeline/steps",
+				"test -race -timeout=20m -run ^Test[A-O] ./internal/daemon",
+				"test -race -timeout=20m -skip ^Test[A-O] ./internal/daemon",
 			},
 		},
 	}
