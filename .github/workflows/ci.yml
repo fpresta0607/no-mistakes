@@ -171,13 +171,14 @@ jobs:
       # them. pipeline/steps then outgrew it again: it timed out at 1201s in the
       # merge train while internal/daemon passed the same run at 1136s, with
       # every parked goroutine a t.Parallel waiter and the three running tests a
-      # second old or less - exhausted capacity, not a hang. Running the
-      # packages one at a time (-p=1) gave that package the runner but overran
-      # the 40m job cap on both Unix legs, so the suite keeps its concurrency and
-      # pipeline/steps gets its own budget instead: its tests run as two
-      # complementary -run/-skip halves, the shard split the Windows rows already
-      # use, so each half has its own budget while the rest of the suite runs
-      # beside them (-p=2 keeps three test binaries on the runner, as before).
+      # second old or less - exhausted capacity, not a hang. Running every
+      # package one at a time (-p=1) gave that package the runner but overran
+      # the 40m job cap on both Unix legs, so pipeline/steps gets its own budget
+      # instead: its tests run as two complementary -run/-skip halves, the shard
+      # split the Windows rows already use, so each half has its own budget. The
+      # remainder runs at -p=1 beside them, so at most two race-instrumented
+      # binaries share the runner and the package that starts last gets about
+      # 1.5 of its cores rather than the one it had while three shared them.
       # The remainder package set is computed once from go list filtered by
       # NM_CI_UNIX_STEPS_EXCLUDE, and the step fails closed when that listing
       # fails or leaves nothing, so a resolution failure cannot quietly run the
@@ -197,7 +198,7 @@ jobs:
             echo "::error::go list ./... left no Unix remainder packages; refusing to run a narrowed suite" >&2
             exit 1
           fi
-          go test -race -timeout=20m -p=2 $rest &
+          go test -race -timeout=20m -p=1 $rest &
           rest_pid=$!
           status=0
           go test -race -timeout=20m -run '^Test[A-Q]' ./internal/pipeline/steps || status=1

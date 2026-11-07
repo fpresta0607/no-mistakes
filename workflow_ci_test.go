@@ -258,7 +258,7 @@ func TestCIWorkflow_UnixStepFailsClosedWhenTheRemainderPackageSetIsEmpty(t *test
 			name:   "resolved listing",
 			goList: "github.com/kunchenguid/no-mistakes\ngithub.com/kunchenguid/no-mistakes/internal/daemon\ngithub.com/kunchenguid/no-mistakes/internal/pipeline/steps\n",
 			wantTests: []string{
-				"test -race -timeout=20m -p=2 github.com/kunchenguid/no-mistakes github.com/kunchenguid/no-mistakes/internal/daemon",
+				"test -race -timeout=20m -p=1 github.com/kunchenguid/no-mistakes github.com/kunchenguid/no-mistakes/internal/daemon",
 				"test -race -timeout=20m -run ^Test[A-Q] ./internal/pipeline/steps",
 				"test -race -timeout=20m -skip ^Test[A-Q] ./internal/pipeline/steps",
 			},
