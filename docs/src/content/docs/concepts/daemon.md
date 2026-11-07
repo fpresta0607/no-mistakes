@@ -82,6 +82,8 @@ If admission wins, ordinary maintenance refuses without changing that run.
 If shutdown wins, later launches, source claims, hook admission, and gate responses refuse before changing run state.
 Before stopping a managed service or using a PID fallback, ordinary maintenance requires the daemon's `prepare_shutdown` acknowledgement; a busy, unreadable, or unsupported response aborts the operation.
 The acknowledgement leaves the daemon alive with admission closed so the caller can stop its managed service before keep-alive restarts it.
+If no daemon is running, maintenance holds the existing singleton lock through binary replacement and service or PID teardown, excluding daemon startup until teardown finishes.
+Restart operations release that ownership before starting the replacement daemon.
 If a later file replacement or service operation fails, admission stays closed until the daemon is stopped and restarted; the command reports its failure.
 An older running daemon cannot gain this boundary from a newly compiled client or binary replacement: a client that cannot obtain the acknowledgement refuses ordinary maintenance.
 Safe bootstrap from such a daemon requires independently established exclusion of every launch, resume, and hook producer before an operator-authorized stop; an idle database snapshot or singleton lock alone does not establish that exclusion.

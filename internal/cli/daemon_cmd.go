@@ -567,16 +567,19 @@ func newDaemonStartCmd() *cobra.Command {
 				}
 				// Restarting for service drift or an older daemon must pass
 				// the active-run guard before stopping or rewriting anything.
-				guard := func() error {
+				guard := func() (func(), error) {
 					logLifecycleInvocation("daemon.start", force)
 					return guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon start", force)
 				}
 				if older, _ := cmd.Context().Value(olderDaemonContextKey{}).(bool); older {
-					if err := guard(); err != nil {
+					release, err := guard()
+					if err != nil {
 						return err
 					}
-					if err := daemonStopFn(p); err != nil {
-						return fmt.Errorf("stop older daemon: %w", err)
+					stopErr := daemonStopFn(p)
+					release()
+					if stopErr != nil {
+						return fmt.Errorf("stop older daemon: %w", stopErr)
 					}
 					if err := daemonStartFn(p); err != nil {
 						return fmt.Errorf("start daemon: %w", err)
@@ -605,9 +608,11 @@ func newDaemonStopCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if err := guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon stop", force); err != nil {
+				release, err := guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon stop", force)
+				if err != nil {
 					return err
 				}
+				defer release()
 				if err := daemonStopFn(p); err != nil {
 					return err
 				}
@@ -640,7 +645,7 @@ func newDaemonUninstallCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				definition, err := daemonUninstallFn(p, func() error {
+				definition, err := daemonUninstallFn(p, func() (func(), error) {
 					return guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon uninstall", force)
 				})
 				if err != nil {
@@ -691,11 +696,14 @@ func newDaemonRestartCmd() *cobra.Command {
 						return nil
 					}
 				}
-				if err := guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon restart", force); err != nil {
+				release, err := guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon restart", force)
+				if err != nil {
 					return err
 				}
-				if err := daemonStopFn(p); err != nil {
-					return fmt.Errorf("stop daemon: %w", err)
+				stopErr := daemonStopFn(p)
+				release()
+				if stopErr != nil {
+					return fmt.Errorf("stop daemon: %w", stopErr)
 				}
 				if err := daemonStartFn(p); err != nil {
 					return fmt.Errorf("start daemon: %w", err)
@@ -710,23 +718,23 @@ func newDaemonRestartCmd() *cobra.Command {
 	return cmd
 }
 
-func guardDestructiveDaemonLifecycle(p *paths.Paths, stderr io.Writer, action string, force bool) error {
+func guardDestructiveDaemonLifecycle(p *paths.Paths, stderr io.Writer, action string, force bool) (func(), error) {
 	runs, err := lifecycle.ActiveRuns(p)
 	if err != nil {
-		return fmt.Errorf("check active pipeline runs: %w", err)
+		return nil, fmt.Errorf("check active pipeline runs: %w", err)
 	}
 	if len(runs) == 0 {
 		if force {
-			return nil
+			return func() {}, nil
 		}
 		return daemon.PrepareShutdownIfIdle(p)
 	}
 	if force {
 		fmt.Fprintf(stderr, "FORCE: %s will stop/restart the daemon while %d active pipeline runs are in progress\n", action, len(runs))
 		fmt.Fprint(stderr, lifecycle.RunList(runs))
-		return nil
+		return func() {}, nil
 	}
-	return fmt.Errorf("refusing %s because %d active pipeline runs are in progress; pass --force to stop/restart the daemon anyway\n%s", action, len(runs), lifecycle.RunList(runs))
+	return nil, fmt.Errorf("refusing %s because %d active pipeline runs are in progress; pass --force to stop/restart the daemon anyway\n%s", action, len(runs), lifecycle.RunList(runs))
 }
 
 func newDaemonStatusCmd() *cobra.Command {

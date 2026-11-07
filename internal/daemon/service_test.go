@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -45,13 +46,29 @@ func TestStart_ReinstallsManagedServiceWhenPlistChanged(t *testing.T) {
 
 	var commands []string
 	running := true
+	bootouts := 0
 	serviceCommandRunner = func(name string, args ...string) ([]byte, error) {
 		command := name + " " + strings.Join(args, " ")
 		commands = append(commands, command)
 		if strings.Contains(command, "launchctl bootout ") {
+			bootouts++
+			if bootouts == 1 {
+				lock, err := acquireSingletonLock(p)
+				if lock != nil {
+					lock.Release()
+				}
+				if !errors.Is(err, ErrSingletonLockHeld) {
+					t.Fatalf("service teardown lost absent-daemon ownership: %v", err)
+				}
+			}
 			running = false
 		}
 		if strings.Contains(command, "launchctl kickstart ") {
+			lock, err := acquireSingletonLock(p)
+			if err != nil {
+				t.Fatalf("replacement startup still excluded: %v", err)
+			}
+			lock.Release()
 			running = true
 		}
 		return nil, nil
@@ -122,7 +139,7 @@ func TestStartGuarded_RefusalLeavesDriftedServiceAndDaemonAlone(t *testing.T) {
 	daemonHealthCheck = func(*paths.Paths) (bool, error) { return true, nil }
 
 	refusal := fmt.Errorf("refusing daemon start")
-	if err := StartGuarded(p, func() error { return refusal }); err != refusal {
+	if err := StartGuarded(p, func() (func(), error) { return nil, refusal }); err != refusal {
 		t.Fatalf("StartGuarded should return the guard's refusal, got %v", err)
 	}
 	if data, _ := os.ReadFile(plistPath); string(data) != stale {
@@ -167,9 +184,9 @@ func TestStart_DoesNotReinstallWhenPlistUnchanged(t *testing.T) {
 	}
 	daemonHealthCheck = func(*paths.Paths) (bool, error) { return true, nil }
 
-	err := StartGuarded(p, func() error {
+	err := StartGuarded(p, func() (func(), error) {
 		t.Fatal("an unchanged definition restarts nothing, so the restart guard must not run")
-		return nil
+		return nil, nil
 	})
 	if err == nil || !strings.Contains(err.Error(), "already running") {
 		t.Fatalf("expected 'already running' error when plist unchanged, got %v", err)

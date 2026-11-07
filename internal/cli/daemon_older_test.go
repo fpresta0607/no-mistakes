@@ -45,7 +45,7 @@ func TestOlderDaemonLifecycleCommandsRefuseAtomicShutdownUnsupported(t *testing.
 			oldStop, oldStart, oldGuarded := daemonStopFn, daemonStartFn, daemonStartGuardedFn
 			daemonStopFn = func(*paths.Paths) error { calls = append(calls, "stop"); return nil }
 			daemonStartFn = func(*paths.Paths) error { calls = append(calls, "start"); return nil }
-			daemonStartGuardedFn = func(*paths.Paths, func() error) error {
+			daemonStartGuardedFn = func(*paths.Paths, func() (func(), error)) error {
 				t.Fatal("older daemon must be stopped before reinstalling")
 				return nil
 			}

@@ -15,7 +15,7 @@ func TestDaemonUninstallReportsRemovedDefinitionAndNoService(t *testing.T) {
 	for _, definition := range []string{"/tmp/home/Library/LaunchAgents/daemon.plist", ""} {
 		t.Run(definition, func(t *testing.T) {
 			called := false
-			daemonUninstallFn = func(_ *paths.Paths, _ func() error) (string, error) {
+			daemonUninstallFn = func(_ *paths.Paths, _ func() (func(), error)) (string, error) {
 				called = true
 				return definition, nil
 			}
@@ -48,10 +48,12 @@ func TestDaemonUninstallRefusesActiveRunsUnlessForced(t *testing.T) {
 	t.Cleanup(func() { daemonUninstallFn, daemonUninstallSupportedFn = prev, prevSupported })
 	daemonUninstallSupportedFn = func() bool { return true }
 	called := false
-	daemonUninstallFn = func(_ *paths.Paths, guard func() error) (string, error) {
-		if err := guard(); err != nil {
+	daemonUninstallFn = func(_ *paths.Paths, guard func() (func(), error)) (string, error) {
+		release, err := guard()
+		if err != nil {
 			return "", err
 		}
+		defer release()
 		called = true
 		return "/tmp/service.plist", nil
 	}
@@ -95,7 +97,7 @@ func TestDaemonUninstallOnUnsupportedPlatformChangesNothingAndSucceeds(t *testin
 	prev, prevSupported := daemonUninstallFn, daemonUninstallSupportedFn
 	t.Cleanup(func() { daemonUninstallFn, daemonUninstallSupportedFn = prev, prevSupported })
 	daemonUninstallSupportedFn = func() bool { return false }
-	daemonUninstallFn = func(_ *paths.Paths, _ func() error) (string, error) {
+	daemonUninstallFn = func(_ *paths.Paths, _ func() (func(), error)) (string, error) {
 		t.Fatal("unsupported platform must not uninstall")
 		return "", nil
 	}

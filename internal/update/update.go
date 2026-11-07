@@ -57,7 +57,7 @@ type updater struct {
 	stderr             io.Writer
 	now                func() time.Time
 	spawnBackground    func(currentVersion string) error
-	resetDaemon        func(daemonExpected bool) error
+	resetDaemon        func(daemonExpected bool, releaseShutdown func()) error
 	restartStatus      func() (*ipc.RestartStatusResult, error)
 	scheduleRestart    func() (*ipc.RestartStatusResult, error)
 	paths              *paths.Paths
@@ -153,8 +153,8 @@ func defaultUpdater(stdout, stderr io.Writer) (*updater, error) {
 		now:             time.Now,
 		paths:           p,
 		spawnBackground: defaultSpawnBackground,
-		resetDaemon: func(daemonExpected bool) error {
-			return defaultResetDaemon(p, daemonExpected, execPath)
+		resetDaemon: func(daemonExpected bool, releaseShutdown func()) error {
+			return defaultResetDaemon(p, daemonExpected, execPath, releaseShutdown)
 		},
 		restartStatus:   func() (*ipc.RestartStatusResult, error) { return daemon.RestartStatus(p) },
 		scheduleRestart: func() (*ipc.RestartStatusResult, error) { return daemon.ScheduleRestart(p) },
@@ -269,11 +269,14 @@ func (u *updater) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	releaseShutdown := func() {}
 	if !u.force && !u.restartWhenIdle {
-		if err := daemon.PrepareShutdownIfIdle(u.paths); err != nil {
+		releaseShutdown, err = daemon.PrepareShutdownIfIdle(u.paths)
+		if err != nil {
 			return err
 		}
 	}
+	defer releaseShutdown()
 	if err := replaceExecutable(u.executablePath, binaryData); err != nil {
 		return err
 	}
@@ -286,7 +289,7 @@ func (u *updater) run(ctx context.Context) error {
 		return nil
 	}
 	if u.resetDaemon != nil {
-		if err := u.resetDaemon(daemonExpected); err != nil {
+		if err := u.resetDaemon(daemonExpected, releaseShutdown); err != nil {
 			var resetErr *daemonResetError
 			if errors.As(err, &resetErr) && resetErr.daemonOffline {
 				return fmt.Errorf("updated %s to %s, but daemon is offline: %w", u.appName, plan.LatestVersion, err)

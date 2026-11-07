@@ -1,16 +1,19 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/kunchenguid/no-mistakes/internal/lifecycle"
 )
 
+var errAdmissionClosed = errors.New("daemon is shutting down")
+
 func (m *RunManager) beginAdmission() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.admissionClosed || m.shuttingDown.Load() {
-		return fmt.Errorf("daemon is shutting down")
+		return errAdmissionClosed
 	}
 	m.admissions++
 	return nil

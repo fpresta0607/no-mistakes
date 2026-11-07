@@ -32,7 +32,7 @@ func TestUpdaterRunWithActiveRunsInstallsAndSchedulesTheRestart(t *testing.T) {
 	u, execPath, stdout, stderr := newActiveRunUpdater(t)
 	u.whenIdle = true
 	resetCalled := false
-	u.resetDaemon = func(bool) error { resetCalled = true; return nil }
+	u.resetDaemon = func(bool, func()) error { resetCalled = true; return nil }
 	u.restartStatus = func() (*ipc.RestartStatusResult, error) { return &ipc.RestartStatusResult{}, nil }
 	scheduled := false
 	u.scheduleRestart = func() (*ipc.RestartStatusResult, error) {
@@ -65,7 +65,7 @@ func TestUpdaterRunWithActiveRunsInstallsAndSchedulesTheRestart(t *testing.T) {
 func TestUpdaterRunWithActiveRunsRefusesWhenTheDaemonIsTooOldToWait(t *testing.T) {
 	u, execPath, _, _ := newActiveRunUpdater(t)
 	u.whenIdle = true
-	u.resetDaemon = func(bool) error { t.Fatal("reset must not run"); return nil }
+	u.resetDaemon = func(bool, func()) error { t.Fatal("reset must not run"); return nil }
 	u.restartStatus = func() (*ipc.RestartStatusResult, error) { return nil, daemon.ErrRestartWhenIdleUnsupported }
 	u.scheduleRestart = func() (*ipc.RestartStatusResult, error) { t.Fatal("schedule must not run"); return nil, nil }
 
@@ -81,7 +81,7 @@ func TestUpdaterRunWithActiveRunsRefusesWhenTheDaemonIsTooOldToWait(t *testing.T
 func TestUpdaterRunWithActiveRunsReportsAFailedSchedule(t *testing.T) {
 	u, execPath, _, _ := newActiveRunUpdater(t)
 	u.whenIdle = true
-	u.resetDaemon = func(bool) error { t.Fatal("reset must not run"); return nil }
+	u.resetDaemon = func(bool, func()) error { t.Fatal("reset must not run"); return nil }
 	u.restartStatus = func() (*ipc.RestartStatusResult, error) { return &ipc.RestartStatusResult{}, nil }
 	u.scheduleRestart = func() (*ipc.RestartStatusResult, error) { return nil, fmt.Errorf("connect to daemon: refused") }
 
@@ -96,7 +96,7 @@ func TestUpdaterRunWithActiveRunsReportsAFailedSchedule(t *testing.T) {
 
 func TestUpdaterRunWithActiveRunsStillRefusesWithoutWhenIdle(t *testing.T) {
 	u, execPath, _, _ := newActiveRunUpdater(t)
-	u.resetDaemon = func(bool) error { t.Fatal("reset must not run"); return nil }
+	u.resetDaemon = func(bool, func()) error { t.Fatal("reset must not run"); return nil }
 	u.restartStatus = func() (*ipc.RestartStatusResult, error) { return &ipc.RestartStatusResult{}, nil }
 	u.scheduleRestart = func() (*ipc.RestartStatusResult, error) { t.Fatal("schedule must not run"); return nil, nil }
 
@@ -116,7 +116,7 @@ func TestUpdaterRunWhenIdleWithNoActiveRunStillSchedulesTheRestart(t *testing.T)
 	u, _, stdout, _ := newActiveRunUpdater(t)
 	finishActiveRuns(t, u.paths)
 	u.whenIdle = true
-	u.resetDaemon = func(bool) error {
+	u.resetDaemon = func(bool, func()) error {
 		t.Fatal("an immediate reset could stop a run started during the download")
 		return nil
 	}
@@ -144,7 +144,7 @@ func TestUpdaterRunWhenIdleWithNoActiveRunRefusesAFailedProbe(t *testing.T) {
 	u, execPath, _, _ := newActiveRunUpdater(t)
 	finishActiveRuns(t, u.paths)
 	u.whenIdle = true
-	u.resetDaemon = func(bool) error { t.Fatal("reset must not run"); return nil }
+	u.resetDaemon = func(bool, func()) error { t.Fatal("reset must not run"); return nil }
 	u.restartStatus = func() (*ipc.RestartStatusResult, error) { return nil, fmt.Errorf("read: unexpected EOF") }
 	u.scheduleRestart = func() (*ipc.RestartStatusResult, error) { t.Fatal("schedule must not run"); return nil, nil }
 
@@ -168,7 +168,7 @@ func TestUpdaterRunWhenIdleWithNoActiveRunAndNoDaemonResetsImmediately(t *testin
 	}
 	u.scheduleRestart = func() (*ipc.RestartStatusResult, error) { t.Fatal("schedule must not run"); return nil, nil }
 	reset := false
-	u.resetDaemon = func(bool) error { reset = true; return nil }
+	u.resetDaemon = func(bool, func()) error { reset = true; return nil }
 
 	if err := u.run(context.Background()); err != nil {
 		t.Fatalf("update should proceed when no daemon is reachable, got %v", err)
@@ -202,7 +202,7 @@ func TestUpdaterRunWhenIdleRestartsADeadDaemonWhoseFilesTheProbeCleared(t *testi
 	}
 	u.scheduleRestart = func() (*ipc.RestartStatusResult, error) { t.Fatal("schedule must not run"); return nil, nil }
 	var expected *bool
-	u.resetDaemon = func(daemonExpected bool) error { expected = &daemonExpected; return nil }
+	u.resetDaemon = func(daemonExpected bool, _ func()) error { expected = &daemonExpected; return nil }
 
 	if err := u.run(context.Background()); err != nil {
 		t.Fatalf("update should proceed with no live daemon, got %v", err)
@@ -227,7 +227,7 @@ func TestUpdaterRunWhenIdleRefusesAnUnreachableDaemonThatIsStillRunning(t *testi
 		return nil, fmt.Errorf("connect to daemon: %w", daemon.ErrDaemonNotReachable)
 	}
 	u.scheduleRestart = func() (*ipc.RestartStatusResult, error) { t.Fatal("schedule must not run"); return nil, nil }
-	u.resetDaemon = func(bool) error { t.Fatal("reset must not run"); return nil }
+	u.resetDaemon = func(bool, func()) error { t.Fatal("reset must not run"); return nil }
 
 	err := u.run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "--force") {
@@ -274,7 +274,7 @@ func TestUpdaterRunWhenIdleRefusesADaemonFromAnotherBinaryWhileRunsAreActive(t *
 	u.assumeYes = true
 	u.restartStatus = func() (*ipc.RestartStatusResult, error) { return &ipc.RestartStatusResult{}, nil }
 	u.scheduleRestart = func() (*ipc.RestartStatusResult, error) { t.Fatal("schedule must not run"); return nil, nil }
-	u.resetDaemon = func(bool) error { t.Fatal("reset must not run"); return nil }
+	u.resetDaemon = func(bool, func()) error { t.Fatal("reset must not run"); return nil }
 
 	err := u.run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "with active runs") {
@@ -294,7 +294,7 @@ func TestUpdaterRunWhenIdleWithNoActiveRunFallsBackToTheTakeoverReset(t *testing
 	u.restartStatus = func() (*ipc.RestartStatusResult, error) { return &ipc.RestartStatusResult{}, nil }
 	u.scheduleRestart = func() (*ipc.RestartStatusResult, error) { t.Fatal("schedule must not run"); return nil, nil }
 	reset := false
-	u.resetDaemon = func(bool) error { reset = true; return nil }
+	u.resetDaemon = func(bool, func()) error { reset = true; return nil }
 
 	if err := u.run(context.Background()); err != nil {
 		t.Fatalf("update should take over the daemon when no run is active, got %v", err)

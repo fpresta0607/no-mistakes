@@ -3,14 +3,85 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestPrepareShutdownRefusesDaemonStartingWithoutIPC(t *testing.T) {
+	p, _ := newParkedRunEnv(t)
+	lock, err := acquireSingletonLock(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Release()
+	release, err := PrepareShutdownIfIdle(p)
+	if release != nil {
+		release()
+	}
+	if !errors.Is(err, ErrSingletonLockHeld) {
+		t.Fatalf("maintenance accepted an unready singleton owner: %v", err)
+	}
+}
+
+func TestStopKeepsAbsentDaemonExcludedThroughServiceAndPIDFallback(t *testing.T) {
+	for _, isManaged := range []bool{false, true} {
+		t.Run(fmt.Sprintf("managed_%t", isManaged), func(t *testing.T) {
+			p, _ := newParkedRunEnv(t)
+			defer stubServiceRuntime(t)()
+			runtimeGOOS = "windows"
+			isStartupAttempted := false
+			tryStartup := func() {
+				isStartupAttempted = true
+				lock, err := acquireSingletonLock(p)
+				if lock != nil {
+					lock.Release()
+				}
+				if !errors.Is(err, ErrSingletonLockHeld) {
+					t.Fatalf("startup after absent-daemon observation = %v, want singleton refusal", err)
+				}
+			}
+			serviceCommandRunner = func(_ string, arguments ...string) ([]byte, error) {
+				if arguments[0] == "/Query" {
+					if !isManaged {
+						return nil, fmt.Errorf("task absent")
+					}
+					return nil, nil
+				}
+				tryStartup()
+				return nil, nil
+			}
+			oldDial := daemonDial
+			t.Cleanup(func() { daemonDial = oldDial })
+			dials := 0
+			daemonDial = func(string) (*ipc.Client, error) {
+				dials++
+				if dials > 1 {
+					tryStartup()
+				}
+				return nil, fmt.Errorf("no daemon")
+			}
+			daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+			if err := Stop(p); err != nil {
+				t.Fatal(err)
+			}
+			if !isStartupAttempted {
+				t.Fatal("stop did not reach the service or detached fallback boundary")
+			}
+			lock, err := acquireSingletonLock(p)
+			if err != nil {
+				t.Fatalf("stop did not release startup exclusion: %v", err)
+			}
+			lock.Release()
+		})
+	}
+}
 
 func TestShutdownAdmissionOrdersBothWinners(t *testing.T) {
 	for _, isAdmissionFirst := range []bool{true, false} {

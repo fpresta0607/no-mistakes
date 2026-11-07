@@ -86,7 +86,7 @@ func Start(p *paths.Paths) error {
 // to pick up a changed service definition, beforeRestart runs first; an error
 // from it aborts the start before the definition is rewritten or the daemon
 // is stopped.
-func StartGuarded(p *paths.Paths, beforeRestart func() error) error {
+func StartGuarded(p *paths.Paths, beforeRestart func() (func(), error)) error {
 	if err := p.EnsureDirs(); err != nil {
 		return err
 	}
@@ -150,7 +150,7 @@ func StartGuarded(p *paths.Paths, beforeRestart func() error) error {
 // a binary upgrade re-applies the new service definition without forcing
 // users to run `daemon restart` explicitly. No-op on Windows and when the
 // service manager is bypassed (i.e., under `go test`).
-func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() error) (bool, error) {
+func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() (func(), error)) (bool, error) {
 	if serviceManagerBypassed() {
 		return false, nil
 	}
@@ -210,13 +210,15 @@ func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() error
 	case readErr != nil && !os.IsNotExist(readErr):
 		return false, fmt.Errorf("read managed service definition: %w", readErr)
 	}
+	prepare := func() (func(), error) { return PrepareShutdownIfIdle(p) }
 	if beforeRestart != nil {
-		if err := beforeRestart(); err != nil {
-			return false, err
-		}
-	} else if err := PrepareShutdownIfIdle(p); err != nil {
+		prepare = beforeRestart
+	}
+	release, err := prepare()
+	if err != nil {
 		return false, err
 	}
+	defer release()
 	restoreMode := os.FileMode(0o644)
 	if info, err := os.Stat(installPath); err == nil {
 		restoreMode = info.Mode().Perm()
@@ -230,6 +232,7 @@ func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() error
 			return false, fmt.Errorf("%w; reload restored managed service definition: %v", cause, err)
 		}
 		if stoppedForRefresh {
+			release()
 			if _, err := restartManagedService(p); err != nil {
 				return false, fmt.Errorf("%w; restart restored managed service: %v", cause, err)
 			}
@@ -244,6 +247,7 @@ func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() error
 		return restoreOnFailure(err)
 	}
 	stoppedForRefresh = true
+	release()
 	if _, err := restartManagedService(p); err != nil {
 		return restoreOnFailure(err)
 	}
@@ -586,9 +590,11 @@ func daemonIsRunningViaIPC(p *paths.Paths) (bool, error) {
 
 // Stop sends a shutdown request to the running daemon and waits for it to exit.
 func Stop(p *paths.Paths) error {
-	if err := PrepareShutdownIfIdle(p); err != nil {
+	release, err := PrepareShutdownIfIdle(p)
+	if err != nil {
 		return err
 	}
+	defer release()
 	return StopForced(p)
 }
 

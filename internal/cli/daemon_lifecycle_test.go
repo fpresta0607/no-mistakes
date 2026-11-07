@@ -115,10 +115,12 @@ func TestDaemonStartRefusesToRestartForDriftWithActiveRuns(t *testing.T) {
 
 	restarted := false
 	prevStart := daemonStartGuardedFn
-	daemonStartGuardedFn = func(_ *paths.Paths, beforeRestart func() error) error {
-		if err := beforeRestart(); err != nil {
+	daemonStartGuardedFn = func(_ *paths.Paths, beforeRestart func() (func(), error)) error {
+		release, err := beforeRestart()
+		if err != nil {
 			return err
 		}
+		defer release()
 		restarted = true
 		return nil
 	}
@@ -162,7 +164,13 @@ func TestLifecycleCommandsWriteCallerAttributionToCLILog(t *testing.T) {
 	prevUninstall := daemonUninstallFn
 	daemonStopFn = func(*paths.Paths) error { return nil }
 	daemonStartFn = func(*paths.Paths) error { return nil }
-	daemonUninstallFn = func(_ *paths.Paths, guard func() error) (string, error) { return "", guard() }
+	daemonUninstallFn = func(_ *paths.Paths, guard func() (func(), error)) (string, error) {
+		release, err := guard()
+		if err == nil {
+			release()
+		}
+		return "", err
+	}
 	prevSupported := daemonUninstallSupportedFn
 	daemonUninstallSupportedFn = func() bool { return true }
 	t.Cleanup(func() {

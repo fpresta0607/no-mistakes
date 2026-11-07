@@ -323,11 +323,11 @@ func (m *RunManager) replayHeldPushFile(ctx context.Context, path string) bool {
 			continue
 		}
 		runID, err := m.handlePushReceived(ctx, &params, true)
-		if errors.Is(err, errReplayDeferred) {
+		if errors.Is(err, errReplayDeferred) || errors.Is(err, errAdmissionClosed) {
 			if err := keepUnreplayedPushes(path, data[start:]); err != nil {
 				slog.Error("failed to keep the held pushes not yet replayed", "path", path, "error", err)
 			} else {
-				slog.Info("restart scheduled during held push replay; the rest replay first on the next start", "ref", params.Ref, "new", params.New)
+				slog.Info("held push replay interrupted; the rest replay first on the next start", "ref", params.Ref, "new", params.New, "reason", err)
 			}
 			return false
 		}
