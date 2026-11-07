@@ -62,7 +62,14 @@ no-mistakes update
 It prefers the managed service path and falls back to a detached daemon if service startup is unavailable or fails.
 If pending or running pipeline runs exist, `update` refuses to restart the daemon by default and prints each active run's ID, status, branch, and short head SHA. Pass `--force` to restart the daemon anyway and accept that those runs may fail; `-y`/`--yes` does not bypass this guard.
 
-Pass `--when-idle` to update without interrupting anything: `update` installs the new binary and then schedules a restart when idle on the running daemon instead of restarting it, printing any active runs as runs that finish on the current version. It schedules the restart even when no run is active, so a run that starts during the download is not stopped either. When the running daemon is too old to restart when idle, `update --when-idle` with active runs refuses and replaces nothing; with no daemon process running, or an older daemon and no active run, it resets the daemon as a plain update does. A daemon process that is running but not accepting connections is refused rather than reset, as is any other failed status probe; retry, or pass `--force`. `--force` takes precedence over `--when-idle`. If the restart cannot be scheduled after the binary was replaced, `update` reports the installed version and the failure; run `no-mistakes daemon restart --when-idle` to finish.
+Pass `--when-idle` to let active runs finish: when the running daemon supports scheduling, `update` installs the new binary and then schedules a restart when idle, printing any active runs as runs that finish on the current version.
+It schedules the restart even when no run is active, so a run that starts during the download is not stopped either.
+When the running daemon is too old to restart when idle, `update --when-idle` with active runs refuses and replaces nothing.
+With no daemon process running, or an older daemon and no active run, it attempts the immediate reset under the same ordinary shutdown preparation as a plain update.
+If that older daemon also lacks `prepare_shutdown`, the update refuses before binary replacement even with no active run.
+A daemon process that is running but not accepting connections is refused rather than reset, as is any other failed status probe; retry, or use explicit `--force` subject to the force and bootstrap limits below.
+`--force` takes precedence over `--when-idle`.
+If the restart cannot be scheduled after the binary was replaced, `update` reports the installed version and the failure; run `no-mistakes daemon restart --when-idle` to finish.
 
 `no-mistakes daemon restart --when-idle` schedules the same restart without an update. Once scheduled, the running daemon:
 
@@ -73,12 +80,40 @@ Pass `--when-idle` to update without interrupting anything: `update` installs th
 5. Starts each held push as a new run as soon as the restarted daemon is ready, in the order they arrived, then removes the file. A push that arrives while held pushes are still being started is held behind them, so an older held push never replaces the run of a newer one. If another restart is scheduled mid-replay, the pushes not yet started stay in a `.replay` file beside the held file, and the next daemon starts them before any push held since.
 
 An approval gate that would resolve or resume on its own while the restart is being marked due stays parked instead, and resumes on the restarted daemon. `daemon status` and `doctor` show a pending restart with the number of runs it waits for and pushes it holds. The git hook still prints its usual banner for a held push; the run appears after the restart. A restart when idle does not rewrite the managed service definition; run `no-mistakes daemon start` afterwards to refresh it. `--force` on `daemon restart` takes precedence over `--when-idle`. Without a running daemon, `--when-idle` starts one as a plain restart does.
-If the daemon is already running from a different executable path, update still prompts before replacing it; `-y`/`--yes` answers that prompt non-interactively. With `--when-idle` and active runs, that case is refused instead, because the daemon restarts through its own executable and would miss the update; run `update` with the binary that started the daemon, or pass `--force`. With no active run, `--when-idle` falls back to the plain prompt and reset.
+If the daemon is already running from a different executable path, update still prompts before replacing it; `-y`/`--yes` answers that prompt non-interactively.
+With `--when-idle` and active runs, that case is refused instead, because the daemon restarts through its own executable and would miss the update; run `update` with the binary that started the daemon, or pass `--force` subject to the limits below.
+With no active run, `--when-idle` falls back to the plain prompt and attempts an ordinary guarded reset; accepting the prompt does not bypass shutdown acknowledgement.
 If the daemon executable path cannot be determined, the update aborts before replacing anything.
 
-`no-mistakes daemon stop`, `no-mistakes daemon uninstall`, and `no-mistakes daemon restart` apply the same guard: if pending or running pipeline runs exist, each refuses by default and lists the active runs, and each takes its own `--force` to proceed anyway.
-`no-mistakes daemon start` applies it when it would restart a running daemon to refresh a changed service definition or replace an older daemon that does not support the gate-context RPC; it then refuses before stopping the daemon or rewriting the definition, and takes `--force` the same way.
-When a running daemon does not support that RPC, `daemon start`, `daemon stop`, `daemon restart`, `daemon uninstall`, and `update` check gate execution context locally, including process ancestry, and still refuse callers inside validation steps. `daemon start` then stops the older daemon and installs the current binary in the managed service definition before starting it, as `daemon restart` does.
+`no-mistakes daemon stop` and `no-mistakes daemon restart` apply the same guard: if pending or running pipeline runs exist, each refuses by default and lists the active runs, and each takes its own `--force` to proceed anyway.
+`no-mistakes daemon uninstall` applies this guard when a macOS LaunchAgent is installed.
+A missing LaunchAgent, or a platform without service removal, is a no-op that does not invoke shutdown preparation or close admission.
+The daemon makes the final idle check and closes admission together, including launches still preparing their run row, queued runs, and parked or recovered active runs.
+If admission wins, ordinary maintenance refuses without changing that run.
+If shutdown wins, later launches, source claims, hook admission, and gate responses refuse before changing run state.
+Before closing admission, maintenance takes an exclusive OS lock on `daemon-lifecycle.lock` in the same `NM_HOME` as the socket, PID file and singleton lock.
+Every daemon startup entrypoint takes shared access before touching startup resources; a startup parent and its child can hold shared access together without deadlocking on readiness.
+The daemon releases its startup access once it owns the singleton, so an idle live daemon can still be stopped normally.
+Maintenance retains exclusive access through binary replacement, service stop, process exit and artifact cleanup; the old daemon exiting cannot admit a replacement in that interval.
+A conflicting or unreadable lock refuses immediately without retrying or changing admission, and the OS releases ownership if its holder crashes.
+Before stopping a managed service or using a PID fallback, ordinary maintenance also requires the daemon's `prepare_shutdown` acknowledgement; a busy, unreadable, or unsupported response aborts the operation and releases maintenance ownership.
+The acknowledgement leaves the daemon alive with admission closed so the caller can stop its managed service before keep-alive restarts it.
+If no daemon is running, ordinary maintenance also holds the existing singleton lock through teardown.
+Explicit force skips the idle acknowledgement and retains lifecycle maintenance exclusion and recursive containment; it does not acquire the absent-daemon singleton lock.
+Restart operations release maintenance ownership only after teardown, before starting the intended replacement.
+A prepared service start uses non-destructive start operations rather than stopping a replacement that may already have started; any failed-start rollback must establish maintenance ownership and idle admission again before restoring shared service resources.
+After ordinary preparation closes admission, a later file replacement or service failure leaves it closed until the daemon is stopped and restarted; the command reports its failure.
+An older running daemon cannot gain this boundary from a newly compiled client or binary replacement: a client that cannot obtain the acknowledgement refuses ordinary maintenance.
+Safe bootstrap from such a daemon requires independently established exclusion of every launch, resume, and hook producer before an operator-authorized stop; an idle database snapshot or singleton lock alone does not establish that exclusion.
+Concurrent lifecycle operations that cannot acquire the lock refuse; this boundary does not prevent an external service manager or operating-system signal from stopping the daemon, or coordinate startup binaries that predate the lock.
+`no-mistakes daemon start` applies the same guard when it would restart a running daemon to refresh a changed service definition or replace an older daemon that does not support the gate-context RPC.
+A refusal leaves the daemon running and the service definition unchanged; `--force` has the same limits as for the other lifecycle commands.
+When a running daemon does not support that RPC, `daemon start`, `daemon stop`, `daemon restart`, `daemon uninstall`, and `update` check gate execution context locally, including process ancestry, and still refuse callers inside validation steps.
+That local check does not supply a `prepare_shutdown` acknowledgement: ordinary `daemon start` and `daemon restart` refuse an older daemon that cannot confirm admission closure.
+Replacing such a daemon requires the independently established bootstrap exclusion described above, not merely a new client or an idle database snapshot.
+Ordinary startup refuses an unreadable process listing or a live, unresponsive owner under another spelling of the same root instead of killing it.
+For a proven absent owner, startup retains lifecycle and singleton ownership through stale-artifact cleanup and service installation, then releases them before the non-destructive replacement start.
+Cleanup after a failed managed start must establish ordinary shutdown preparation before stopping the service or attempting a detached fallback.
 That `--force` override is available only to an ordinary top-level caller. A
 process descended from an active validation-step agent cannot start, stop,
 restart, uninstall, or update the daemon; recursive containment refuses the command before

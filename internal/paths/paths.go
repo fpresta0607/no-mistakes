@@ -85,7 +85,8 @@ func (p *Paths) RunInputsDir() string { return filepath.Join(p.root, "run-inputs
 // CLI/status consumers: LockFile is what actually prevents two daemons from
 // ever running startup recovery or binding the socket concurrently for the
 // same root.
-func (p *Paths) LockFile() string { return filepath.Join(p.root, "daemon.lock") }
+func (p *Paths) LockFile() string          { return filepath.Join(p.root, "daemon.lock") }
+func (p *Paths) LifecycleLockFile() string { return filepath.Join(p.root, "daemon-lifecycle.lock") }
 func (p *Paths) UpdateCheckFile() string {
 	return filepath.Join(p.root, "update-check.json")
 }

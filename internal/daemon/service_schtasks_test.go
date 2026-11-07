@@ -29,6 +29,9 @@ func TestStartInstallsWindowsTaskAndStartsManagedDaemon(t *testing.T) {
 			definition = readWindowsTaskDefinition(t, args)
 		}
 		commands = append(commands, name+" "+strings.Join(args, " "))
+		if name == "schtasks" && len(args) == 3 && args[0] == "/Query" && args[2] == windowsTaskName(p) {
+			return nil, fmt.Errorf("task not found")
+		}
 		// Simulate fresh-install: the legacy unsuffixed task is absent, so
 		// the pre-install cleanup query fails and cleanupLegacyWindowsTask
 		// returns without issuing End/Delete.
@@ -50,20 +53,23 @@ func TestStartInstallsWindowsTaskAndStartsManagedDaemon(t *testing.T) {
 	wantQueryLegacy := "schtasks /Query /TN " + legacyWindowsTaskName + " /XML"
 	wantCreatePrefix := "schtasks /Create /TN " + windowsTaskName(p) + " /XML "
 	wantRun := "schtasks /Run /TN " + windowsTaskName(p)
-	if len(commands) != 3 {
-		t.Fatalf("expected schtasks create, legacy query, and run, got %v", commands)
+	if len(commands) != 4 {
+		t.Fatalf("expected scoped query, create, legacy query, and run, got %v", commands)
 	}
-	if !strings.HasPrefix(commands[0], wantCreatePrefix) || !strings.HasSuffix(commands[0], " /F") {
-		t.Fatalf("create command = %q, want %q<file> /F", commands[0], wantCreatePrefix)
+	if want := "schtasks /Query /TN " + windowsTaskName(p); commands[0] != want {
+		t.Fatalf("scoped query command = %q, want %q", commands[0], want)
+	}
+	if !strings.HasPrefix(commands[1], wantCreatePrefix) || !strings.HasSuffix(commands[1], " /F") {
+		t.Fatalf("create command = %q, want %q<file> /F", commands[1], wantCreatePrefix)
 	}
 	if want := renderWindowsTaskXML(exe, p.Root(), stubWindowsTaskAccount); definition != want {
 		t.Fatalf("registered definition = %q, want %q", definition, want)
 	}
-	if commands[1] != wantQueryLegacy {
-		t.Fatalf("legacy query command = %q, want %q", commands[1], wantQueryLegacy)
+	if commands[2] != wantQueryLegacy {
+		t.Fatalf("legacy query command = %q, want %q", commands[2], wantQueryLegacy)
 	}
-	if commands[2] != wantRun {
-		t.Fatalf("run command = %q, want %q", commands[2], wantRun)
+	if commands[3] != wantRun {
+		t.Fatalf("run command = %q, want %q", commands[3], wantRun)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -88,11 +89,19 @@ func Start(p *paths.Paths) error {
 // to pick up a changed service definition, beforeRestart runs first; an error
 // from it aborts the start before the definition is rewritten or the daemon
 // is stopped.
-func StartGuarded(p *paths.Paths, beforeRestart func() error) error {
+func StartGuarded(p *paths.Paths, beforeRestart func() (func(), error)) error {
 	if err := p.EnsureDirs(); err != nil {
 		return err
 	}
-	if alive, _ := daemonHealthCheck(p); alive {
+	releaseStartup, err := acquireLifecycleLock(p, false)
+	if err != nil {
+		return err
+	}
+	defer releaseStartup()
+	if alive, err := daemonHealthCheck(p); err != nil {
+		return fmt.Errorf("cannot confirm daemon ownership; refusing start: %w", err)
+	} else if alive {
+		releaseStartup()
 		reloaded, err := reinstallManagedServiceIfChanged(p, beforeRestart)
 		if err != nil {
 			return err
@@ -102,18 +111,20 @@ func StartGuarded(p *paths.Paths, beforeRestart func() error) error {
 		}
 		return fmt.Errorf("daemon already running")
 	}
-	// Canonical socket is dead. A daemon for the same logical root may still be
-	// alive under a different path spelling (symlinked or relative NM_HOME),
-	// which the socket-keyed health check above cannot see. Detect via the OS
-	// process list: refuse if a healthy stray is serving this root, or reap a
-	// stale stray (including a crash-looping managed unit) before starting.
-	if err := reconcileCollidingDaemons(p); err != nil {
+	releaseStartup()
+	releasePreparation, err := prepareAbsentDaemonStartup(p)
+	if err != nil {
 		return err
+	}
+	defer releasePreparation()
+	if managedServiceInstalled(p) {
+		resetFailedManagedService(p)
 	}
 	var managedErr error
 	if managed, err := installManagedService(p); err == nil {
 		if managed {
-			if err := startManagedDaemon(p); err == nil {
+			releasePreparation()
+			if err := startPreparedManagedDaemon(p); err == nil {
 				return nil
 			} else {
 				managedErr = err
@@ -132,6 +143,7 @@ func StartGuarded(p *paths.Paths, beforeRestart func() error) error {
 		managedErr = fmt.Errorf("install managed service: %w", err)
 	}
 
+	releasePreparation()
 	fallbackErr := startDetachedDaemon(p)
 	if fallbackErr == nil {
 		return nil
@@ -152,7 +164,7 @@ func StartGuarded(p *paths.Paths, beforeRestart func() error) error {
 // a binary upgrade re-applies the new service definition without forcing
 // users to run `daemon restart` explicitly. No-op on Windows and when the
 // service manager is bypassed (i.e., under `go test`).
-func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() error) (bool, error) {
+func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() (func(), error)) (bool, error) {
 	if serviceManagerBypassed() {
 		return false, nil
 	}
@@ -212,17 +224,31 @@ func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() error
 	case readErr != nil && !os.IsNotExist(readErr):
 		return false, fmt.Errorf("read managed service definition: %w", readErr)
 	}
+	prepare := func() (func(), error) { return PrepareShutdownIfIdle(p) }
 	if beforeRestart != nil {
-		if err := beforeRestart(); err != nil {
-			return false, err
-		}
+		prepare = beforeRestart
 	}
+	release, err := prepare()
+	if err != nil {
+		return false, err
+	}
+	defer func() { release() }()
 	restoreMode := os.FileMode(0o644)
 	if info, err := os.Stat(installPath); err == nil {
 		restoreMode = info.Mode().Perm()
 	}
 	stoppedForRefresh := false
 	restoreOnFailure := func(cause error) (bool, error) {
+		if stoppedForRefresh {
+			releaseRestoration, err := prepare()
+			if err != nil {
+				return false, fmt.Errorf("%w; cannot guard service restoration: %v", cause, err)
+			}
+			release = releaseRestoration
+			if err := stopCurrentDaemonBeforeManagedRestart(p); err != nil {
+				return false, fmt.Errorf("%w; stop failed replacement before restoration: %v", cause, err)
+			}
+		}
 		if err := writeFileAtomic(installPath, existing, restoreMode); err != nil {
 			return false, fmt.Errorf("%w; restore managed service definition: %v", cause, err)
 		}
@@ -230,7 +256,8 @@ func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() error
 			return false, fmt.Errorf("%w; reload restored managed service definition: %v", cause, err)
 		}
 		if stoppedForRefresh {
-			if _, err := restartManagedService(p); err != nil {
+			release()
+			if err := startPreparedManagedDaemon(p); err != nil {
 				return false, fmt.Errorf("%w; restart restored managed service: %v", cause, err)
 			}
 		}
@@ -244,11 +271,8 @@ func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() error
 		return restoreOnFailure(err)
 	}
 	stoppedForRefresh = true
-	launchStarted := daemonStartupNow()
-	if _, err := restartManagedService(p); err != nil {
-		return restoreOnFailure(err)
-	}
-	if err := waitForDaemonStartWithProcess(p, nil, nil, 0, time.Time{}, managedServiceLaunch{notBefore: launchStarted}); err != nil {
+	release()
+	if err := startPreparedManagedDaemon(p); err != nil {
 		return restoreOnFailure(err)
 	}
 	return true, nil
@@ -287,6 +311,14 @@ func stopCurrentDaemonBeforeManagedRestart(p *paths.Paths) error {
 }
 
 func stopManagedFallback(p *paths.Paths) error {
+	if err := reconcileCollidingDaemons(p); err != nil {
+		return fmt.Errorf("inspect managed cleanup ownership: %w", err)
+	}
+	release, err := PrepareShutdownIfIdle(p)
+	if err != nil {
+		return fmt.Errorf("prepare managed cleanup: %w", err)
+	}
+	defer release()
 	managed, err := stopManagedService(p)
 	if !managed {
 		return nil
@@ -336,7 +368,11 @@ func waitForManagedServiceExit(p *paths.Paths, timeout time.Duration) error {
 }
 
 func startDetachedDaemon(p *paths.Paths) error {
-	cleanupDaemonArtifacts(p)
+	releasePreparation, err := prepareAbsentDaemonStartup(p)
+	if err != nil {
+		return err
+	}
+	defer releasePreparation()
 
 	exe, err := os.Executable()
 	if err != nil {
@@ -345,6 +381,7 @@ func startDetachedDaemon(p *paths.Paths) error {
 
 	cmd := exec.Command(exe, "daemon", "run", "--root", p.Root())
 	cmd.Env = upsertEnv(os.Environ(), "NM_HOME", p.Root())
+	releasePreparation()
 	return launchDetachedDaemon(p, cmd)
 }
 
@@ -352,6 +389,12 @@ func startDetachedDaemon(p *paths.Paths) error {
 // output appended to the bootstrap log, and waits until that exact child
 // answers on the daemon socket.
 func launchDetachedDaemon(p *paths.Paths, cmd *exec.Cmd) error {
+	releaseStartup, err := acquireLifecycleLock(p, false)
+	if err != nil {
+		return err
+	}
+	defer releaseStartup()
+
 	logFile, err := os.OpenFile(p.DaemonBootstrapLog(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return fmt.Errorf("open daemon bootstrap log: %w", err)
@@ -389,22 +432,6 @@ func launchDetachedDaemon(p *paths.Paths, cmd *exec.Cmd) error {
 		exitCh <- waitErr
 	}()
 	return waitForDaemonStartWithProcess(p, cmd.Process, exitCh, pid, startedAt, managedServiceLaunch{})
-}
-
-func startManagedDaemon(p *paths.Paths) error {
-	launch, err := prepareManagedDaemonLaunch(p)
-	if err != nil {
-		return fmt.Errorf("inspect managed daemon before launch: %w", err)
-	}
-	launch.notBefore = daemonStartupNow()
-	if _, err := startManagedService(p); err != nil {
-		if alive, _ := daemonHealthCheck(p); alive {
-			return nil
-		}
-		return err
-	}
-	slog.Info("managed daemon launched")
-	return waitForDaemonStartWithProcess(p, nil, nil, 0, time.Time{}, launch)
 }
 
 func waitForDaemonStart(p *paths.Paths, pid int, startedAt time.Time) error {
@@ -602,6 +629,17 @@ func daemonIsRunningViaIPC(p *paths.Paths) (bool, error) {
 
 // Stop sends a shutdown request to the running daemon and waits for it to exit.
 func Stop(p *paths.Paths) error {
+	release, err := PrepareShutdownIfIdle(p)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return StopPrepared(p)
+}
+
+// StopPrepared requires the caller to retain the preparation's release callback
+// until this function and any further teardown have finished.
+func StopPrepared(p *paths.Paths) error {
 	instance := captureRunningDaemon(p)
 	if managed, err := stopManagedService(p); managed {
 		var detachedErr error
@@ -649,7 +687,7 @@ func stopDetachedDaemon(p *paths.Paths) error {
 	}
 
 	var result ipc.ShutdownResult
-	callErr := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, &result)
+	callErr := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{Force: true}, &result)
 	// Hand the connection back before waiting on the exit it gates. The
 	// daemon's accept loop drains in-flight connection handlers before it
 	// finishes shutting down, so a stopper that kept its client open while
@@ -802,17 +840,26 @@ func staleDaemonArtifacts(p *paths.Paths) (bool, error) {
 	if err != nil && !missingSocket {
 		return false, fmt.Errorf("stat daemon socket: %w", err)
 	}
-	if err == nil && info.Mode()&os.ModeSocket == 0 && !daemonEndpointUsesRegularFile() {
-		return true, nil
-	}
 	pid, err := ReadPID(p)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if missingSocket {
 				return true, nil
 			}
+			if info.Mode()&os.ModeSocket == 0 && !daemonEndpointUsesRegularFile() {
+				return true, nil
+			}
 			if daemonEndpointUsesRegularFile() {
-				return false, nil
+				client, dialErr := daemonDial(p.Socket())
+				if dialErr == nil {
+					client.Close()
+					return false, nil
+				}
+				var deadOwner *ipc.DeadEndpointError
+				if errors.As(dialErr, &deadOwner) && deadOwner.PID > 0 && uint64(deadOwner.PID) <= math.MaxUint32 {
+					return true, nil
+				}
+				return false, dialErr
 			}
 			alive, err := daemonSocketAcceptingConnections(p.Socket())
 			if err != nil {
@@ -996,6 +1043,14 @@ func EnsureDaemon(p *paths.Paths) error {
 	if err := ipc.CheckEndpointPath(p.Socket()); err != nil {
 		return err
 	}
+	if err := p.EnsureDirs(); err != nil {
+		return err
+	}
+	releaseStartup, err := acquireLifecycleLock(p, false)
+	if err != nil {
+		return err
+	}
+	defer releaseStartup()
 	alive, err := daemonHealthCheck(p)
 	if err != nil {
 		return fmt.Errorf("%w (run 'no-mistakes daemon start' to recover)", err)
@@ -1003,6 +1058,7 @@ func EnsureDaemon(p *paths.Paths) error {
 	if alive {
 		return nil
 	}
+	releaseStartup()
 	return daemonStart(p)
 }
 

@@ -3,15 +3,113 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
+
+func TestAbsentStartupRechecksEndpointOwnerWithoutPIDFile(t *testing.T) {
+	for _, scenario := range []string{"dead", "live", "changed_to_live", "malformed", "unreadable", "unsupported", "non_positive_pid", "out_of_range_pid"} {
+		t.Run(scenario, func(t *testing.T) {
+			p := paths.WithRoot(t.TempDir())
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			endpoint := fmt.Sprintf("127.0.0.1:1\ntoken\n%d", deadDaemonHelperPID(t))
+			switch scenario {
+			case "live":
+				endpoint = fmt.Sprintf("127.0.0.1:1\ntoken\n%d", os.Getpid())
+			case "malformed":
+				endpoint = "unreadable owner"
+			case "non_positive_pid":
+				endpoint = "127.0.0.1:1\ntoken\n-1"
+			case "out_of_range_pid":
+				endpoint = "127.0.0.1:1\ntoken\n4294967296"
+			}
+			if scenario == "unreadable" {
+				if err := os.Mkdir(p.Socket(), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(p.Socket(), []byte(endpoint), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "changed_to_live" {
+				if alive, err := daemonIsRunningViaIPC(p); err != nil || alive {
+					t.Fatalf("initial dead-owner probe: alive=%t, err=%v", alive, err)
+				}
+			}
+			oldDial, oldList := daemonDial, daemonListDaemonProcesses
+			t.Cleanup(func() { daemonDial, daemonListDaemonProcesses = oldDial, oldList })
+			daemonListDaemonProcesses = func() ([]daemonProcessInfo, error) {
+				if scenario == "changed_to_live" {
+					endpoint = fmt.Sprintf("127.0.0.1:1\ntoken\n%d", os.Getpid())
+					if err := os.WriteFile(p.Socket(), []byte(endpoint), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return nil, nil
+			}
+			isRechecked := false
+			daemonDial = func(endpoint string) (*ipc.Client, error) {
+				isRechecked = true
+				if release, err := acquireLifecycleLock(p, false); err == nil {
+					release()
+					t.Error("owner recheck lost maintenance exclusion")
+				}
+				if lock, err := acquireSingletonLock(p); !errors.Is(err, ErrSingletonLockHeld) {
+					if lock != nil {
+						lock.Release()
+					}
+					t.Errorf("owner recheck lost singleton: %v", err)
+				}
+				if scenario == "unsupported" {
+					return nil, errors.New("owner inspection unsupported")
+				}
+				return ipc.Dial(endpoint)
+			}
+			release, err := prepareAbsentDaemonStartup(p)
+			if release != nil {
+				defer release()
+			}
+			if !isRechecked {
+				t.Error("missing PID file bypassed the locked endpoint-owner recheck")
+			}
+			if scenario == "dead" {
+				if err != nil || release == nil {
+					t.Fatalf("proven dead endpoint refused: %v", err)
+				}
+				if _, err := os.Stat(p.Socket()); !os.IsNotExist(err) {
+					t.Fatalf("dead endpoint survived preparation: %v", err)
+				}
+				return
+			}
+			if err == nil || release != nil {
+				t.Fatalf("unconfirmed endpoint granted startup: %v", err)
+			}
+			if scenario != "unreadable" {
+				data, err := os.ReadFile(p.Socket())
+				if err != nil || string(data) != endpoint {
+					t.Fatalf("refusal changed endpoint: %q, %v", data, err)
+				}
+			}
+			if release, err := acquireLifecycleLock(p, false); err != nil {
+				t.Fatalf("refusal retained maintenance exclusion: %v", err)
+			} else {
+				release()
+			}
+			if scenario == "unsupported" && !strings.Contains(err.Error(), "owner inspection unsupported") {
+				t.Fatalf("unsupported inspection was hidden: %v", err)
+			}
+		})
+	}
+}
 
 // deadDaemonHelperPID returns a pid that has provably exited and has not been
 // reused by a live process. Windows can recycle a just-freed pid, so the check
@@ -72,7 +170,7 @@ func TestEnsureDaemonStartsOnDeadEndpointOwner(t *testing.T) {
 			return
 		}
 		if client, err := ipc.Dial(p.Socket()); err == nil {
-			_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
+			_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{Force: true}, nil)
 			_ = client.Close()
 		}
 	})
