@@ -46,6 +46,11 @@ func ciHandbackPR(sctx *pipeline.StepContext, run *db.Run, publishedHead string)
 }
 
 func VerifyCIHandbackSource(sctx *pipeline.StepContext, receipt *db.CIHandback) error {
+	if receipt.Source.Validation != nil {
+		if err := sctx.DB.VerifyCIHandbackValidation(receipt); err != nil {
+			return err
+		}
+	}
 	anchor := fmt.Sprintf("refs/no-mistakes/ci-handback/%s/%d", receipt.RunID, receipt.PushGeneration)
 	for _, directory := range []string{receipt.CallerDir, sctx.GateDir} {
 		for _, source := range []struct{ ref, head string }{{anchor + "/published", receipt.ReleasedHead}, {anchor + "/author", receipt.Source.CallerHead}} {
@@ -56,6 +61,96 @@ func VerifyCIHandbackSource(sctx *pipeline.StepContext, receipt *db.CIHandback) 
 		}
 	}
 	return nil
+}
+
+func verifyCIHandbackValidationHeads(sctx *pipeline.StepContext, run *db.Run, validation *db.CIHandbackValidation) error {
+	if run.SubmittedHeadSHA == nil || run.ReviewApprovedHeadSHA == nil || len(validation.Steps) != len(validation.Rounds) {
+		return fmt.Errorf("publication revalidation requires historical validation proof")
+	}
+	testedHead := ""
+	hasReviewedHead := false
+	for index, step := range validation.Steps {
+		rounds := validation.Rounds[index]
+		if len(rounds) == 0 {
+			return fmt.Errorf("publication revalidation has no historical %s round", step.StepName)
+		}
+		latest := rounds[len(rounds)-1]
+		if step.StepName == types.StepReview {
+			hasReviewedHead = latest.ReviewedHeadSHA != nil && *latest.ReviewedHeadSHA == *run.ReviewApprovedHeadSHA
+		}
+		if step.StepName == types.StepTest {
+			if step.FindingsJSON == nil || latest.FindingsJSON == nil || *step.FindingsJSON != *latest.FindingsJSON {
+				return fmt.Errorf("publication revalidation Test round and evidence disagree")
+			}
+			evidence, err := types.ParseFindingsJSON(*step.FindingsJSON)
+			if err != nil {
+				return err
+			}
+			testedHead = evidence.TestedHeadSHA
+		}
+	}
+	if !hasReviewedHead || testedHead == "" {
+		return fmt.Errorf("publication revalidation requires recorded Review and Test heads")
+	}
+	heads := []string{*run.SubmittedHeadSHA, *run.ReviewApprovedHeadSHA, testedHead, run.HeadSHA}
+	for index, head := range heads {
+		if resolved, err := stepGitRun(sctx, "rev-parse", "--verify", head+"^{commit}"); err != nil || resolved != head {
+			return fmt.Errorf("publication revalidation head is missing or ambiguous")
+		}
+		if index > 0 {
+			if _, err := stepGitRun(sctx, "merge-base", "--is-ancestor", heads[index-1], head); err != nil {
+				return fmt.Errorf("publication revalidation requires submitted, reviewed, tested and published ancestry")
+			}
+		}
+	}
+	return nil
+}
+
+func verifyCIHandbackPublication(sctx *pipeline.StepContext, receipt *db.CIHandback, head string) error {
+	if receipt.Source == nil || receipt.Source.Validation == nil {
+		return nil
+	}
+	if err := sctx.DB.VerifyCIHandbackValidation(receipt); err != nil {
+		return err
+	}
+	run, err := sctx.DB.GetRun(receipt.RunID)
+	if err != nil || run == nil || run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != head {
+		return fmt.Errorf("CI handback publication requires fresh Review of the exact final head")
+	}
+	results, err := sctx.DB.GetStepsByRun(receipt.RunID)
+	if err != nil {
+		return err
+	}
+	for _, result := range results {
+		if result.StepName != types.StepReview && result.StepName != types.StepTest {
+			continue
+		}
+		rounds, err := sctx.DB.GetRoundsByStep(result.ID)
+		if err != nil {
+			return err
+		}
+		originalCount := 0
+		for index, original := range receipt.Source.Validation.Steps {
+			if original.ID == result.ID {
+				originalCount = len(receipt.Source.Validation.Rounds[index])
+			}
+		}
+		if result.StepName == types.StepReview {
+			if result.Status != types.StepStatusCompleted || len(rounds) <= originalCount || rounds[len(rounds)-1].ReviewedHeadSHA == nil || *rounds[len(rounds)-1].ReviewedHeadSHA != head {
+				return fmt.Errorf("CI handback publication requires fresh Review of the exact final head")
+			}
+			continue
+		}
+		if result.Status != types.StepStatusCompleted || result.FindingsJSON == nil || len(rounds) <= originalCount || rounds[len(rounds)-1].FindingsJSON == nil || *rounds[len(rounds)-1].FindingsJSON != *result.FindingsJSON {
+			break
+		}
+		evidence, err := types.ParseFindingsJSON(*result.FindingsJSON)
+		if err == nil && evidence.TestedHeadSHA == head {
+			return nil
+		}
+		break
+	}
+	return fmt.Errorf("CI handback publication requires fresh Test of the exact final head")
 }
 
 func CIHandbackManagedHead(sctx *pipeline.StepContext, receipt *db.CIHandback) (string, error) {
@@ -164,8 +259,16 @@ func RecoverCIHandback(sctx *pipeline.StepContext, receipt *db.CIHandback) error
 		if run.SubmittedHeadSHA == nil || *run.SubmittedHeadSHA != receipt.Source.SubmittedHead || run.LastPushedAt == nil || *run.LastPushedAt != receipt.Source.PushedAt || *run.PushTargetKind != receipt.Source.PushKind {
 			return fmt.Errorf("interrupted ordinary CI handback source changed")
 		}
-		if receipt.Source.ReviewHead != receipt.ReleasedHead || (receipt.AcceptedHead == nil && (run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != receipt.Source.ReviewHead)) {
+		if (receipt.Source.Validation == nil && receipt.Source.ReviewHead != receipt.ReleasedHead) || (receipt.AcceptedHead == nil && (run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != receipt.Source.ReviewHead)) {
 			return fmt.Errorf("interrupted ordinary CI handback review identity changed")
+		}
+		if receipt.Source.Validation != nil {
+			historical := *run
+			historical.HeadSHA = receipt.ReleasedHead
+			historical.ReviewApprovedHeadSHA = &receipt.Source.ReviewHead
+			if err := verifyCIHandbackValidationHeads(sctx, &historical, receipt.Source.Validation); err != nil {
+				return err
+			}
 		}
 		ancestors = []string{receipt.ReleasedHead, receipt.Source.CallerHead}
 	}

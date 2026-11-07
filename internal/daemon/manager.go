@@ -3020,6 +3020,7 @@ func (m *RunManager) HandleHandoff(ctx context.Context, runID string) error {
 // cancelActiveRuns cancels any in-progress runs for the given repo+branch
 // and waits for their goroutines to finish before returning, preventing
 // concurrent pushes to upstream.
+// Terminal runs still being cleaned up must finish before a replacement starts.
 // The cancellation cause is propagated to the executor via context.Cause,
 // which uses it as the run's error message in the DB.
 func (m *RunManager) cancelActiveRuns(repoID, branch string) {
@@ -3045,10 +3046,6 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 		if run.Branch != branch {
 			continue
 		}
-		if run.Status != types.RunPending && run.Status != types.RunRunning {
-			continue
-		}
-
 		m.mu.Lock()
 		cancel, ok := m.cancels[run.ID]
 		done := m.dones[run.ID]
@@ -3058,8 +3055,10 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 			continue
 		}
 
-		cancel(fmt.Errorf(types.RunCancelReasonSuperseded))
-		slog.Info("cancelled active run", "run_id", run.ID, "repo_id", repoID, "branch", branch)
+		if run.Status == types.RunPending || run.Status == types.RunRunning {
+			cancel(fmt.Errorf(types.RunCancelReasonSuperseded))
+			slog.Info("cancelled active run", "run_id", run.ID, "repo_id", repoID, "branch", branch)
+		}
 		if done != nil {
 			toWait = append(toWait, done)
 		}
