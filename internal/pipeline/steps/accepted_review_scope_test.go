@@ -3,13 +3,19 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -131,69 +137,168 @@ func TestAcceptedReviewScopeReachesLaterStagesAfterRestart(t *testing.T) {
 	}
 }
 
-func TestAcceptedReviewScopeDiscardsSpeculativeTestEvidence(t *testing.T) {
-	for _, baseline := range []string{"repository", "machine-local", "absent"} {
-		t.Run(baseline, func(t *testing.T) {
-			f := newSideBySideFixture(t, config.Commands{Test: "count", Lint: "echo lint"})
-			if baseline == "machine-local" {
-				f.review.Config.CommandOverrides = map[string]config.CommandOverride{"test": {Additional: []string{f.review.Config.Commands.Test}}}
-			}
-			if baseline != "repository" {
-				f.review.Config.Commands.Test = ""
-			}
-			startSideLanes(f.review, f.baseSHA)
-			f.lanesDone()
-			if calls := f.agent.evidenceCalls(); len(calls) != 1 {
-				t.Fatalf("want one speculative turn, got %v", calls)
-			}
-			database := f.review.DB
-			if err := database.UpdateRunStatus(f.review.Run.ID, types.RunRunning); err != nil {
-				t.Fatal(err)
-			}
-			review, err := database.InsertStepResult(f.review.Run.ID, types.StepReview)
-			if err != nil {
-				t.Fatal(err)
-			}
-			raw := declinedDedupFindings
-			round, err := database.InsertReviewStepRoundWithProvenance(review.ID, 1, "initial", &raw, nil, f.headSHA, f.headSHA, "trusted", nil, nil, 5)
-			if err != nil {
-				t.Fatal(err)
-			}
-			findings, err := types.ParseFindingsJSON(raw)
-			if err != nil {
-				t.Fatal(err)
-			}
-			decision := types.ReviewScopeDecision{Version: 1, DecisionID: "decision", Authority: "controller_assertion", RunID: f.review.Run.ID, StepResultID: review.ID, RoundID: round.ID, SourceHeadSHA: f.headSHA, SourceBaseSHA: f.baseSHA, TrustedConfigSHA: "trusted", Finding: findings.Items[0], AcceptedScope: "retain the existing bounded loop"}
-			if err := database.SetReviewScopeDecision(decision, `["journal-version-deduplication"]`, raw, types.ResponseOriginUnknown); err != nil {
-				t.Fatal(err)
-			}
-			if baseline == "absent" {
-				if _, err := (&TestStep{}).Execute(f.turn()); err != nil {
+func TestAcceptedReviewScopeRunsOneBaselineAfterReview(t *testing.T) {
+	for _, baseline := range []string{"repository", "machine-local"} {
+		for _, mode := range []string{"approve", "scope", "recovered approve", "recovered scope"} {
+			t.Run(baseline+"/"+mode, func(t *testing.T) {
+				dir, base, head := setupGitRepo(t)
+				counter := filepath.Join(t.TempDir(), "baseline-runs.txt")
+				appPaths := paths.WithRoot(t.TempDir())
+				if err := appPaths.EnsureDirs(); err != nil {
 					t.Fatal(err)
 				}
-				if calls := f.agent.evidenceCalls(); len(calls) != 2 || !samePath(calls[1], f.dir) || f.baselineRuns() != 0 {
-					t.Fatalf("fresh scope evidence did not run without a baseline: calls=%v baselines=%d", calls, f.baselineRuns())
-				}
-				if _, err := (&DocumentStep{}).Execute(f.turn()); err != nil {
+				database, err := db.Open(appPaths.DB())
+				if err != nil {
 					t.Fatal(err)
 				}
-				if calls := f.agent.documentCalls(); len(calls) != 2 || !samePath(calls[1], f.dir) {
-					t.Fatalf("Document reused speculative scope evidence: calls=%v", calls)
+				t.Cleanup(func() { database.Close() })
+				repo, err := database.InsertRepo(dir, "https://example.invalid/repo", "main")
+				if err != nil {
+					t.Fatal(err)
 				}
-				return
-			}
-			for attempt := 0; attempt < 2; attempt++ {
-				outcome, err := (&TestStep{}).Execute(f.turn())
-				if err == nil || !strings.Contains(err.Error(), "baseline equivalence receipt") || outcome != nil {
-					t.Fatalf("missing equivalence proof must refuse certification: outcome=%+v err=%v", outcome, err)
+				run, err := database.InsertRun(repo.ID, "refs/heads/feature", head, base)
+				if err != nil {
+					t.Fatal(err)
 				}
-				if calls := f.agent.evidenceCalls(); len(calls) != 1 || f.baselineRuns() != 1 {
-					t.Fatalf("unchanged baseline or speculative evidence was repeated: calls=%v baselines=%d", calls, f.baselineRuns())
+				command := "echo ran>> " + counter
+				cfg := &config.Config{Agent: types.AgentClaude, SideBySide: true, TrustedConfigSHA: "trusted", Commands: config.Commands{Test: command, Lint: "echo lint"}}
+				if baseline == "machine-local" {
+					cfg.Commands.Test = ""
+					cfg.CommandOverrides = map[string]config.CommandOverride{"test": {Additional: []string{command}}}
 				}
-				if _, _, _, recorded := f.review.Shared.Baseline(); recorded {
-					t.Fatal("unverified lane baseline was granted to the main run")
+				ensureHermeticOrigin(t, dir)
+				ag := &sideBySideAgent{}
+				const findings = `{"findings":[{"id":"R1","severity":"error","file":"feature.txt","description":"Expand cleanup bounds","action":"ask-user"}]}`
+				review := &transitionStep{name: types.StepReview, execute: func(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+					startSideLanes(sctx, base)
+					(&sideBySideFixture{t: t, review: sctx}).lanesDone()
+					if sctx.Fixing {
+						return &pipeline.StepOutcome{Findings: `{"findings":[],"reviewed_paths":["feature.txt"]}`, ReviewedPaths: []string{"feature.txt"}, ReviewablePaths: []string{"feature.txt"}, ReviewApprovedHeadSHA: head}, nil
+					}
+					return &pipeline.StepOutcome{NeedsApproval: true, Findings: findings, ReviewApprovedHeadSHA: head}, nil
+				}}
+				steps := []pipeline.Step{review, &TestStep{}, &DocumentStep{}}
+				parks := make(chan struct{}, 4)
+				emit := func(event ipc.Event) {
+					if event.Type == ipc.EventStepCompleted && event.StepName != nil && *event.StepName == types.StepReview && event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
+						parks <- struct{}{}
+					}
 				}
-			}
-		})
+				executor := pipeline.NewExecutor(database, appPaths, cfg, ag, steps, emit)
+				ctx, cancel := context.WithCancelCause(context.Background())
+				done := make(chan error, 1)
+				finished := make(chan struct{})
+				go func() { defer close(finished); done <- executor.Execute(ctx, run, repo, dir) }()
+				t.Cleanup(func() {
+					cancel(pipeline.ErrDaemonShutdown)
+					select {
+					case <-finished:
+					case <-time.After(10 * time.Second):
+						t.Error("executor did not stop")
+					}
+				})
+				waitForPark := func() {
+					t.Helper()
+					select {
+					case <-parks:
+					case err := <-done:
+						t.Fatalf("Review did not park: %v", err)
+					case <-time.After(10 * time.Second):
+						t.Fatal("Review did not park")
+					}
+				}
+				waitForPark()
+				if data, err := os.ReadFile(counter); !os.IsNotExist(err) {
+					t.Fatalf("baseline ran before Review settled: %q, %v", data, err)
+				}
+				if strings.HasPrefix(mode, "recovered") {
+					cancel(pipeline.ErrDaemonShutdown)
+					select {
+					case err := <-done:
+						if !errors.Is(err, pipeline.ErrParkedAtShutdown) {
+							t.Fatalf("park was not retained: %v", err)
+						}
+					case <-time.After(10 * time.Second):
+						t.Fatal("executor did not stop at its park")
+					}
+					<-finished
+					if err := database.Close(); err != nil {
+						t.Fatal(err)
+					}
+					database, err = db.Open(appPaths.DB())
+					if err != nil {
+						t.Fatal(err)
+					}
+					run, err = database.GetRun(run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					executor = pipeline.NewExecutor(database, appPaths, cfg, ag, steps, emit)
+					ctx, cancel = context.WithCancelCause(context.Background())
+					done = make(chan error, 1)
+					finished = make(chan struct{})
+					go func() { defer close(finished); done <- executor.Resume(ctx, run, repo, dir) }()
+					waitForPark()
+				}
+				records, err := database.GetStepsByRun(run.ID)
+				if err != nil || len(records) != 3 {
+					t.Fatalf("steps=%v err=%v", records, err)
+				}
+				rounds, err := database.GetRoundsByStep(records[0].ID)
+				if err != nil || len(rounds) != 1 {
+					t.Fatalf("Review spending changed at recovery: %v %v", rounds, err)
+				}
+				originalFindings := *rounds[0].FindingsJSON
+				if strings.HasSuffix(mode, "scope") {
+					parsed, err := types.ParseFindingsJSON(originalFindings)
+					if err != nil {
+						t.Fatal(err)
+					}
+					decision := &types.ReviewScopeDecision{Version: 1, DecisionID: "decision", Authority: "controller_assertion", RunID: run.ID, StepResultID: records[0].ID, RoundID: rounds[0].ID, SourceHeadSHA: head, SourceBaseSHA: base, TrustedConfigSHA: "trusted", Finding: parsed.Items[0], AcceptedScope: "retain fixed cleanup bounds"}
+					if _, err := executor.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"R1"}, nil, nil, nil, "", pipeline.ResponseOptions{ScopeDecision: decision}); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := executor.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(30 * time.Second):
+					t.Fatal("settled Review did not reach Test")
+				}
+				data, err := os.ReadFile(counter)
+				if err != nil || len(strings.Fields(string(data))) != 1 {
+					t.Fatalf("baseline must run once after settled Review: %q %v", data, err)
+				}
+				if calls := ag.evidenceCalls(); len(calls) != 1 || !samePath(calls[0], dir) {
+					t.Fatalf("Test must run once in the run worktree: %v", calls)
+				}
+				if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != head {
+					t.Fatalf("same-source disposition changed source: %s", got)
+				}
+				rounds, err = database.GetRoundsByStep(records[0].ID)
+				expectedRounds := 1
+				if strings.HasSuffix(mode, "scope") {
+					expectedRounds = 2
+				}
+				if err != nil || len(rounds) != expectedRounds || rounds[0].FindingsJSON == nil || *rounds[0].FindingsJSON != originalFindings {
+					t.Fatalf("Review evidence or spending changed: %v %v", rounds, err)
+				}
+				if expectedRounds == 2 && !rounds[1].IsFixRound() {
+					t.Fatal("scope rereview lost its spent repair round")
+				}
+				documentCalls := ag.documentCalls()
+				expectedDocumentCalls := 2
+				if mode == "approve" {
+					expectedDocumentCalls = 1
+				}
+				if len(documentCalls) != expectedDocumentCalls || (mode != "approve" && !samePath(documentCalls[len(documentCalls)-1], dir)) {
+					t.Fatalf("Document did not refresh outdated scope evidence: %v", documentCalls)
+				}
+			})
+		}
 	}
 }

@@ -20,10 +20,9 @@ import (
 // This file owns global side_by_side. Without the setting none of it runs.
 //
 // The executor keeps exactly one step, and one approval gate, in flight. That
-// does not change. What changes is when two later steps do their work: the
-// Test step (baseline command, then the live check) and the documentation
-// pass start when the review starts, each on a throwaway clone of the run's
-// worktree at the commit the review reads. Such a clone is a side lane. A lane
+// does not change. The documentation pass starts when the review starts,
+// on a throwaway clone of the run's worktree at the commit the review reads.
+// Such a clone is a side lane. A lane
 // cannot change the run: it has its own repository, its own copy of the run
 // record, and no approval.
 //
@@ -33,8 +32,7 @@ import (
 //   - The run's head must still be the commit the lane ran on. A review fix
 //     moves the head, and the step then runs as it always has, on the new head.
 //     A lane is stopped as soon as the head moves, not only at its turn.
-//   - The run's worktree must hold nothing uncommitted for the Test step, and
-//     nothing uncommitted on a path the documentation commit changes.
+//   - The run's worktree holds nothing uncommitted on a path the documentation commit changes.
 //   - The lane must have finished without an error.
 //
 // Anything else discards the lane and runs the step in the run's worktree.
@@ -43,7 +41,7 @@ import (
 // reproduce (submodules, Git LFS) starts nothing beside the review.
 //
 // What starting early cannot settle is what gets pushed. The baseline ran on
-// the commit the review started on, and the documentation pass, the lint step
+// the Test step's head, and the documentation pass, the lint step
 // and the formatter can all add commits after it. baselineBeforePush closes
 // that: it names every commit after the tested one, and when those commits
 // touch more than documentation it runs the baseline again on the head about
@@ -106,7 +104,7 @@ func (l *sideLaneLog) String() string {
 
 // sideLane is one step's work started beside the review.
 type sideLane struct {
-	step pipeline.Step
+	step *DocumentStep
 	// head is the commit the lane runs on: the run's head when the review started.
 	head    string
 	started time.Time
@@ -118,7 +116,6 @@ type sideLane struct {
 	scratch     string
 	checkout    string
 	evidenceDir string
-	shared      *pipeline.RunShared
 	elapsed     time.Duration
 	outcome     *pipeline.StepOutcome
 	err         error
@@ -209,7 +206,7 @@ func (l *sideLanes) Stop(sctx *pipeline.StepContext) {
 	}
 }
 
-// startSideLanes starts the Test step's work and the documentation pass
+// startSideLanes starts the documentation pass
 // beside the review that is about to run. It is called once the review has
 // resolved its base, and does nothing unless the executor offered side lanes.
 func startSideLanes(sctx *pipeline.StepContext, baseSHA string) {
@@ -233,29 +230,28 @@ func startSideLanes(sctx *pipeline.StepContext, baseSHA string) {
 		sctx.Log("side by side: nothing starts beside the review: " + reason)
 		return
 	}
-	for _, step := range []pipeline.Step{&TestStep{}, &DocumentStep{}} {
-		name := step.Name()
-		// With no commands.lint the documentation pass also fixes lint, so it
-		// may change code. Code changed beside the baseline would only be
-		// tested again, so that pass keeps its place after the Test step.
-		if name == types.StepDocument && strings.TrimSpace(sctx.Config.Commands.Lint) == "" {
-			sctx.Log("side by side: the documentation pass keeps its place after the Test step, because with no commands.lint it also fixes lint and may change code")
-			continue
-		}
-		laneCtx, ok := sctx.SideLaneContext(name)
-		if !ok {
-			continue
-		}
-		ctx, cancel := context.WithCancelCause(laneCtx.Ctx)
-		laneCtx.Ctx = ctx
-		laneCtx.Env = sctx.Env
-		lane := &sideLane{step: step, head: sctx.Run.HeadSHA, started: time.Now(), cancel: cancel, done: make(chan struct{})}
-		lanes.mu.Lock()
-		lanes.lanes[name] = lane
-		lanes.mu.Unlock()
-		sctx.Log(fmt.Sprintf("side by side: the %s step's work starts beside the review, on %s", name, shortObjectID(lane.head)))
-		go lane.run(laneCtx, sctx.WorkDir, baseSHA)
+	// With no commands.lint the documentation pass also fixes lint, so it
+	// may change code. Code changed beside the baseline would only be
+	// tested again, so that pass keeps its place after the Test step.
+	if strings.TrimSpace(sctx.Config.Commands.Lint) == "" {
+		sctx.Log("side by side: the documentation pass keeps its place after the Test step, because with no commands.lint it also fixes lint and may change code")
+		return
 	}
+	step := &DocumentStep{}
+	name := step.Name()
+	laneCtx, ok := sctx.SideLaneContext(name)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithCancelCause(laneCtx.Ctx)
+	laneCtx.Ctx = ctx
+	laneCtx.Env = sctx.Env
+	lane := &sideLane{step: step, head: sctx.Run.HeadSHA, started: time.Now(), cancel: cancel, done: make(chan struct{})}
+	lanes.mu.Lock()
+	lanes.lanes[name] = lane
+	lanes.mu.Unlock()
+	sctx.Log(fmt.Sprintf("side by side: the %s step's work starts beside the review, on %s", name, shortObjectID(lane.head)))
+	go lane.run(laneCtx, sctx.WorkDir, baseSHA)
 }
 
 // sideLaneRefusal says why this run starts nothing beside the review, or "".
@@ -344,7 +340,6 @@ func (lane *sideLane) run(sctx *pipeline.StepContext, runWorkDir, baseSHA string
 			lane.outcome, lane.err = nil, fmt.Errorf("side lane panicked: %v", recovered)
 		}
 	}()
-	lane.shared = sctx.Shared
 	lane.outcome, lane.err = lane.execute(sctx, runWorkDir, baseSHA)
 }
 
@@ -448,12 +443,13 @@ func (lane *sideLane) removeClone() {
 	}
 }
 
-// takeSideLane returns the result of name's work started beside the review
+// takeSideLane returns the result of Document's work started beside the review
 // when that work is still what the step would do now. Otherwise it discards
 // the lane, says why, and returns false, and the caller runs the step as it
 // always has. Work that ended in a native agent safety refusal is never run
 // again: its refusal is returned as the step's error.
-func takeSideLane(sctx *pipeline.StepContext, name types.StepName) (*pipeline.StepOutcome, bool, error) {
+func takeSideLane(sctx *pipeline.StepContext) (*pipeline.StepOutcome, bool, error) {
+	const name = types.StepDocument
 	if sctx.SideLane || sctx.Shared == nil {
 		return nil, false, nil
 	}
@@ -490,10 +486,6 @@ func takeSideLane(sctx *pipeline.StepContext, name types.StepName) (*pipeline.St
 			return nil, false, fmt.Errorf("accepted Review scope unavailable: restore its source record before continuing: %w", err)
 		}
 		if len(decisions) > 0 {
-			if name == types.StepTest && lane.head == sctx.Run.HeadSHA && (strings.TrimSpace(sctx.Config.Commands.Test) != "" || len(sctx.Config.CommandOverrides["test"].Additional) > 0) {
-				lanes.keep(lane)
-				return nil, false, fmt.Errorf("accepted Review scope requires fresh Test evidence on %s, but the existing baseline record has no baseline equivalence receipt for commands/configuration, dependencies, tools, environment and platform; restore that proof or obtain an explicit baseline policy decision before continuing; speculative evidence is not accepted and the unchanged baseline is not rerun", lane.head)
-			}
 			return refuse("Review accepted an explicit scope decision; speculative evidence cannot certify that decision")
 		}
 	}
@@ -521,7 +513,6 @@ func takeSideLane(sctx *pipeline.StepContext, name types.StepName) (*pipeline.St
 // adopt brings a finished lane's result into the run, or returns why it
 // cannot be used. It changes the run's worktree only when it returns "".
 func (lane *sideLane) adopt(sctx *pipeline.StepContext) string {
-	name := lane.step.Name()
 	if lane.err != nil {
 		return fmt.Sprintf("it failed (%v)", lane.err)
 	}
@@ -544,40 +535,20 @@ func (lane *sideLane) adopt(sctx *pipeline.StepContext) string {
 	}
 	dirty := porcelainZPaths(status)
 
-	switch name {
-	case types.StepTest:
-		// What the Test step leaves uncommitted is brought over into a clean
-		// worktree only, so nothing of the run's is ever written over.
-		if len(dirty) > 0 {
-			return "the run's worktree holds uncommitted changes: " + strings.Join(dirty, ", ")
+	if strings.TrimSpace(lane.leftover) != "" {
+		return "it left uncommitted changes in its copy"
+	}
+	if lane.finalHead != lane.head {
+		// The files a Test step leaves uncommitted, its new tests among
+		// them, may stay where they are: a later step commits them, and
+		// the push answers for them. A commit that changes one of them is
+		// refused, so nothing uncommitted is ever written over.
+		if overlap := sharedPaths(lane.changed, dirty); len(overlap) > 0 {
+			return "its commit changes paths the run's worktree holds uncommitted changes to: " + strings.Join(overlap, ", ")
 		}
-		if lane.finalHead != lane.head {
-			return fmt.Sprintf("it left a commit (%s) that no step validated", shortObjectID(lane.finalHead))
+		if err := lane.bringCommit(sctx); err != nil {
+			return fmt.Sprintf("its commit could not be brought over (%v)", err)
 		}
-		if err := lane.bringLeftovers(sctx); err != nil {
-			return fmt.Sprintf("what it left in its copy could not be brought over (%v)", err)
-		}
-		if _, comparison, passed, recorded := lane.shared.Baseline(); recorded {
-			sctx.Shared.RecordBaseline(lane.head, comparison, passed)
-		}
-	case types.StepDocument:
-		if strings.TrimSpace(lane.leftover) != "" {
-			return "it left uncommitted changes in its copy"
-		}
-		if lane.finalHead != lane.head {
-			// The files a Test step leaves uncommitted, its new tests among
-			// them, may stay where they are: a later step commits them, and
-			// the push answers for them. A commit that changes one of them is
-			// refused, so nothing uncommitted is ever written over.
-			if overlap := sharedPaths(lane.changed, dirty); len(overlap) > 0 {
-				return "its commit changes paths the run's worktree holds uncommitted changes to: " + strings.Join(overlap, ", ")
-			}
-			if err := lane.bringCommit(sctx); err != nil {
-				return fmt.Sprintf("its commit could not be brought over (%v)", err)
-			}
-		}
-	default:
-		return "no step takes this lane"
 	}
 	return ""
 }
@@ -607,79 +578,6 @@ func sharedPaths(a, b []string) []string {
 		}
 	}
 	return shared
-}
-
-// bringLeftovers copies the uncommitted files a Test lane left in its clone
-// (the test files its evidence turn wrote) into the run's worktree, where the
-// same step would have left them. Only new files and edits to tracked files
-// are brought. Anything else refuses the lane, and a failure part way puts
-// the worktree back.
-func (lane *sideLane) bringLeftovers(sctx *pipeline.StepContext) (err error) {
-	type change struct {
-		rel string
-		new bool
-	}
-	var changes []change
-	for _, item := range strings.Split(strings.TrimSuffix(lane.leftover, "\x00"), "\x00") {
-		if item == "" {
-			continue
-		}
-		if len(item) < 4 || item[2] != ' ' {
-			return fmt.Errorf("invalid git status entry %q", item)
-		}
-		code, path := item[:2], item[3:]
-		rel := filepath.FromSlash(path)
-		if !filepath.IsLocal(rel) {
-			return fmt.Errorf("path %q is outside the worktree", path)
-		}
-		switch code {
-		case "??":
-			changes = append(changes, change{rel: rel, new: true})
-		case " M":
-			changes = append(changes, change{rel: rel})
-		default:
-			return fmt.Errorf("change %q to %s is neither a new file nor an edit", code, path)
-		}
-	}
-	var brought []change
-	defer func() {
-		if err == nil {
-			return
-		}
-		for _, c := range brought {
-			if c.new {
-				_ = os.Remove(filepath.Join(sctx.WorkDir, c.rel))
-			} else {
-				_, _ = stepGitRun(sctx, "checkout", "HEAD", "--", filepath.ToSlash(c.rel))
-			}
-		}
-	}()
-	for _, c := range changes {
-		source := filepath.Join(lane.checkout, c.rel)
-		target := filepath.Join(sctx.WorkDir, c.rel)
-		info, statErr := os.Stat(source)
-		if statErr != nil {
-			return statErr
-		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("%s is not a regular file", c.rel)
-		}
-		if _, statErr := os.Lstat(target); c.new && statErr == nil {
-			return fmt.Errorf("%s already exists in the run's worktree", c.rel)
-		}
-		data, readErr := os.ReadFile(source)
-		if readErr != nil {
-			return readErr
-		}
-		if mkErr := os.MkdirAll(filepath.Dir(target), 0o755); mkErr != nil {
-			return mkErr
-		}
-		brought = append(brought, c)
-		if writeErr := os.WriteFile(target, data, info.Mode().Perm()); writeErr != nil {
-			return writeErr
-		}
-	}
-	return nil
 }
 
 // bringCommit fast-forwards the run's worktree to the commit a documentation
@@ -718,7 +616,7 @@ func isDocumentationPath(sctx *pipeline.StepContext, path string) bool {
 
 // baselineBeforePush makes the Push step answer for every commit that came
 // after the one the Test step's baseline ran on. Under side_by_side that
-// commit is the one the review started on, and the documentation pass, the
+// commit is the one Test ran on, and the documentation pass, the
 // lint step and the formatter may all have added commits since.
 //
 // A configured baseline requires Test's recorded comparison from this daemon

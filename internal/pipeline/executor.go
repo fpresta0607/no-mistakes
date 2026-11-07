@@ -1391,7 +1391,7 @@ func recoveredLogPath(step *db.StepResult) string {
 // does not have.
 func (e *Executor) sideLaneContext(ctx context.Context, run *db.Run, repo *db.Repo, name types.StepName) (*StepContext, bool) {
 	sr := e.stepRecords[name]
-	if sr == nil || e.skips[name] || name == types.StepReview {
+	if sr == nil || e.skips[name] || name != types.StepDocument {
 		return nil, false
 	}
 	runCopy := *run
