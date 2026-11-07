@@ -24,11 +24,13 @@ var daemonProcessRunning = processRunning
 var daemonProcessStartTime = processStartTime
 var daemonKillPID = killPID
 var daemonEndpointUsesRegularFile = func() bool { return runtime.GOOS == "windows" }
+var daemonStartupNow = time.Now
+var daemonStartupSleep = time.Sleep
 
 func daemonStartTimeout() time.Duration {
 	// Unix readiness covers the missing-shell retry window, the final
-	// login-shell probe, and the existing budget for recovery and other startup
-	// work. Windows bypasses login-shell probing and keeps the original budget.
+	// login-shell probe, and the no-progress budget for recovery and other
+	// startup work. Windows bypasses login-shell probing and keeps 45 seconds.
 	fallback := 45 * time.Second
 	if runtimeGOOS != "windows" {
 		fallback += shellenv.DefaultShellRetryWindow + shellenv.DefaultShellProbeTimeout
@@ -242,10 +244,11 @@ func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() error
 		return restoreOnFailure(err)
 	}
 	stoppedForRefresh = true
+	launchStarted := daemonStartupNow()
 	if _, err := restartManagedService(p); err != nil {
 		return restoreOnFailure(err)
 	}
-	if err := waitForDaemonStart(p, 0, time.Time{}); err != nil {
+	if err := waitForDaemonStartWithProcess(p, nil, nil, 0, time.Time{}, managedServiceLaunch{notBefore: launchStarted}); err != nil {
 		return restoreOnFailure(err)
 	}
 	return true, nil
@@ -393,6 +396,7 @@ func startManagedDaemon(p *paths.Paths) error {
 	if err != nil {
 		return fmt.Errorf("inspect managed daemon before launch: %w", err)
 	}
+	launch.notBefore = daemonStartupNow()
 	if _, err := startManagedService(p); err != nil {
 		if alive, _ := daemonHealthCheck(p); alive {
 			return nil
@@ -410,12 +414,17 @@ func waitForDaemonStart(p *paths.Paths, pid int, startedAt time.Time) error {
 func waitForDaemonStartWithProcess(p *paths.Paths, proc *os.Process, exitCh <-chan error, pid int, startedAt time.Time, launch managedServiceLaunch) error {
 	timeout := daemonStartTimeout()
 	pollInterval := daemonStartPollInterval()
-	deadline := time.Now().Add(timeout)
+	waitStarted := daemonStartupNow()
+	wait := startupWait{
+		timeout: timeout, deadline: waitStarted.Add(timeout),
+		hardDeadline: waitStarted.Add(max(timeout, maxDaemonStartupElapsed)),
+		pid:          pid, startedAt: startedAt, notBefore: launch.notBefore,
+	}
 	managedPID := 0
 	nextManagedProbe := time.Time{}
 	var lastHealthErr error
 
-	for time.Now().Before(deadline) {
+	for daemonStartupNow().Before(wait.deadline) {
 		if alive, err := daemonHealthCheck(p); alive {
 			slog.Info("daemon ready", "pid", pid)
 			return nil
@@ -445,22 +454,31 @@ func waitForDaemonStartWithProcess(p *paths.Paths, proc *os.Process, exitCh <-ch
 					if actual, err := daemonProcessStartTime(record.PID); err == nil {
 						if matches, _ := daemonPIDRecordMatchesProcess(p, record, actual); matches {
 							managedPID = record.PID
-							nextManagedProbe = time.Now().Add(250 * time.Millisecond)
+							nextManagedProbe = daemonStartupNow().Add(250 * time.Millisecond)
 						}
 					}
 				}
-			} else if !time.Now().Before(nextManagedProbe) {
+			} else if !daemonStartupNow().Before(nextManagedProbe) {
 				running, err := daemonProcessRunning(managedPID)
 				if err == nil && !running {
 					return fmt.Errorf("managed daemon child %d exited before readiness", managedPID)
 				}
-				nextManagedProbe = time.Now().Add(250 * time.Millisecond)
+				nextManagedProbe = daemonStartupNow().Add(250 * time.Millisecond)
 			}
 		}
-		time.Sleep(pollInterval)
+		if wait.pid == 0 && managedPID != 0 {
+			wait.pid = managedPID
+		}
+		wait.observe(p, daemonStartupNow())
+		if remaining := wait.deadline.Sub(daemonStartupNow()); remaining > 0 {
+			daemonStartupSleep(min(pollInterval, remaining))
+		}
 	}
 
-	timeoutErr := fmt.Errorf("daemon launched but did not become ready within %v", timeout)
+	timeoutErr := fmt.Errorf("daemon launched but did not become ready within %v without startup progress (elapsed %v)", timeout, daemonStartupNow().Sub(waitStarted))
+	if !daemonStartupNow().Before(wait.hardDeadline) {
+		timeoutErr = fmt.Errorf("daemon launched but did not become ready: startup elapsed limit %v reached", wait.hardDeadline.Sub(waitStarted))
+	}
 	if lastHealthErr != nil {
 		timeoutErr = fmt.Errorf("%w: last health check: %v", timeoutErr, lastHealthErr)
 	}
