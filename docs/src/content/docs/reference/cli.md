@@ -407,7 +407,9 @@ The input is one operator-owned UTF-8 JSON object, at most 64 KiB, with these fi
 | `reason` | A nonempty explicit reason, at most 4096 bytes |
 
 The daemon checks the authenticated caller, registered Git identity, exact clean source, immutable predecessor history, launch selection and publication facts before accepting the child.
-An unresolved native agent safety refusal in the predecessor, or unreadable predecessor findings, refuses admission.
+The gate branch may still name a head bound by an earlier immutable authored admission or terminal adoption, including the adopted root's original submitted head.
+Terminal-adoption links must retain their recorded source, lane and recovery anchors; unrelated Git ancestry supplies no ownership evidence.
+An unresolved native agent safety refusal or unreadable findings anywhere in that immutable lineage refuses admission.
 The declared authored candidate must differ from every head bound in the immutable validation family: submitted, terminal, published and approved review heads, starting and reviewed heads from every stage's rounds, linked terminal source-adoption candidate, retained, gate, recovery and caller heads, and every source-anchor value recorded by an admission.
 This checks recorded identities, never arbitrary Git ancestry.
 Use [terminal validation](#no-mistakes-axi-validate-terminal) to explicitly validate an unchanged failed or cancelled child's terminal head after an infrastructure failure, including an interrupted daemon or a pending acceptance cancelled after the trusted source changed.
