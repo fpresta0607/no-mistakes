@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -231,6 +232,9 @@ func TestCIWorkflow_UnixStepFailsClosedWhenTheRemainderPackageSetIsEmpty(t *test
 	if err != nil {
 		t.Skip("bash unavailable to execute the Unix test step")
 	}
+	if runtime.GOOS == "windows" && !isNativeGitBash(t, bash) {
+		t.Skipf("resolved bash %q is not native Git Bash, and the guarded Unix step never runs on Windows", bash)
+	}
 	step := unixTestStep(t)
 
 	cases := []struct {
@@ -302,10 +306,7 @@ if [ "$1" = "list" ]; then
 	printf '%s' "$FAKE_GO_LIST"
 	exit "$FAKE_GO_LIST_EXIT"
 fi
-{
-	printf '%s\n' "--"
-	printf '%s\n' "$@"
-} >> "$FAKE_GO_LOG"
+printf '%s\n' "--" "$@" >> "$FAKE_GO_LOG"
 `
 	if err := os.WriteFile(filepath.Join(shimDir, "go"), []byte(shim), 0o755); err != nil {
 		t.Fatalf("write fake go: %v", err)
@@ -354,4 +355,13 @@ fi
 		tests = append(tests, strings.Join(args, " "))
 	}
 	return tests, err, output.String()
+}
+
+// isNativeGitBash reports whether bash identifies as the MSYS shell that runs
+// the Unix step, so a WSL launcher earlier on PATH cannot make the guard hand a
+// checkout path to a Linux shell.
+func isNativeGitBash(t *testing.T, bash string) bool {
+	t.Helper()
+	output, err := exec.Command(bash, "-c", `printf %s "$OSTYPE"`).Output()
+	return err == nil && strings.TrimSpace(string(output)) == "msys"
 }
