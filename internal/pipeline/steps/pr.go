@@ -909,18 +909,24 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 	if sctx.Config != nil {
 		policy.AllowTestCommandOverride = strings.TrimSpace(sctx.Config.Test.AllowApproveOverFailure)
 	}
-	pipelineMD, riskLine = buildPipelineSummaryFor(steps, rounds, sctx.Run.HeadSHA, provider, policy)
+	shouldPublishValidationText := shouldPublishPRIntent(sctx)
+	pipelineMD, riskLine = buildPipelineSummaryWithVisibility(steps, rounds, sctx.Run.HeadSHA, provider, policy, shouldPublishValidationText)
 	// The review conversation rides inside the Pipeline section as an ordinary
 	// `### ` group, so the existing body-budget logic can drop it whole rather
 	// than competing with the attestation it must never displace.
-	if conversationMD := buildReviewConversationSection(sctx); conversationMD != "" && pipelineMD != "" {
-		pipelineMD += "\n\n" + conversationMD
+	if shouldPublishValidationText {
+		if conversationMD := buildReviewConversationSection(sctx); conversationMD != "" && pipelineMD != "" {
+			pipelineMD += "\n\n" + conversationMD
+		}
 	}
 	// Ordinary Bitbucket descriptions keep their existing Markdown-only skin.
 	// Owned templates additionally carry the exact existing declaration as
 	// visible text; the raw consumer/restamper uses the same marker and schema.
 	if owned && provider == scm.ProviderBitbucket && pipelineMD != "" {
 		pipelineMD += "\n\n```text\n" + buildPipelineAttestationWithPolicy(steps, rounds, sctx.Run.HeadSHA, policy) + "\n```"
+	}
+	if !shouldPublishValidationText {
+		return pipelineMD, riskLine, "", ""
 	}
 	compact := true
 	if sctx.Config != nil {

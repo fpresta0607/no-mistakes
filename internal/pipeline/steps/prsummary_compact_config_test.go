@@ -38,6 +38,7 @@ func TestPRStep_TestingSummaryUsesResolvedCompactSetting(t *testing.T) {
 				t.Fatal(err)
 			}
 			sctx.Config = config.Merge(&config.GlobalConfig{}, repo)
+			publishValidationTextForTest(sctx)
 			sctx.Config.Test.Evidence.AttachMedia = false
 			_, _, md, _ := (&PRStep{}).buildPipelineSection(sctx, scm.ProviderGitHub)
 			if tc.compact {

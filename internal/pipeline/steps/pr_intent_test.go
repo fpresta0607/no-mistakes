@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,6 +17,11 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func publishValidationTextForTest(sctx *pipeline.StepContext) {
+	shouldPublish := true
+	sctx.Config.PR.PublishIntent = &shouldPublish
+}
 
 func TestPRPrivateValidationIntentIsNotPublishedByDefault(t *testing.T) {
 	t.Parallel()
@@ -70,8 +77,8 @@ func TestPRPrivateValidationIntentIsNotPublishedByDefault(t *testing.T) {
 					t.Error("PR body published operational instructions")
 				}
 				if path != "title" {
-					if !strings.Contains(content.Body, "Request parser regression passed.") || !strings.Contains(content.Body, "Closes #50") {
-						t.Error("public body lost test evidence or the requested issue reference")
+					if strings.Contains(content.Body, "Request parser regression passed.") || !strings.Contains(content.Body, "Closes #50") {
+						t.Error("public body exposed validation text or lost the requested issue reference")
 					}
 					if got := parsePipelineAttestationForTest(t, content.Body).HeadSHA; got != sctx.Run.HeadSHA {
 						t.Errorf("attestation head = %q, want %q", got, sctx.Run.HeadSHA)
@@ -98,6 +105,151 @@ func TestPRIntentWithoutConfigurationStaysPrivate(t *testing.T) {
 		if publicPRIntent(sctx) != "" || prDraftIntentPromptSection(sctx) != "" {
 			t.Fatal("missing configuration permitted intent publication")
 		}
+	}
+}
+
+func TestPRPrivateIntentCannotLeakThroughRecordedValidation(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{config.PRAppendixFull, config.PRAppendixCollapsed, config.PRAppendixMinimal} {
+		for _, path := range []string{"ordinary", "fallback", "template", "supplied", "keep"} {
+			t.Run(mode+"/"+path, func(t *testing.T) {
+				sctx, ag, _ := templateTestContext(t)
+				if path != "template" {
+					sctx.Config.PR.Template = ""
+				}
+				sctx.Config.PR.PublishIntent = nil
+				sctx.Config.PR.Appendix = mode
+				sctx.UserIntent = "Require the private Project Cedar launch criterion."
+				sctx.IntentSource = db.RunIntentSourceAgent
+				leakedText := "Project Cedar must wait for the confidential launch window"
+				review := findingsJSON(t, types.Findings{
+					RiskLevel: "high", RiskRationale: leakedText,
+					Items: []types.Finding{{ID: "r1", Severity: "warning", Action: "ask-user", Description: leakedText}},
+				})
+				insertCompletedStep(t, sctx, types.StepReview, review, "")
+				testing := findingsJSON(t, types.Findings{
+					Verdict: "go", TestedHeadSHA: sctx.Run.HeadSHA,
+					TestingSummary: leakedText, Tested: []string{leakedText},
+					Scenarios: []types.TestScenario{{Name: leakedText, Result: "pass", Live: true, Evidence: leakedText}},
+					Artifacts: []types.TestArtifact{{Kind: "log", Label: leakedText, Content: leakedText}},
+				})
+				step := insertCompletedStep(t, sctx, types.StepTest, testing, "")
+				if _, err := sctx.DB.InsertStepRound(step.ID, 2, "auto_fix", &testing, &leakedText, 10); err != nil {
+					t.Fatal(err)
+				}
+				insertCompletedStep(t, sctx, types.StepDocument, "", leakedText)
+				if path == "fallback" {
+					ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+						return nil, errors.New("draft unavailable")
+					}
+				}
+				if path == "keep" {
+					sctx.Config.PR.UpdateText = "keep"
+				}
+				var content prContent
+				var err error
+				if path == "supplied" {
+					title, body := "fix: parser", "Author supplied description."
+					sctx.Run.PRTitle, sctx.Run.PRBody = &title, &body
+					content, err = (&PRStep{}).buildSuppliedPRContent(sctx, "feature", "main", sctx.Run.BaseSHA, "", scm.ProviderGitHub, 0)
+				} else {
+					content, err = (&PRStep{}).buildPRContent(sctx, "feature", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(content.Body, leakedText) || strings.Contains(content.Body, sctx.UserIntent) {
+					t.Errorf("private criterion escaped through recorded validation:\n%s", content.Body)
+				}
+				attestation := parsePipelineAttestationForTest(t, content.Body)
+				if attestation.HeadSHA != sctx.Run.HeadSHA || attestation.LiveValidation == nil || attestation.LiveValidation.Live != 1 || attestation.LiveValidation.Total != 1 {
+					t.Errorf("private publication lost factual attestation: %+v", attestation)
+				}
+				stored, err := sctx.DB.GetRoundsByStep(step.ID)
+				if err != nil || len(stored) != 2 || stored[0].FindingsJSON == nil || *stored[0].FindingsJSON != testing {
+					t.Fatalf("publication changed local validation evidence: %+v, %v", stored, err)
+				}
+				if !strings.Contains(userIntentPromptSection(sctx), sctx.UserIntent) {
+					t.Fatal("validation lost private intent")
+				}
+			})
+		}
+	}
+}
+
+func TestPRValidationTextPublicationUsesTrustedPolicy(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, trusted             string
+		shouldOmit, shouldPublish bool
+	}{
+		{name: "default", trusted: "pr: {}"},
+		{name: "explicit refusal", trusted: "pr: {publish_intent: false}"},
+		{name: "trusted opt-in", trusted: "pr: {publish_intent: true}", shouldPublish: true},
+		{name: "caller omission", trusted: "pr: {publish_intent: true}", shouldOmit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+			trusted, err := config.LoadRepoFromBytes([]byte(tc.trusted))
+			if err != nil {
+				t.Fatal(err)
+			}
+			pushed, err := config.LoadRepoFromBytes([]byte("pr: {publish_intent: true}"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			sctx.Config = config.Merge(config.DefaultGlobalConfig(), config.EffectiveRepoConfig(pushed, trusted, true))
+			sctx.Run.OmitIntent = tc.shouldOmit
+			const recordedText = "Synthetic criterion paraphrase: preserve C:/synthetic/operator/private-run."
+			insertCompletedStep(t, sctx, types.StepReview, findingsJSON(t, types.Findings{RiskLevel: "high", RiskRationale: recordedText}), "")
+			insertCompletedStep(t, sctx, types.StepTest, findingsJSON(t, types.Findings{TestingSummary: recordedText}), "")
+
+			pipelineMD, risk, testing, evidence := (&PRStep{}).buildPipelineSection(sctx, scm.ProviderGitHub)
+
+			if got := strings.Contains(pipelineMD+risk+testing+evidence, recordedText); got != tc.shouldPublish {
+				t.Fatalf("recorded validation text published = %v, want %v", got, tc.shouldPublish)
+			}
+			if attestation := parsePipelineAttestationForTest(t, pipelineMD); attestation.HeadSHA != head || len(attestation.Steps) != 2 {
+				t.Fatalf("publication changed attestation: %+v", attestation)
+			}
+		})
+	}
+}
+
+func TestPRPrivateValidationDoesNotUploadArtifactsOrPublishConversation(t *testing.T) {
+	t.Parallel()
+	sctx, _, _ := templateTestContext(t)
+	sctx.Config.PR.Template = ""
+	sctx.Config.PR.PublishIntent = nil
+	withReviewConversation(sctx)
+	const privateText = "Synthetic operator decision about the private launch window."
+	if err := sctx.DB.RecordReviewAnswer(db.ReviewAnswer{
+		RepoID: sctx.Repo.ID, Branch: sctx.Run.Branch, RunID: sctx.Run.ID, QuestionID: "q1", AskOrdinal: 1,
+		Question: privateText, Answer: privateText,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sctx.EvidenceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	artifact := filepath.Join(sctx.EvidenceDir, "synthetic.png")
+	if err := os.WriteFile(artifact, []byte(privateText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Config.Test.Evidence.AttachMedia = true
+	insertCompletedStep(t, sctx, types.StepTest, findingsJSON(t, types.Findings{
+		Artifacts: []types.TestArtifact{{Kind: "screenshot", Label: privateText, Path: artifact}},
+	}), "")
+	uploader := &stubMediaUploader{t: t, urls: map[string]string{"synthetic.png": testAttachmentURL}}
+
+	content, err := (&PRStep{mediaUploader: uploader}).buildPRContent(sctx, "feature", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uploader.calls) != 0 || strings.Contains(content.Body, privateText) || strings.Contains(content.Body, "Review conversation") {
+		t.Fatalf("private validation published an artifact or conversation: uploads=%d\n%s", len(uploader.calls), content.Body)
 	}
 }
 

@@ -45,6 +45,7 @@ func templateTestContext(t *testing.T) (*pipeline.StepContext, *mockAgent, strin
 		return &agent.Result{Output: data}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+	publishValidationTextForTest(sctx)
 	sctx.Config.PR.Template = name
 	sctx.Config.TrustedConfigSHA = trusted
 	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
