@@ -55,6 +55,34 @@ func TestBuildPipelineSummary_EscapesFindingDescriptionsInDetails(t *testing.T) 
 	}
 }
 
+func TestBuildPipelineSummary_ListsReviewFollowUps(t *testing.T) {
+	t.Parallel()
+	followUp := `{"id":"n-1","severity":"warning","file":"cmd/main.go","line":10,"description":"break </details><summary>oops</summary> after","action":"auto-fix"}`
+	cases := []struct {
+		name   string
+		record string
+	}{
+		{name: "a clean round", record: `{"findings":[],"follow_ups":[` + followUp + `],"summary":"clean"}`},
+		{name: "a round with findings", record: `{"findings":[{"id":"f-1","severity":"warning","description":"open"}],"follow_ups":[` + followUp + `],"summary":"open"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			steps := []*db.StepResult{{ID: "s1", StepName: types.StepReview, Status: types.StepStatusCompleted, FindingsJSON: &tc.record}}
+			rounds := map[string][]*db.StepRound{"s1": {{Round: 2, Trigger: "auto_fix", FindingsJSON: &tc.record, DurationMS: 1000}}}
+
+			md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
+
+			if !strings.Contains(md, "Follow-ups outside the repair, not blocking:") || !strings.Contains(md, "`cmd/main.go:10` - break &lt;/details&gt;") {
+				t.Fatalf("expected the follow-up listed and HTML-escaped, got:\n%s", md)
+			}
+			if strings.Contains(md, "break </details>") {
+				t.Fatalf("did not expect raw HTML in a follow-up, got:\n%s", md)
+			}
+		})
+	}
+}
+
 func TestBuildPipelineSummary_ReviewUsesFinalCleanState(t *testing.T) {
 	t.Parallel()
 	initialFindings := `{"findings":[{"id":"review-1","severity":"warning","description":"risky change"}],"summary":"1 warning","risk_level":"medium","risk_rationale":"initial risk rationale"}`
