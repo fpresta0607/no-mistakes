@@ -1035,14 +1035,17 @@ func TestStartRemovesLaunchAgentBeforeDetachedFallbackAfterBootoutESRCH(t *testi
 	serviceCurrentUser = func() (*user.User, error) { return &user.User{Uid: "501"}, nil }
 	serviceExecutablePath = func() (string, error) { return "/opt/no-mistakes/bin/no-mistakes", nil }
 
+	isKickstartFailed, isBootoutAttempted := false, false
 	serviceCommandRunner = func(name string, args ...string) ([]byte, error) {
 		command := name + " " + strings.Join(args, " ")
 		switch command {
 		case "launchctl bootout gui/501/" + launchdServiceLabel(p):
+			isBootoutAttempted = true
 			return []byte("Boot-out failed: 3: No such process"), fmt.Errorf("exit status 3: Boot-out failed: 3: No such process")
 		case "launchctl bootstrap gui/501 " + launchAgentPath(p):
 			return nil, nil
-		case "launchctl kickstart -k gui/501/" + launchdServiceLabel(p):
+		case "launchctl kickstart gui/501/" + launchdServiceLabel(p):
+			isKickstartFailed = true
 			return nil, fmt.Errorf("launchctl kickstart failed")
 		default:
 			return nil, nil
@@ -1056,6 +1059,9 @@ func TestStartRemovesLaunchAgentBeforeDetachedFallbackAfterBootoutESRCH(t *testi
 
 	if err := Start(p); err != nil {
 		t.Fatalf("Start should fall back to detached mode: %v", err)
+	}
+	if !isKickstartFailed || !isBootoutAttempted {
+		t.Fatalf("fallback was not exercised: failed kickstart=%t, bootout=%t", isKickstartFailed, isBootoutAttempted)
 	}
 
 	if _, err := os.Stat(launchAgentPath(p)); !os.IsNotExist(err) {
@@ -1926,7 +1932,12 @@ func TestManagedFallbackRefusesUnconfirmedOwnerBeforeServiceStop(t *testing.T) {
 }
 
 func TestEnsureDaemonRecoversDeadOwnerUnderBothLocksBeforeManagedStart(t *testing.T) {
-	p := paths.WithRoot(t.TempDir())
+	root, err := os.MkdirTemp("", "dtest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	p := paths.WithRoot(root)
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}

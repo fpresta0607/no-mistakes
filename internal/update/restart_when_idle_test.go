@@ -352,7 +352,12 @@ func newActiveRunUpdater(t *testing.T) (*updater, string, *bytes.Buffer, *bytes.
 	}))
 	t.Cleanup(server.Close)
 
-	p := paths.WithRoot(t.TempDir())
+	root, err := os.MkdirTemp("", "utest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	p := paths.WithRoot(root)
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}

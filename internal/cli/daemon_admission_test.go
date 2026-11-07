@@ -17,7 +17,7 @@ func TestDaemonLifecycleRetainsStartupExclusion(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			for _, action := range []string{"stop", "restart", "start", "uninstall"} {
 				t.Run(action, func(t *testing.T) {
-					t.Setenv("NM_HOME", t.TempDir())
+					t.Setenv("NM_HOME", makeSocketSafeTempDir(t))
 					if mode != "absent" {
 						legacyLifecycleServer(t, 0, func(server *ipc.Server) {
 							server.Handle(ipc.MethodGateContext, func(context.Context, json.RawMessage) (interface{}, error) {

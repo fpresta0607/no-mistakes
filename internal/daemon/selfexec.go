@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -849,7 +850,16 @@ func staleDaemonArtifacts(p *paths.Paths) (bool, error) {
 				return true, nil
 			}
 			if daemonEndpointUsesRegularFile() {
-				return false, nil
+				client, dialErr := daemonDial(p.Socket())
+				if dialErr == nil {
+					client.Close()
+					return false, nil
+				}
+				var deadOwner *ipc.DeadEndpointError
+				if errors.As(dialErr, &deadOwner) && deadOwner.PID > 0 && uint64(deadOwner.PID) <= math.MaxUint32 {
+					return true, nil
+				}
+				return false, dialErr
 			}
 			alive, err := daemonSocketAcceptingConnections(p.Socket())
 			if err != nil {
