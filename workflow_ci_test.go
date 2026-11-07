@@ -300,13 +300,20 @@ func runUnixTestStep(t *testing.T, bash string, step wfStep, goList, goListExit 
 	if err := os.MkdirAll(shimDir, 0o755); err != nil {
 		t.Fatalf("create fake go directory: %v", err)
 	}
-	logPath := filepath.Join(dir, "go.log")
+	logDir := filepath.Join(dir, "go-log")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("create fake go log directory: %v", err)
+	}
+	// The step runs its go invocations concurrently, so each one records itself
+	// in its own file: an append to a shared log can interleave with a sibling's
+	// write and merge two invocations into one unparseable record.
 	const shim = `#!/bin/sh
 if [ "$1" = "list" ]; then
 	printf '%s' "$FAKE_GO_LIST"
 	exit "$FAKE_GO_LIST_EXIT"
 fi
-printf '%s\n' "--" "$@" >> "$FAKE_GO_LOG"
+record=$(mktemp "$FAKE_GO_LOG/record.XXXXXXXX") || exit 1
+printf '%s\n' "$@" > "$record"
 `
 	if err := os.WriteFile(filepath.Join(shimDir, "go"), []byte(shim), 0o755); err != nil {
 		t.Fatalf("write fake go: %v", err)
@@ -324,7 +331,7 @@ printf '%s\n' "--" "$@" >> "$FAKE_GO_LOG"
 		"PATH="+shimDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_GO_LIST="+goList,
 		"FAKE_GO_LIST_EXIT="+goListExit,
-		"FAKE_GO_LOG="+logPath,
+		"FAKE_GO_LOG="+logDir,
 	)
 	for name, value := range step.Env {
 		cmd.Env = append(cmd.Env, name+"="+value)
@@ -334,24 +341,20 @@ printf '%s\n' "--" "$@" >> "$FAKE_GO_LOG"
 	cmd.Stderr = &output
 	err := cmd.Run()
 
-	data, readErr := os.ReadFile(logPath)
-	if readErr != nil && !os.IsNotExist(readErr) {
+	records, readErr := os.ReadDir(logDir)
+	if readErr != nil {
 		t.Fatalf("read recorded go invocations: %v", readErr)
 	}
 	var tests []string
-	var args []string
-	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
-		switch {
-		case line == "--":
-			if len(args) > 0 {
-				tests = append(tests, strings.Join(args, " "))
-				args = nil
-			}
-		case line != "" || len(args) > 0:
-			args = append(args, line)
+	for _, record := range records {
+		data, readErr := os.ReadFile(filepath.Join(logDir, record.Name()))
+		if readErr != nil {
+			t.Fatalf("read recorded go invocation %s: %v", record.Name(), readErr)
 		}
-	}
-	if len(args) > 0 {
+		args := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+		if len(args) == 0 || (len(args) == 1 && args[0] == "") {
+			continue
+		}
 		tests = append(tests, strings.Join(args, " "))
 	}
 	return tests, err, output.String()
