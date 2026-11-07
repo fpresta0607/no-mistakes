@@ -170,7 +170,11 @@ func TestPreparedShutdownRejectsLaunchAndResumeIPC(t *testing.T) {
 	}
 	for _, method := range []string{ipc.MethodAdmitPush, ipc.MethodPushReceived, ipc.MethodClaimLaunchReceipt, ipc.MethodRespond, ipc.MethodRespondReviewScope, ipc.MethodAnswerReview} {
 		t.Run(method, func(t *testing.T) {
-			err := client.Call(method, map[string]string{}, nil)
+			params := map[string]json.RawMessage{}
+			if method == ipc.MethodRespondReviewScope {
+				params["scope_decision"] = json.RawMessage(`{}`)
+			}
+			err := client.Call(method, params, nil)
 			if err == nil || !strings.Contains(err.Error(), "shutting down") {
 				t.Fatalf("request after closure = %v", err)
 			}

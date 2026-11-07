@@ -132,40 +132,68 @@ func TestAcceptedReviewScopeReachesLaterStagesAfterRestart(t *testing.T) {
 }
 
 func TestAcceptedReviewScopeDiscardsSpeculativeTestEvidence(t *testing.T) {
-	f := newSideBySideFixture(t, config.Commands{Test: "count"})
-	startSideLanes(f.review, f.baseSHA)
-	f.lanesDone()
-	if calls := f.agent.evidenceCalls(); len(calls) != 1 {
-		t.Fatalf("want one speculative turn, got %v", calls)
-	}
-	database := f.review.DB
-	if err := database.UpdateRunStatus(f.review.Run.ID, types.RunRunning); err != nil {
-		t.Fatal(err)
-	}
-	review, err := database.InsertStepResult(f.review.Run.ID, types.StepReview)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw := declinedDedupFindings
-	round, err := database.InsertReviewStepRoundWithProvenance(review.ID, 1, "initial", &raw, nil, f.headSHA, f.headSHA, "trusted", nil, nil, 5)
-	if err != nil {
-		t.Fatal(err)
-	}
-	findings, err := types.ParseFindingsJSON(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	decision := types.ReviewScopeDecision{Version: 1, DecisionID: "decision", Authority: "controller_assertion", RunID: f.review.Run.ID, StepResultID: review.ID, RoundID: round.ID, SourceHeadSHA: f.headSHA, SourceBaseSHA: f.baseSHA, TrustedConfigSHA: "trusted", Finding: findings.Items[0], AcceptedScope: "retain the existing bounded loop"}
-	if err := database.SetReviewScopeDecision(decision, `["journal-version-deduplication"]`, raw, types.ResponseOriginUnknown); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := (&TestStep{}).Execute(f.turn()); err != nil {
-		t.Fatal(err)
-	}
-	if calls := f.agent.evidenceCalls(); len(calls) != 2 || !samePath(calls[1], f.dir) || f.baselineRuns() != 2 {
-		t.Fatalf("stale speculative proof was reused: calls=%v baselines=%d", calls, f.baselineRuns())
-	}
-	if !strings.Contains(f.logText(), "Review accepted an explicit scope decision") {
-		t.Fatal("discarded evidence did not name the changed scope input")
+	for _, baseline := range []string{"repository", "machine-local", "absent"} {
+		t.Run(baseline, func(t *testing.T) {
+			f := newSideBySideFixture(t, config.Commands{Test: "count", Lint: "echo lint"})
+			if baseline == "machine-local" {
+				f.review.Config.CommandOverrides = map[string]config.CommandOverride{"test": {Additional: []string{f.review.Config.Commands.Test}}}
+			}
+			if baseline != "repository" {
+				f.review.Config.Commands.Test = ""
+			}
+			startSideLanes(f.review, f.baseSHA)
+			f.lanesDone()
+			if calls := f.agent.evidenceCalls(); len(calls) != 1 {
+				t.Fatalf("want one speculative turn, got %v", calls)
+			}
+			database := f.review.DB
+			if err := database.UpdateRunStatus(f.review.Run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			review, err := database.InsertStepResult(f.review.Run.ID, types.StepReview)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw := declinedDedupFindings
+			round, err := database.InsertReviewStepRoundWithProvenance(review.ID, 1, "initial", &raw, nil, f.headSHA, f.headSHA, "trusted", nil, nil, 5)
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings, err := types.ParseFindingsJSON(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision := types.ReviewScopeDecision{Version: 1, DecisionID: "decision", Authority: "controller_assertion", RunID: f.review.Run.ID, StepResultID: review.ID, RoundID: round.ID, SourceHeadSHA: f.headSHA, SourceBaseSHA: f.baseSHA, TrustedConfigSHA: "trusted", Finding: findings.Items[0], AcceptedScope: "retain the existing bounded loop"}
+			if err := database.SetReviewScopeDecision(decision, `["journal-version-deduplication"]`, raw, types.ResponseOriginUnknown); err != nil {
+				t.Fatal(err)
+			}
+			if baseline == "absent" {
+				if _, err := (&TestStep{}).Execute(f.turn()); err != nil {
+					t.Fatal(err)
+				}
+				if calls := f.agent.evidenceCalls(); len(calls) != 2 || !samePath(calls[1], f.dir) || f.baselineRuns() != 0 {
+					t.Fatalf("fresh scope evidence did not run without a baseline: calls=%v baselines=%d", calls, f.baselineRuns())
+				}
+				if _, err := (&DocumentStep{}).Execute(f.turn()); err != nil {
+					t.Fatal(err)
+				}
+				if calls := f.agent.documentCalls(); len(calls) != 2 || !samePath(calls[1], f.dir) {
+					t.Fatalf("Document reused speculative scope evidence: calls=%v", calls)
+				}
+				return
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				outcome, err := (&TestStep{}).Execute(f.turn())
+				if err == nil || !strings.Contains(err.Error(), "baseline equivalence receipt") || outcome != nil {
+					t.Fatalf("missing equivalence proof must refuse certification: outcome=%+v err=%v", outcome, err)
+				}
+				if calls := f.agent.evidenceCalls(); len(calls) != 1 || f.baselineRuns() != 1 {
+					t.Fatalf("unchanged baseline or speculative evidence was repeated: calls=%v baselines=%d", calls, f.baselineRuns())
+				}
+				if _, _, _, recorded := f.review.Shared.Baseline(); recorded {
+					t.Fatal("unverified lane baseline was granted to the main run")
+				}
+			}
+		})
 	}
 }

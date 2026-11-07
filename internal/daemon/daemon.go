@@ -1768,13 +1768,16 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return mgr.HandleCIHandback(ctx, request)
 	})
 
-	respond := func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+	respond := func(ctx context.Context, params json.RawMessage, isScopeResponse bool) (interface{}, error) {
 		if err := refuseNested(ctx, false); err != nil {
 			return nil, err
 		}
 		var p ipc.RespondParams
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if isScopeResponse && p.ScopeDecision == nil {
+			return nil, fmt.Errorf("respond_review_scope requires scope_decision")
 		}
 		dispositions, err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, respondInstructions(p), p.AddedFindings, p.ApprovalReason, pipeline.ResponseOptions{Origin: p.Origin, Coverage: p.Coverage, ScopeDecision: p.ScopeDecision})
 		if err != nil {
@@ -1794,8 +1797,12 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		}
 		return result, nil
 	}
-	srv.Handle(ipc.MethodRespond, respond)
-	srv.Handle(ipc.MethodRespondReviewScope, respond)
+	srv.Handle(ipc.MethodRespond, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		return respond(ctx, params, false)
+	})
+	srv.Handle(ipc.MethodRespondReviewScope, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		return respond(ctx, params, true)
+	})
 
 	srv.Handle(ipc.MethodAnswerReview, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		if err := refuseNested(ctx, false); err != nil {

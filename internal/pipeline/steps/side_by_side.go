@@ -490,6 +490,10 @@ func takeSideLane(sctx *pipeline.StepContext, name types.StepName) (*pipeline.St
 			return nil, false, fmt.Errorf("accepted Review scope unavailable: restore its source record before continuing: %w", err)
 		}
 		if len(decisions) > 0 {
+			if name == types.StepTest && lane.head == sctx.Run.HeadSHA && (strings.TrimSpace(sctx.Config.Commands.Test) != "" || len(sctx.Config.CommandOverrides["test"].Additional) > 0) {
+				lanes.keep(lane)
+				return nil, false, fmt.Errorf("accepted Review scope requires fresh Test evidence on %s, but the existing baseline record has no baseline equivalence receipt for commands/configuration, dependencies, tools, environment and platform; restore that proof or obtain an explicit baseline policy decision before continuing; speculative evidence is not accepted and the unchanged baseline is not rerun", lane.head)
+			}
 			return refuse("Review accepted an explicit scope decision; speculative evidence cannot certify that decision")
 		}
 	}

@@ -1970,7 +1970,11 @@ rounds:
 			if e.config != nil && e.config.CaptureEvalProvenance {
 				inserted, dbErr = e.db.InsertReviewStepRoundWithProvenance(sr.ID, roundNum, roundTrigger, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, reviewStartingHeadSHA, e.config.TrustedConfigSHA, e.config.ReplayGlobalYAML, e.config.ReplayRepoYAML, roundDuration)
 			} else {
-				inserted, dbErr = e.db.InsertReviewStepRound(sr.ID, roundNum, roundTrigger, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, roundDuration)
+				trustedConfigSHA := ""
+				if e.config != nil {
+					trustedConfigSHA = e.config.TrustedConfigSHA
+				}
+				inserted, dbErr = e.db.InsertReviewStepRoundWithProvenance(sr.ID, roundNum, roundTrigger, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, "", trustedConfigSHA, nil, nil, roundDuration)
 			}
 		} else {
 			inserted, dbErr = e.db.InsertStepRoundWithRepair(sr.ID, roundNum, roundTrigger, findingsPtr, fixSummaryPtr, outcome.RepairPublished, roundDuration)

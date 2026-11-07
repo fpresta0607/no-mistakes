@@ -76,7 +76,9 @@ Every subsequent agent turn in that run, including Review repair and rereview, T
 It supersedes conflicting historical requirements only for the named concern; actual failed evidence remains intact, and new correctness or security regressions still block with concrete evidence.
 Ordinary fix guidance never becomes scope authority, and another run never inherits this assertion or a pass from it.
 Changed bindings, conflicting replays, malformed records and unavailable authority refuse acceptance or the next agent turn with an actionable error; the gate response remains unapplied when acceptance fails.
-Speculative Test and Document results are discarded when Review accepts an explicit scope decision, so their own turns validate the accepted scope.
+Speculative Test and Document agent results cannot certify an explicit Review scope decision; their own turns must validate the accepted scope.
+When a speculative Test lane already targets the unchanged source and a baseline is configured, Test refuses to continue without a baseline equivalence receipt covering commands/configuration, dependencies, tools, environment and platform.
+The existing baseline record contains only the head, comparison and pass status, so it cannot supply this proof; Test reports the missing prerequisite instead of reusing speculative agent evidence or repeating the unchanged baseline.
 This changes prompt context, not the repair ledger, frozen policy, source certification or the evidence required to publish.
 
 ## Intent

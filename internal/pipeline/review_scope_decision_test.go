@@ -12,6 +12,46 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestReviewScopeDecisionWithoutEvalProvenance(t *testing.T) {
+	database, root, run, repo := setupTest(t)
+	workDir := coverageWorkdir(t, database, run)
+	cfg := &config.Config{TrustedConfigSHA: "trusted", ReplayGlobalYAML: []byte("global snapshot"), ReplayRepoYAML: []byte("repo snapshot")}
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+		return &StepOutcome{NeedsApproval: true, Findings: gateFindingsThree, ReviewApprovedHeadSHA: run.HeadSHA}, nil
+	}}
+	executor := NewExecutor(database, root, cfg, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, executor, run, repo, workDir)
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil || len(steps) != 1 {
+		t.Fatalf("read Review step: steps=%v err=%v", steps, err)
+	}
+	rounds, err := database.GetRoundsByStep(steps[0].ID)
+	if err != nil || len(rounds) != 1 {
+		t.Fatalf("read Review round: rounds=%v err=%v", rounds, err)
+	}
+	round := rounds[0]
+	if round.TrustedConfigSHA == nil || *round.TrustedConfigSHA != "trusted" || len(round.GlobalConfigYAML) != 0 || len(round.RepoConfigYAML) != 0 {
+		t.Fatalf("minimal source binding was lost or optional snapshots were captured: %+v", round)
+	}
+	findings, err := types.ParseFindingsJSON(gateFindingsThree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := types.ReviewScopeDecision{Version: 1, DecisionID: "decision", Authority: "controller_assertion", RunID: run.ID, StepResultID: steps[0].ID, RoundID: round.ID, SourceHeadSHA: run.HeadSHA, SourceBaseSHA: run.BaseSHA, TrustedConfigSHA: "trusted", Finding: findings.Items[0], AcceptedScope: "retain fixed cleanup bounds"}
+	if err := database.SetReviewScopeDecision(decision, `["R1"]`, gateFindingsThree, types.ResponseOriginUnknown); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := database.GetReviewScopeDecisions(run.ID)
+	if err != nil || len(stored) != 1 || stored[0] != decision {
+		t.Fatalf("decision could not be reloaded without eval snapshots: stored=%v err=%v", stored, err)
+	}
+	if err := executor.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+}
+
 func TestExecutorScopeDecisionIsBoundBeforeDispatch(t *testing.T) {
 	for _, state := range []string{"accepted", "stale binding", "dirty source", "stale trusted config"} {
 		t.Run(state, func(t *testing.T) {
