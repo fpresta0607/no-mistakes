@@ -2,6 +2,7 @@ package steps
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -301,5 +302,120 @@ func TestCIHandbackRebasedPublicationRefusesUnprovenSource(t *testing.T) {
 				t.Fatal("refusal moved managed source")
 			}
 		})
+	}
+}
+
+func TestCIHandbackRebasedPublicationRefusesIncompleteRoundHistory(t *testing.T) {
+	for _, phase := range []types.StepName{types.StepRebase, types.StepReview, types.StepTest} {
+		for _, missingRound := range []int{1, 2} {
+			for _, operation := range []string{"release", "resume", "recovery"} {
+				t.Run(fmt.Sprintf("%s/missing_round_%d/%s", phase, missingRound, operation), func(t *testing.T) {
+					fixture := newRebasedCIHandbackFixture(t)
+					sctx := fixture.context
+					validation, err := sctx.DB.ReadCIHandbackValidation(sctx.Run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var stepID string
+					for index, step := range validation.Steps {
+						if step.StepName != phase {
+							continue
+						}
+						stepID = step.ID
+						for number := len(validation.Rounds[index]) + 1; number <= 3; number++ {
+							if phase == types.StepReview {
+								_, err = sctx.DB.InsertReviewStepRound(step.ID, number, "auto_fix", step.FindingsJSON, nil, *sctx.Run.ReviewApprovedHeadSHA, 10)
+							} else {
+								_, err = sctx.DB.InsertStepRound(step.ID, number, "auto_fix", step.FindingsJSON, nil, 10)
+							}
+							if err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					if stepID == "" {
+						t.Fatal("fixture has no target step")
+					}
+					var receipt *db.CIHandback
+					if operation != "release" {
+						released, err := (&CIStep{}).HandbackCI(sctx, fixture.request)
+						if err != nil {
+							t.Fatal(err)
+						}
+						receipt, err = sctx.DB.LatestCIHandback(sctx.Run.ID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						anchor := fmt.Sprintf("refs/no-mistakes/ci-handback/%s/%d/published", sctx.Run.ID, receipt.PushGeneration)
+						gitCmd(t, fixture.caller, "merge", "--no-ff", "--no-edit", anchor)
+						fixture.request.Resume, fixture.request.ReceiptID = true, released.ReceiptID
+						fixture.request.HeadSHA = gitCmd(t, fixture.caller, "rev-parse", "HEAD")
+						if operation == "recovery" {
+							if err := sctx.DB.PrepareCIHandback(receipt, fixture.request.HeadSHA, receipt.BaseHead, "HEAD", sctx.Repo); err != nil {
+								t.Fatal(err)
+							}
+							gitCmd(t, sctx.WorkDir, "fetch", fixture.caller, fixture.request.HeadSHA)
+							gitCmd(t, sctx.WorkDir, "merge", "--ff-only", fixture.request.HeadSHA)
+						}
+					}
+					connection, err := sql.Open("sqlite", fixture.databasePath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer connection.Close()
+					result, err := connection.Exec("DELETE FROM step_rounds WHERE step_result_id = ? AND round = ?", stepID, missingRound)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if count, err := result.RowsAffected(); err != nil || count != 1 {
+						t.Fatalf("did not remove exactly one historical round: %d %v", count, err)
+					}
+					validation, err = sctx.DB.ReadCIHandbackValidation(sctx.Run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if receipt != nil {
+						receipt.Source.Validation = validation
+						encoded, err := json.Marshal(receipt.Source)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if _, err := connection.Exec("UPDATE ci_handbacks SET source_json = ? WHERE id = ?", string(encoded), receipt.ID); err != nil {
+							t.Fatal(err)
+						}
+					}
+					before, err := sctx.DB.GetRun(sctx.Run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					refs := make(map[string]string)
+					for _, directory := range []string{fixture.caller, sctx.WorkDir, sctx.GateDir, fixture.remote} {
+						refs[directory] = gitCmd(t, directory, "for-each-ref") + "\n" + gitCmd(t, directory, "rev-parse", "HEAD")
+					}
+					if operation == "recovery" {
+						err = RecoverCIHandback(sctx, receipt)
+					} else {
+						_, err = (&CIStep{}).HandbackCI(sctx, fixture.request)
+					}
+					if err == nil || !strings.Contains(err.Error(), "round history") {
+						t.Fatalf("incomplete %s history did not refuse %s: %v", phase, operation, err)
+					}
+					if after, err := sctx.DB.GetRun(sctx.Run.ID); err != nil || !reflect.DeepEqual(before, after) {
+						t.Fatalf("refusal changed run: %#v %v", after, err)
+					}
+					if after, err := sctx.DB.ReadCIHandbackValidation(sctx.Run.ID); err != nil || !reflect.DeepEqual(validation, after) {
+						t.Fatalf("refusal changed evidence or spending: %#v %v", after, err)
+					}
+					if after, err := sctx.DB.LatestCIHandback(sctx.Run.ID); err != nil || !reflect.DeepEqual(receipt, after) {
+						t.Fatalf("refusal changed receipt: %#v %v", after, err)
+					}
+					for directory, before := range refs {
+						if after := gitCmd(t, directory, "for-each-ref") + "\n" + gitCmd(t, directory, "rev-parse", "HEAD"); after != before {
+							t.Fatal("refusal moved source or refs")
+						}
+					}
+				})
+			}
+		}
 	}
 }

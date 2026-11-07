@@ -76,9 +76,12 @@ func verifyCIHandbackValidationHeads(sctx *pipeline.StepContext, run *db.Run, va
 		if step.RunID != run.ID || len(rounds) == 0 {
 			return fmt.Errorf("publication revalidation has no historical %s round", step.StepName)
 		}
-		for _, round := range rounds {
+		for roundIndex, round := range rounds {
 			if round.StepResultID != step.ID {
 				return fmt.Errorf("publication revalidation round ownership changed")
+			}
+			if round.Round != roundIndex+1 {
+				return fmt.Errorf("publication revalidation has incomplete %s round history", step.StepName)
 			}
 		}
 		latest := rounds[len(rounds)-1]
