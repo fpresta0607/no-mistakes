@@ -168,12 +168,15 @@ jobs:
       # 594s and timed out at 600s with no test hung on runners up to ~1.9x
       # slower across the board, and internal/daemon and internal/cli reached
       # the same limit (issue #73). 20m clears that variation for every one of
-      # them. The heavy packages queue behind each other, so pipeline/steps can
-      # start ~12 minutes into this step; 20m still lands a real hang as a
-      # goroutine dump well before timeout-minutes cancels the job.
+      # them. Packages run one at a time: pipeline/steps alone needs most of
+      # that budget, and sharing a three-core runner with the other heavy
+      # race-instrumented packages is what took it from 1112s to a 1201s
+      # timeout with no test hung, so it now gets the runner to itself. The
+      # per-package 20m still lands a real hang as a goroutine dump well before
+      # timeout-minutes cancels the job.
       - name: Test on Unix
         if: runner.os != 'Windows'
-        run: go test -race -timeout=20m ./...
+        run: go test -race -timeout=20m -p=1 ./...
 
       # Git-heavy packages are the Windows wall floor. NM_CI_WINDOWS_GIT_EXCLUDE
       # on the core shard is the union of the git, steps, daemon, gate,

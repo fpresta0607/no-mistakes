@@ -2,6 +2,7 @@ package main
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -36,13 +37,56 @@ func TestCIWorkflowUsesRaceTestsOnUnixRunners(t *testing.T) {
 
 	var raceTests []workflowCommand
 	for _, command := range commands {
-		if command.name == "go" && slices.Equal(command.args, []string{"test", "-race", "-timeout=20m", "./..."}) {
+		if command.name == "go" && slices.Equal(command.args, []string{"test", "-race", "-timeout=20m", "-p=1", "./..."}) {
 			raceTests = append(raceTests, command)
 		}
 	}
 	if len(raceTests) != 1 {
-		t.Fatalf("Unix-only go test -race -timeout=20m ./... commands = %d, want 1; normalized commands: %#v", len(raceTests), commands)
+		t.Fatalf("Unix-only go test -race -timeout=20m -p=1 ./... commands = %d, want 1; normalized commands: %#v", len(raceTests), commands)
 	}
+}
+
+// internal/pipeline/steps alone needs most of the Unix package budget: it
+// passed at 1112s on macos-latest and timed out at 1201s once the other heavy
+// packages ran beside it, with no test hung. Every parked goroutine in that
+// dump was a t.Parallel waiter and only three tests were running, a second or
+// less old - the exhausted-capacity signature the testing-conventions skill
+// records, not a hang. Letting the packages take the runner one at a time is
+// the only Unix-side lever that neither raises the budget, skips a test nor
+// widens a timeout, so keep -p 1 pinned here: without it pipeline/steps goes
+// back to competing for three cores with internal/pipeline, internal/gate and
+// the rest of the suite.
+func TestCIWorkflow_UnixRunsOnePackageAtATime(t *testing.T) {
+	job := ciTestJob(t)
+	commands := workflowCommandsMatching(job.Steps, func(step wfStep) bool {
+		return exactRunnerOSCondition(step.If, "!=", "Windows")
+	})
+
+	var tests []workflowCommand
+	for _, command := range commands {
+		if command.name == "go" && len(command.args) > 0 && command.args[0] == "test" {
+			tests = append(tests, command)
+		}
+	}
+	if len(tests) != 1 {
+		t.Fatalf("Unix-only go test commands = %d, want 1; normalized commands: %#v", len(tests), commands)
+	}
+	packageParallelism, ok := commandFlagValue(tests[0], "-p")
+	if !ok || packageParallelism != "1" {
+		t.Fatalf("Unix go test package parallelism = %q (found %t), want 1 so the heavy package gets the runner instead of a share of it; args: %#v", packageParallelism, ok, tests[0].args)
+	}
+}
+
+func commandFlagValue(command workflowCommand, flag string) (string, bool) {
+	for index, arg := range command.args {
+		if arg == flag && index+1 < len(command.args) {
+			return command.args[index+1], true
+		}
+		if value, found := strings.CutPrefix(arg, flag+"="); found {
+			return value, true
+		}
+	}
+	return "", false
 }
 
 // The Unix legs ran on go test's implicit 10m per-package budget until

@@ -156,7 +156,7 @@ func TestCIWorkflow_RetainsFullRaceSuiteAsBroadRegressionOwner(t *testing.T) {
 	commands := workflowCommandsMatching(ciTestJob(t).Steps, func(step wfStep) bool {
 		return exactRunnerOSCondition(step.If, "!=", "Windows")
 	})
-	want := []string{"test", "-race", "-timeout=20m", "./..."}
+	want := []string{"test", "-race", "-timeout=20m", "-p=1", "./..."}
 	for _, command := range commands {
 		if command.name == "go" && slices.Equal(command.args, want) {
 			return
