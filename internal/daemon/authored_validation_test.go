@@ -280,6 +280,8 @@ func TestAuthoredAdmissionContinuesAnUnpublishedTerminalChild(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			gitCmd(t, gate, "fetch", "--no-tags", "--no-write-fetch-head", repo.WorkingPath, request.Request.CandidateSHA)
+			gitCmd(t, gate, "update-ref", "refs/no-mistakes/authored-candidate/"+event.ID, request.Request.CandidateSHA)
 			if status == types.RunCancelled {
 				err = manager.HandleCancel(event.ChildID)
 			} else {

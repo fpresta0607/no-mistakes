@@ -19,6 +19,8 @@ import (
 // conflict check to be exercised against it.
 const omitIntentSlowBranch = "feature/omit-reattach"
 
+const syntheticValidationText = "Synthetic acceptance criterion: retain C:/synthetic/operator/private-run."
+
 func writeOmitIntentScenario(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "omit-intent-scenario.yaml")
@@ -30,13 +32,13 @@ func writeOmitIntentScenario(t *testing.T) string {
       findings: []
       summary: "no issues found"
       risk_level: low
-      risk_rationale: "no risks detected in the diff"
+      risk_rationale: "` + syntheticValidationText + `"
       risk_scope: source-or-external
       tested:
         - "fakeagent: simulated test run"
-      testing_summary: "simulated tests passed"
+      testing_summary: "` + syntheticValidationText + `"
       scenarios:
-        - name: "fakeagent: simulated end-to-end scenario"
+        - name: "` + syntheticValidationText + `"
           result: pass
           live: true
           evidence: "fakeagent: simulated test run"
@@ -55,13 +57,13 @@ func writeOmitIntentScenario(t *testing.T) string {
       findings: []
       summary: "no issues found"
       risk_level: low
-      risk_rationale: "no risks detected in the diff"
+      risk_rationale: "` + syntheticValidationText + `"
       risk_scope: source-or-external
       tested:
         - "fakeagent: simulated test run"
-      testing_summary: "simulated tests passed"
+      testing_summary: "` + syntheticValidationText + `"
       scenarios:
-        - name: "fakeagent: simulated end-to-end scenario"
+        - name: "` + syntheticValidationText + `"
           result: pass
           live: true
           evidence: "fakeagent: simulated test run"
@@ -181,6 +183,9 @@ func TestOmitIntentJourney(t *testing.T) {
 	if !strings.Contains(baselineBody, "## Intent") || !strings.Contains(baselineBody, publishedIntent) {
 		t.Fatalf("baseline PR body must publish the Intent section:\n%s", baselineBody)
 	}
+	if !strings.Contains(baselineBody, syntheticValidationText) {
+		t.Fatal("trusted opt-in lost recorded validation text")
+	}
 
 	// Per-run flag: publication withheld, review retains the intent.
 	const secretIntent = "SECRET-INTENT keep this contributor context off the public PR"
@@ -200,6 +205,9 @@ func TestOmitIntentJourney(t *testing.T) {
 	if strings.Contains(flaggedBody, "## Intent") || strings.Contains(flaggedBody, "SECRET-INTENT") {
 		t.Fatalf("--no-publish-intent PR body leaked the Intent section:\n%s", flaggedBody)
 	}
+	if strings.Contains(flaggedBody, syntheticValidationText) {
+		t.Fatal("caller omission leaked the validation turn's paraphrased criterion")
+	}
 	if !strings.Contains(flaggedBody, "## What Changed") {
 		t.Fatalf("--no-publish-intent PR body lost the drafted narrative:\n%s", flaggedBody)
 	}
@@ -214,6 +222,9 @@ func TestOmitIntentJourney(t *testing.T) {
 	rerunBody := prBodyFor(rerun)
 	if strings.Contains(rerunBody, "## Intent") || strings.Contains(rerunBody, "SECRET-INTENT") {
 		t.Fatalf("rerun PR body re-published the Intent section:\n%s", rerunBody)
+	}
+	if strings.Contains(rerunBody, syntheticValidationText) {
+		t.Fatal("rerun leaked recorded private validation text")
 	}
 
 	// Global default: intent.publish_intent: false omits for a run started
@@ -242,6 +253,9 @@ func TestOmitIntentJourney(t *testing.T) {
 	globalBody := prBodyFor(global)
 	if strings.Contains(globalBody, "## Intent") || strings.Contains(globalBody, "GLOBAL-DEFAULT") {
 		t.Fatalf("global publish_intent: false PR body leaked the Intent section:\n%s", globalBody)
+	}
+	if strings.Contains(globalBody, syntheticValidationText) {
+		t.Fatal("global omission leaked recorded private validation text")
 	}
 	promptsCarry(globalIntent)
 	if err := os.WriteFile(configPath, original, 0o644); err != nil {
@@ -273,5 +287,42 @@ func TestOmitIntentJourney(t *testing.T) {
 	}
 	if runsOnBranch != 1 {
 		t.Fatalf("refused reattach must not start a second run on %s, got %d runs", omitIntentSlowBranch, runsOnBranch)
+	}
+}
+
+func TestPrivateValidationTextJourney(t *testing.T) {
+	for _, tc := range []struct{ name, policy string }{
+		{name: "default"},
+		{name: "explicit refusal", policy: "pr:\n  publish_intent: false\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: writeOmitIntentScenario(t)})
+			if tc.policy != "" {
+				commitTrustedRepoConfig(t, h, tc.policy)
+			}
+			statePath := setupStatefulGitHub(t, h)
+			if out, err := h.Run("init"); err != nil {
+				t.Fatalf("init: %v\n%s", err, out)
+			}
+			const branch = "feature/private-validation"
+			h.CommitChange(branch, "feature.txt", "private validation fixture\n", "add validation fixture")
+			worktree := h.AddWorktree(branch)
+			const privateIntent = "Keep synthetic operational acceptance criteria private."
+			if out, err := h.RunInDir(worktree, "axi", "run", "--intent", privateIntent, "--skip", "ci"); err != nil {
+				t.Fatalf("run: %v\n%s", err, out)
+			}
+			run := waitPublished(t, h, branch, "", "private validation")
+			body := livePRBody(t, statePath, branch)
+			if strings.Contains(body, syntheticValidationText) || strings.Contains(body, privateIntent) {
+				t.Fatalf("private validation text leaked into captured public PR body:\n%s", body)
+			}
+			if !strings.Contains(body, "Validation text withheld") || !strings.Contains(body, `"head_sha":"`+run.HeadSHA+`"`) || !strings.Contains(body, `"live":1,"total":1`) {
+				t.Fatalf("private PR body lost withholding notice or bound proof:\n%s", body)
+			}
+			reviewPrompt := findInvocationContaining(h.AgentInvocations(), "Review the code changes and return structured findings")
+			if !strings.Contains(reviewPrompt, privateIntent) {
+				t.Fatal("validation turn lost private acceptance criteria")
+			}
+		})
 	}
 }
