@@ -59,10 +59,6 @@ func TestTerminalValidationAdmitsTheUnchangedReturnedCandidateWithFreshSelection
 	if err != nil || family == nil || family.HasChildRepairs || family.Spending[types.StepReview].Automatic != 1 || family.Spending[types.StepReview].Manual != 2 || family.Spending[types.StepReview].Remaining != 0 {
 		t.Fatalf("cumulative spending: %+v %v", family, err)
 	}
-	replay, created, err := database.AcceptValidationAdmission(context.Background(), proposal)
-	if err != nil || created || replay.ChildID != child.ID {
-		t.Fatalf("replay replaced admission: %+v %v %v", replay, created, err)
-	}
 }
 
 func TestTerminalValidationPreservesSourceAdoptionSpendingAndRefusesUnsafeAncestors(t *testing.T) {
@@ -132,50 +128,6 @@ func TestTerminalValidationPreservesSourceAdoptionSpendingAndRefusesUnsafeAncest
 			after, err := database.ValidationHistory(event.ChildID)
 			if err != nil || !reflect.DeepEqual(history, after) {
 				t.Fatalf("refused source mutation changed verified ancestry: %v", err)
-			}
-		})
-	}
-}
-
-func TestTerminalValidationReplayRefusesEveryChangedBinding(t *testing.T) {
-	for _, change := range []string{"generation", "acceptance", "tree", "anchors", "selection", "reason", "controller"} {
-		t.Run(change, func(t *testing.T) {
-			database, proposal := admissionFixture(t)
-			proposal.Request.CandidateSHA = proposal.Snapshot.Run.HeadSHA
-			proposal.Request.TerminalGeneration, proposal.Request.AcceptUnknownSource = "terminal-lane", true
-			proposal.Request.LaunchAssertion = &launchassert.Expectation{TrustedSHA: proposal.Request.LaunchAssertion.TrustedSHA, Profiles: proposal.Request.LaunchAssertion.Profiles, Apply: true}
-			var err error
-			proposal.AssertionProof, err = proposal.Request.LaunchAssertion.Verify(proposal.Request.LaunchAssertion.TrustedSHA, proposal.Request.LaunchAssertion.Profiles)
-			if err != nil {
-				t.Fatal(err)
-			}
-			first, _, err := database.AcceptValidationAdmission(context.Background(), proposal)
-			if err != nil {
-				t.Fatal(err)
-			}
-			switch change {
-			case "generation":
-				proposal.Request.TerminalGeneration = "other-lane"
-			case "acceptance":
-				proposal.Request.AcceptUnknownSource = false
-			case "tree":
-				proposal.Request.CandidateTree = proposal.Request.CandidateSHA
-			case "anchors":
-				proposal.Request.SourceAnchors = map[string]string{"gate/refs/no-mistakes/recover/fixture": proposal.Request.CandidateSHA}
-			case "selection":
-				proposal.Request.LaunchAssertion.Apply = false
-			case "reason":
-				proposal.Request.Reason = "a different acceptance"
-			case "controller":
-				proposal.Request.ControllerPolicy.ReviewCycles++
-			}
-
-			if _, _, err := database.AcceptValidationAdmission(context.Background(), proposal); err == nil {
-				t.Fatal("replay changed a bound input")
-			}
-			child, err := database.GetRun(first.ChildID)
-			if err != nil || child.Status != types.RunPending {
-				t.Fatalf("refusal changed child: %+v %v", child, err)
 			}
 		})
 	}

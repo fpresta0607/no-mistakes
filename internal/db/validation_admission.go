@@ -159,25 +159,6 @@ func (d *DB) AcceptValidationAdmission(ctx context.Context, proposal ValidationA
 	if _, err := tx.Exec(`INSERT INTO validation_admissions (predecessor_id, id, child_id, request_digest, event_json) SELECT '', '', '', '', '' WHERE 0`); err != nil {
 		return nil, false, err
 	}
-	existing, err := readValidationAdmission(tx.QueryRow(`SELECT `+validationAdmissionColumns+` FROM validation_admissions WHERE predecessor_id = ?`, proposal.Request.PredecessorID))
-	if err != nil {
-		return nil, false, err
-	}
-	if existing != nil {
-		comparison := *existing
-		comparison.ID, comparison.ChildID, comparison.CreatedAt, comparison.InitialChild = "", "", 0, Run{}
-		if !reflect.DeepEqual(comparison, proposal) {
-			return nil, false, fmt.Errorf("predecessor already has a different authored admission")
-		}
-		family, err := readValidationFamily(tx, existing.ChildID)
-		if err != nil {
-			return nil, false, err
-		}
-		if family == nil || family.HasChildRepairs {
-			return nil, false, fmt.Errorf("validation-only admission has conflicting repair history")
-		}
-		return existing, false, nil
-	}
 	current, err := readTerminalSnapshot(tx, proposal.Request.PredecessorID)
 	if err != nil || !reflect.DeepEqual(current, &proposal.Snapshot) {
 		return nil, false, fmt.Errorf("terminal predecessor history changed before authored admission")
@@ -195,6 +176,35 @@ func (d *DB) AcceptValidationAdmission(ctx context.Context, proposal ValidationA
 	}
 	if family != nil && (family.HasChildRepairs || !reflect.DeepEqual(family.ControllerPolicy, proposal.Request.ControllerPolicy) || family.HistoricalSourceCompleteness != proposal.Request.HistoricalSourceCompleteness) {
 		return nil, false, fmt.Errorf("authored descendants cannot renew repairs, change the frozen controller assertion or certify missing source")
+	}
+	if proposal.Request.TerminalGeneration == "" {
+		history, err := readValidationHistory(tx, current.Run.ID)
+		if err != nil {
+			return nil, false, err
+		}
+		for _, entry := range history {
+			run := entry.Snapshot.Run
+			heads := []*string{&run.HeadSHA, run.SubmittedHeadSHA, run.LastPushedSHA, run.ReviewApprovedHeadSHA}
+			if entry.Admission != nil {
+				for _, head := range entry.Admission.Request.SourceAnchors {
+					heads = append(heads, &head)
+				}
+			}
+			if entry.Adoption != nil {
+				adoption := entry.Adoption
+				heads = append(heads, &adoption.CandidateSHA, &adoption.RetainedSHA, &adoption.GateHead, &adoption.RecoveryHead, &adoption.CallerHead)
+			}
+			for _, rounds := range entry.Snapshot.Rounds {
+				for _, round := range rounds {
+					heads = append(heads, round.StartingHeadSHA, round.ReviewedHeadSHA)
+				}
+			}
+			for _, head := range heads {
+				if head != nil && proposal.Request.CandidateSHA == *head {
+					return nil, false, fmt.Errorf("authored admission requires a newly authored candidate, not a head bound in the validation family; use terminal validation for an unchanged terminal candidate")
+				}
+			}
+		}
 	}
 	childID, timestamp := newID(), now()
 	if proposal.Plan != nil {

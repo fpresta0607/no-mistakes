@@ -481,7 +481,7 @@ func proveAuthoredPublication(ctx context.Context, run *db.Run, repo *db.Repo, c
 			}
 		}
 	}
-	if json.Unmarshal(output, &pr) != nil || pr.URL != *run.PRURL || pr.State != "open" || pr.Head.SHA != head || pr.Head.Ref != run.Branch || pr.Head.Repo.FullName != github.RepoSlug(repo.PushURL()) || pr.Base.Repo.FullName != github.RepoSlug(repo.UpstreamURL) {
+	if json.Unmarshal(output, &pr) != nil || pr.URL != *run.PRURL || pr.State != "open" || pr.Head.SHA != head || pr.Head.Ref != run.Branch || !strings.EqualFold(pr.Head.Repo.FullName, github.RepoSlug(repo.PushURL())) || !strings.EqualFold(pr.Base.Repo.FullName, github.RepoSlug(repo.UpstreamURL)) {
 		return fmt.Errorf("terminal PR repository, branch, state or public head changed")
 	}
 	base := strings.TrimSpace(repo.DefaultBranch)
