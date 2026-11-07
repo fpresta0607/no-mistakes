@@ -608,8 +608,8 @@ Release requires the latest branch run's CI `awaiting_approval` gate, automatic 
 A published GitHub CI merge conflict requires an unresolved merge-conflict finding and a clean, synchronized caller.
 By default, an ordinary handback requires genuine provider-structured failed checks, exact completed Review and Test evidence for the published head, and no review-bot, transient, safety or protected-path refusal.
 When Document committed after Test, explicitly use `axi handback --revalidate-publication` instead.
-That route requires completed steps and durable Review and Test rounds, with verified reviewed, tested and published ancestry.
-If native Rebase rewrote the submitted commits, the completed Rebase record and first Review head must prove an exact, conflict-free replay of the preserved submitted source before that ancestry chain begins.
+That route requires completed steps and durable phase rounds numbered consecutively from 1, with verified reviewed, tested and published ancestry.
+If native Rebase rewrote the submitted commits, the completed Rebase record and the head recorded in Review round 1 must prove an exact, conflict-free replay of the preserved submitted source before that ancestry chain begins.
 Missing phase boundaries, unrelated source and rewrites that cannot be proved as an exact replay refuse.
 It pins those historical rounds, evidence, repair limits and spending in the native receipt without certifying the published descendant or changing the old evidence heads.
 Changed historical evidence refuses release, acceptance and recovery.
