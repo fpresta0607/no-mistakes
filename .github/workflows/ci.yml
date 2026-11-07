@@ -57,12 +57,17 @@ jobs:
             name: test (windows-steps-1)
             shard: steps
             steps_run: '^Test[A-K]'
+            steps_skip: '^TestCIHandback'
           - os: windows-latest
             name: test (windows-steps-2)
             shard: steps
-            steps_run: '^Test[L-Q]'
+            steps_run: '^TestCIHandback'
           - os: windows-latest
             name: test (windows-steps-3)
+            shard: steps
+            steps_run: '^Test[L-Q]'
+          - os: windows-latest
+            name: test (windows-steps-4)
             shard: steps
             steps_skip: '^Test[A-Q]'
           - os: windows-latest
