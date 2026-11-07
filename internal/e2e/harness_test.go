@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/e2edaemon"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -129,12 +130,8 @@ func TestFixtureRootFromRepoRoot(t *testing.T) {
 }
 
 func TestDaemonStartTimeoutLeavesRoomForLoginShellProbe(t *testing.T) {
-	timeout, err := time.ParseDuration(e2eDaemonStartTimeout)
-	if err != nil {
-		t.Fatalf("parse e2eDaemonStartTimeout: %v", err)
-	}
-	if timeout <= 30*time.Second {
-		t.Fatalf("e2eDaemonStartTimeout = %v, want more than the 30s login-shell probe budget", timeout)
+	if e2eDaemonStartTimeout <= 30*time.Second {
+		t.Fatalf("e2eDaemonStartTimeout = %v, want more than the 30s login-shell probe budget", e2eDaemonStartTimeout)
 	}
 }
 
@@ -197,8 +194,64 @@ func TestDaemonStopDirFallsBackWhenWorkDirMoved(t *testing.T) {
 	}
 }
 
-func TestWaitForRunPrefersNewestRunOnBranch(t *testing.T) {
-	nmHome, err := os.MkdirTemp("/tmp", "nm-e2e-")
+func TestHarnessShutdownScalesGracefulStopTimeout(t *testing.T) {
+	for _, hasOwnership := range []bool{true, false} {
+		name := "fallback"
+		if hasOwnership {
+			name = "ownership"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("NM_E2E_TIMEOUT_SCALE", "4")
+			t.Setenv("NM_TEST_DAEMON_STOP_TIMEOUT", "30s")
+			h := NewHarness(t, SetupOpts{Agent: "claude"})
+			if out, err := h.Run("daemon", "start"); err != nil {
+				t.Fatalf("start disposable daemon: %v\n%s", err, out)
+			}
+			pid := daemonPIDForRoot(t, h)
+			ownership := h.daemonOwn
+			if !hasOwnership {
+				h.daemonOwn = nil
+				t.Cleanup(ownership.Release)
+			}
+
+			client, err := ipc.Dial(paths.WithRoot(h.NMHome).Socket())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = client.Close() })
+			var health ipc.HealthResult
+			if err := client.Call(ipc.MethodHealth, nil, &health); err != nil {
+				t.Fatal(err)
+			}
+
+			// An open IPC connection keeps the real daemon draining until it closes.
+			const stopDelay = 6 * time.Second
+			released := make(chan struct{})
+			timer := time.AfterFunc(stopDelay, func() {
+				_ = client.Close()
+				close(released)
+			})
+			defer timer.Stop()
+			started := time.Now()
+			h.shutdown()
+			elapsed := time.Since(started)
+			<-released
+
+			if elapsed < stopDelay {
+				t.Errorf("shutdown returned after %v before the %v graceful drain completed", elapsed, stopDelay)
+			}
+			if isAlive, err := e2edaemon.ProcessAlive(pid); err != nil || isAlive {
+				t.Errorf("daemon pid %d alive=%t after shutdown: %v", pid, isAlive, err)
+			}
+			assertNoDaemonProcessesForRoot(t, h, "after delayed shutdown")
+			t.Logf("shutdown elapsed=%v; delayed drain=%v; daemon pid=%d", elapsed, stopDelay, pid)
+		})
+	}
+}
+
+func TestWaitForRunScalesTimeoutAndPrefersNewestRunOnBranch(t *testing.T) {
+	t.Setenv("NM_E2E_TIMEOUT_SCALE", "10000")
+	nmHome, err := os.MkdirTemp("", "nm-e2e-")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
@@ -246,7 +299,7 @@ func TestWaitForRunPrefersNewestRunOnBranch(t *testing.T) {
 	}
 
 	h := &Harness{t: t, NMHome: nmHome, WorkDir: workDir}
-	run := h.WaitForRun("feature/e2e", 2*time.Second)
+	run := h.WaitForRun("feature/e2e", time.Millisecond)
 	if run.ID != "run-new" {
 		t.Fatalf("WaitForRun returned %q, want newest run", run.ID)
 	}

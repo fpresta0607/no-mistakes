@@ -27,6 +27,24 @@ When set, everything else moves under this root:
 
 A push is handled by the root that owns the gate it was pushed to, not by the root `NM_HOME` names. Git does not set `NM_HOME` for a hook, so the managed `pre-receive` and `post-receive` hooks would otherwise reach whichever daemon the pushing shell happened to point at - usually the default `~/.no-mistakes`, since the variable is normally unset. Instead the CLI resolves its root from the gate path the hook passes it: a gate always lives at `$NM_HOME/repos/<id>.git`, so the owning root is a property of where the gate sits. A push to a gate under one root therefore reaches that root's daemon even when `NM_HOME` is unset or names a different root. A path that is not a managed gate is refused rather than resolved against the default root, so `pre-receive` fails the push and `post-receive` stays non-blocking and records the skipped notification in the gate's `notify-push.log`. The daemon enforces the same ownership on its own side of both calls, refusing to admit or to start a run for a gate that does not sit under its root. Existing installs get this by updating the binary; the hook scripts are unchanged, so no gate needs regenerating.
 
+## `NM_E2E_TIMEOUT_SCALE`
+
+Scale the e2e harness's command and run-wait budgets on slow hosts without editing the tests.
+This setting applies only to tests built with `-tags=e2e`.
+
+|         |                      |
+| ------- | -------------------- |
+| Type    | positive integer     |
+| Default | `1`                  |
+
+For example, set `$env:NM_E2E_TIMEOUT_SCALE = '4'` in PowerShell before `make e2e` to give a 30-second gate push two minutes, a 60-second command four minutes, and a 90-second run wait six minutes.
+The scale also applies to harness ref reads, worktree operations, daemon startup and shutdown, daemon ownership acquisition, and shared run and step status waits.
+It does not change the inventory-wide recovery reaper's five-second daemon stop bound, polling intervals, product timeout settings, or deadlines written directly in individual tests.
+Invalid, non-positive, fractional, or overflowing values fail the test instead of silently using the default.
+
+Go's package timeout remains the outer limit.
+Raise it separately when the complete suite needs more time, for example: `bash scripts/e2e.sh -tags=e2e -count=1 -timeout=60m ./internal/e2e/... ./internal/pipeline/steps/...`.
+
 ## `NM_DAEMON_CONNECT_TIMEOUT`
 
 Override how long a CLI client waits for an existing daemon socket to accept a connection before failing instead of hanging.
