@@ -260,6 +260,12 @@ func startSideLanes(sctx *pipeline.StepContext, baseSHA string) {
 
 // sideLaneRefusal says why this run starts nothing beside the review, or "".
 func sideLaneRefusal(sctx *pipeline.StepContext) string {
+	if sctx.DB != nil && sctx.Run != nil {
+		decisions, err := sctx.DB.GetReviewScopeDecisions(sctx.Run.ID)
+		if err != nil || len(decisions) > 0 {
+			return "accepted Review scope must be validated at each step's own turn"
+		}
+	}
 	agents := sctx.Config.Agents
 	if len(agents) == 0 {
 		agents = []types.AgentName{sctx.Config.Agent}
@@ -476,6 +482,16 @@ func takeSideLane(sctx *pipeline.StepContext, name types.StepName) (*pipeline.St
 	// commit before those findings existed says nothing about it.
 	if sctx.Fixing {
 		return refuse("this is a fix round")
+	}
+	if sctx.DB != nil && sctx.Run != nil {
+		decisions, err := sctx.DB.GetReviewScopeDecisions(sctx.Run.ID)
+		if err != nil {
+			refuse("accepted Review scope could not be read")
+			return nil, false, fmt.Errorf("accepted Review scope unavailable: restore its source record before continuing: %w", err)
+		}
+		if len(decisions) > 0 {
+			return refuse("Review accepted an explicit scope decision; speculative evidence cannot certify that decision")
+		}
 	}
 	select {
 	case <-lane.done:

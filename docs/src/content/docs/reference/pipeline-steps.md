@@ -69,6 +69,16 @@ Current-step and uncertified previous-run history sections each have a 16 KiB pr
 
 This context is advisory and fails open. It tells agents not to implement or re-report a declined finding unless the current code introduces a materially different problem, but it does not block a step or commit and is not a reversion detector. Rebase fix prompts do not receive this decision history.
 
+An explicit [Review scope decision](/no-mistakes/reference/cli/#no-mistakes-axi-respond) uses a separate immutable record, accepted atomically with its bound Review fix selection.
+Its authority is `controller_assertion`: the managed controller authenticates its operator; native local IPC does not authenticate a registered primary role from caller-supplied origin or actor labels.
+The decision names the exact run, Review step, round, original finding, source head, base and trusted configuration.
+Every subsequent agent turn in that run, including Review repair and rereview, Test evidence and repair, and Document, receives the accepted scope separately from original intent and advisory history, including after restart.
+It supersedes conflicting historical requirements only for the named concern; actual failed evidence remains intact, and new correctness or security regressions still block with concrete evidence.
+Ordinary fix guidance never becomes scope authority, and another run never inherits this assertion or a pass from it.
+Changed bindings, conflicting replays, malformed records and unavailable authority refuse acceptance or the next agent turn with an actionable error; the gate response remains unapplied when acceptance fails.
+Speculative Test and Document results are discarded when Review accepts an explicit scope decision, so their own turns validate the accepted scope.
+This changes prompt context, not the repair ledger, frozen policy, source certification or the evidence required to publish.
+
 ## Intent
 
 Uses explicit intent when a run provides it, including exact explicit intent inherited by a rerun, otherwise infers the author's intent from recent local Claude Code, Codex, OpenCode, Rovo Dev, Pi, or GitHub Copilot CLI transcripts.

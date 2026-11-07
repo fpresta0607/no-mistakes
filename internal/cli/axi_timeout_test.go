@@ -354,7 +354,8 @@ type axiTimeoutOpts struct {
 	answer func() *ipc.AnswerReviewQuestionResult
 	// respond, when set, replaces the default respond handler so a test can
 	// return the refusals and recorded dispositions the CLI has to render.
-	respond func(context.Context, json.RawMessage) (interface{}, error)
+	respond      func(context.Context, json.RawMessage) (interface{}, error)
+	respondScope func(context.Context, json.RawMessage) (interface{}, error)
 }
 
 type axiTimeoutFixture struct {
@@ -487,6 +488,9 @@ func newAxiTimeoutFixture(t *testing.T, opts axiTimeoutOpts) *axiTimeoutFixture 
 			opts.responded.Store(true)
 			return &ipc.RespondResult{OK: true}, nil
 		})
+	}
+	if opts.respondScope != nil {
+		srv.Handle(ipc.MethodRespondReviewScope, opts.respondScope)
 	}
 	if opts.answer != nil {
 		srv.Handle(ipc.MethodAnswerReview, func(context.Context, json.RawMessage) (interface{}, error) {

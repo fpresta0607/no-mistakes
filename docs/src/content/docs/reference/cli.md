@@ -489,6 +489,7 @@ no-mistakes axi respond --action fix --findings F1,F2 --instructions "optional g
 no-mistakes axi respond --action fix --findings F1,F2 --ignore F3
 no-mistakes axi respond --action fix --add-finding '{"description":"...","action":"auto-fix"}'
 no-mistakes axi respond --action fix --findings F1 --instructions-file ./guidance.md
+no-mistakes axi respond --run <id> --step review --action fix --findings F1 --scope-decision-file ./decision.json
 no-mistakes axi respond --action fix --add-finding-file ./finding.json
 no-mistakes axi respond --action skip
 no-mistakes axi respond --step review --action complete-coverage
@@ -532,6 +533,45 @@ Revalidation, a new fix round, or skipping the step clears that current-step app
 This is separate from the configured-command waiver and trusted repository opt-in used by [PR enforcement](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation); neither that policy nor approval authority changes.
 `--instructions` remains fix guidance, not an approval-reason input.
 It is recorded as the driving agent's `driver_instructions`, apart from the TUI's per-finding user instructions: the step's own round history names it as driver guidance that scoped that fix round only, and the decision history carried to other steps and later runs never repeats it as the user's choice.
+
+`--scope-decision-file` carries an explicit accepted scope correction on a Review fix response, separately from `--instructions-file` guidance.
+It requires a single JSON object of at most 32 KiB and refuses `--yes`.
+The managed controller must authenticate its decision maker before submission; native authority is honestly recorded as `controller_assertion`, not proof of a registered primary role.
+Caller-supplied origin or actor text supplies no authentication, and old fixer instructions are never promoted.
+For example:
+
+```json
+{
+  "version": 1,
+  "decision_id": "controller-stable-decision-id",
+  "authority": "controller_assertion",
+  "run_id": "observed-run-id",
+  "step_result_id": "observed-review-step-id",
+  "round_id": "observed-round-id",
+  "source_head_sha": "observed-reviewed-head",
+  "source_base_sha": "observed-run-base",
+  "trusted_config_sha": "observed-trusted-config",
+  "finding": {
+    "id": "F1",
+    "severity": "error",
+    "description": "Original finding text",
+    "action": "ask-user"
+  },
+  "accepted_scope": "Scale command/startup/run-wait budgets; retain fixed cleanup/reaper/fallback bounds."
+}
+```
+
+Copy the original finding's complete typed content, including its file, line, source and category when present, rather than reconstructing it from terminal prose.
+Read the bound round and its provenance with `axi rounds --step review --run <id> --json`, and the current head and base with `axi status --run <id>`.
+The named finding must be selected in the same response; all other fix-response accounting rules still apply.
+Acceptance atomically stores the scope assertion and selection before dispatch and returns `accepted_scope` with the bound record.
+The native IPC method is `respond_review_scope`, using ordinary respond parameters plus `scope_decision`; its success includes the matching `scope_decision_id`.
+An older daemon refuses the unknown method without receiving an ordinary response; there is no fallback.
+Identical retries on the same still-parked round retain one record; changed identities, source, finding content or scope are refused.
+Only one scope decision may be accepted per round, and total scope history is bounded to 64 KiB without silently dropping accepted decisions.
+Review's `axi rounds` export includes the accepted `scope_decisions` and round IDs, step IDs, reviewed heads and trusted configuration identities.
+Original intent, findings, failed evidence and cumulative spending remain historical records; a scope decision grants no pass or extra repair allowance and never transfers to another run.
+Managed-driver role enforcement and forwarding are required before claiming end-to-end activation.
 
 `--action abort` rejects the parked gate and is the same gate-level abort the executor already has, now reachable from the agent surface.
 It requires `--reason`, so a rejection is never recorded without the operator's explanation.

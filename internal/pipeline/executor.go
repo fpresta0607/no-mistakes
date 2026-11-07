@@ -62,6 +62,7 @@ func (f *FixInstructions) driverNotes() map[string]string {
 }
 
 type approvalResponse struct {
+	scopeDecision      *types.ReviewScopeDecision
 	origin             types.ResponseOrigin
 	action             types.ApprovalAction
 	findingIDs         []string
@@ -303,8 +304,9 @@ func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, fin
 // complete-coverage binding. An omitted origin is unknown, including direct
 // executor responses that did not come from an IPC client.
 type ResponseOptions struct {
-	Origin   types.ResponseOrigin
-	Coverage *ipc.CoverageBinding
+	ScopeDecision *types.ReviewScopeDecision
+	Origin        types.ResponseOrigin
+	Coverage      *ipc.CoverageBinding
 }
 
 // RespondWithOverrides is like Respond but also carries explicit declines,
@@ -363,6 +365,24 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		e.mu.Unlock()
 		return RespondDispositions{}, fmt.Errorf("step mismatch: responding to %q but %q is awaiting approval", step, e.waitingStep)
 	}
+	if decision := option.ScopeDecision; decision != nil {
+		if action != types.ActionFix || step != types.StepReview || decision.StepResultID != e.waitingStepResultID || decision.RoundID != e.waitingRoundID {
+			e.mu.Unlock()
+			return RespondDispositions{}, fmt.Errorf("scope decision requires a fix response bound to the parked Review step and round")
+		}
+		if e.config == nil || e.config.TrustedConfigSHA != decision.TrustedConfigSHA {
+			e.mu.Unlock()
+			return RespondDispositions{}, fmt.Errorf("scope decision trusted source differs from the executor's current trusted configuration")
+		}
+		ctx, cancel := context.WithTimeout(e.runContext(context.Background()), 5*time.Second)
+		head, headErr := git.HeadSHA(ctx, e.workDir)
+		status, statusErr := git.Run(ctx, e.workDir, "status", "--porcelain")
+		cancel()
+		if e.workDir == "" || headErr != nil || statusErr != nil || head != decision.SourceHeadSHA || strings.TrimSpace(status) != "" {
+			e.mu.Unlock()
+			return RespondDispositions{}, fmt.Errorf("scope decision requires the observed source head in a readable clean worktree; inspect the parked Review before responding")
+		}
+	}
 	var coverageRound *db.StepRound
 	if action == types.ActionCompleteCoverage {
 		if err := validateCoverageResponse(step, e.waitingFindings, findingIDs, ignoreFindingIDs, instructions, addedFindings); err != nil {
@@ -393,6 +413,7 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		return RespondDispositions{}, errors.New(refusal)
 	}
 	response := approvalResponse{
+		scopeDecision:      option.ScopeDecision,
 		origin:             option.Origin.OrUnknown(),
 		action:             action,
 		findingIDs:         findingIDs,
@@ -2370,6 +2391,12 @@ func (e *Executor) persistResponseDecision(step types.StepName, response approva
 		persisted, _ = types.MarshalFindingsJSON(current)
 	}
 	idsJSON := marshalFindingIDs(combineSelectedFindingIDs(response.findingIDs, persisted))
+	if response.scopeDecision != nil {
+		if err := e.db.SetReviewScopeDecision(*response.scopeDecision, idsJSON, persisted, response.origin); err != nil {
+			return fmt.Errorf("record accepted Review scope: %w", err)
+		}
+		return nil
+	}
 	if idsJSON == "" {
 		if len(response.ignoreFindingIDs) > 0 {
 			if err := e.db.SetStepRoundDeclined(e.waitingRoundID, response.origin); err != nil {
