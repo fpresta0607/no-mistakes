@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +37,9 @@ var authoredPRCommandOutput = (*exec.Cmd).Output
 
 func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAuthoredParams, operator int) (*ipc.ValidateAuthoredResult, error) {
 	request := params.Request
+	if len(request.SourceAnchors) == 0 {
+		request.SourceAnchors = nil
+	}
 	if operator <= 0 {
 		return nil, fmt.Errorf("authored admission requires an authenticated local operator")
 	}
@@ -66,10 +70,18 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err := proveAuthoredCheckout(ctx, params.CallerDir, &request, repo); err != nil {
 			return "", err
 		}
+		gateDir := m.paths.RepoDir(repo.ID)
+		anchors, err := branchsync.TerminalValidationAnchors(ctx, m.db, gateDir, request.CallerDir, snapshot.Run.ID)
+		if err != nil {
+			return "", err
+		}
+		if request.TerminalGeneration != "" && !maps.Equal(anchors, request.SourceAnchors) {
+			return "", fmt.Errorf("terminal recovery anchors changed; inspect and bind every known anchor")
+		}
 		m.mu.Lock()
-		predecessorExecutor := m.executors[snapshot.Run.ID]
+		isPredecessorScheduled := m.runScheduledLocked(snapshot.Run.ID)
 		m.mu.Unlock()
-		if predecessorExecutor != nil || !snapshot.Run.Status.Terminal() || snapshot.Run.PushActive {
+		if isPredecessorScheduled || !snapshot.Run.Status.Terminal() || snapshot.Run.PushActive {
 			return "", fmt.Errorf("predecessor must be terminal with no executor or publisher; it will never be restarted")
 		}
 		for _, step := range snapshot.Steps {
@@ -93,7 +105,10 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 			if run.Branch != request.Branch || run.ID == snapshot.Run.ID || event != nil && run.ID == event.ChildID {
 				continue
 			}
-			if !run.Status.Terminal() || run.ID > snapshot.Run.ID {
+			m.mu.Lock()
+			isRunScheduled := m.runScheduledLocked(run.ID)
+			m.mu.Unlock()
+			if !run.Status.Terminal() || run.ID > snapshot.Run.ID || isRunScheduled {
 				return "", fmt.Errorf("a newer or active run owns this branch; authored admission cannot replace it")
 			}
 		}
@@ -141,7 +156,9 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil {
 			return "", err
 		}
-		gateDir := m.paths.RepoDir(repo.ID)
+		if symbolic, err := git.Run(ctx, gateDir, "symbolic-ref", "-q", "refs/heads/"+request.Branch); err == nil && symbolic != "" {
+			return "", fmt.Errorf("gate branch is symbolic")
+		}
 		gateHead, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+request.Branch+"^{commit}")
 		if err != nil {
 			return "", fmt.Errorf("read existing gate branch: %w", err)
@@ -201,7 +218,12 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil {
 			return "", err
 		}
-		cfg, _, _, err := m.loadRunConfig(ctx, repo, global, candidateConfig, gateDir, trustedSHA, "", request.Branch, snapshot.Run.PiProfile)
+		pin := snapshot.Run.PiProfile
+		storedQuota := snapshot.Run.QuotaRouting
+		if request.TerminalGeneration != "" {
+			pin, storedQuota = nil, ""
+		}
+		cfg, _, _, err := m.loadRunConfig(ctx, repo, global, candidateConfig, gateDir, trustedSHA, "", request.Branch, pin)
 		if err != nil {
 			return "", err
 		}
@@ -229,7 +251,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err := proveAuthoredPublication(ctx, &snapshot.Run, repo, request.CallerDir, cfg, forge); err != nil {
 			return "", err
 		}
-		quotaRecord, err := replayQuotaRouting(cfg, snapshot.Run.QuotaRouting)
+		quotaRecord, err := replayQuotaRouting(cfg, storedQuota)
 		if err != nil {
 			return "", err
 		}
@@ -267,6 +289,10 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		}
 		if err := ctx.Err(); err != nil {
 			return "", err
+		}
+		confirmedAnchors, err := branchsync.TerminalValidationAnchors(ctx, m.db, gateDir, request.CallerDir, snapshot.Run.ID)
+		if err != nil || !maps.Equal(anchors, confirmedAnchors) {
+			return "", fmt.Errorf("terminal recovery anchors changed before acceptance: %v", err)
 		}
 		if event == nil {
 			var plan *verificationplan.Snapshot
@@ -331,17 +357,17 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 }
 
 func (m *RunManager) proveAuthoredGateLineage(ctx context.Context, snapshot *db.TerminalSnapshot, gateDir, gateHead string) error {
+	history, err := m.db.ValidationHistory(snapshot.Run.ID)
+	if err != nil {
+		return err
+	}
 	isBoundGateHead := false
-	seen := make(map[string]bool)
-	for historical := snapshot; historical != nil; {
-		if seen[historical.Run.ID] {
-			return fmt.Errorf("immutable predecessor lineage contains a cycle")
-		}
-		seen[historical.Run.ID] = true
-		if err := historical.ValidateAuthoredSafety(); err != nil {
-			return err
-		}
+	for _, entry := range history {
+		historical := entry.Snapshot
 		heads := []*string{&historical.Run.HeadSHA, historical.Run.SubmittedHeadSHA, historical.Run.LastPushedSHA}
+		if entry.Adoption != nil {
+			heads = append(heads, &entry.Adoption.GateHead)
+		}
 		for _, rounds := range historical.Rounds {
 			for _, round := range rounds {
 				heads = append(heads, round.StartingHeadSHA, round.ReviewedHeadSHA)
@@ -352,38 +378,14 @@ func (m *RunManager) proveAuthoredGateLineage(ctx context.Context, snapshot *db.
 				isBoundGateHead = true
 			}
 		}
-		predecessor, err := m.db.GetValidationPredecessor(historical.Run.ID)
-		if err != nil {
-			return err
-		}
-		adoption, err := m.db.GetTerminalPredecessor(historical.Run.ID)
-		if err != nil {
-			return err
-		}
-		if predecessor != nil && adoption != nil || historical.IsAuthoredChild && predecessor == nil {
-			return fmt.Errorf("immutable predecessor lineage is contradictory or incomplete")
-		}
-		if adoption != nil {
-			successor := &adoption.Successor
-			current := &historical.Run
-			if current.RepoID != adoption.Snapshot.Run.RepoID || current.Branch != adoption.Snapshot.Run.Branch || current.SubmittedHeadSHA == nil || *current.SubmittedHeadSHA != adoption.CandidateSHA || successor.RepoID != current.RepoID || successor.Branch != current.Branch || successor.HeadSHA != adoption.CandidateSHA || !reflect.DeepEqual(current.SubmittedHeadSHA, successor.SubmittedHeadSHA) {
+		if adoption := entry.Adoption; adoption != nil {
+			if adoption.Successor.HeadSHA != adoption.CandidateSHA || !reflect.DeepEqual(historical.Run.SubmittedHeadSHA, adoption.Successor.SubmittedHeadSHA) {
 				return fmt.Errorf("terminal adoption successor source binding changed")
 			}
-			if !reflect.DeepEqual(current.LaunchNonce, successor.LaunchNonce) || !reflect.DeepEqual(current.LaunchValidationGeneration, successor.LaunchValidationGeneration) || !reflect.DeepEqual(current.LaunchIntentDigest, successor.LaunchIntentDigest) || !current.LaunchAssertion.Matches(adoption.Assertion) {
-				return fmt.Errorf("terminal adoption successor source or launch binding changed")
-			}
-			original, err := m.db.ReadContinuationSnapshot(adoption.Snapshot.Run.ID)
-			if err != nil {
-				return err
-			}
-			original.Repo = adoption.Snapshot.Repo
-			if !reflect.DeepEqual(original, &adoption.Snapshot) {
-				return fmt.Errorf("immutable terminal predecessor history changed")
-			}
-			if adoption.SourceRef != "refs/no-mistakes/terminal-candidate/"+current.ID {
+			if adoption.SourceRef != "refs/no-mistakes/terminal-candidate/"+historical.Run.ID {
 				return fmt.Errorf("terminal adoption source anchor identity changed")
 			}
-			anchors := []struct{ ref, head string }{{adoption.SourceRef, adoption.CandidateSHA}, {"refs/no-mistakes/terminal-lane/" + current.ID, adoption.GateHead}}
+			anchors := []struct{ ref, head string }{{adoption.SourceRef, adoption.CandidateSHA}, {"refs/no-mistakes/terminal-lane/" + historical.Run.ID, adoption.GateHead}}
 			if adoption.RecoveryHead != "" {
 				anchors = append(anchors, struct{ ref, head string }{custody.RecoveryRef(adoption.Snapshot.Run.ID), adoption.RecoveryHead})
 			}
@@ -397,15 +399,6 @@ func (m *RunManager) proveAuthoredGateLineage(ctx context.Context, snapshot *db.
 			if err != nil || tree != adoption.CandidateTree {
 				return fmt.Errorf("terminal adoption candidate tree changed or is unreadable")
 			}
-			historical, err = m.db.ReadTerminalSnapshot(adoption.Snapshot.Run.ID)
-			if err != nil {
-				return err
-			}
-			continue
-		}
-		historical = nil
-		if predecessor != nil {
-			historical = &predecessor.Snapshot
 		}
 	}
 	if !isBoundGateHead {
@@ -520,7 +513,7 @@ func proveAuthoredPublication(ctx context.Context, run *db.Run, repo *db.Repo, c
 			}
 		}
 	}
-	if json.Unmarshal(output, &pr) != nil || pr.URL != *run.PRURL || pr.State != "open" || pr.Head.SHA != head || pr.Head.Ref != run.Branch || pr.Head.Repo.FullName != github.RepoSlug(repo.PushURL()) || pr.Base.Repo.FullName != github.RepoSlug(repo.UpstreamURL) {
+	if json.Unmarshal(output, &pr) != nil || pr.URL != *run.PRURL || pr.State != "open" || pr.Head.SHA != head || pr.Head.Ref != run.Branch || !strings.EqualFold(pr.Head.Repo.FullName, github.RepoSlug(repo.PushURL())) || !strings.EqualFold(pr.Base.Repo.FullName, github.RepoSlug(repo.UpstreamURL)) {
 		return fmt.Errorf("terminal PR repository, branch, state or public head changed")
 	}
 	base := strings.TrimSpace(repo.DefaultBranch)

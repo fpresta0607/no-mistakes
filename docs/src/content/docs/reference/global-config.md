@@ -1408,13 +1408,17 @@ The template supports literal text and three Go-style placeholders:
 
 The value must be a valid UTF-8 template that renders to a non-empty, single-line commit subject.
 The template source is limited to 1,024 bytes and 16 placeholders.
-The fix-agent summary and final rendered subject are each limited to 4,096 bytes.
+The raw fix-agent summary and final rendered subject are each limited to 4,096 bytes.
+An accepted summary is normalized to one line, trimmed, and shortened to its first 72 Unicode characters before template rendering.
+Shortening never hides invalid UTF-8, an over-limit raw summary, or an unsafe character later in the summary; those inputs are refused.
 Before rendering, no-mistakes predicts the subject size from the validated literal text and placeholders, then rejects oversized output without allocating the expanded message.
 Template functions, control actions, named templates, unknown placeholders, malformed syntax, control characters, unsafe Unicode format characters, and Unicode line or paragraph separators cause configuration loading to fail.
 The blocked format set includes every Unicode `Bidi_Control` code point plus `U+00AD`, `U+180E`, `U+200B`, `U+2060` through `U+2064`, the deprecated bidi controls `U+206A` through `U+206F`, `U+FEFF`, `U+FFF9` through `U+FFFB`, and Unicode tag characters in `U+E0000` through `U+E007F`.
 Legitimate `U+200C` zero-width non-joiner and `U+200D` zero-width joiner text shaping remains allowed.
 The final rendered subject is validated again, so unsafe characters in an agent-provided summary are also rejected.
-Each fix prompt, including CI repair, tells the agent how many characters the summary may use so the subject stays within 72: 72 minus the rendered text around the summary, divided by the number of times the template uses `{{.Summary}}`, with a floor of 20. The limit is guidance only; no-mistakes does not truncate or reject a longer subject.
+Each fix prompt, including CI repair, tells the agent how many characters the summary may use so the subject stays within 72: 72 minus the rendered text around the summary, divided by the number of times the template uses `{{.Summary}}`, with a floor of 20.
+That template-specific budget remains guidance; the enforced 72-character cap applies to the summary alone, so a rendered subject may be longer.
+Custom template expansion must still fit the 4,096-byte rendered-subject limit after shortening.
 CI repair prompts direct the agent to keep detailed diagnosis and verification evidence in its explanatory output, recorded in the run log, rather than in the summary.
 The setting does not change commit subjects created by the Rebase step or the evidence-branch commit; see [`test.evidence`](#testevidence) for the latter.
 A per-repo [`commit.fix_message`](/no-mistakes/reference/repo-config/#commitfix_message) value overrides this global setting.
@@ -1686,7 +1690,7 @@ For PR-drafting context and publication, see [`pr.publish_intent`](/no-mistakes/
 
 Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `pi`, and `copilot`.
 
-`intent.publish_intent: false` records a caller-side omission of intent from the generated `## Intent` section and PR-drafting context.
+`intent.publish_intent: false` records a caller-side omission under the repository's [intent and validation publication policy](/no-mistakes/reference/repo-config/#prpublish_intent).
 The default `true` leaves publication to the repository's trusted [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
 A run records the folded decision (the `axi run --no-publish-intent` flag OR this global default) at start; reruns inherit it, and a mid-run config change never re-publishes.
 This field is global-only: a pushed branch's `.no-mistakes.yaml` cannot express it.
@@ -1741,7 +1745,9 @@ For GitLab image uploads from that run directory, see [Pull request](/no-mistake
 ### test.evidence
 
 Test-step evidence storage settings.
-By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>`. [`evidence_dir`](#evidence_dir) moves that parent for new runs. On GitHub.com/GHEC, supported image and video artifacts are also uploaded when the PR is rendered; see `attach_media` below.
+By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>`.
+[`evidence_dir`](#evidence_dir) moves that parent for new runs.
+PR artifact rendering, uploads, and evidence-branch publication described below follow [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
 
 |      |          |
 | ---- | -------- |

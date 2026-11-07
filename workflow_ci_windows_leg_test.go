@@ -559,6 +559,38 @@ func TestCIWorkflow_WindowsStepsShardsRunEveryTestExactlyOnce(t *testing.T) {
 	})
 }
 
+func TestCIWorkflow_WindowsHandbackDoesNotShareTheCIMonitorBudget(t *testing.T) {
+	t.Parallel()
+	for _, row := range ciTestJob(t).Strategy.Matrix.Include {
+		if row["os"] != "windows-latest" || row["shard"] != "steps" {
+			continue
+		}
+		shard := namedTestShard{
+			name: row["name"],
+			run:  namedShardPattern(t, row, "steps_run"),
+			skip: namedShardPattern(t, row, "steps_skip"),
+		}
+		for _, handback := range []string{
+			"TestCIHandbackRebasedPublicationRevalidatesTheSameRun",
+			"TestCIHandbackRebasedPublicationRefusesIncompleteRoundHistory",
+		} {
+			if !shard.selects(handback) {
+				continue
+			}
+			for _, monitor := range []string{
+				"TestCIStep_AutoFixUsesOnlySelectedFindings",
+				"TestCIStep_FixAgentBudgetExhaustionParksForADecisionInsteadOfRetrying",
+				"TestCIStep_GreenBehindPRTakesTheRebaseRepairOnceAfterTheBaseSettles",
+				"TestCIStep_NonTimeoutFixFailureKeepsRetrying",
+			} {
+				if shard.selects(monitor) {
+					t.Errorf("%s shares the Windows package timeout with %s in %s", handback, monitor, shard.name)
+				}
+			}
+		}
+	}
+}
+
 func TestCIWorkflow_WindowsDaemonShardsRunEveryTestExactlyOnce(t *testing.T) {
 	t.Parallel()
 	assertWindowsNamedShardsCoverEveryTest(t, windowsNamedShardSpec{

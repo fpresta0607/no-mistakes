@@ -74,3 +74,40 @@ func TestDecodeRejectsNonUTF8InsteadOfChangingTheDeclaredInput(t *testing.T) {
 		t.Fatal("silently rewrote invalid UTF-8 in an admission")
 	}
 }
+
+func TestTerminalRequestBindsAnExplicitIndependentSelectionAndUnknownSourceAcceptance(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*Request)
+	}{
+		{"accepted", func(*Request) {}},
+		{"missing acceptance", func(request *Request) { request.AcceptUnknownSource = false }},
+		{"inherited generation", func(request *Request) { request.TerminalGeneration = request.ValidationGeneration }},
+		{"whitespace generation", func(request *Request) { request.TerminalGeneration = " " }},
+		{"oversized generation", func(request *Request) { request.TerminalGeneration = strings.Repeat("g", 129) }},
+		{"implicit selection", func(request *Request) { request.LaunchAssertion.Apply = false }},
+		{"missing selection", func(request *Request) { request.LaunchAssertion = nil }},
+		{"claimed recovery", func(request *Request) { request.HistoricalSourceCompleteness = "clean" }},
+		{"authored acceptance", func(request *Request) { request.TerminalGeneration = "" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := requestFixture()
+			request.TerminalGeneration, request.AcceptUnknownSource, request.LaunchAssertion.Apply = "independent-lane", true, true
+			test.change(&request)
+			payload, err := json.Marshal(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			decoded, err := Decode(payload)
+
+			if test.name == "accepted" {
+				if err != nil || decoded.SuccessorGeneration() != "independent-lane" || decoded.ValidationGeneration != "original-generation" {
+					t.Fatalf("successor lost independent or historical generation: %+v %v", decoded, err)
+				}
+			} else if err == nil {
+				t.Fatal("accepted an unbound terminal admission")
+			}
+		})
+	}
+}

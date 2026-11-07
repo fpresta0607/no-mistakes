@@ -32,7 +32,7 @@ func stopParkedRunDaemon(t *testing.T, p *paths.Paths, errCh chan error) {
 	if err != nil {
 		t.Fatalf("dial daemon: %v", err)
 	}
-	if err := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil); err != nil {
+	if err := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{Force: true}, nil); err != nil {
 		t.Fatalf("shutdown daemon: %v", err)
 	}
 	_ = client.Close()

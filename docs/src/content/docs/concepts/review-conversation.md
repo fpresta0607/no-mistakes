@@ -72,9 +72,9 @@ The conversation stays LOCAL to the run. The files live in the run's evidence
 directory, but the conversation directory is excluded from the evidence-branch
 publication walk, so opting into
 [`test.evidence.store_in_repo`](/no-mistakes/reference/repo-config/) publishes
-the run's test evidence and never the conversation. The only published copy is
-the bounded rendering in the PR body, which goes through the home-path redaction
-every published body does. Publishing the raw files instead would put the full
+the run's test evidence and never the conversation.
+For the bounded, home-path-redacted public rendering, see [The PR body](#the-pr-body).
+Publishing the raw files instead would put the full
 question text, the full answer text and who answered on an orphan branch
 permanently and unbounded.
 
@@ -522,9 +522,8 @@ questions never spends that budget.
 
 ## The PR body
 
-The PR body records the conversation alongside the existing decision and
-deferred lists: each question asked, its answer, and who answered it. A
-retracted question is listed as withdrawn.
+When the [publication policy](/no-mistakes/reference/repo-config/#prpublish_intent) permits validation text and the [appendix mode](/no-mistakes/reference/repo-config/#prappendix) retains pipeline details, the PR body records the conversation alongside the existing decision and deferred lists: each question asked, its answer, and who answered it.
+A retracted question is listed as withdrawn.
 
 A question can also be published as **unanswered**. The review step never
 completes on its own while one is open, but a human may approve the gate over

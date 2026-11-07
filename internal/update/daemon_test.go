@@ -63,7 +63,7 @@ func TestDefaultResetDaemonReportsOfflineWhenRestartFails(t *testing.T) {
 	daemonStop = func(*paths.Paths) error { return nil }
 	daemonStart = func(*paths.Paths) error { return errors.New("boom") }
 
-	err := defaultResetDaemon(&paths.Paths{}, false, "")
+	err := defaultResetDaemon(&paths.Paths{}, false, "", func() {})
 	if err == nil {
 		t.Fatal("defaultResetDaemon should fail when restart fails")
 	}
@@ -205,7 +205,7 @@ func TestDefaultResetDaemonRecoversWhenHealthCheckErrors(t *testing.T) {
 		return nil
 	}
 
-	if err := defaultResetDaemon(&paths.Paths{}, false, ""); err != nil {
+	if err := defaultResetDaemon(&paths.Paths{}, false, "", func() {}); err != nil {
 		t.Fatalf("defaultResetDaemon error = %v", err)
 	}
 	if !stopCalled {
@@ -239,7 +239,7 @@ func TestDefaultResetDaemonNoopWhenDaemonOfflineAndNoArtifacts(t *testing.T) {
 		return nil
 	}
 
-	if err := defaultResetDaemon(p, false, ""); err != nil {
+	if err := defaultResetDaemon(p, false, "", func() {}); err != nil {
 		t.Fatalf("defaultResetDaemon error = %v", err)
 	}
 	if stopCalled {
@@ -277,7 +277,7 @@ func TestDefaultResetDaemonRecoversWhenDaemonArtifactsRemain(t *testing.T) {
 		return nil
 	}
 
-	if err := defaultResetDaemon(p, false, ""); err != nil {
+	if err := defaultResetDaemon(p, false, "", func() {}); err != nil {
 		t.Fatalf("defaultResetDaemon error = %v", err)
 	}
 	if !stopCalled {
@@ -309,7 +309,7 @@ func TestDefaultResetDaemonDoesNotReportOfflineWhenRestartLeavesDaemonRunning(t 
 	daemonStop = func(*paths.Paths) error { return nil }
 	daemonStart = func(*paths.Paths) error { return errors.New("daemon already running") }
 
-	err := defaultResetDaemon(&paths.Paths{}, false, "")
+	err := defaultResetDaemon(&paths.Paths{}, false, "", func() {})
 	if err == nil {
 		t.Fatal("defaultResetDaemon should fail when restart fails")
 	}
@@ -357,7 +357,7 @@ func TestDefaultResetDaemonStartsTheNewlyInstalledBinary(t *testing.T) {
 				t.Fatal("the old binary's in-process daemon.Start must not start the daemon after update")
 				return nil
 			}
-			if err := defaultResetDaemon(&paths.Paths{}, false, exe); err != nil {
+			if err := defaultResetDaemon(&paths.Paths{}, false, exe, func() {}); err != nil {
 				t.Fatalf("defaultResetDaemon error = %v", err)
 			}
 			got, err := os.ReadFile(argsFile)
@@ -396,7 +396,7 @@ func TestDefaultResetDaemonReportsTheNewBinarysStartFailure(t *testing.T) {
 	}
 	daemonStop = func(*paths.Paths) error { return nil }
 
-	err := defaultResetDaemon(&paths.Paths{}, false, exe)
+	err := defaultResetDaemon(&paths.Paths{}, false, exe, func() {})
 	var resetErr *daemonResetError
 	if !errors.As(err, &resetErr) || !resetErr.daemonOffline {
 		t.Fatalf("expected an offline daemonResetError, got %v", err)
@@ -429,7 +429,7 @@ func TestDefaultResetDaemonKeepsInProcessStartOnWindows(t *testing.T) {
 		t.Fatal("windows must keep the in-process start")
 		return nil
 	}
-	if err := defaultResetDaemon(&paths.Paths{}, false, `C:\no-mistakes.exe`); err != nil {
+	if err := defaultResetDaemon(&paths.Paths{}, false, `C:\no-mistakes.exe`, func() {}); err != nil {
 		t.Fatalf("defaultResetDaemon error = %v", err)
 	}
 	if !startCalled {

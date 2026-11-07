@@ -130,18 +130,9 @@ func splitCommandLineTokens(command string) []string {
 // see those: paths.Paths stores the raw root string and derives its socket from
 // it, so two spellings of the same directory produce two different sockets.
 //
-// Behaviour:
-//   - No collision: return nil so Start proceeds.
-//   - Healthy collision (a daemon already serves this root): refuse to start a
-//     duplicate.
-//   - Stale collision (process exists but is unresponsive, e.g. a crash-looping
-//     managed unit whose binary died): kill the processes, stop the managed
-//     service so systemd's Restart=always cannot immediately revive the dead
-//     binary, and clear failed-unit state. Start then installs and starts a
-//     fresh daemon.
-//
-// Enumeration failures fail open (a warning is logged) so an environment
-// without ps/CIM does not lose the existing pidfile and socket guards.
+// Live or unreadable owners refuse startup even when IPC does not answer.
+// A process already gone needs no kill or service stop; the caller retains
+// lifecycle and singleton ownership while checking and clearing stale artifacts.
 func reconcileCollidingDaemons(p *paths.Paths) error {
 	want := canonicalRoot(p.Root())
 	if want == "" {
@@ -149,16 +140,10 @@ func reconcileCollidingDaemons(p *paths.Paths) error {
 	}
 	procs, err := daemonListDaemonProcesses()
 	if err != nil {
-		slog.Warn("daemon collision check skipped: process enumeration failed", "error", err)
-		return nil
+		return fmt.Errorf("cannot inspect daemon ownership; refusing start: %w", err)
 	}
 
 	self := os.Getpid()
-	type candidate struct {
-		pid  int
-		root string
-	}
-	var matches []candidate
 	for _, info := range procs {
 		if info.PID == self {
 			continue
@@ -166,34 +151,17 @@ func reconcileCollidingDaemons(p *paths.Paths) error {
 		if info.Root == "" || canonicalRoot(info.Root) != want {
 			continue
 		}
-		matches = append(matches, candidate{pid: info.PID, root: info.Root})
-	}
-	if len(matches) == 0 {
-		return nil
-	}
-
-	for _, m := range matches {
-		if alive, _ := daemonHealthCheck(paths.WithRoot(m.root)); alive {
-			slog.Info("daemon already running under alternate root path", "pid", m.pid, "root", m.root)
-			return fmt.Errorf("%w (pid %d)", errDaemonCollisionHealthy, m.pid)
+		if alive, _ := daemonHealthCheck(paths.WithRoot(info.Root)); alive {
+			slog.Info("daemon already running under alternate root path", "pid", info.PID, "root", info.Root)
+			return fmt.Errorf("%w (pid %d)", errDaemonCollisionHealthy, info.PID)
+		}
+		running, err := daemonProcessRunning(info.PID)
+		if err != nil {
+			return fmt.Errorf("cannot inspect daemon pid %d; refusing start: %w", info.PID, err)
+		}
+		if running {
+			return fmt.Errorf("daemon pid %d has not confirmed shutdown; refusing start", info.PID)
 		}
 	}
-
-	for _, m := range matches {
-		if killErr := daemonKillPID(m.pid); killErr != nil {
-			slog.Warn("kill stale colliding daemon", "pid", m.pid, "error", killErr)
-		}
-	}
-	// Stop the managed unit so Restart=always cannot revive a dead binary while
-	// Start re-installs and re-starts it. Best-effort: install/start below will
-	// reinstall the unit even if this returns an error.
-	if _, err := stopManagedService(p); err != nil {
-		slog.Warn("stop managed service before fresh daemon start", "error", err)
-	}
-	resetFailedManagedService(p)
-	for _, m := range matches {
-		cleanupDaemonArtifacts(paths.WithRoot(m.root))
-	}
-	cleanupDaemonArtifacts(p)
 	return nil
 }

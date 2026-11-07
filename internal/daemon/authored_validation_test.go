@@ -26,6 +26,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -47,11 +48,22 @@ func TestAuthoredPublicationProofChecksLiveProviderFactsAndRefusesRaces(t *testi
 	parent.PRURL, parent.PRState, parent.LastPushedSHA, parent.PushRef, parent.PushTargetFingerprint, parent.PushTargetKind, parent.PushGeneration, parent.LastPushedAt = &prURL, &state, &publicHead, &ref, &fingerprint, &kind, &generation, &publishedAt
 	originalOutput := authoredPRCommandOutput
 	t.Cleanup(func() { authoredPRCommandOutput = originalOutput })
-	for _, change := range []string{"matching", "generation", "fingerprint", "kind", "ref", "closed PR", "repository", "head", "branch", "base", "provider failure", "head racing PR"} {
+	for _, change := range []string{"matching", "mixed-case registration", "generation", "fingerprint", "kind", "ref", "closed PR", "repository", "head", "branch", "branch case", "base", "provider failure", "head racing PR"} {
 		t.Run(change, func(t *testing.T) {
 			candidate := *parent
+			candidateRepo := *repo
+			providerTarget := "repos/test/repo/pulls/17"
 			provider := fmt.Sprintf(`{"html_url":%q,"state":"open","head":{"sha":%q,"ref":"feature","repo":{"full_name":"test/repo"}},"base":{"ref":"main","repo":{"full_name":"test/repo"}}}`, prURL, publicHead)
 			switch change {
+			case "mixed-case registration":
+				candidateRepo.UpstreamURL = "https://github.com/Test/Repo.git"
+				fingerprint := branchsync.TargetFingerprint(candidateRepo.PushURL())
+				candidate.PushTargetFingerprint = &fingerprint
+				gitCmd(t, repo.WorkingPath, "config", "url."+filepath.ToSlash(gate)+".insteadOf", candidateRepo.UpstreamURL)
+				t.Cleanup(func() {
+					gitCmd(t, repo.WorkingPath, "config", "url."+filepath.ToSlash(gate)+".insteadOf", repo.UpstreamURL)
+				})
+				providerTarget = "repos/Test/Repo/pulls/17"
 			case "generation":
 				value := int64(0)
 				candidate.PushGeneration = &value
@@ -72,11 +84,13 @@ func TestAuthoredPublicationProofChecksLiveProviderFactsAndRefusesRaces(t *testi
 				provider = strings.Replace(provider, publicHead, request.Request.CandidateSHA, 1)
 			case "branch":
 				provider = strings.Replace(provider, `"ref":"feature"`, `"ref":"other"`, 1)
+			case "branch case":
+				provider = strings.Replace(provider, `"ref":"feature"`, `"ref":"Feature"`, 1)
 			case "base":
 				provider = strings.Replace(provider, `"ref":"main"`, `"ref":"other"`, 1)
 			}
 			authoredPRCommandOutput = func(command *exec.Cmd) ([]byte, error) {
-				if !strings.Contains(strings.Join(command.Args, " "), "repos/test/repo/pulls/17") {
+				if !strings.Contains(strings.Join(command.Args, " "), providerTarget) {
 					t.Fatalf("queried an unrelated provider target: %v", command.Args)
 				}
 				if change == "provider failure" {
@@ -91,9 +105,124 @@ func TestAuthoredPublicationProofChecksLiveProviderFactsAndRefusesRaces(t *testi
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			err := proveAuthoredPublication(ctx, &candidate, repo, repo.WorkingPath, &config.Config{}, nil)
-			if (change == "matching") != (err == nil) {
+			err := proveAuthoredPublication(ctx, &candidate, &candidateRepo, repo.WorkingPath, &config.Config{}, nil)
+			if (change == "matching" || change == "mixed-case registration") != (err == nil) {
 				t.Fatalf("publication proof %s: %v", change, err)
+			}
+		})
+	}
+}
+
+func TestAuthoredAdmissionTracksItsOwnTelemetryTrigger(t *testing.T) {
+	recorder := &telemetryRecorder{}
+	restore := telemetry.SetDefaultForTesting(recorder)
+	defer restore()
+	manager, database, _, request, _ := authoredAdmissionFixture(t, func() []pipeline.Step {
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+	})
+
+	result, err := manager.validateAuthored(context.Background(), request, os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := waitForRunTerminalState(t, database, result.Receipt.RunID)
+	if child.Status != types.RunCompleted {
+		t.Fatalf("child status = %s", child.Status)
+	}
+	finished := waitForTelemetryEvent(t, recorder, "run", "action", "finished")
+	if finished == nil || finished.fields["trigger"] != "authored" {
+		t.Fatalf("authored finished telemetry = %+v", finished)
+	}
+	started := recorder.find("run", "action", "started")
+	if started == nil || started.fields["trigger"] != "authored" {
+		t.Fatalf("authored started telemetry = %+v", started)
+	}
+}
+
+func TestAuthoredAdmissionRefusesAnInheritedPRWithoutPushBinding(t *testing.T) {
+	manager, database, repo, request, gate := authoredAdmissionFixture(t, nil)
+	if err := database.UpdateRunPRURL(request.Request.PredecessorID, "https://github.com/test/repo/pull/17"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := database.ReadTerminalSnapshot(request.Request.PredecessorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Request.SnapshotDigest = snapshot.Digest()
+	gateHead := gitOutput(t, gate, "rev-parse", "refs/heads/feature")
+	before, err := database.GetRunsByRepo(repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = manager.validateAuthored(context.Background(), request, os.Getpid())
+
+	if err == nil || !strings.Contains(err.Error(), "publication binding is incomplete") {
+		t.Fatalf("inherited PR became a publication binding: %v", err)
+	}
+	after, err := database.GetRunsByRepo(repo.ID)
+	if err != nil || !reflect.DeepEqual(before, after) || gitOutput(t, gate, "rev-parse", "refs/heads/feature") != gateHead {
+		t.Fatalf("refusal changed runs or the gate: %v", err)
+	}
+}
+
+func TestAuthoredInfrastructureFailureRetriesOnlyThroughFreshTerminalValidation(t *testing.T) {
+	for _, status := range []types.RunStatus{types.RunFailed, types.RunCancelled} {
+		t.Run(string(status), func(t *testing.T) {
+			var calls atomic.Int32
+			manager, database, repo, params, gate := authoredAdmissionFixture(t, func() []pipeline.Step {
+				var result []pipeline.Step
+				for _, step := range steps.AllSteps() {
+					result = append(result, &authoredFixtureStep{name: step.Name(), calls: &calls})
+				}
+				return result
+			})
+			root, err := database.ReadTerminalSnapshot(params.Request.PredecessorID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proof, err := params.Request.LaunchAssertion.Verify(params.Request.LaunchAssertion.TrustedSHA, params.Request.LaunchAssertion.Profiles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, _, err := database.AcceptValidationAdmission(context.Background(), db.ValidationAdmission{Request: params.Request, Snapshot: *root, AssertionProof: proof, WorktreeRoot: filepath.Dir(manager.paths.WorktreeDir(repo.ID, "pending")), Gates: "[]", Steps: types.AllSteps(), Operator: "fixture"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, gate, "fetch", "--no-tags", "--no-write-fetch-head", repo.WorkingPath, params.Request.CandidateSHA)
+			gitCmd(t, gate, "update-ref", "refs/no-mistakes/authored-candidate/"+first.ID, params.Request.CandidateSHA)
+			if err := database.UpdateRunErrorStatus(first.ChildID, "infrastructure interrupted validation", status); err != nil {
+				t.Fatal(err)
+			}
+			child, err := database.ReadTerminalSnapshot(first.ChildID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			params.Request.PredecessorID, params.Request.SnapshotDigest = child.Run.ID, child.Digest()
+			params.Request.LaunchNonce = *child.Run.LaunchNonce
+			if _, err := manager.validateAuthored(context.Background(), params, os.Getpid()); err == nil {
+				t.Fatal("unchanged authored request implicitly retried the candidate")
+			}
+			params.Request.TerminalGeneration, params.Request.AcceptUnknownSource = "explicit-infrastructure-retry", true
+			params.Request.LaunchAssertion.Apply = true
+			params.Request.SourceAnchors, err = branchsync.TerminalValidationAnchors(context.Background(), database, gate, repo.WorkingPath, child.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			result, err := manager.validateAuthored(context.Background(), params, os.Getpid())
+
+			if err != nil || !result.Started {
+				t.Fatalf("explicit terminal retry: %+v %v", result, err)
+			}
+			retried := waitForRunTerminalState(t, database, result.Receipt.RunID)
+			manager.wg.Wait()
+			if retried.Status != types.RunCompleted || retried.HeadSHA != child.Run.HeadSHA || calls.Load() != int32(len(steps.AllSteps())) || result.Family.HasChildRepairs || result.Family.Spending[types.StepReview].Remaining != 0 {
+				t.Fatalf("retry did not validate unchanged source fresh with zero repairs: %+v calls=%d family=%+v", retried, calls.Load(), result.Family)
+			}
+			after, err := database.ReadTerminalSnapshot(child.Run.ID)
+			if err != nil || !reflect.DeepEqual(child, after) {
+				t.Fatalf("retry changed its terminal predecessor: %v", err)
 			}
 		})
 	}
@@ -284,6 +413,8 @@ func TestAuthoredAdmissionContinuesAnUnpublishedTerminalChild(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			gitCmd(t, gate, "fetch", "--no-tags", "--no-write-fetch-head", repo.WorkingPath, request.Request.CandidateSHA)
+			gitCmd(t, gate, "update-ref", "refs/no-mistakes/authored-candidate/"+event.ID, request.Request.CandidateSHA)
 			if status == types.RunCancelled {
 				err = manager.HandleCancel(event.ChildID)
 			} else {
@@ -415,8 +546,8 @@ func TestAuthoredAdmissionAcceptsATerminalAdoptionsOriginalSubmittedHead(t *test
 	if result.Family.HistoricalSourceCompleteness != "unknown" || result.Family.HasChildRepairs {
 		t.Fatalf("admission changed uncertainty or repair authority: %+v", result.Family)
 	}
-	if spending := result.Family.Spending[types.StepReview]; spending.Automatic != 0 || spending.Manual != 0 {
-		t.Fatalf("admission counted the separate old adoption ledger: %+v", spending)
+	if spending := result.Family.Spending[types.StepReview]; spending.Automatic != 0 || spending.Manual != 1 || spending.Remaining != 0 {
+		t.Fatalf("admission lost or duplicated the linked root repair: %+v", spending)
 	}
 	after, err := database.ReadTerminalSnapshot(before.Run.ID)
 	if err != nil || !reflect.DeepEqual(before, after) {

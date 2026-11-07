@@ -361,6 +361,7 @@ func TestPRStep_CreatesConfiguredDraftPR(t *testing.T) {
 	findings := `{"findings":[],"summary":"clean","risk_level":"medium","risk_rationale":"touches critical error handling"}`
 	ag := &mockAgent{name: "test"}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	publishValidationTextForTest(sctx)
 	sctx.Env = env
 	sctx.Config.Providers.GitHub.DraftPullRequests = true
 	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
@@ -1033,6 +1034,7 @@ func TestPRStep_UsesAgentGeneratedTitleAndBody(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	publishValidationTextForTest(sctx)
 	sctx.Env = env
 	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
 	if err != nil {
@@ -1089,6 +1091,7 @@ func TestPRStep_AppendsTestingSectionFromTestStep(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	publishValidationTextForTest(sctx)
 	sctx.Env = env
 
 	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
@@ -2745,6 +2748,7 @@ func TestPRStep_EmbeddedAttestationDoesNotShadowTheRealOne(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	publishValidationTextForTest(sctx)
 
 	foreignSHA := strings.Repeat("f", 40)
 	embedded := pipelineAttestationCommentPrefix +
@@ -2802,6 +2806,7 @@ func TestPRStep_EvidenceQuotingAnOwnedBodyStaysRestampable(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	publishValidationTextForTest(sctx)
 
 	quoted := "Author text\n\n" + wrapPRAppendix("## Issues\n\nCloses #95\n\n"+
 		pipelineAttestationCommentPrefix+`{"head_sha":"`+strings.Repeat("f", 40)+`","steps":[]}`+pipelineAttestationCommentClosingToken)

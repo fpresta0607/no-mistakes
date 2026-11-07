@@ -383,8 +383,8 @@ A daemon that proves assertions but cannot apply them refuses the unknown `apply
 
 ## no-mistakes axi validate-authored
 
-Validate one explicitly declared, clean authored commit and tree linked to an immutable terminal predecessor: a failed, cancelled, or `ci_monitor_interrupted` run (which is never resumed), or a completed authored child.
-A branch with authored lineage can therefore validate a follow-up change after its child completes, while a completed run that was not itself admitted through `validate-authored` is refused as a predecessor.
+Validate one explicitly declared, clean authored commit and tree linked to an immutable terminal predecessor: a failed, cancelled, or `ci_monitor_interrupted` run (which is never resumed), or a completed validation-only child.
+A branch with validation-only lineage can therefore validate a follow-up change after its child completes, while a completed run that was not itself admitted through `validate-authored` or `validate-terminal` is refused as a predecessor.
 This is a new validation-only child: the predecessor stays terminal, and every core stage and current trusted custom gate starts fresh without an inherited pass, review approval, CI-ready state, exception or agent session.
 All automatic and manual repair authority is zero, including stages the predecessor never reached.
 Fix selections, skips, CI handbacks, ordinary fresh launches that would drop the lineage, and repair dispatch after restart are refused.
@@ -410,24 +410,76 @@ The daemon checks the authenticated caller, registered Git identity, exact clean
 The gate branch may still name a head bound by an earlier immutable authored admission or terminal adoption, including the adopted root's original submitted head.
 Terminal-adoption links must retain their recorded source, lane and recovery anchors; unrelated Git ancestry supplies no ownership evidence.
 An unresolved native agent safety refusal or unreadable findings anywhere in that immutable lineage refuses admission.
-The declared candidate must differ from the predecessor's submitted, terminal and published heads; this operation does not replace ordinary validation of those historical targets.
+The declared authored candidate must differ from every head bound in the immutable validation family: submitted, terminal, published and approved review heads, starting and reviewed heads from every stage's rounds, linked terminal source-adoption candidate, retained, gate, recovery and caller heads, and every source-anchor value recorded by an admission.
+This checks recorded identities, never arbitrary Git ancestry.
+Use [terminal validation](#no-mistakes-axi-validate-terminal) to explicitly validate an unchanged failed or cancelled child's terminal head after an infrastructure failure, including an interrupted daemon or a pending acceptance cancelled after the trusted source changed.
+Every stage still runs fresh with zero repair authority; replay never implicitly retries a progressed or cancelled child, and no cosmetic commit is needed.
 It imports the exact candidate object without overwriting an author branch or the gate branch.
 Historical findings, failed checks, automatic and manual spending, and the unknown historical source completeness stay attached to the lineage.
-Cumulative spending counts the predecessor and its authored descendants from the native round ledger.
-Runs on the branch before the predecessor are outside that ledger; they appear only through the controller policy assertion and the unknown historical source completeness.
-Following a terminal-adoption link for source ownership neither certifies nor adds its separate old native ledger to authored-validation spending.
+Cumulative spending counts the predecessor, its validation-only descendants and linked terminal source-adoption predecessors from the native round ledger.
+Older branch runs outside this linked source lineage are excluded from that ledger; they appear only through the controller policy assertion and the unknown historical source completeness.
 Later changes to the repository's registered path, URLs or default branch, and custody-return bookkeeping on the predecessor, do not change its validation history; the live publication target is verified again at admission.
 The output and subsequent status include `authored_validation`, cumulative per-stage spending, zero remaining repair authority and `policy_origin: controller_assertion`.
 This command grants no authority to install the candidate or operate another run.
 
 An exact repeated request returns the same admission and child.
-After a crash, an untouched pending acceptance remains idle until the exact request is explicitly replayed and revalidated.
+A fresh accepted admission schedules its child for execution.
+An untouched, unscheduled pending acceptance left by an interrupted admission or daemon restart remains idle until the exact request is explicitly replayed and revalidated.
 A progressed child is observed or recovered through its existing execution; a cancelled child is never restarted by replay.
 Later authored descendants must preserve the same controller policy assertion, historical uncertainty and zero repair authority.
 Continuing from a published predecessor requires a GitHub repository with the predecessor's PR open.
+The live PR's head and base repository names are compared case-insensitively with the registered repositories; head and base branch names must match exactly, including case.
+A predecessor that inherited an open PR URL through a same-head relaunch or `rerun`, but never recorded its own complete push binding, is ineligible even if that PR is still open.
+An inherited PR URL alone proves neither publication nor an unpublished predecessor, so admission fails closed rather than inferring a binding from the live PR.
 A child that publishes but then cannot run its PR or CI stage fails and cannot itself be continued, so confirm forge access before admission.
 An accepted pending child can be cancelled with `axi abort`.
 Ordinary explicit gate acknowledgements and review-question answers retain their existing meaning; they do not create repair capacity or turn an approved failure into a clean pass.
+
+## no-mistakes axi validate-terminal
+
+Validate the exact committed head of a failed, cancelled or `ci_monitor_interrupted` predecessor without making another commit, including after custody has returned or the predecessor's selected provider has exhausted its quota.
+This uses the same validation-only lineage and zero automatic/manual repair authority as `validate-authored`.
+Every stage starts fresh; no predecessor Review, Test, CI, completion state, exception or session certifies the successor.
+The original receipt, intent, terminal result, findings, source observations, usage records and cumulative repair spending remain historical evidence.
+The successor records a distinct validation generation, a new nonce, and a freshly proved selection against the current trusted default-branch source.
+The predecessor's harness selection is never changed.
+
+First inspect the selected predecessor from the canonical root of its registered caller checkout:
+
+```sh
+no-mistakes axi terminal-preflight --predecessor <run-id>
+```
+
+This is read-only and works with the daemon stopped.
+It reports the predecessor snapshot digest and original launch bindings, current caller commit/tree and cleanliness, custody state, publication bindings, and the known recovery anchors in the caller and gate repositories.
+It does not fetch, recover custody, reconstruct missing source, start a daemon, admit a candidate or grant execution authority.
+Its observations must be checked again at admission; a preflight is not a validation result.
+Preflight output contains local paths and source evidence and should stay private.
+
+Prepare the same bounded admission JSON documented for `validate-authored`, with these explicit changes:
+
+| Field | Terminal validation binding |
+| --- | --- |
+| `candidate_sha`, `candidate_tree` | The predecessor's exact terminal commit and its tree, already checked out cleanly in the invoking canonical repository root |
+| `launch_nonce`, `validation_generation`, `intent_digest` | The predecessor's original receipt, unchanged |
+| `terminal_generation` | A nonempty independent successor generation, at most 128 bytes, different from the predecessor's generation |
+| `accept_unknown_source` | Exactly `true`: accept this committed candidate while missing historical dirty or untracked source remains unknown |
+| `launch_assertion` | An explicit launch selection with `apply: true`, the freshly fetched trusted SHA, and the selected available harness/model/effort chain for every role; this may differ from the predecessor's selection |
+| `source_anchors` | The exact map reported by preflight, keyed as `gate/<ref>` or `caller/<ref>`; use `{}` when none exist |
+
+```sh
+no-mistakes axi validate-terminal --admission-file admission.json --wait 8m
+```
+
+The command requires an authenticated local caller and refuses active competing work, stale or changed identity, a different candidate, unreadable findings, native safety-refusal ancestry, and missing, moved, symbolic or contradictory declared recovery anchors.
+Known anchors are preserved, and a missing historical managed checkout is never inferred to have been clean.
+Current staged, tracked, untracked and submodule changes still refuse admission.
+The successor uses only its explicit selection, without inheriting an old per-run profile or quota-routing order or changing shared configuration.
+An identical admission observes the same child, including after restart; changing any bound input refuses.
+A fresh accepted admission schedules its child; explicit replay is required only for an untouched, unscheduled pending acceptance left by an interrupted admission or daemon restart.
+A cancelled child is never restarted by replay.
+Use `validate-authored` for a later authored commit and `validate-terminal` for the next unchanged terminal child; both retain the same historical controller assertion, uncertainty and zero repair authority.
+These commands grant no authority to install a binary, upgrade a daemon, edit a database, cancel another run or adopt a live fleet candidate.
 
 ## no-mistakes axi respond
 
@@ -524,7 +576,8 @@ This is not a gate response, and `axi respond` does not accept an answer. The an
 
 The answer that closes the last open question sets the run moving again, so it then behaves exactly like `axi respond` after its response: it blocks until the next `gate:`, `checks-passed`, or final `outcome:`, bounded by `--wait`, and returns that document led by the answer's own fields. That holds whether the reviewer was already parked (`reviewer_resumed: true`) or still finishing its turn, in which case the gate resumes the reviewer itself as soon as it parks. A review gate that still carries questions right after the answer is given one [`gate_reconcile_timeout`](/no-mistakes/reference/global-config/) to leave, because a park registered just after the answer landed briefly still lists the question it closed until the daemon releases it; one still there after that asks something new and is returned. Two cases end that grace differently: a park restored by a daemon restart is not re-checked until one [`gate_reconcile_interval`](/no-mistakes/reference/global-config/) has passed, so the grace can expire before it is released and the park you just answered comes back; and a `--wait` at or below the grace elapses before the grace does, so even a genuine new question is reported as an elapsed wait rather than a `gate:`. If it returns another `gate:`, answer that gate. An answer that leaves questions open, or closes none, returns at once. An elapsed wait, and a park that came back already answered, both reattach with `axi run`, never by answering again.
 
-Every answered question is recorded per branch, so a later cold reviewer receives it as settled and does not re-raise it, and the question and answer appear in the PR body's review conversation.
+Every answered question is recorded per branch, so a later cold reviewer receives it as settled and does not re-raise it.
+For public rendering, see the [review conversation's PR-body contract](/no-mistakes/concepts/review-conversation/#the-pr-body).
 
 Answering requires an active run, because only its executor can resume the reviewer.
 
@@ -611,7 +664,9 @@ Release requires the latest branch run's CI `awaiting_approval` gate, automatic 
 A published GitHub CI merge conflict requires an unresolved merge-conflict finding and a clean, synchronized caller.
 By default, an ordinary handback requires genuine provider-structured failed checks, exact completed Review and Test evidence for the published head, and no review-bot, transient, safety or protected-path refusal.
 When Document committed after Test, explicitly use `axi handback --revalidate-publication` instead.
-That route requires the submitted, reviewed, tested and published commits to form a verified ancestry chain, with completed steps and durable Review and Test rounds.
+That route requires completed steps and durable phase rounds numbered consecutively from 1, with verified reviewed, tested and published ancestry.
+If native Rebase rewrote the submitted commits, the completed Rebase record and the head recorded in Review round 1 must prove an exact, conflict-free replay of the preserved submitted source before that ancestry chain begins.
+Missing phase boundaries, unrelated source and rewrites that cannot be proved as an exact replay refuse.
 It pins those historical rounds, evidence, repair limits and spending in the native receipt without certifying the published descendant or changing the old evidence heads.
 Changed historical evidence refuses release, acceptance and recovery.
 Resume uses the same `--resume --receipt <id>` command and requires fresh Review and Test before publication; it cannot renew repair authority or replace the run.
@@ -938,7 +993,7 @@ The retry refuses, changing nothing, unless every proof holds:
 | `clean branch` | the working tree has no uncommitted changes |
 | `matching head` | the local `HEAD` is exactly the preserved head; adopt it first with `no-mistakes axi sync --recover` |
 | `compatible configuration` | the run has no verification plan, its Pi profile still resolves to the same model and effort, and the repository's gates, read from the freshly fetched trusted default branch, are the gates the run pinned. A carried Review also needs the same effective repository configuration as the trusted commit its rounds recorded, the same global configuration when its rounds recorded one, and the same agent and model that served each carried step (an `auto` agent is resolved first). The configuration is checked twice: once before the launch, and again against the configuration the new run actually loads, so a change between the two refuses the retry. The refusal names the changed setting |
-| `review conversation` | a carried Review that recorded a question still has its question records on disk. They are copied into the new run, so open and withdrawn questions reach the PR body; if they are gone, the retry is refused |
+| `review conversation` | a carried Review that recorded a question still has its question records on disk. They are copied into the new run for the reviewer and [publication under the conversation's PR-body contract](/no-mistakes/concepts/review-conversation/#the-pr-body); if they are gone, the retry is refused |
 
 For the agent and model proof, configured reviewer fallbacks are eligible under
 the base or later-round role that served the invocation, including coverage turns.
