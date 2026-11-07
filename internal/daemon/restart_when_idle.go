@@ -150,7 +150,14 @@ func (m *RunManager) beginGateResponse() (release func(), err error) {
 		m.restart.gate.RUnlock()
 		return nil, errRestartPending
 	}
-	return m.restart.gate.RUnlock, nil
+	if err := m.beginAdmission(); err != nil {
+		m.restart.gate.RUnlock()
+		return nil, err
+	}
+	return func() {
+		m.endAdmission()
+		m.restart.gate.RUnlock()
+	}, nil
 }
 
 // busyRunCount counts runs a restart must wait for: every executing run that

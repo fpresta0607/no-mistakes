@@ -214,6 +214,8 @@ func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() error
 		if err := beforeRestart(); err != nil {
 			return false, err
 		}
+	} else if err := PrepareShutdownIfIdle(p); err != nil {
+		return false, err
 	}
 	restoreMode := os.FileMode(0o644)
 	if info, err := os.Stat(installPath); err == nil {
@@ -584,6 +586,15 @@ func daemonIsRunningViaIPC(p *paths.Paths) (bool, error) {
 
 // Stop sends a shutdown request to the running daemon and waits for it to exit.
 func Stop(p *paths.Paths) error {
+	if err := PrepareShutdownIfIdle(p); err != nil {
+		return err
+	}
+	return StopForced(p)
+}
+
+// StopForced stops the daemon without an idle check. Callers must have either
+// prepared shutdown or received an explicit force instruction.
+func StopForced(p *paths.Paths) error {
 	instance := captureRunningDaemon(p)
 	if managed, err := stopManagedService(p); managed {
 		var detachedErr error
@@ -631,7 +642,7 @@ func stopDetachedDaemon(p *paths.Paths) error {
 	}
 
 	var result ipc.ShutdownResult
-	callErr := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, &result)
+	callErr := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{Force: true}, &result)
 	// Hand the connection back before waiting on the exit it gates. The
 	// daemon's accept loop drains in-flight connection handlers before it
 	// finishes shutting down, so a stopper that kept its client open while

@@ -33,7 +33,7 @@ var allowInsecureDownloads bool
 var currentGOOS = runtime.GOOS
 var daemonIsRunning = daemon.IsRunning
 var daemonExecutablePath = runningDaemonExecutablePath
-var daemonStop = daemon.Stop
+var daemonStop = daemon.StopForced
 var daemonStart = daemon.Start
 var daemonStartExecutable = runDaemonStart
 var windowsExecutablePathForPID = defaultWindowsExecutablePathForPID
@@ -268,6 +268,11 @@ func (u *updater) run(ctx context.Context) error {
 	binaryData, err := u.extractBinary(archiveData)
 	if err != nil {
 		return err
+	}
+	if !u.force && !u.restartWhenIdle {
+		if err := daemon.PrepareShutdownIfIdle(u.paths); err != nil {
+			return err
+		}
 	}
 	if err := replaceExecutable(u.executablePath, binaryData); err != nil {
 		return err

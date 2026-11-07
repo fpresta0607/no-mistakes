@@ -72,7 +72,7 @@ func TestEnsureDaemonStartsOnDeadEndpointOwner(t *testing.T) {
 			return
 		}
 		if client, err := ipc.Dial(p.Socket()); err == nil {
-			_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
+			_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{Force: true}, nil)
 			_ = client.Close()
 		}
 	})

@@ -72,6 +72,8 @@ type RunManager struct {
 	maxConcurrentRuns int
 	wg                sync.WaitGroup // tracks background run goroutines
 	shuttingDown      atomic.Bool    // prevents new runs during shutdown
+	admissionClosed   bool           // guarded by mu
+	admissions        int            // branch mutations in flight, guarded by mu
 	restart           restartState   // restart scheduled for an update; see restart_when_idle.go
 
 	afterRetryProof func() // test seam: runs between HandleRetry's proof and the launch
@@ -596,6 +598,11 @@ func (m *RunManager) resumeRecoveredRuns(plans []recoveredRunPlan) {
 }
 
 func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
+	if err := m.beginAdmission(); err != nil {
+		_ = plan.agent.Close()
+		return
+	}
+	defer m.endAdmission()
 	sequence := m.reserveAdmission()
 	defer m.releaseAdmission(sequence)
 	if m.shuttingDown.Load() {
@@ -1059,6 +1066,10 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 // handlePushReceived is HandlePushReceived; fromReplay marks a push an
 // earlier daemon held, which replayHeldPushes starts ahead of fresh pushes.
 func (m *RunManager) handlePushReceived(ctx context.Context, params *ipc.PushReceivedParams, fromReplay bool) (string, error) {
+	if err := m.beginAdmission(); err != nil {
+		return "", err
+	}
+	defer m.endAdmission()
 	if params.LaunchAssertion != nil && params.LaunchNonce == "" {
 		return "", fmt.Errorf("launch assertion requires launch_nonce and validation_generation")
 	}
@@ -1791,6 +1802,10 @@ func (m *RunManager) withBranchLock(repoID, branch string, action func() (string
 	branchMu := m.branchMutex(repoID, branch)
 	branchMu.Lock()
 	defer branchMu.Unlock()
+	if err := m.beginAdmission(); err != nil {
+		return "", err
+	}
+	defer m.endAdmission()
 	return action()
 }
 

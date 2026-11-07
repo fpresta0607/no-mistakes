@@ -23,9 +23,9 @@ var (
 	daemonRun                  = daemon.RunRestartable
 	daemonStartFn              = daemon.Start
 	daemonStartGuardedFn       = daemon.StartGuarded
-	daemonStopFn               = daemon.Stop
+	daemonStopFn               = daemon.StopForced
 	daemonScheduleRestartFn    = daemon.ScheduleRestart
-	daemonUninstallFn          = daemon.Uninstall
+	daemonUninstallFn          = daemon.UninstallGuarded
 	daemonUninstallSupportedFn = daemon.UninstallSupported
 	daemonLaunchAgentPathFn    = daemon.InstalledLaunchAgentPath
 	daemonIsRunningFn          = daemon.IsRunning
@@ -640,10 +640,9 @@ func newDaemonUninstallCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if err := guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon uninstall", force); err != nil {
-					return err
-				}
-				definition, err := daemonUninstallFn(p)
+				definition, err := daemonUninstallFn(p, func() error {
+					return guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon uninstall", force)
+				})
 				if err != nil {
 					return err
 				}
@@ -717,7 +716,10 @@ func guardDestructiveDaemonLifecycle(p *paths.Paths, stderr io.Writer, action st
 		return fmt.Errorf("check active pipeline runs: %w", err)
 	}
 	if len(runs) == 0 {
-		return nil
+		if force {
+			return nil
+		}
+		return daemon.PrepareShutdownIfIdle(p)
 	}
 	if force {
 		fmt.Fprintf(stderr, "FORCE: %s will stop/restart the daemon while %d active pipeline runs are in progress\n", action, len(runs))

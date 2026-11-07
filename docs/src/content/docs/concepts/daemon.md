@@ -77,6 +77,15 @@ If the daemon is already running from a different executable path, update still 
 If the daemon executable path cannot be determined, the update aborts before replacing anything.
 
 `no-mistakes daemon stop`, `no-mistakes daemon uninstall`, and `no-mistakes daemon restart` apply the same guard: if pending or running pipeline runs exist, each refuses by default and lists the active runs, and each takes its own `--force` to proceed anyway.
+The daemon makes the final idle check and closes admission together, including launches still preparing their run row, queued runs, and parked or recovered active runs.
+If admission wins, ordinary maintenance refuses without changing that run.
+If shutdown wins, later launches, source claims, hook admission, and gate responses refuse before changing run state.
+Before stopping a managed service or using a PID fallback, ordinary maintenance requires the daemon's `prepare_shutdown` acknowledgement; a busy, unreadable, or unsupported response aborts the operation.
+The acknowledgement leaves the daemon alive with admission closed so the caller can stop its managed service before keep-alive restarts it.
+If a later file replacement or service operation fails, admission stays closed until the daemon is stopped and restarted; the command reports its failure.
+An older running daemon cannot gain this boundary from a newly compiled client or binary replacement: a client that cannot obtain the acknowledgement refuses ordinary maintenance.
+Safe bootstrap from such a daemon requires independently established exclusion of every launch, resume, and hook producer before an operator-authorized stop; an idle database snapshot or singleton lock alone does not establish that exclusion.
+This boundary does not coordinate separate concurrent lifecycle operators or prevent an external service manager or operating-system signal from stopping the daemon.
 `no-mistakes daemon start` applies it when it would restart a running daemon to refresh a changed service definition or replace an older daemon that does not support the gate-context RPC; it then refuses before stopping the daemon or rewriting the definition, and takes `--force` the same way.
 When a running daemon does not support that RPC, `daemon start`, `daemon stop`, `daemon restart`, `daemon uninstall`, and `update` check gate execution context locally, including process ancestry, and still refuse callers inside validation steps. `daemon start` then stops the older daemon and installs the current binary in the managed service definition before starting it, as `daemon restart` does.
 That `--force` override is available only to an ordinary top-level caller. A

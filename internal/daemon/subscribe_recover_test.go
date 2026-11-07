@@ -514,7 +514,7 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 	defer func() {
 		client, err := ipc.Dial(p.Socket())
 		if err == nil {
-			_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
+			_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{Force: true}, nil)
 			_ = client.Close()
 		}
 		select {
@@ -660,7 +660,7 @@ func TestRecoverOnStartup_ReconcilesHistoricalCIGateFromCurrentPRState(t *testin
 			defer func() {
 				client, dialErr := ipc.Dial(p.Socket())
 				if dialErr == nil {
-					_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
+					_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{Force: true}, nil)
 					_ = client.Close()
 				}
 				select {
