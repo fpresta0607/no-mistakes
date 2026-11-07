@@ -42,6 +42,7 @@ const (
 	MethodAdmitPush                 = "admit_push"
 	MethodHealth                    = "health"
 	MethodShutdown                  = "shutdown"
+	MethodPrepareShutdown           = "prepare_shutdown"
 	MethodUpdateRunClosingIssueRefs = "update_run_closing_issue_refs"
 	MethodScheduleRestart           = "schedule_restart"
 	MethodRestartStatus             = "restart_status"
@@ -405,8 +406,9 @@ type AdmitPushParams struct {
 // HealthParams has no fields but exists for consistency.
 type HealthParams struct{}
 
-// ShutdownParams has no fields but exists for consistency.
-type ShutdownParams struct{}
+type ShutdownParams struct {
+	Force bool `json:"force,omitempty"`
+}
 
 // ScheduleRestartParams asks the daemon to restart through its own executable
 // file once no run is executing. It is how `no-mistakes update` installs a new

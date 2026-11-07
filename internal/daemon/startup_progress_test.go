@@ -314,6 +314,22 @@ func TestDaemonStartupProgressRejectsAnOldManagedChild(t *testing.T) {
 	}
 }
 
+func TestPreparedManagedStartupRejectsOldProgress(t *testing.T) {
+	p, started, elapsed := startupProgressClock(t)
+	defer stubServiceRuntime(t)()
+	runtimeGOOS = "windows"
+	oldStarted := started.Add(-time.Minute)
+	daemonProcessStartTime = func(int) (time.Time, error) { return oldStarted, nil }
+	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+		writeStartupProgressFixture(t, p, 4242, oldStarted, 10, int(elapsed().Seconds())/5)
+		return false, nil
+	}
+	serviceCommandRunner = func(string, ...string) ([]byte, error) { return nil, nil }
+	if err := startPreparedManagedDaemon(p); err == nil || elapsed() != 45*time.Second {
+		t.Fatalf("prepared startup accepted old progress: elapsed=%v, error=%v", elapsed(), err)
+	}
+}
+
 func TestDaemonStartupProgressManagedLaunchRespectsProcessTimePrecision(t *testing.T) {
 	for _, test := range []struct {
 		name         string

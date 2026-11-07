@@ -64,7 +64,12 @@ func Run() (retErr error) {
 	if err := p.EnsureDirs(); err != nil {
 		return fmt.Errorf("create directories: %w", err)
 	}
+	releaseStartup, err := acquireLifecycleLock(p, false)
+	if err != nil {
+		return err
+	}
 	lock, err := acquireSingletonLock(p)
+	releaseStartup()
 	if err != nil {
 		return err
 	}
@@ -220,7 +225,12 @@ func RunWithOptions(p *paths.Paths, d *db.DB, stepFactory StepFactory) error {
 	// live daemon's active runs as crashed and delete worktrees out from
 	// under it (see "Daemon Singleton Lock" in
 	// .agents/skills/daemon-runtime/SKILL.md).
+	releaseStartup, err := acquireLifecycleLock(p, false)
+	if err != nil {
+		return err
+	}
 	lock, err := acquireSingletonLock(p)
+	releaseStartup()
 	if err != nil {
 		return err
 	}
@@ -1354,9 +1364,28 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return mgr.RestartStatus(), nil
 	})
 
-	srv.Handle(ipc.MethodShutdown, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
+	srv.Handle(ipc.MethodPrepareShutdown, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
 		if err := refuseNested(ctx, false); err != nil {
 			return nil, err
+		}
+		if err := mgr.prepareShutdown(); err != nil {
+			return nil, err
+		}
+		return &ipc.ShutdownResult{OK: true}, nil
+	})
+
+	srv.Handle(ipc.MethodShutdown, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var request ipc.ShutdownParams
+		if err := json.Unmarshal(params, &request); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if !request.Force {
+			if err := mgr.prepareShutdown(); err != nil {
+				return nil, err
+			}
 		}
 		go shutdown()
 		return &ipc.ShutdownResult{OK: true}, nil
@@ -1497,6 +1526,10 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 	})
 
 	srv.Handle(ipc.MethodAdmitPush, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := mgr.beginAdmission(); err != nil {
+			return nil, err
+		}
+		defer mgr.endAdmission()
 		var p ipc.AdmitPushParams
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
@@ -1515,6 +1548,10 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 	})
 
 	srv.Handle(ipc.MethodClaimLaunchReceipt, func(_ context.Context, params json.RawMessage) (interface{}, error) {
+		if err := mgr.beginAdmission(); err != nil {
+			return nil, err
+		}
+		defer mgr.endAdmission()
 		var p ipc.ClaimLaunchReceiptParams
 		if err := decodeLaunchParams(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)

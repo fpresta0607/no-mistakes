@@ -119,7 +119,7 @@ func TestDaemonStartRestartAndStatusReportSocketPathTooLong(t *testing.T) {
 		t.Fatal("daemon restart went past the socket path check")
 		return nil
 	}
-	daemonStartGuardedFn = func(*paths.Paths, func() error) error {
+	daemonStartGuardedFn = func(*paths.Paths, func() (func(), error)) error {
 		t.Fatal("daemon start went past the socket path check")
 		return nil
 	}

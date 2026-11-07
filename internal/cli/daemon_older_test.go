@@ -37,7 +37,7 @@ func legacyLifecycleServer(t *testing.T, pid int, configure func(*ipc.Server)) *
 	return p
 }
 
-func TestOlderDaemonLifecycleCommands(t *testing.T) {
+func TestOlderDaemonLifecycleCommandsRefuseAtomicShutdownUnsupported(t *testing.T) {
 	for _, action := range []string{"start", "stop", "restart"} {
 		t.Run(action, func(t *testing.T) {
 			legacyLifecycleServer(t, os.Getpid(), nil)
@@ -45,21 +45,17 @@ func TestOlderDaemonLifecycleCommands(t *testing.T) {
 			oldStop, oldStart, oldGuarded := daemonStopFn, daemonStartFn, daemonStartGuardedFn
 			daemonStopFn = func(*paths.Paths) error { calls = append(calls, "stop"); return nil }
 			daemonStartFn = func(*paths.Paths) error { calls = append(calls, "start"); return nil }
-			daemonStartGuardedFn = func(*paths.Paths, func() error) error {
+			daemonStartGuardedFn = func(*paths.Paths, func() (func(), error)) error {
 				t.Fatal("older daemon must be stopped before reinstalling")
 				return nil
 			}
 			t.Cleanup(func() { daemonStopFn, daemonStartFn, daemonStartGuardedFn = oldStop, oldStart, oldGuarded })
 			out, err := executeCmd("daemon", action)
-			if err != nil {
-				t.Fatalf("%s failed: %v\n%s", action, err, out)
+			if err == nil || !strings.Contains(err.Error(), "cannot atomically prepare daemon shutdown") {
+				t.Fatalf("%s must refuse unsupported atomic shutdown: %v\n%s", action, err, out)
 			}
-			want := []string{"stop", "start"}
-			if action == "stop" {
-				want = []string{"stop"}
-			}
-			if !reflect.DeepEqual(calls, want) {
-				t.Fatalf("calls = %v, want %v", calls, want)
+			if len(calls) != 0 {
+				t.Fatalf("unsupported guard reached destructive calls: %v", calls)
 			}
 		})
 	}
