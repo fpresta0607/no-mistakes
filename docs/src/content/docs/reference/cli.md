@@ -408,7 +408,7 @@ The input is one operator-owned UTF-8 JSON object, at most 64 KiB, with these fi
 
 The daemon checks the authenticated caller, registered Git identity, exact clean source, immutable predecessor history, launch selection and publication facts before accepting the child.
 An unresolved native agent safety refusal in the predecessor, or unreadable predecessor findings, refuses admission.
-The declared authored candidate must differ from every head bound in the immutable validation family: submitted, terminal, published and approved review heads, review-round starting and reviewed heads, and linked terminal source-adoption candidate, retained, gate, recovery and caller heads.
+The declared authored candidate must differ from every head bound in the immutable validation family: submitted, terminal, published and approved review heads, review-round starting and reviewed heads, linked terminal source-adoption candidate, retained, gate, recovery and caller heads, and every source-anchor value recorded by an admission.
 This checks recorded identities, never arbitrary Git ancestry.
 Use [terminal validation](#no-mistakes-axi-validate-terminal) to explicitly validate an unchanged failed or cancelled child's terminal head after an infrastructure failure, including an interrupted daemon or a pending acceptance cancelled after the trusted source changed.
 Every stage still runs fresh with zero repair authority; replay never implicitly retries a progressed or cancelled child, and no cosmetic commit is needed.

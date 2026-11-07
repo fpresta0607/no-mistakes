@@ -293,6 +293,9 @@ func TestValidationAdmissionRejectsEveryEarlierFamilyHead(t *testing.T) {
 		{name: "round starting", candidate: strings.Repeat("3", 40)},
 		{name: "round reviewed", candidate: strings.Repeat("4", 40)},
 		{name: "review approved", candidate: strings.Repeat("5", 40)},
+		{name: "caller recovery local", candidate: strings.Repeat("6", 40)},
+		{name: "gate recovery local", candidate: strings.Repeat("7", 40)},
+		{name: "caller recovery rewritten", candidate: strings.Repeat("8", 40)},
 		{name: "unbound base", candidate: strings.Repeat("c", 40), shouldAdmit: true},
 		{name: "fresh", candidate: strings.Repeat("9", 40), shouldAdmit: true},
 	} {
@@ -328,6 +331,33 @@ func TestValidationAdmissionRejectsEveryEarlierFamilyHead(t *testing.T) {
 			proposal.Snapshot, proposal.Request.PredecessorID, proposal.Request.SnapshotDigest = *child, first.ChildID, child.Digest()
 			proposal.Request.LaunchNonce = *child.Run.LaunchNonce
 			proposal.Request.PublishedHeadSHA, proposal.Request.PushGeneration = *child.Run.LastPushedSHA, *child.Run.PushGeneration
+			proposal.Request.TerminalGeneration, proposal.Request.AcceptUnknownSource = "terminal-retry", true
+			proposal.Request.SourceAnchors = map[string]string{
+				"caller/refs/no-mistakes/recover-local/" + rootID:            strings.Repeat("6", 40),
+				"gate/refs/no-mistakes/recover-local/" + rootID:              strings.Repeat("7", 40),
+				"caller/refs/no-mistakes/recover-rewritten/" + rootID + "/1": strings.Repeat("8", 40),
+			}
+			assertion := *proposal.Request.LaunchAssertion
+			assertion.Apply = true
+			proposal.Request.LaunchAssertion = &assertion
+			proposal.AssertionProof, err = assertion.Verify(assertion.TrustedSHA, assertion.Profiles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			terminal, _, err := database.AcceptValidationAdmission(context.Background(), proposal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunErrorStatus(terminal.ChildID, "daemon restarted", types.RunFailed); err != nil {
+				t.Fatal(err)
+			}
+			child, err = database.ReadTerminalSnapshot(terminal.ChildID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proposal.Snapshot, proposal.Request.PredecessorID, proposal.Request.SnapshotDigest = *child, terminal.ChildID, child.Digest()
+			proposal.Request.LaunchNonce, proposal.Request.ValidationGeneration = *child.Run.LaunchNonce, *child.Run.LaunchValidationGeneration
+			proposal.Request.TerminalGeneration, proposal.Request.AcceptUnknownSource, proposal.Request.SourceAnchors = "", false, nil
 			proposal.Request.CandidateSHA = test.candidate
 			before, err := database.GetRunsByRepo(proposal.Request.RepoID)
 			if err != nil {

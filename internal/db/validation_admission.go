@@ -185,6 +185,11 @@ func (d *DB) AcceptValidationAdmission(ctx context.Context, proposal ValidationA
 		for _, entry := range history {
 			run := entry.Snapshot.Run
 			heads := []*string{&run.HeadSHA, run.SubmittedHeadSHA, run.LastPushedSHA, run.ReviewApprovedHeadSHA}
+			if entry.Admission != nil {
+				for _, head := range entry.Admission.Request.SourceAnchors {
+					heads = append(heads, &head)
+				}
+			}
 			if entry.Adoption != nil {
 				adoption := entry.Adoption
 				heads = append(heads, &adoption.CandidateSHA, &adoption.RetainedSHA, &adoption.GateHead, &adoption.RecoveryHead, &adoption.CallerHead)
