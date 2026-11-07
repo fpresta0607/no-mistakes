@@ -61,8 +61,16 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 		hasConflict = hasConflict || finding.Category == types.FindingCategoryCIMergeConflict
 	}
 	isOrdinary := !hasConflict
+	receipt, err := sctx.DB.LatestCIHandback(run.ID)
+	if err != nil {
+		return nil, err
+	}
+	isRevalidation := request.RevalidatePublication || (receipt != nil && receipt.Source != nil && receipt.Source.Validation != nil)
+	if isRevalidation && !isOrdinary {
+		return nil, fmt.Errorf("publication revalidation handback requires ordinary failed checks")
+	}
 	if isOrdinary {
-		if len(findings.Items) == 0 || sctx.Config.AutoFixLimit(types.StepCI) != 0 || run.SubmittedHeadSHA == nil || run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != run.HeadSHA || run.PushTargetKind == nil || run.LastPushedAt == nil || request.PublishedHead != run.HeadSHA || request.PushGeneration != *run.PushGeneration {
+		if len(findings.Items) == 0 || sctx.Config.AutoFixLimit(types.StepCI) != 0 || run.SubmittedHeadSHA == nil || run.ReviewApprovedHeadSHA == nil || (!isRevalidation && *run.ReviewApprovedHeadSHA != run.HeadSHA) || run.PushTargetKind == nil || run.LastPushedAt == nil || request.PublishedHead != run.HeadSHA || request.PushGeneration != *run.PushGeneration {
 			return nil, fmt.Errorf("ordinary CI handback requires exact reviewed publication and request identity with automatic repair disabled")
 		}
 		for _, finding := range findings.Items {
@@ -113,6 +121,7 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 			return nil, fmt.Errorf("handback requires completed validation and no active writers: %s is %s", result.StepName, result.Status)
 		}
 	}
+	var validation *db.CIHandbackValidation
 	if isOrdinary {
 		expectedKind := "upstream"
 		if repo.ForkURL != "" {
@@ -134,9 +143,18 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 					return nil, fmt.Errorf("ordinary CI handback has no completed Test evidence")
 				}
 				evidence, err := types.ParseFindingsJSON(*result.FindingsJSON)
-				if err != nil || evidence.TestedHeadSHA != run.HeadSHA {
+				if err != nil || evidence.TestedHeadSHA == "" || (!isRevalidation && evidence.TestedHeadSHA != run.HeadSHA) {
 					return nil, fmt.Errorf("ordinary CI handback Test evidence does not bind the published head")
 				}
+			}
+		}
+		if isRevalidation {
+			validation, err = sctx.DB.ReadCIHandbackValidation(run.ID)
+			if err != nil {
+				return nil, err
+			}
+			if err := verifyCIHandbackValidationHeads(sctx, run, validation); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -189,10 +207,6 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 		return nil
 	}
 	if err := checkManaged(); err != nil {
-		return nil, err
-	}
-	receipt, err := sctx.DB.LatestCIHandback(run.ID)
-	if err != nil {
 		return nil, err
 	}
 	if (request.Resume && request.ReceiptID == "") || (request.ReceiptID != "" && (receipt == nil || receipt.ID != request.ReceiptID || receipt.AcceptedHead != nil)) {
@@ -252,6 +266,7 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 		receipt = &db.CIHandback{RunID: run.ID, RoundID: rounds[len(rounds)-1].ID, CallerDir: caller, ReleasedHead: run.HeadSHA, PRURL: pr.URL, BaseBranch: pr.BaseBranch, BaseHead: baseHead, PushGeneration: *run.PushGeneration, TargetFingerprint: *run.PushTargetFingerprint, PushRef: *run.PushRef}
 		if isOrdinary {
 			receipt.Source = &db.CIHandbackSource{CallerHead: request.HeadSHA, SubmittedHead: *run.SubmittedHeadSHA, ReviewHead: *run.ReviewApprovedHeadSHA, PushKind: *run.PushTargetKind, PushedAt: *run.LastPushedAt, Findings: *step.FindingsJSON, AutoFixLimits: make(map[types.StepName]int, len(results))}
+			receipt.Source.Validation = validation
 			for _, result := range results {
 				limit := 0
 				if result.AutoFixLimit != nil {
@@ -263,6 +278,9 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 	}
 	if isOrdinary && (receipt.Source == nil || receipt.RoundID != request.RoundID || receipt.Source.SubmittedHead != *run.SubmittedHeadSHA || receipt.Source.ReviewHead != *run.ReviewApprovedHeadSHA || receipt.Source.PushKind != *run.PushTargetKind || receipt.Source.PushedAt != *run.LastPushedAt || receipt.Source.Findings != *step.FindingsJSON || (!request.Resume && receipt.Source.CallerHead != request.HeadSHA)) {
 		return nil, fmt.Errorf("ordinary CI handback source binding changed")
+	}
+	if isRevalidation && (receipt.Source == nil || receipt.Source.Validation == nil) {
+		return nil, fmt.Errorf("handback receipt does not authorize publication revalidation")
 	}
 	if receipt.ID != "" && receipt.Source != nil {
 		if err := VerifyCIHandbackSource(sctx, receipt); err != nil {
