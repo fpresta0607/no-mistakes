@@ -129,6 +129,8 @@ This includes corrections committed after terminalization and before the first t
 Cleanup rechecks source after terminating escaped workers and immediately before removal, preserving files flushed during shutdown.
 Retention reaping holds the same branch lock as terminal continuation through revalidation, the process sweep, and removal.
 Source retention supplies no review or terminal validation authority; [terminal continuation](/no-mistakes/reference/cli/#continue-validation-of-preserved-terminal-source) submits eligible source for fresh validation.
+At terminalization, the executor preserves an unpublished head and records a proven descendant as the run's head even when uncommitted repair source remains.
+It records whether the source is clean, dirty, or unreadable and grants a verified terminal-head stamp only after a successful clean-source check.
 
 Step 4's cleanup is best effort: a `git worktree remove` failure (for example a vendored `.git` nested somewhere under a large `node_modules` tree) leaves the directory behind rather than retrying immediately. The [`worktree` retention setting](/no-mistakes/reference/global-config/#worktree) is the safety net for that leftover - it reaps eligible directories under the default tree after every finished run and again at startup, so a long-lived daemon converges on the retention budget instead of waiting for the crash-recovery sweep below, which only ever runs once per restart.
 
