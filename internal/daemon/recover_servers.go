@@ -25,8 +25,9 @@ var processStartTimeFunc = processStartTime
 var terminateOrphanProcessGroupFunc = terminateOrphanProcessGroup
 
 type daemonPIDFile struct {
-	PID       int       `json:"pid"`
-	StartedAt time.Time `json:"started_at,omitempty"`
+	PID       int          `json:"pid"`
+	StartedAt time.Time    `json:"started_at,omitempty"`
+	Startup   *startupWork `json:"startup,omitempty"`
 }
 
 // reapOrphanedServers kills managed-server subprocesses (opencode,
