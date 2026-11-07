@@ -16,7 +16,10 @@ import (
 
 func TestNativeTestBashRefusesWSLBeforeVerifyingNativeShell(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	systemRoot := filepath.Join(root, "Windows")
 	wsl := filepath.Join(systemRoot, "System32", "bash.exe")
 	native := filepath.Join(root, "Git", "bin", "bash.exe")
@@ -37,14 +40,17 @@ func TestNativeTestBashMissingOrNonNativeRefusesWithoutWSL(t *testing.T) {
 	t.Parallel()
 	for _, isPresent := range []bool{false, true} {
 		t.Run(map[bool]string{false: "missing", true: "not_native"}[isPresent], func(t *testing.T) {
-			root := t.TempDir()
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
 			wsl := filepath.Join(root, "Windows", "System32", "bash.exe")
 			native := filepath.Join(root, "Git", "bin", "bash.exe")
 			writeTestFile(t, wsl, "never execute")
 			if isPresent {
 				writeTestFile(t, native, "not a native shell")
 			}
-			_, err := resolveNativeTestBash([]string{wsl, native}, filepath.Join(root, "Windows"), func(path string) error {
+			_, err = resolveNativeTestBash([]string{wsl, native}, filepath.Join(root, "Windows"), func(path string) error {
 				if path == wsl {
 					t.Fatal("WSL was verified or launched")
 				}

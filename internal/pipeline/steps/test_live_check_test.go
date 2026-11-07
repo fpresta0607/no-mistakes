@@ -243,7 +243,6 @@ func TestTestStep_LiveCheckRulesOffIsTodaysPrompt(t *testing.T) {
 			return &agent.Result{Output: json.RawMessage(liveCheckPassingEvidence)}, nil
 		}}
 		sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-		// Fixed locations, so two contexts render the same text.
 		sctx.WorkDir = dir
 		sctx.EvidenceDir = filepath.Join(t.TempDir(), "evidence")
 		configure(sctx)
@@ -254,6 +253,11 @@ func TestTestStep_LiveCheckRulesOffIsTodaysPrompt(t *testing.T) {
 			t.Fatalf("evidence agent calls = %d, want 1", len(ag.calls))
 		}
 		got := ag.calls[0].Prompt
+		scratch, _ := envValue(ag.calls[0].Env, "TMPDIR")
+		if scratch == "" {
+			t.Fatal("evidence agent received no scratch directory")
+		}
+		got = strings.ReplaceAll(got, scratch, "<scratch>")
 		got = strings.ReplaceAll(got, sctx.EvidenceDir, "<evidence>")
 		return strings.ReplaceAll(got, dir, "<worktree>")
 	}

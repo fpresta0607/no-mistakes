@@ -139,6 +139,9 @@ func (s *TestStep) execute(sctx *pipeline.StepContext, desktop string) (*pipelin
 	if evidenceDir == "" {
 		return nil, fmt.Errorf("test evidence dir is not configured for this run")
 	}
+	if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create test evidence dir: %w", err)
+	}
 	scratchDir, err := newTestScratch("", runtime.GOOS)
 	if err != nil {
 		return nil, err
