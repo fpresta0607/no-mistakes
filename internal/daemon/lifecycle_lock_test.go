@@ -80,6 +80,7 @@ func TestMaintenanceBlocksEveryStartupEntrypoint(t *testing.T) {
 		"resources": func() error { return RunWithResources(p, database) },
 		"options":   func() error { return RunWithOptions(p, database, nil) },
 		"start":     func() error { return Start(p) },
+		"ensure":    func() error { return EnsureDaemon(p) },
 		"detached":  func() error { return startDetachedDaemon(p) },
 		"managed":   func() error { return startManagedDaemon(p) },
 		"launch":    func() error { return launchDetachedDaemon(p, exec.Command("must-not-launch")) },
@@ -106,6 +107,28 @@ func TestLifecycleLockRefusesUnreadablePathBeforeIPC(t *testing.T) {
 	}
 	if release, err := PrepareShutdownIfIdle(p); err == nil || release != nil {
 		t.Fatalf("unreadable lock granted teardown: %v", err)
+	}
+}
+
+func TestMaintenanceBlocksEnsureBeforeArtifactProbe(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	release, err := PrepareForcedShutdown(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	oldHealth := daemonHealthCheck
+	t.Cleanup(func() { daemonHealthCheck = oldHealth })
+	isProbed := false
+	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+		isProbed = true
+		return false, nil
+	}
+	if err := EnsureDaemon(p); err == nil {
+		t.Fatal("ensure daemon bypassed maintenance")
+	}
+	if isProbed {
+		t.Fatal("ensure daemon reached an artifact-mutating health probe during maintenance")
 	}
 }
 

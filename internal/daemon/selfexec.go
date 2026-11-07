@@ -1036,6 +1036,14 @@ func EnsureDaemon(p *paths.Paths) error {
 	if err := ipc.CheckEndpointPath(p.Socket()); err != nil {
 		return err
 	}
+	if err := p.EnsureDirs(); err != nil {
+		return err
+	}
+	releaseStartup, err := acquireLifecycleLock(p, false)
+	if err != nil {
+		return err
+	}
+	defer releaseStartup()
 	alive, err := daemonHealthCheck(p)
 	if err != nil {
 		return fmt.Errorf("%w (run 'no-mistakes daemon start' to recover)", err)
