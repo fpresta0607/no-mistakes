@@ -314,6 +314,52 @@ func TestDaemonStartupProgressRejectsAnOldManagedChild(t *testing.T) {
 	}
 }
 
+func TestDaemonStartupProgressManagedLaunchRespectsProcessTimePrecision(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		platform     string
+		startOffset  time.Duration
+		recordOffset time.Duration
+		wantElapsed  time.Duration
+	}{
+		{name: "linux same second", platform: "linux", wantElapsed: 70 * time.Second},
+		{name: "darwin same second", platform: "darwin", wantElapsed: 70 * time.Second},
+		{name: "linux previous second", platform: "linux", startOffset: -time.Second, wantElapsed: 45 * time.Second},
+		{name: "darwin previous second", platform: "darwin", startOffset: -time.Second, wantElapsed: 45 * time.Second},
+		{name: "linux mismatched identity", platform: "linux", recordOffset: time.Second, wantElapsed: 45 * time.Second},
+		{name: "windows earlier same second", platform: "windows", startOffset: 100 * time.Millisecond, wantElapsed: 45 * time.Second},
+		{name: "windows later same second", platform: "windows", startOffset: 400 * time.Millisecond, wantElapsed: 70 * time.Second},
+		{name: "windows mismatched identity", platform: "windows", startOffset: 400 * time.Millisecond, recordOffset: 100 * time.Nanosecond, wantElapsed: 45 * time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p, started, elapsed := startupProgressClock(t)
+			oldPlatform := runtimeGOOS
+			runtimeGOOS = test.platform
+			t.Cleanup(func() { runtimeGOOS = oldPlatform })
+			launchStarted := started.Truncate(time.Second).Add(250 * time.Millisecond)
+			processStarted := started.Truncate(time.Second).Add(test.startOffset)
+			daemonProcessStartTime = func(int) (time.Time, error) { return processStarted, nil }
+			daemonHealthCheck = func(*paths.Paths) (bool, error) {
+				writeStartupProgressFixture(t, p, 4242, processStarted.Add(test.recordOffset), 3, int(elapsed().Seconds())/20)
+				return elapsed() >= 70*time.Second, nil
+			}
+
+			err := waitForDaemonStartWithProcess(p, nil, nil, 0, time.Time{}, managedServiceLaunch{notBefore: launchStarted})
+
+			if elapsed() != test.wantElapsed {
+				t.Fatalf("managed readiness elapsed=%v error=%v; want %v", elapsed(), err, test.wantElapsed)
+			}
+			if test.wantElapsed == 70*time.Second {
+				if err != nil {
+					t.Fatalf("valid managed progress failed: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "did not become ready") {
+				t.Fatalf("invalid managed progress error=%v; want readiness timeout", err)
+			}
+		})
+	}
+}
+
 func TestDaemonStartupProgressRejectsAReplacementSnapshotOfTheSameSize(t *testing.T) {
 	p, started, _ := startupProgressClock(t)
 	wait := startupWait{timeout: 45 * time.Second, deadline: started.Add(45 * time.Second), hardDeadline: started.Add(10 * time.Minute), pid: 4242, startedAt: started}

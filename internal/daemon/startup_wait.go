@@ -21,8 +21,12 @@ type startupWait struct {
 }
 
 func (wait *startupWait) observe(p *paths.Paths, now time.Time) {
+	notBefore := wait.notBefore
+	if runtimeGOOS != "windows" {
+		notBefore = notBefore.Truncate(time.Second)
+	}
 	record, err := readDaemonPIDFile(p.PIDFile())
-	if err != nil || record.Startup == nil || record.StartedAt.IsZero() || record.StartedAt.Before(wait.notBefore) {
+	if err != nil || record.Startup == nil || record.StartedAt.IsZero() || record.StartedAt.Before(notBefore) {
 		return
 	}
 	work := record.Startup
