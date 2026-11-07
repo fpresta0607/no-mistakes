@@ -477,7 +477,7 @@ func TestAuthoredAdmissionSchedulesEveryStageFreshWithoutMovingSourceOrPredecess
 }
 
 func TestAuthoredAdmissionRefusesSourceAndLaunchMismatchesWithoutMutation(t *testing.T) {
-	for _, change := range []string{"dirty", "untracked hidden by config", "wrong tree", "wrong branch", "wrong repository", "wrong trusted repository", "unrelated gate head", "stale snapshot", "wrong generation", "wrong launch", "unauthenticated"} {
+	for _, change := range []string{"dirty", "untracked hidden by config", "wrong tree", "wrong branch", "wrong repository", "wrong trusted repository", "unrelated gate head", "stale snapshot", "wrong generation", "wrong launch", "unauthenticated", "native safety refusal", "unreadable findings"} {
 		t.Run(change, func(t *testing.T) {
 			manager, database, repo, request, gate := authoredAdmissionFixture(t, nil)
 			operator := os.Getpid()
@@ -510,6 +510,23 @@ func TestAuthoredAdmissionRefusesSourceAndLaunchMismatchesWithoutMutation(t *tes
 				request.Request.LaunchAssertion.Profiles["primary"][0].Model = "other"
 			case "unauthenticated":
 				operator = 0
+			case "native safety refusal", "unreadable findings":
+				step, err := database.InsertStepResult(request.Request.PredecessorID, types.StepTest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				findings := `{"findings":[{"id":"agent-safety-refusal","severity":"error","description":"native provider refused execution","action":"ask-user"}]}`
+				if change == "unreadable findings" {
+					findings = `{"findings":`
+				}
+				if err := database.SetStepFindings(step.ID, findings); err != nil {
+					t.Fatal(err)
+				}
+				snapshot, err := database.ReadTerminalSnapshot(request.Request.PredecessorID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.Request.SnapshotDigest = snapshot.Digest()
 			}
 			before, err := database.GetRunsByRepo(repo.ID)
 			if err != nil {
