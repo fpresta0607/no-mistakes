@@ -4,7 +4,6 @@ package realpath
 
 import (
 	"io/fs"
-	"os"
 	"strings"
 
 	"golang.org/x/sys/windows"
@@ -18,14 +17,18 @@ const normalizedDOSName = 0
 // which the kernel has already walked through every symlink, junction and
 // mount point, whatever volume each one targets.
 func resolve(abs string) (string, error) {
-	file, err := os.Open(abs)
+	name, err := windows.UTF16PtrFromString(abs)
 	if err != nil {
-		return "", err
+		return "", &fs.PathError{Op: "open", Path: abs, Err: err}
 	}
-	defer file.Close()
+	handle, err := windows.CreateFile(name, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return "", &fs.PathError{Op: "open", Path: abs, Err: err}
+	}
+	defer windows.CloseHandle(handle)
 	buffer := make([]uint16, windows.MAX_PATH)
 	for {
-		length, err := windows.GetFinalPathNameByHandle(windows.Handle(file.Fd()), &buffer[0], uint32(len(buffer)), normalizedDOSName)
+		length, err := windows.GetFinalPathNameByHandle(handle, &buffer[0], uint32(len(buffer)), normalizedDOSName)
 		if err != nil {
 			return "", &fs.PathError{Op: "GetFinalPathNameByHandle", Path: abs, Err: err}
 		}
