@@ -57,6 +57,7 @@ func TestPRStep_ExecuteKeepsCapturedRuntimeContextOutOfThePublishedBody(t *testi
 				},
 			}
 			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			publishValidationTextForTest(sctx)
 			sctx.Env = env
 			sctx.EvidenceDir = evidenceDir
 			sctx.Config.Test.Evidence.Compact = tc.isCompact
