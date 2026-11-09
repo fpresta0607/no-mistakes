@@ -12,11 +12,12 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 func TestNativeTestBashRefusesWSLBeforeVerifyingNativeShell(t *testing.T) {
 	t.Parallel()
-	root, err := filepath.EvalSymlinks(t.TempDir())
+	root, err := realpath.Resolve(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +41,7 @@ func TestNativeTestBashMissingOrNonNativeRefusesWithoutWSL(t *testing.T) {
 	t.Parallel()
 	for _, isPresent := range []bool{false, true} {
 		t.Run(map[bool]string{false: "missing", true: "not_native"}[isPresent], func(t *testing.T) {
-			root, err := filepath.EvalSymlinks(t.TempDir())
+			root, err := realpath.Resolve(t.TempDir())
 			if err != nil {
 				t.Fatal(err)
 			}

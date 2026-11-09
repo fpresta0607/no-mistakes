@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 // Paths provides access to all no-mistakes filesystem locations.
@@ -162,7 +164,7 @@ func (p *Paths) ResolveEvidenceRoot(evidenceDir, localRoot string) (root, warnin
 	if err := writableEvidenceDir(clean); err != nil {
 		return defaultRoot, fmt.Sprintf("evidence_dir %q is missing or not writable (%v); using %s", clean, err, defaultRoot)
 	}
-	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+	if resolved, err := realpath.Resolve(clean); err == nil {
 		clean = resolved
 	}
 	if p.evidenceRootInsideWorktrees(clean) {

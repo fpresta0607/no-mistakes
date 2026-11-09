@@ -5,13 +5,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 func TestResolveEvidenceRootUsesAUsableSettingAndFallsBack(t *testing.T) {
 	root := t.TempDir()
 	// TempDir may use a symlink (macOS) or a short Windows path. The
 	// resolver returns the canonical spelling of configured directories.
-	root, err := filepath.EvalSymlinks(root)
+	root, err := realpath.Resolve(root)
 	if err != nil {
 		t.Fatal(err)
 	}

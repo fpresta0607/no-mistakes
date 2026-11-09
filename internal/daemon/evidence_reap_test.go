@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -598,7 +599,7 @@ func TestPinRunEvidenceDirAvoidsEveryWorktreePlacement(t *testing.T) {
 				}
 				want := filepath.Join(f.p.EvidenceDir(), run.ID)
 				if relation == "separate" {
-					canonical, err := filepath.EvalSymlinks(evidence)
+					canonical, err := realpath.Resolve(evidence)
 					if err != nil {
 						t.Fatal(err)
 					}

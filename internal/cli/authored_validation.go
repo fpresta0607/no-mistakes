@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"time"
 
@@ -12,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/authoredvalidation"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 func newAxiValidateAuthoredCmd() *cobra.Command {
@@ -48,7 +48,7 @@ func newValidationAdmissionCmd(isTerminal bool) *cobra.Command {
 			if err != nil {
 				return emitError(command, 1, err.Error())
 			}
-			directory, err = filepath.EvalSymlinks(directory)
+			directory, err = realpath.Resolve(directory)
 			if err != nil {
 				return emitError(command, 1, err.Error())
 			}

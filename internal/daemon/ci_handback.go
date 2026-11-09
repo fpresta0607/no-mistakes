@@ -11,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -61,7 +62,7 @@ func (m *RunManager) HandleCIHandback(ctx context.Context, params ipc.CIHandback
 			if err != nil {
 				return "", err
 			}
-			caller, err = filepath.EvalSymlinks(caller)
+			caller, err = realpath.Resolve(caller)
 			if err != nil || !samePath(caller, receipt.CallerDir) {
 				return "", fmt.Errorf("accepted CI handback caller changed")
 			}

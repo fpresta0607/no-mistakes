@@ -334,6 +334,12 @@ func serviceInstanceSuffix(p *paths.Paths) string {
 // and the daemon-collision key (reconcileCollidingDaemons) agree on what
 // "same root" means. Resolution is best-effort: if symlinks cannot be evaluated
 // the cleaned input is returned unchanged.
+//
+// It keeps filepath.EvalSymlinks rather than realpath.Resolve on purpose: the
+// result names the installed service, and a home that is itself a junction
+// must keep the name it was installed under. EvalSymlinks leaves such a root
+// unresolved, and a path below a junction falls back to its cleaned spelling,
+// which sameGateDir backs with os.SameFile.
 func canonicalRoot(root string) string {
 	if root == "" {
 		return ""
