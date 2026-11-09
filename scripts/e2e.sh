@@ -61,7 +61,8 @@ if [[ "$#" -eq 0 ]]; then
   # The user-journey matrix runs native backends serially because each case
   # owns process-wide environment. A full macOS run took 1127s for internal/e2e,
   # so the package budget includes room for the complete serial journey matrix
-  # and ordinary variance. Individual scenario guards remain unchanged.
+  # and ordinary variance. NM_E2E_TIMEOUT_SCALE extends harness operation
+  # budgets on slow hosts; go test's -timeout still bounds the package.
   set -- -tags=e2e -count=1 -timeout 25m ./internal/e2e/... ./internal/pipeline/steps/...
 fi
 

@@ -1965,6 +1965,7 @@ func assertReviewWarningRun(t *testing.T, h *Harness) {
 
 func waitForRunIDStatus(t *testing.T, h *Harness, runID string, status types.RunStatus, timeout time.Duration) *ipc.RunInfo {
 	t.Helper()
+	timeout = h.timeout(timeout)
 	deadline := time.Now().Add(timeout)
 	var lastRun *ipc.RunInfo
 	for time.Now().Before(deadline) {
@@ -1992,6 +1993,7 @@ func waitForRunIDStatus(t *testing.T, h *Harness, runID string, status types.Run
 
 func waitForStepStatus(t *testing.T, h *Harness, branch string, stepName types.StepName, status types.StepStatus, timeout time.Duration) *ipc.RunInfo {
 	t.Helper()
+	timeout = h.timeout(timeout)
 	deadline := time.Now().Add(timeout)
 	var lastRun *ipc.RunInfo
 	for time.Now().Before(deadline) {
