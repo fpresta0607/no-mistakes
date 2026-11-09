@@ -123,11 +123,15 @@ func goListPackages(t *testing.T, patterns ...string) []string {
 	return packages
 }
 
+// goTestPackagePatterns keeps only the package patterns a go test command
+// names directly. Flags, @file arguments and the shell words of a go list
+// substitution are not patterns, so a command that computes its package set
+// (the Windows core remainder, the Unix remainder) reports none of them.
 func goTestPackagePatterns(command workflowCommand) []string {
 	var patterns []string
 	for _, arg := range command.args[1:] {
 		arg = unquoteWorkflowArg(arg)
-		if strings.HasPrefix(arg, "-") || strings.HasPrefix(arg, "@") {
+		if !strings.HasPrefix(arg, "./") && arg != "." {
 			continue
 		}
 		patterns = append(patterns, arg)
@@ -557,6 +561,38 @@ func TestCIWorkflow_WindowsStepsShardsRunEveryTestExactlyOnce(t *testing.T) {
 		runEnv:  "NM_CI_WINDOWS_STEPS_RUN",
 		skipEnv: "NM_CI_WINDOWS_STEPS_SKIP",
 	})
+}
+
+func TestCIWorkflow_WindowsHandbackDoesNotShareTheCIMonitorBudget(t *testing.T) {
+	t.Parallel()
+	for _, row := range ciTestJob(t).Strategy.Matrix.Include {
+		if row["os"] != "windows-latest" || row["shard"] != "steps" {
+			continue
+		}
+		shard := namedTestShard{
+			name: row["name"],
+			run:  namedShardPattern(t, row, "steps_run"),
+			skip: namedShardPattern(t, row, "steps_skip"),
+		}
+		for _, handback := range []string{
+			"TestCIHandbackRebasedPublicationRevalidatesTheSameRun",
+			"TestCIHandbackRebasedPublicationRefusesIncompleteRoundHistory",
+		} {
+			if !shard.selects(handback) {
+				continue
+			}
+			for _, monitor := range []string{
+				"TestCIStep_AutoFixUsesOnlySelectedFindings",
+				"TestCIStep_FixAgentBudgetExhaustionParksForADecisionInsteadOfRetrying",
+				"TestCIStep_GreenBehindPRTakesTheRebaseRepairOnceAfterTheBaseSettles",
+				"TestCIStep_NonTimeoutFixFailureKeepsRetrying",
+			} {
+				if shard.selects(monitor) {
+					t.Errorf("%s shares the Windows package timeout with %s in %s", handback, monitor, shard.name)
+				}
+			}
+		}
+	}
 }
 
 func TestCIWorkflow_WindowsDaemonShardsRunEveryTestExactlyOnce(t *testing.T) {

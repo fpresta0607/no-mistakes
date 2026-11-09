@@ -11,6 +11,40 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestShutdownRechecksRunsAfterIdleSnapshot(t *testing.T) {
+	p, database := startTestDaemon(t)
+	active, err := database.GetActiveRuns()
+	if err != nil || len(active) != 0 {
+		t.Fatalf("initial idle observation = %v, %v", active, err)
+	}
+	repo, err := database.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "admission-wins", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.UpdateRunStatus(run.ID, types.RunCompleted) })
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	err = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, &ipc.ShutdownResult{})
+	if err == nil || !strings.Contains(err.Error(), run.ID) {
+		t.Fatalf("shutdown after admission = %v, want busy refusal naming %s", err, run.ID)
+	}
+	stored, err := database.GetRun(run.ID)
+	if err != nil || stored.Status != types.RunPending {
+		t.Fatalf("admitted run changed: %+v, %v", stored, err)
+	}
+	var health ipc.HealthResult
+	if err := client.CallWithTimeout(ipc.MethodHealth, nil, &health, time.Second); err != nil {
+		t.Fatalf("busy refusal stopped daemon: %v", err)
+	}
+}
+
 func TestShutdownRefusesActiveAgentPeer(t *testing.T) {
 	p, database := startTestDaemon(t)
 	repo, err := database.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")

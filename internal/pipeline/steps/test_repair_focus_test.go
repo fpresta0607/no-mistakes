@@ -274,11 +274,15 @@ func TestTestStep_FocusedCheckStandsInForTheFullCommandAfterARepair(t *testing.T
 	cmds := config.Commands{Test: fullCommandMustNotRun, TestFocused: focused}
 	sctx := repairContext(t, ag, dir, baseSHA, headSHA, cmds, answeredFailure(t, &types.TestBaselineFailure{Tests: []string{namedFailure}}))
 	logs := liveCheckLogs(sctx)
-	var focusFilesAtEvidence []string
+	var focusFilesAtAgent []string
 	answer := ag.runFn
 	ag.runFn = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		if !isRepairTurn(opts) {
-			focusFilesAtEvidence, _ = filepath.Glob(filepath.Join(testEvidenceDir(sctx), testScratchDirName, testFocusFileName))
+			scratch, _ := envValue(opts.Env, "TMPDIR")
+			if scratch == "" {
+				t.Fatal("evidence agent received no scratch directory")
+			}
+			focusFilesAtAgent, _ = filepath.Glob(filepath.Join(scratch, testFocusFileName))
 		}
 		return answer(ctx, opts)
 	}
@@ -305,8 +309,8 @@ func TestTestStep_FocusedCheckStandsInForTheFullCommandAfterARepair(t *testing.T
 	if containsLog(*logs, "baseline tests passed") || !containsLog(*logs, "focused check passed") {
 		t.Fatalf("step log calls a focused pass a baseline pass: %q", *logs)
 	}
-	if len(focusFilesAtEvidence) != 0 {
-		t.Fatalf("the focus file was still in the agent's scratch directory: %v", focusFilesAtEvidence)
+	if len(focusFilesAtAgent) != 0 {
+		t.Fatalf("the focus file was still in the agent's scratch directory: %v", focusFilesAtAgent)
 	}
 	given, err := os.ReadFile(seen)
 	if err != nil {

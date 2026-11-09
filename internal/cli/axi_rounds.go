@@ -17,13 +17,18 @@ import (
 // Keep the public shape separate from DB rows, which also hold private config
 // snapshots and internal bookkeeping
 type axiRoundsDocument struct {
-	SchemaVersion int            `json:"schema_version"`
-	RunID         string         `json:"run_id"`
-	Step          string         `json:"step"`
-	Rounds        []axiRoundView `json:"rounds"`
+	ScopeDecisions []types.ReviewScopeDecision `json:"scope_decisions,omitempty"`
+	SchemaVersion  int                         `json:"schema_version"`
+	RunID          string                      `json:"run_id"`
+	Step           string                      `json:"step"`
+	Rounds         []axiRoundView              `json:"rounds"`
 }
 
 type axiRoundView struct {
+	ID                 string           `json:"id"`
+	StepResultID       string           `json:"step_result_id"`
+	ReviewedHeadSHA    *string          `json:"reviewed_head_sha"`
+	TrustedConfigSHA   *string          `json:"trusted_config_sha"`
 	Round              int              `json:"round"`
 	Trigger            string           `json:"trigger"`
 	Summary            *string          `json:"summary"`
@@ -121,6 +126,12 @@ func runAxiRounds(cmd *cobra.Command, step, runID string, asJSON bool) error {
 		return fail(1, fmt.Sprintf("load rounds: %v", err))
 	}
 	doc := axiRoundsDocument{SchemaVersion: 1, RunID: run.ID, Step: step, Rounds: make([]axiRoundView, 0, len(rounds))}
+	if step == string(types.StepReview) {
+		doc.ScopeDecisions, err = env.d.GetReviewScopeDecisions(run.ID)
+		if err != nil {
+			return fail(1, fmt.Sprintf("accepted Review scope unavailable: %v", err))
+		}
+	}
 	for _, r := range rounds {
 		view, err := axiRoundFromDB(r)
 		if err != nil {
@@ -145,12 +156,14 @@ func runAxiRounds(cmd *cobra.Command, step, runID string, asJSON bool) error {
 		toon.Field{Key: "run_id", Value: doc.RunID},
 		toon.Field{Key: "step", Value: doc.Step},
 		toon.Field{Key: "rounds", Value: exactTOONIntegers(values["rounds"])},
+		toon.Field{Key: "scope_decisions", Value: values["scope_decisions"]},
 	)
 	return nil
 }
 
 func axiRoundFromDB(r *db.StepRound) (axiRoundView, error) {
 	view := axiRoundView{
+		ID: r.ID, StepResultID: r.StepResultID, ReviewedHeadSHA: r.ReviewedHeadSHA, TrustedConfigSHA: r.TrustedConfigSHA,
 		Round: r.Round, Trigger: r.Trigger, SelectionSource: r.SelectionSource,
 		ResponseOrigin: string(r.ResponseOrigin.OrUnknown()), FixSummary: r.FixSummary,
 		DurationMS: r.DurationMS, CreatedAt: r.CreatedAt,

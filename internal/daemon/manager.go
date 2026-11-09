@@ -72,6 +72,8 @@ type RunManager struct {
 	maxConcurrentRuns int
 	wg                sync.WaitGroup // tracks background run goroutines
 	shuttingDown      atomic.Bool    // prevents new runs during shutdown
+	admissionClosed   bool           // guarded by mu
+	admissions        int            // branch mutations in flight, guarded by mu
 	restart           restartState   // restart scheduled for an update; see restart_when_idle.go
 
 	afterRetryProof func() // test seam: runs between HandleRetry's proof and the launch
@@ -79,6 +81,7 @@ type RunManager struct {
 	paths           *paths.Paths
 	steps           StepFactory
 	refreshPR       func(*pipeline.StepContext) (bool, error)
+	startup         *startupProgress
 
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
 
@@ -187,6 +190,7 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) ([]recoveredRunP
 			continue
 		}
 		plan, err := m.prepareRecoveredRun(ctx, run)
+		m.startup.complete("run:" + run.ID)
 		if err != nil {
 			slog.Warn("active run cannot be safely resumed", "run_id", run.ID, "error", err)
 			continue
@@ -598,6 +602,11 @@ func (m *RunManager) resumeRecoveredRuns(plans []recoveredRunPlan) {
 }
 
 func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
+	if err := m.beginAdmission(); err != nil {
+		_ = plan.agent.Close()
+		return
+	}
+	defer m.endAdmission()
 	sequence := m.reserveAdmission()
 	defer m.releaseAdmission(sequence)
 	if m.shuttingDown.Load() {
@@ -624,6 +633,18 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		m.wg.Add(1)
 		go func() {
 			startedAt := time.Now()
+			trigger := "recovery"
+			if plan.admission != nil {
+				trigger = "authored"
+				telemetry.Track("run", telemetry.Fields{
+					"action":      "started",
+					"trigger":     trigger,
+					"agent":       string(plan.cfg.Agent),
+					"branch_role": telemetryBranchRole(plan.run.Branch, plan.repo.DefaultBranch),
+					"step_count":  len(plan.steps),
+					"demo_mode":   steps.IsDemoMode(),
+				})
+			}
 			defer m.wg.Done()
 			defer close(done)
 			parkedAtShutdown := false
@@ -693,7 +714,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			}
 			fields := telemetry.Fields{
 				"action":      "finished",
-				"trigger":     "recovery",
+				"trigger":     trigger,
 				"agent":       string(plan.cfg.Agent),
 				"branch_role": telemetryBranchRole(plan.run.Branch, plan.repo.DefaultBranch),
 				"status":      string(plan.run.Status),
@@ -1061,6 +1082,10 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 // handlePushReceived is HandlePushReceived; fromReplay marks a push an
 // earlier daemon held, which replayHeldPushes starts ahead of fresh pushes.
 func (m *RunManager) handlePushReceived(ctx context.Context, params *ipc.PushReceivedParams, fromReplay bool) (string, error) {
+	if err := m.beginAdmission(); err != nil {
+		return "", err
+	}
+	defer m.endAdmission()
 	if params.LaunchAssertion != nil && params.LaunchNonce == "" {
 		return "", fmt.Errorf("launch assertion requires launch_nonce and validation_generation")
 	}
@@ -1793,6 +1818,10 @@ func (m *RunManager) withBranchLock(repoID, branch string, action func() (string
 	branchMu := m.branchMutex(repoID, branch)
 	branchMu.Lock()
 	defer branchMu.Unlock()
+	if err := m.beginAdmission(); err != nil {
+		return "", err
+	}
+	defer m.endAdmission()
 	return action()
 }
 
@@ -3022,6 +3051,7 @@ func (m *RunManager) HandleHandoff(ctx context.Context, runID string) error {
 // cancelActiveRuns cancels any in-progress runs for the given repo+branch
 // and waits for their goroutines to finish before returning, preventing
 // concurrent pushes to upstream.
+// Terminal runs still being cleaned up must finish before a replacement starts.
 // The cancellation cause is propagated to the executor via context.Cause,
 // which uses it as the run's error message in the DB.
 func (m *RunManager) cancelActiveRuns(repoID, branch string) {
@@ -3047,10 +3077,6 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 		if run.Branch != branch {
 			continue
 		}
-		if run.Status != types.RunPending && run.Status != types.RunRunning {
-			continue
-		}
-
 		m.mu.Lock()
 		cancel, ok := m.cancels[run.ID]
 		done := m.dones[run.ID]
@@ -3060,8 +3086,10 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 			continue
 		}
 
-		cancel(fmt.Errorf(types.RunCancelReasonSuperseded))
-		slog.Info("cancelled active run", "run_id", run.ID, "repo_id", repoID, "branch", branch)
+		if run.Status == types.RunPending || run.Status == types.RunRunning {
+			cancel(fmt.Errorf(types.RunCancelReasonSuperseded))
+			slog.Info("cancelled active run", "run_id", run.ID, "repo_id", repoID, "branch", branch)
+		}
 		if done != nil {
 			toWait = append(toWait, done)
 		}

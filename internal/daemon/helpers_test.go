@@ -223,7 +223,7 @@ func runTestDaemon(t *testing.T, p *paths.Paths, d *db.DB, sf StepFactory, stopW
 
 	t.Cleanup(func() {
 		if client, err := ipc.Dial(p.Socket()); err == nil {
-			_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
+			_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{Force: true}, nil)
 			client.Close()
 		}
 		select {
@@ -600,7 +600,7 @@ func shutdownTestDaemonAndWaitForCleanup(t *testing.T, p *paths.Paths) {
 	if err != nil {
 		t.Fatalf("dial daemon for shutdown: %v", err)
 	}
-	if err := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil); err != nil {
+	if err := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{Force: true}, nil); err != nil {
 		client.Close()
 		t.Fatalf("shut down daemon: %v", err)
 	}

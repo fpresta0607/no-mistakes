@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
@@ -46,6 +47,7 @@ type managedServiceState int
 
 type managedServiceLaunch struct {
 	windowsRunGeneration string
+	notBefore            time.Time
 }
 
 const (
@@ -403,18 +405,33 @@ func startManagedService(p *paths.Paths) (bool, error) {
 	}
 }
 
-func restartManagedService(p *paths.Paths) (bool, error) {
-	if serviceManagerBypassed() {
-		return false, nil
+// startPreparedManagedDaemon starts a service whose old instance was stopped
+// under maintenance exclusion. Startup must not kill a replacement that won
+// the released lock, so this path uses start rather than restart or kickstart -k.
+func startPreparedManagedDaemon(p *paths.Paths) error {
+	release, err := acquireLifecycleLock(p, false)
+	if err != nil {
+		return err
 	}
-	switch runtimeGOOS {
-	case "darwin":
-		return true, startLaunchAgent(p)
-	case "linux":
-		return true, restartSystemdUserService(p)
-	default:
-		return startManagedService(p)
+	defer release()
+	launch, err := prepareManagedDaemonLaunch(p)
+	if err != nil {
+		return fmt.Errorf("inspect managed daemon before launch: %w", err)
 	}
+	launch.notBefore = daemonStartupNow()
+	if runtimeGOOS == "darwin" && !serviceManagerBypassed() {
+		domain, err := launchdDomainTarget()
+		if err != nil {
+			return err
+		}
+		bootstrapErr := launchctlBootstrapWithRetry(domain, launchAgentPath(p))
+		if _, err := serviceCommandRunner("launchctl", "kickstart", domain+"/"+launchdServiceLabel(p)); err != nil {
+			return fmt.Errorf("start prepared launch agent: %w; bootstrap: %v", err, bootstrapErr)
+		}
+	} else if _, err := startManagedService(p); err != nil {
+		return err
+	}
+	return waitForDaemonStartWithProcess(p, nil, nil, 0, time.Time{}, launch)
 }
 
 func reloadManagedServiceDefinition(p *paths.Paths) error {

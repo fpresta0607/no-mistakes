@@ -50,6 +50,7 @@ func prDraftAgent() *mockAgent {
 }
 
 func enableDefaultEvidence(sctx *pipeline.StepContext) {
+	publishValidationTextForTest(sctx)
 	sctx.Config.Test = config.Merge(&config.GlobalConfig{}, &config.RepoConfig{}).Test
 }
 
@@ -167,6 +168,7 @@ func TestPRStep_DeduplicatesScreenshotUploadsByPath(t *testing.T) {
 func TestPRStep_StoreInRepoKeepsCommitLinkAndAttachment(t *testing.T) {
 	t.Parallel()
 	sctx, remote := newEvidencePublishContext(t, "feature/add-login")
+	publishValidationTextForTest(sctx)
 	sctx.Agent = prDraftAgent()
 	sctx.Config.Test.Evidence.AttachMedia = true
 	png := writeEvidenceFile(t, testEvidenceDir(sctx), "checkout.png", []byte("\x89PNG binary"))
@@ -196,6 +198,7 @@ func TestPRStep_AttachMediaOptOutDisablesUploads(t *testing.T) {
 		t.Run(fmt.Sprintf("store_in_repo=%t", storeInRepo), func(t *testing.T) {
 			t.Parallel()
 			sctx, remote := newEvidencePublishContext(t, "feature/add-login")
+			publishValidationTextForTest(sctx)
 			sctx.Agent = prDraftAgent()
 			sctx.Config.Test.Evidence.StoreInRepo = storeInRepo
 			sctx.Config.Test.Evidence.AttachMedia = false
@@ -416,6 +419,7 @@ func TestPRStep_GHESDoesNotUpload(t *testing.T) {
 func TestPRStep_OversizedImagePreservesCommittedPath(t *testing.T) {
 	t.Parallel()
 	sctx, remote := newEvidencePublishContext(t, "feature/add-login")
+	publishValidationTextForTest(sctx)
 	sctx.Agent = prDraftAgent()
 	sctx.Config.Test.Evidence.AttachMedia = true
 	png := writeEvidenceFile(t, testEvidenceDir(sctx), "oversize.png", make([]byte, 10*1024*1024+1))
@@ -447,6 +451,7 @@ func TestPRStep_OversizedImagePreservesCommittedPath(t *testing.T) {
 func TestPRStep_UnsupportedImagePreservesCommittedPath(t *testing.T) {
 	t.Parallel()
 	sctx, remote := newEvidencePublishContext(t, "feature/add-login")
+	publishValidationTextForTest(sctx)
 	sctx.Agent = prDraftAgent()
 	sctx.Config.Test.Evidence.AttachMedia = true
 	image := writeEvidenceFile(t, testEvidenceDir(sctx), "checkout.bmp", []byte("bitmap"))

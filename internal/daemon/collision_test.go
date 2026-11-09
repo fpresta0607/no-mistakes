@@ -203,69 +203,37 @@ func TestReconcileCollidingDaemons_RefusesWhenHealthyStrayExists(t *testing.T) {
 	}
 }
 
-func TestReconcileCollidingDaemons_ReapsStaleStrayAndResetsManagedUnit(t *testing.T) {
-	root := t.TempDir()
-	p := paths.WithRoot(root)
+func TestReconcileCollidingDaemons_RefusesUnresponsiveStrayWithoutMutation(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}
-	// A socket file the stale stray left behind; cleanup must remove it.
-	if err := os.WriteFile(p.Socket(), []byte("stale"), 0o644); err != nil {
+	if err := os.WriteFile(p.Socket(), []byte("retain endpoint"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	procs := []daemonProcessInfo{{PID: 8888, Root: root}}
+	procs := []daemonProcessInfo{{PID: 8888, Root: p.Root()}}
 	killed, restore := stubCollisionVars(t, procs, nil, func(string) bool { return false }, nil)
 	defer restore()
-
-	// Engage the real managed-service plumbing so stopManagedService actually
-	// issues systemctl commands we can observe, and so resetFailed runs.
-	svcRestore := stubServiceRuntime(t)
-	defer svcRestore()
-	runtimeGOOS = "linux"
-	home := t.TempDir()
-	serviceUserHomeDir = func() (string, error) { return home, nil }
-	// Pretend the managed unit is installed so stopManagedService reaches the
-	// systemctl stop call instead of short-circuiting.
-	if err := os.MkdirAll(filepath.Dir(systemdUserServicePath(p)), 0o755); err != nil {
-		t.Fatal(err)
+	oldRunning := daemonProcessRunning
+	t.Cleanup(func() { daemonProcessRunning = oldRunning })
+	daemonProcessRunning = func(int) (bool, error) { return true, nil }
+	if err := reconcileCollidingDaemons(p); err == nil {
+		t.Fatal("unresponsive live collision must refuse")
 	}
-	if err := os.WriteFile(systemdUserServicePath(p), []byte("[Service]\nExecStart=/x daemon run\n"), 0o644); err != nil {
-		t.Fatal(err)
+	if len(*killed) != 0 {
+		t.Fatalf("unconfirmed owner was killed: %v", *killed)
 	}
-	var svcCmds []string
-	serviceCommandRunner = func(name string, args ...string) ([]byte, error) {
-		svcCmds = append(svcCmds, name+" "+strings.Join(args, " "))
-		return nil, nil
-	}
-
-	if err := reconcileCollidingDaemons(p); err != nil {
-		t.Fatalf("expected nil, got %v", err)
-	}
-
-	if !(*killed)[8888] {
-		t.Error("stale stray pid 8888 was not killed")
-	}
-	if _, err := os.Stat(p.Socket()); !os.IsNotExist(err) {
-		t.Errorf("stale socket should have been cleaned up, stat err=%v", err)
-	}
-	unit := systemdServiceName(p)
-	if !containsCmd(svcCmds, "systemctl --user stop "+unit) {
-		t.Errorf("expected systemctl stop for %s in %v", unit, svcCmds)
-	}
-	if !containsCmd(svcCmds, "systemctl --user reset-failed "+unit) {
-		t.Errorf("expected systemctl reset-failed for %s in %v", unit, svcCmds)
+	if data, err := os.ReadFile(p.Socket()); err != nil || string(data) != "retain endpoint" {
+		t.Fatalf("unconfirmed owner endpoint changed: %q, %v", data, err)
 	}
 }
 
-func TestReconcileCollidingDaemons_FailsOpenOnEnumerationError(t *testing.T) {
-	root := t.TempDir()
-	p := paths.WithRoot(root)
+func TestReconcileCollidingDaemons_FailsClosedOnEnumerationError(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
 	_, restore := stubCollisionVars(t, nil, errors.New("ps missing"), nil, nil)
 	defer restore()
-
-	if err := reconcileCollidingDaemons(p); err != nil {
-		t.Fatalf("enumeration error must fail open, got %v", err)
+	if err := reconcileCollidingDaemons(p); err == nil {
+		t.Fatal("unreadable process ownership must refuse")
 	}
 }
 

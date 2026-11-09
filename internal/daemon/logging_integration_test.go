@@ -113,7 +113,7 @@ func TestDetachedDaemonUsesBoundedDedicatedLogSinks(t *testing.T) {
 func shutdownIsolatedDaemon(t *testing.T, p *paths.Paths, pid int) {
 	t.Helper()
 	if client, err := ipc.Dial(p.Socket()); err == nil {
-		_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
+		_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{Force: true}, nil)
 		_ = client.Close()
 	}
 	deadline := time.Now().Add(5 * time.Second)

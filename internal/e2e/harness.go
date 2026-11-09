@@ -78,7 +78,7 @@ type SetupOpts struct {
 	GlobalConfigExtra string
 }
 
-const e2eDaemonStartTimeout = "45s"
+const e2eDaemonStartTimeout = 45 * time.Second
 
 // NewHarness builds the no-mistakes + fakeagent binaries (once per test
 // process), creates a temp git repo with origin, writes the no-mistakes
@@ -170,7 +170,7 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	t.Setenv("NM_TEST_START_DAEMON", "1")
 	// Give the daemon room to come up. Startup may spend up to 30s resolving
 	// the login-shell environment before the IPC socket is opened.
-	t.Setenv("NM_TEST_DAEMON_START_TIMEOUT", e2eDaemonStartTimeout)
+	t.Setenv("NM_TEST_DAEMON_START_TIMEOUT", h.timeout(e2eDaemonStartTimeout).String())
 
 	// Disable telemetry attempts (the package would no-op anyway, but
 	// avoid a network DNS lookup on each command).
@@ -185,7 +185,7 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	// Temporary-daemon ownership: inventory + concurrency slot. The suite
 	// wrapper (scripts/e2e.sh) and TestMain reaper recover if Cleanup never
 	// runs (timeout / SIGKILL of the test process).
-	own, err := e2edaemon.Acquire(h.NMHome, h.NMBin, 2*time.Minute)
+	own, err := e2edaemon.Acquire(h.NMHome, h.NMBin, h.timeout(2*time.Minute))
 	if err != nil {
 		t.Fatalf("acquire e2e daemon ownership: %v", err)
 	}
@@ -307,13 +307,13 @@ func (h *Harness) RunInDir(dir string, args ...string) (string, error) {
 // RunInDirWithEnv invokes the no-mistakes binary in dir with env overrides.
 func (h *Harness) RunInDirWithEnv(dir string, env map[string]string, args ...string) (string, error) {
 	h.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), h.timeout(60*time.Second))
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.NMBin, args...)
 	winproc.Harden(cmd)
 	cmd.Dir = dir
 	cmd.Env = mergedEnv(os.Environ(), env)
-	out, err := cmd.CombinedOutput()
+	out, err := combinedOutput(ctx, cmd)
 	h.syncDaemonOwnership()
 	return string(out), err
 }
@@ -402,7 +402,7 @@ func (h *Harness) CommitChange(branch, path, content, message string) string {
 // run. Returns the IPC client connected to the daemon's socket.
 func (h *Harness) PushToGate(branch string) {
 	h.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), h.timeout(30*time.Second))
 	defer cancel()
 	out, err := h.runGit(ctx, h.WorkDir, "push", "no-mistakes", branch)
 	if err != nil {
@@ -412,7 +412,7 @@ func (h *Harness) PushToGate(branch string) {
 
 func (h *Harness) UpstreamBranchSHA(branch string) string {
 	h.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), h.timeout(5*time.Second))
 	defer cancel()
 	sha, err := h.runGit(ctx, h.UpstreamDir, "rev-parse", "refs/heads/"+branch)
 	if err != nil {
@@ -423,7 +423,7 @@ func (h *Harness) UpstreamBranchSHA(branch string) string {
 
 func (h *Harness) AddWorktree(branch string) string {
 	h.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), h.timeout(10*time.Second))
 	defer cancel()
 	if out, err := h.runGit(ctx, h.WorkDir, "checkout", "main"); err != nil {
 		h.t.Fatalf("checkout main before adding worktree: %v\n%s", err, out)
@@ -445,7 +445,7 @@ func (h *Harness) RemoveWorktree(dir string) {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), h.timeout(10*time.Second))
 	defer cancel()
 	if out, err := h.runGit(ctx, h.WorkDir, "worktree", "remove", "--force", dir); err != nil {
 		h.t.Fatalf("git worktree remove %s: %v\n%s", dir, err, out)
@@ -454,7 +454,7 @@ func (h *Harness) RemoveWorktree(dir string) {
 
 func (h *Harness) Checkout(branch string) {
 	h.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), h.timeout(10*time.Second))
 	defer cancel()
 	if out, err := h.runGit(ctx, h.WorkDir, "checkout", branch); err != nil {
 		h.t.Fatalf("checkout %s: %v\n%s", branch, err, out)
@@ -463,7 +463,7 @@ func (h *Harness) Checkout(branch string) {
 
 func (h *Harness) WorktreeRefSHA(ref string) string {
 	h.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), h.timeout(5*time.Second))
 	defer cancel()
 	sha, err := h.runGit(ctx, h.WorkDir, "rev-parse", ref)
 	if err != nil {
@@ -676,6 +676,7 @@ func (h *Harness) TryCancelRun(runID string) error {
 
 func (h *Harness) waitForRunStatus(branch string, timeout time.Duration, match func(types.RunStatus) bool, action string) *ipc.RunInfo {
 	h.t.Helper()
+	timeout = h.timeout(timeout)
 	deadline := time.Now().Add(timeout)
 
 	var lastRun *ipc.RunInfo
@@ -800,7 +801,15 @@ func (h *Harness) runGit(ctx context.Context, dir string, args ...string) ([]byt
 		"GIT_COMMITTER_NAME=E2E Test",
 		"GIT_COMMITTER_EMAIL=e2e@example.com",
 	)
-	return cmd.CombinedOutput()
+	return combinedOutput(ctx, cmd)
+}
+
+func combinedOutput(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
+	out, err := cmd.CombinedOutput()
+	if err != nil && ctx.Err() != nil {
+		err = errors.Join(err, ctx.Err())
+	}
+	return out, err
 }
 
 // repoID mirrors gate.repoID(): sha256 of the absolute work path, first

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -39,6 +40,13 @@ func TestUninstallStopsAndRemovesOnlyThisInstancesLaunchAgent(t *testing.T) {
 		command := name + " " + strings.Join(args, " ")
 		commands = append(commands, command)
 		if command == want[0] {
+			lock, err := acquireSingletonLock(p)
+			if lock != nil {
+				lock.Release()
+			}
+			if !errors.Is(err, ErrSingletonLockHeld) {
+				t.Fatalf("uninstall teardown lost absent-daemon ownership: %v", err)
+			}
 			stopped = true
 			if _, err := os.Stat(definition); err != nil {
 				t.Fatalf("service definition must remain until stopped: %v", err)

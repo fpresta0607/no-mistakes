@@ -34,6 +34,7 @@ const (
 	MethodRetryRun                  = "retry_run"
 	MethodSubscribe                 = "subscribe"
 	MethodRespond                   = "respond"
+	MethodRespondReviewScope        = "respond_review_scope"
 	MethodCIHandback                = "ci_handback"
 	MethodAnswerReview              = "answer_review_question"
 	MethodCancelRun                 = "cancel_run"
@@ -43,6 +44,7 @@ const (
 	MethodAdmitPush                 = "admit_push"
 	MethodHealth                    = "health"
 	MethodShutdown                  = "shutdown"
+	MethodPrepareShutdown           = "prepare_shutdown"
 	MethodUpdateRunClosingIssueRefs = "update_run_closing_issue_refs"
 	MethodScheduleRestart           = "schedule_restart"
 	MethodRestartStatus             = "restart_status"
@@ -101,17 +103,18 @@ type RefreshPRResult struct {
 }
 
 type CIHandbackParams struct {
-	RepoID         string             `json:"repo_id"`
-	RunID          string             `json:"run_id"`
-	Branch         string             `json:"branch"`
-	CallerDir      string             `json:"caller_dir"`
-	HeadSHA        string             `json:"head_sha"`
-	Resume         bool               `json:"resume"`
-	PublishedHead  string             `json:"published_head"`
-	PushGeneration int64              `json:"push_generation"`
-	RoundID        string             `json:"round_id"`
-	ReceiptID      string             `json:"receipt_id"`
-	Expect         *CIHandbackBinding `json:"expect,omitempty"`
+	RepoID                string             `json:"repo_id"`
+	RunID                 string             `json:"run_id"`
+	Branch                string             `json:"branch"`
+	CallerDir             string             `json:"caller_dir"`
+	HeadSHA               string             `json:"head_sha"`
+	Resume                bool               `json:"resume"`
+	RevalidatePublication bool               `json:"revalidate_publication,omitempty"`
+	PublishedHead         string             `json:"published_head"`
+	PushGeneration        int64              `json:"push_generation"`
+	RoundID               string             `json:"round_id"`
+	ReceiptID             string             `json:"receipt_id"`
+	Expect                *CIHandbackBinding `json:"expect,omitempty"`
 }
 
 type CIHandbackBinding struct {
@@ -379,14 +382,15 @@ type SubscribeParams struct {
 // already decided it, and the daemon refuses the response (leaving the gate
 // parked) when one is left out. An omission is never a decline.
 type RespondParams struct {
-	Origin           types.ResponseOrigin `json:"origin,omitempty"`
-	Coverage         *CoverageBinding     `json:"coverage,omitempty"`
-	RunID            string               `json:"run_id"`
-	Step             types.StepName       `json:"step"`
-	Action           types.ApprovalAction `json:"action"`
-	FindingIDs       []string             `json:"finding_ids,omitempty"`
-	IgnoreFindingIDs []string             `json:"ignore_finding_ids,omitempty"`
-	Instructions     map[string]string    `json:"instructions,omitempty"`
+	ScopeDecision    *types.ReviewScopeDecision `json:"scope_decision,omitempty"`
+	Origin           types.ResponseOrigin       `json:"origin,omitempty"`
+	Coverage         *CoverageBinding           `json:"coverage,omitempty"`
+	RunID            string                     `json:"run_id"`
+	Step             types.StepName             `json:"step"`
+	Action           types.ApprovalAction       `json:"action"`
+	FindingIDs       []string                   `json:"finding_ids,omitempty"`
+	IgnoreFindingIDs []string                   `json:"ignore_finding_ids,omitempty"`
+	Instructions     map[string]string          `json:"instructions,omitempty"`
 	// InstructionsFromDriver marks Instructions as an agent driver's fix
 	// guidance rather than the user's own words.
 	InstructionsFromDriver bool            `json:"instructions_from_driver,omitempty"`
@@ -421,8 +425,9 @@ type AdmitPushParams struct {
 // HealthParams has no fields but exists for consistency.
 type HealthParams struct{}
 
-// ShutdownParams has no fields but exists for consistency.
-type ShutdownParams struct{}
+type ShutdownParams struct {
+	Force bool `json:"force,omitempty"`
+}
 
 // ScheduleRestartParams asks the daemon to restart through its own executable
 // file once no run is executing. It is how `no-mistakes update` installs a new
@@ -526,12 +531,13 @@ type RerunResult struct {
 // transport failure: the gate is intact, the caller's response was wrong, and
 // the caller can correct it. Refusal is non-empty exactly when OK is false.
 type RespondResult struct {
-	OK      bool     `json:"ok"`
-	Fixed   []string `json:"fixed,omitempty"`
-	Ignored []string `json:"ignored,omitempty"`
-	Kept    []string `json:"kept,omitempty"`
-	Refusal string   `json:"refusal,omitempty"`
-	Missing []string `json:"missing,omitempty"`
+	ScopeDecisionID string   `json:"scope_decision_id,omitempty"`
+	OK              bool     `json:"ok"`
+	Fixed           []string `json:"fixed,omitempty"`
+	Ignored         []string `json:"ignored,omitempty"`
+	Kept            []string `json:"kept,omitempty"`
+	Refusal         string   `json:"refusal,omitempty"`
+	Missing         []string `json:"missing,omitempty"`
 	// DeclinedEarlierFix names the findings the response tried to decline that
 	// an earlier round of the same step already chose to fix. Reverting an
 	// applied fix is out of scope for a gate response, so the response was

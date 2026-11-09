@@ -102,8 +102,8 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err != nil {
 		return nil, fmt.Errorf("resolve head before push: %w", err)
 	}
-	// Under global side_by_side the baseline ran on the commit the review
-	// started on. Answer for every commit since, before anything is pushed.
+	// Under global side_by_side, answer for every commit after Test's
+	// baseline, before anything is pushed.
 	afterTested, backToTest, err := baselineBeforePush(sctx, headBeingPushed)
 	if err != nil {
 		return nil, err
@@ -194,6 +194,9 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 		}
 		if _, err := stepGitRun(sctx, "merge-base", "--is-ancestor", *handback.AcceptedHead, headBeingPushed); err != nil {
 			return fmt.Errorf("publication must preserve the accepted CI follow-up and its released head as ancestors")
+		}
+		if err := verifyCIHandbackPublication(sctx, handback, headBeingPushed); err != nil {
+			return err
 		}
 	}
 	ref := normalizedBranchRef(sctx.Run.Branch)

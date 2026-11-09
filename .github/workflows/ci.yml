@@ -41,8 +41,15 @@ jobs:
         include:
           - os: ubuntu-latest
             name: test (ubuntu-latest)
+          # The macOS leg is split across two runners by unix_part (see the
+          # Unix step): the go list remainder on one, the pipeline/steps and
+          # daemon shards on the other. ubuntu-latest runs both parts.
           - os: macos-latest
             name: test (macos-latest)
+            unix_part: rest
+          - os: macos-latest
+            name: test (macos-shards)
+            unix_part: shards
           - os: windows-latest
             name: test (windows-core)
             shard: core
@@ -57,12 +64,17 @@ jobs:
             name: test (windows-steps-1)
             shard: steps
             steps_run: '^Test[A-K]'
+            steps_skip: '^TestCIHandback'
           - os: windows-latest
             name: test (windows-steps-2)
             shard: steps
-            steps_run: '^Test[L-Q]'
+            steps_run: '^TestCIHandback'
           - os: windows-latest
             name: test (windows-steps-3)
+            shard: steps
+            steps_run: '^Test[L-Q]'
+          - os: windows-latest
+            name: test (windows-steps-4)
             shard: steps
             steps_skip: '^Test[A-Q]'
           - os: windows-latest
@@ -163,12 +175,85 @@ jobs:
       # 594s and timed out at 600s with no test hung on runners up to ~1.9x
       # slower across the board, and internal/daemon and internal/cli reached
       # the same limit (issue #73). 20m clears that variation for every one of
-      # them. The heavy packages queue behind each other, so pipeline/steps can
-      # start ~12 minutes into this step; 20m still lands a real hang as a
-      # goroutine dump well before timeout-minutes cancels the job.
+      # them. pipeline/steps then outgrew it again: it timed out at 1201s in the
+      # merge train while internal/daemon passed the same run at 1136s, with
+      # every parked goroutine a t.Parallel waiter and the three running tests a
+      # second old or less - exhausted capacity, not a hang. Running the whole
+      # suite one package at a time (-p=1) gave each package the runner but
+      # summed every package's wall and overran the 40m job cap on both Unix
+      # legs, so the two packages whose own wall exceeds the budget are split by
+      # test name, the -run/-skip partition the Windows rows already use, and
+      # every binary of a part starts at once.
+      #
+      # Splitting on one runner moved work between binaries but finished the
+      # macOS leg no sooner: its step took 25-33m unsharded and 26-39m sharded,
+      # within minutes of the 40m job cap, while ^Test[A-K] of pipeline/steps
+      # and both daemon shards still reached 20m on a slower runner (issue
+      # #170). The leg is capacity-bound, so macos-latest runs its two parts on
+      # two runners (matrix unix_part): rest is the go list remainder at -p=2,
+      # and shards is pipeline/steps in four shards (^TestCIStep, the rest of
+      # ^Test[A-K], ^Test[L-Q], the rest) and daemon in four (^Test[A-L],
+      # ^Test[M-O], ^Test[P-R], the rest), cut by the Windows rows' -v
+      # timings. A row with no unix_part runs both parts on one runner, as
+      # ubuntu-latest does, and an unknown part fails the step.
+      # The remainder package set is computed once from go list filtered by
+      # NM_CI_UNIX_SHARD_EXCLUDE, and the step fails closed when that listing
+      # fails or leaves nothing, so a resolution failure cannot quietly run the
+      # repository root alone. No test, timeout or coverage is given up, and a
+      # hang in any shard still lands as a goroutine dump inside
+      # timeout-minutes.
       - name: Test on Unix
         if: runner.os != 'Windows'
-        run: go test -race -timeout=20m ./...
+        env:
+          NM_CI_UNIX_SHARD_EXCLUDE: '/(internal/pipeline/steps|internal/daemon)$'
+          NM_CI_UNIX_PART: ${{ matrix.unix_part }}
+        run: |
+          case "$NM_CI_UNIX_PART" in
+            '') run_rest=1 run_shards=1 ;;
+            rest) run_rest=1 run_shards= ;;
+            shards) run_rest= run_shards=1 ;;
+            *)
+              echo "::error::unknown NM_CI_UNIX_PART '$NM_CI_UNIX_PART'; refusing to guess which tests to run" >&2
+              exit 1
+              ;;
+          esac
+          pids=
+          if [ -n "$run_rest" ]; then
+            if ! packages=$(go list ./...); then
+              echo "::error::go list ./... failed; refusing to run a narrowed suite" >&2
+              exit 1
+            fi
+            rest=$(printf '%s\n' "$packages" | grep -Ev "$NM_CI_UNIX_SHARD_EXCLUDE" || true)
+            if [ -z "$rest" ]; then
+              echo "::error::go list ./... left no Unix remainder packages; refusing to run a narrowed suite" >&2
+              exit 1
+            fi
+            go test -race -timeout=20m -p=2 $rest &
+            pids=$!
+          fi
+          if [ -n "$run_shards" ]; then
+            go test -race -timeout=20m -run '^TestCIStep' ./internal/pipeline/steps &
+            pids="$pids $!"
+            go test -race -timeout=20m -run '^Test[A-K]' -skip '^TestCIStep' ./internal/pipeline/steps &
+            pids="$pids $!"
+            go test -race -timeout=20m -run '^Test[L-Q]' ./internal/pipeline/steps &
+            pids="$pids $!"
+            go test -race -timeout=20m -skip '^Test[A-Q]' ./internal/pipeline/steps &
+            pids="$pids $!"
+            go test -race -timeout=20m -run '^Test[A-L]' ./internal/daemon &
+            pids="$pids $!"
+            go test -race -timeout=20m -run '^Test[M-O]' ./internal/daemon &
+            pids="$pids $!"
+            go test -race -timeout=20m -run '^Test[P-R]' ./internal/daemon &
+            pids="$pids $!"
+            go test -race -timeout=20m -skip '^Test[A-R]' ./internal/daemon &
+            pids="$pids $!"
+          fi
+          status=0
+          for pid in $pids; do
+            wait "$pid" || status=1
+          done
+          exit $status
 
       # Git-heavy packages are the Windows wall floor. NM_CI_WINDOWS_GIT_EXCLUDE
       # on the core shard is the union of the git, steps, daemon, gate,

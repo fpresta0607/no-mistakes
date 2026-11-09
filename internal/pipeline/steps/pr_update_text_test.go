@@ -43,6 +43,7 @@ func TestPRUpdateTextKeepOnUpdate(t *testing.T) {
 				return nil, nil
 			}}
 			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			publishValidationTextForTest(sctx)
 			sctx.Env = append(env, "FAKE_CLI_PR_TITLE="+keptAuthorTitle)
 			sctx.Config.PR.UpdateText = config.PRUpdateTextKeep
 			sctx.Config.PR.Appendix = mode
@@ -120,6 +121,7 @@ func TestPRUpdateTextKeepOnCreate(t *testing.T) {
 		return &agent.Result{Output: data}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	publishValidationTextForTest(sctx)
 	sctx.Env = env
 	sctx.Config.PR.UpdateText = config.PRUpdateTextKeep
 	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
@@ -475,6 +477,7 @@ func TestPRSuppliedTextCreatesOwnedBody(t *testing.T) {
 			t.Parallel()
 			ag := noDraftAgent(t)
 			sctx, env, logFile := suppliedPRContext(t, ag, suppliedPRTitleText, suppliedPRBodyText)
+			publishValidationTextForTest(sctx)
 			sctx.Config.PR.Appendix = mode
 			out, err := (&PRStep{}).Execute(sctx)
 			if err != nil || out == nil || out.PRURL == "" {

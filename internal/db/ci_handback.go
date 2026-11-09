@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -38,6 +39,71 @@ type CIHandbackSource struct {
 	PushedAt      int64
 	Findings      string
 	AutoFixLimits map[types.StepName]int
+	Validation    *CIHandbackValidation
+}
+
+// CIHandbackValidation pins historical evidence without certifying a descendant.
+type CIHandbackValidation struct {
+	Gates  string
+	Steps  []StepResult
+	Rounds [][]StepRound
+}
+
+func (d *DB) ReadCIHandbackValidation(runID string) (*CIHandbackValidation, error) {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	return readCIHandbackValidation(tx, runID)
+}
+
+func readCIHandbackValidation(tx *sql.Tx, runID string) (*CIHandbackValidation, error) {
+	snapshot, err := readTerminalSnapshot(tx, runID)
+	if err != nil {
+		return nil, err
+	}
+	for index := range snapshot.Steps {
+		if err := tx.QueryRow(`SELECT review_max_fix_rounds FROM step_results WHERE id = ?`, snapshot.Steps[index].ID).Scan(&snapshot.Steps[index].ReviewMaxFixRounds); err != nil {
+			return nil, err
+		}
+	}
+	return &CIHandbackValidation{Gates: snapshot.Gates, Steps: snapshot.Steps, Rounds: snapshot.Rounds}, nil
+}
+
+func verifyCIHandbackValidation(tx *sql.Tx, receipt *CIHandback) error {
+	if receipt.Source == nil || receipt.Source.Validation == nil {
+		return nil
+	}
+	current, err := readCIHandbackValidation(tx, receipt.RunID)
+	if err != nil {
+		return err
+	}
+	original := receipt.Source.Validation
+	if receipt.AcceptedHead == nil {
+		if !reflect.DeepEqual(current, original) {
+			return fmt.Errorf("CI handback historical validation changed")
+		}
+		return nil
+	}
+	if current.Gates != original.Gates || len(current.Steps) != len(original.Steps) || len(original.Rounds) != len(original.Steps) {
+		return fmt.Errorf("CI handback historical validation identity changed")
+	}
+	for index, step := range original.Steps {
+		if current.Steps[index].ID != step.ID || current.Steps[index].StepName != step.StepName || (step.ReviewMaxFixRounds != nil && !reflect.DeepEqual(current.Steps[index].ReviewMaxFixRounds, step.ReviewMaxFixRounds)) || len(current.Rounds[index]) < len(original.Rounds[index]) || !reflect.DeepEqual(current.Rounds[index][:len(original.Rounds[index])], original.Rounds[index]) {
+			return fmt.Errorf("CI handback historical rounds changed")
+		}
+	}
+	return nil
+}
+
+func (d *DB) VerifyCIHandbackValidation(receipt *CIHandback) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	return verifyCIHandbackValidation(tx, receipt)
 }
 
 type CIHandbackCandidate struct {
@@ -96,7 +162,15 @@ func (d *DB) PrepareCIHandback(receipt *CIHandback, head, baseHead, managedBranc
 	if err != nil {
 		return err
 	}
-	result, err := d.sql.Exec(`UPDATE ci_handbacks SET candidate_json = ? WHERE id = ? AND run_id = ? AND accepted_head IS NULL AND candidate_json IS NULL
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := verifyCIHandbackValidation(tx, receipt); err != nil {
+		return err
+	}
+	result, err := tx.Exec(`UPDATE ci_handbacks SET candidate_json = ? WHERE id = ? AND run_id = ? AND accepted_head IS NULL AND candidate_json IS NULL
 		AND EXISTS (SELECT 1 FROM runs r JOIN repos p ON p.id = r.repo_id WHERE r.id = ci_handbacks.run_id
 		AND r.status = 'running' AND r.head_sha = ci_handbacks.released_head AND r.last_pushed_sha = r.head_sha
 		AND r.push_generation = ci_handbacks.push_generation AND r.push_target_fingerprint = ci_handbacks.target_fingerprint AND r.push_ref = ci_handbacks.push_ref
@@ -110,6 +184,9 @@ func (d *DB) PrepareCIHandback(receipt *CIHandback, head, baseHead, managedBranc
 	}
 	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
 		return fmt.Errorf("CI handback binding changed before checkpoint")
+	}
+	if err := tx.Commit(); err != nil {
+		return err
 	}
 	receipt.Candidate = candidate
 	return nil
@@ -142,7 +219,15 @@ func (d *DB) ReleaseCIHandback(receipt *CIHandback, run *Run, repo *Repo, findin
 		sourceJSON = &value
 	}
 	receipt.ID = newID()
-	result, err := d.sql.Exec(`INSERT INTO ci_handbacks (id, run_id, round_id, caller_dir, released_head, pr_url, base_branch, base_head, push_generation, target_fingerprint, push_ref, released_at, source_json)
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := verifyCIHandbackValidation(tx, receipt); err != nil {
+		return err
+	}
+	result, err := tx.Exec(`INSERT INTO ci_handbacks (id, run_id, round_id, caller_dir, released_head, pr_url, base_branch, base_head, push_generation, target_fingerprint, push_ref, released_at, source_json)
 		SELECT ?, r.id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? FROM runs r JOIN repos p ON p.id = r.repo_id
 		WHERE r.id = ? AND r.status = ? AND r.head_sha = ? AND r.last_pushed_sha = r.head_sha AND r.push_generation = ?
 		AND r.push_target_fingerprint = ? AND r.push_ref = ? AND r.pr_url = ? AND r.pr_state = 'open' AND COALESCE(r.push_active, 0) = 0
@@ -165,7 +250,7 @@ func (d *DB) ReleaseCIHandback(receipt *CIHandback, run *Run, repo *Repo, findin
 	if changed != 1 {
 		return fmt.Errorf("CI handback ownership changed before release")
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (d *DB) CancelReleasedCIHandback(runID string) error {
@@ -229,6 +314,9 @@ func (d *DB) AcceptCIHandback(receipt *CIHandback, head string, repo *Repo) erro
 		return err
 	}
 	defer tx.Rollback()
+	if err := verifyCIHandbackValidation(tx, receipt); err != nil {
+		return err
+	}
 	result, err := tx.Exec(`UPDATE runs SET head_sha = ?, review_approved_head_sha = NULL, ci_ready_at = NULL, ci_ready_no_ci = 0, updated_at = ?
 		WHERE id = ? AND status = 'running' AND head_sha = ? AND last_pushed_sha = ? AND push_generation = ? AND push_target_fingerprint = ? AND push_ref = ? AND pr_url = ? AND pr_state = 'open' AND COALESCE(push_active, 0) = 0
 		AND EXISTS (SELECT 1 FROM ci_handbacks WHERE id = ? AND run_id = runs.id AND accepted_head IS NULL AND candidate_json = ?)

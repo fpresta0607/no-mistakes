@@ -108,13 +108,63 @@ func TestValidationAdmissionPreservesThePredecessorAndStartsWithNoCertification(
 	if family.PolicyOrigin != "controller_assertion" || family.HistoricalSourceCompleteness != "unknown" {
 		t.Fatalf("provenance = %+v", family)
 	}
-	replay, created, err := database.AcceptValidationAdmission(context.Background(), proposal)
-	if err != nil || created || replay.ChildID != child.ID {
-		t.Fatalf("replay reset the admission: %+v %v %v", replay, created, err)
+}
+
+func TestValidationAdmissionRejectsASecondAdmissionWithoutMutation(t *testing.T) {
+	database, proposal := admissionFixture(t)
+	first, _, err := database.AcceptValidationAdmission(context.Background(), proposal)
+	if err != nil {
+		t.Fatal(err)
 	}
-	proposal.Request.ControllerPolicy.ReviewCycles++
-	if _, _, err := database.AcceptValidationAdmission(context.Background(), proposal); err == nil {
-		t.Fatal("replay replaced the frozen controller assertion")
+	before, err := database.GetRunsByRepo(proposal.Request.RepoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = database.AcceptValidationAdmission(context.Background(), proposal)
+
+	if err == nil {
+		t.Fatal("accepted a second admission for the same predecessor")
+	}
+	after, err := database.GetRunsByRepo(proposal.Request.RepoID)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("second admission changed runs: %v", err)
+	}
+	event, err := database.GetValidationAdmission(proposal.Request.PredecessorID)
+	if err != nil || event == nil || event.ID != first.ID {
+		t.Fatalf("second admission changed the ledger: %+v %v", event, err)
+	}
+}
+
+func TestValidationAdmissionRejectsOutstandingNativeSafetyRefusalWithoutMutation(t *testing.T) {
+	database, proposal := admissionFixture(t)
+	step := proposal.Snapshot.Steps[0]
+	findings := `{"findings":[{"id":"agent-safety-refusal","severity":"error","description":"native provider refused execution","action":"ask-user"}]}`
+	if err := database.SetStepFindings(step.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := database.ReadTerminalSnapshot(proposal.Request.PredecessorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal.Snapshot, proposal.Request.SnapshotDigest = *snapshot, snapshot.Digest()
+	before, err := database.GetRunsByRepo(proposal.Request.RepoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = database.AcceptValidationAdmission(context.Background(), proposal)
+
+	if err == nil || !strings.Contains(err.Error(), "native agent safety refusal") {
+		t.Fatalf("authored admission did not refuse the native provider refusal: %v", err)
+	}
+	after, err := database.GetRunsByRepo(proposal.Request.RepoID)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("refusal changed run history: %v", err)
+	}
+	event, err := database.GetValidationAdmission(proposal.Request.PredecessorID)
+	if err != nil || event != nil {
+		t.Fatalf("refusal recorded an admission: %+v %v", event, err)
 	}
 }
 
@@ -231,21 +281,148 @@ func TestValidationAdmissionDescendantsKeepSpendingAndTheControllerAssertion(t *
 	}
 }
 
-func TestValidationAdmissionReplayRefusesDriftWithoutCreatingAReplacement(t *testing.T) {
-	database, proposal := admissionFixture(t)
-	first, _, err := database.AcceptValidationAdmission(context.Background(), proposal)
-	if err != nil {
-		t.Fatal(err)
+func TestValidationAdmissionRejectsEveryEarlierFamilyHead(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		candidate   string
+		shouldAdmit bool
+	}{
+		{name: "submitted", candidate: strings.Repeat("b", 40)},
+		{name: "terminal", candidate: strings.Repeat("1", 40)},
+		{name: "published", candidate: strings.Repeat("2", 40)},
+		{name: "round starting", candidate: strings.Repeat("3", 40)},
+		{name: "round reviewed", candidate: strings.Repeat("4", 40)},
+		{name: "review approved", candidate: strings.Repeat("5", 40)},
+		{name: "caller recovery local", candidate: strings.Repeat("6", 40)},
+		{name: "gate recovery local", candidate: strings.Repeat("7", 40)},
+		{name: "caller recovery rewritten", candidate: strings.Repeat("8", 40)},
+		{name: "unbound base", candidate: strings.Repeat("c", 40), shouldAdmit: true},
+		{name: "fresh", candidate: strings.Repeat("9", 40), shouldAdmit: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database, proposal := admissionFixture(t)
+			rootID := proposal.Request.PredecessorID
+			if _, err := database.sql.Exec(`UPDATE runs SET head_sha = ?, last_pushed_sha = ?, review_approved_head_sha = ?, push_generation = 1, push_target_fingerprint = 'fixture-target' WHERE id = ?`, strings.Repeat("1", 40), strings.Repeat("2", 40), strings.Repeat("5", 40), rootID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.sql.Exec(`UPDATE step_rounds SET starting_head_sha = ?, reviewed_head_sha = ? WHERE id = ?`, strings.Repeat("3", 40), strings.Repeat("4", 40), proposal.Snapshot.Rounds[0][0].ID); err != nil {
+				t.Fatal(err)
+			}
+			root, err := database.ReadTerminalSnapshot(rootID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proposal.Snapshot, proposal.Request.SnapshotDigest = *root, root.Digest()
+			proposal.Request.PublishedHeadSHA, proposal.Request.PushGeneration, proposal.Request.PushTargetFingerprint = *root.Run.LastPushedSHA, *root.Run.PushGeneration, *root.Run.PushTargetFingerprint
+			first, _, err := database.AcceptValidationAdmission(context.Background(), proposal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunErrorStatus(first.ChildID, "daemon restarted", types.RunFailed); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.sql.Exec(`UPDATE runs SET last_pushed_sha = ?, push_generation = 2 WHERE id = ?`, first.Request.CandidateSHA, first.ChildID); err != nil {
+				t.Fatal(err)
+			}
+			child, err := database.ReadTerminalSnapshot(first.ChildID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proposal.Snapshot, proposal.Request.PredecessorID, proposal.Request.SnapshotDigest = *child, first.ChildID, child.Digest()
+			proposal.Request.LaunchNonce = *child.Run.LaunchNonce
+			proposal.Request.PublishedHeadSHA, proposal.Request.PushGeneration = *child.Run.LastPushedSHA, *child.Run.PushGeneration
+			proposal.Request.TerminalGeneration, proposal.Request.AcceptUnknownSource = "terminal-retry", true
+			proposal.Request.SourceAnchors = map[string]string{
+				"caller/refs/no-mistakes/recover-local/" + rootID:            strings.Repeat("6", 40),
+				"gate/refs/no-mistakes/recover-local/" + rootID:              strings.Repeat("7", 40),
+				"caller/refs/no-mistakes/recover-rewritten/" + rootID + "/1": strings.Repeat("8", 40),
+			}
+			assertion := *proposal.Request.LaunchAssertion
+			assertion.Apply = true
+			proposal.Request.LaunchAssertion = &assertion
+			proposal.AssertionProof, err = assertion.Verify(assertion.TrustedSHA, assertion.Profiles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			terminal, _, err := database.AcceptValidationAdmission(context.Background(), proposal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunErrorStatus(terminal.ChildID, "daemon restarted", types.RunFailed); err != nil {
+				t.Fatal(err)
+			}
+			child, err = database.ReadTerminalSnapshot(terminal.ChildID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proposal.Snapshot, proposal.Request.PredecessorID, proposal.Request.SnapshotDigest = *child, terminal.ChildID, child.Digest()
+			proposal.Request.LaunchNonce, proposal.Request.ValidationGeneration = *child.Run.LaunchNonce, *child.Run.LaunchValidationGeneration
+			proposal.Request.TerminalGeneration, proposal.Request.AcceptUnknownSource, proposal.Request.SourceAnchors = "", false, nil
+			proposal.Request.CandidateSHA = test.candidate
+			before, err := database.GetRunsByRepo(proposal.Request.RepoID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			event, _, err := database.AcceptValidationAdmission(context.Background(), proposal)
+
+			if test.shouldAdmit {
+				if err != nil || event == nil {
+					t.Fatalf("unbound candidate refused: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "family") {
+				t.Fatalf("earlier %s head admitted: %v", test.name, err)
+			}
+			after, err := database.GetRunsByRepo(proposal.Request.RepoID)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("refusal changed runs: %v", err)
+			}
+		})
 	}
-	if err := database.UpdateRunError(proposal.Request.PredecessorID, "historical record changed"); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := database.AcceptValidationAdmission(context.Background(), proposal); err == nil {
-		t.Fatal("accepted a replay with changed immutable predecessor history")
-	}
-	child, err := database.GetRun(first.ChildID)
-	if err != nil || child.Status != types.RunPending {
-		t.Fatalf("replay altered the original child: %+v %v", child, err)
+}
+
+func TestValidationAdmissionRejectsLinkedAdoptionHeads(t *testing.T) {
+	for _, candidate := range []string{strings.Repeat("1", 40), strings.Repeat("2", 40), strings.Repeat("3", 40), strings.Repeat("4", 40)} {
+		t.Run(candidate[:1], func(t *testing.T) {
+			database, proposal := admissionFixture(t)
+			source, err := database.ReadContinuationSnapshot(proposal.Request.PredecessorID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			adoption, _, err := database.AdoptTerminalCandidate(context.Background(), TerminalAdoption{
+				Snapshot: *source, CandidateSHA: proposal.Request.CandidateSHA, CandidateTree: proposal.Request.CandidateTree,
+				RetainedSHA: strings.Repeat("1", 40), GateHead: strings.Repeat("2", 40), RecoveryHead: strings.Repeat("3", 40), CallerHead: strings.Repeat("4", 40),
+				WorktreeRoot: proposal.WorktreeRoot, Reason: "accept retained source", Operator: "fixture", Assertion: source.Run.LaunchAssertion, Proof: source.Run.LaunchAssertionProof,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunStatus(adoption.SuccessorID, types.RunFailed); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := database.ReadTerminalSnapshot(adoption.SuccessorID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proposal.Snapshot, proposal.Request.PredecessorID, proposal.Request.SnapshotDigest = *snapshot, snapshot.Run.ID, snapshot.Digest()
+			proposal.Request.LaunchNonce, proposal.Request.CandidateSHA = *snapshot.Run.LaunchNonce, candidate
+			before, err := database.GetRunsByRepo(proposal.Request.RepoID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err = database.AcceptValidationAdmission(context.Background(), proposal)
+
+			if err == nil || !strings.Contains(err.Error(), "head bound in the validation family") {
+				t.Fatalf("adoption-bound head admitted: %v", err)
+			}
+			after, err := database.GetRunsByRepo(proposal.Request.RepoID)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("refusal changed runs: %v", err)
+			}
+		})
 	}
 }
 

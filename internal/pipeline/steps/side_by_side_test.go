@@ -3,7 +3,6 @@ package steps
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -231,69 +230,22 @@ func samePath(a, b string) bool {
 	return strings.EqualFold(filepath.Clean(aa), filepath.Clean(bb))
 }
 
-// The Test step's work starts when the review starts, in a copy of the
-// worktree, and the step takes that work at its own turn: the baseline ran
-// once and the live check once, both before the step's turn began.
-func TestSideBySide_TestWorkStartsBesideTheReviewAndIsTakenAtItsTurn(t *testing.T) {
-	f := newSideBySideFixture(t, config.Commands{Test: "count"})
-	started := make(chan string, 1)
-	f.agent.onCall = func(kind, cwd string) {
-		if kind == "evidence" {
-			select {
-			case started <- cwd:
-			default:
-			}
-		}
-	}
-
+func TestSideBySide_TestRunsOnlyAtItsTurn(t *testing.T) {
+	f := newSideBySideFixture(t, config.Commands{Test: "count", Lint: "echo lint"})
 	startSideLanes(f.review, f.baseSHA)
-	// The review is still "running" here: nothing has called the Test step.
-	var laneDir string
-	select {
-	case laneDir = <-started:
-	case <-time.After(sideBySideWait):
-		t.Fatal("the live check did not start beside the review")
-	}
-	if samePath(laneDir, f.dir) {
-		t.Fatalf("the live check started in the run's own worktree %s, want a copy", laneDir)
-	}
-	if got := f.baselineRuns(); got != 1 {
-		t.Fatalf("baseline runs before the Test step's turn = %d, want 1", got)
-	}
 	f.lanesDone()
-
+	if f.baselineRuns() != 0 || len(f.agent.evidenceCalls()) != 0 {
+		t.Fatal("Test started before Review settled")
+	}
 	outcome, err := (&TestStep{}).Execute(f.turn())
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	if err != nil || outcome == nil || outcome.NeedsApproval {
+		t.Fatalf("Test Execute() = %+v, %v", outcome, err)
 	}
-	if got := f.baselineRuns(); got != 1 {
-		t.Fatalf("baseline runs = %d, want 1: the step takes the work already done", got)
+	if calls := f.agent.evidenceCalls(); f.baselineRuns() != 1 || len(calls) != 1 || !samePath(calls[0], f.dir) {
+		t.Fatalf("canonical Test must run once in the run worktree: baselines=%d calls=%v", f.baselineRuns(), calls)
 	}
-	if calls := f.agent.evidenceCalls(); len(calls) != 1 {
-		t.Fatalf("live check calls = %d, want 1", len(calls))
-	}
-	if outcome.NeedsApproval {
-		t.Fatalf("outcome = %#v, want the passing result of the work started early", outcome)
-	}
-	findings := liveCheckFindings(t, outcome)
-	if findings.Verdict != types.TestVerdictGo || findings.TestedHeadSHA != f.headSHA {
-		t.Fatalf("verdict = %q tested head = %q, want go on %s", findings.Verdict, findings.TestedHeadSHA, f.headSHA)
-	}
-	if head, comparison, passed, recorded := f.review.Shared.Baseline(); !recorded || !passed || head != f.headSHA || comparison != f.baseSHA {
-		t.Fatalf("recorded baseline = %q, %v, %v, want the tested head as passed", head, passed, recorded)
-	}
-	if !strings.Contains(f.logText(), "took the test result") {
-		t.Fatalf("log = %q, want it to say the result was taken", f.logText())
-	}
-	if _, err := os.Stat(laneDir); !os.IsNotExist(err) {
-		t.Fatalf("the copy %s is still there after its result was taken (stat error %v)", laneDir, err)
-	}
-	// The run itself was never touched by the lane.
-	if got := gitCmd(t, f.dir, "rev-parse", "HEAD"); got != f.headSHA {
-		t.Fatalf("run worktree HEAD = %s, want %s", got, f.headSHA)
-	}
-	if status := gitStatusPorcelain(t, f.dir); status != "" {
-		t.Fatalf("run worktree status = %q, want clean", status)
+	if head, comparison, passed, recorded := f.review.Shared.Baseline(); head != f.headSHA || comparison != f.baseSHA || !passed || !recorded {
+		t.Fatalf("Test did not record its exact baseline: %s %s %t %t", head, comparison, passed, recorded)
 	}
 }
 
@@ -324,55 +276,13 @@ func TestSideBySide_OffStartsNothingBesideTheReview(t *testing.T) {
 	}
 }
 
-// A review fix moves the head. Work done on the commit before it is thrown
-// away and the Test step runs on the new head, as it does today.
-func TestSideBySide_TestWorkIsDiscardedWhenTheHeadMoved(t *testing.T) {
-	f := newSideBySideFixture(t, config.Commands{Test: "count"})
-	startSideLanes(f.review, f.baseSHA)
-	f.lanesDone()
-	early := f.agent.evidenceCalls()
-	if len(early) != 1 {
-		t.Fatalf("live checks before the head moved = %q, want one beside the review", early)
-	}
-	laneDir := early[0]
-	newHead := f.commitInRun("fixed.go", "package fixed\n", "no-mistakes(review): fix a finding")
-
-	outcome, err := (&TestStep{}).Execute(f.turn())
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	calls := f.agent.evidenceCalls()
-	if len(calls) != 2 || !samePath(calls[1], f.dir) {
-		t.Fatalf("live check ran in %q, want a second time, in the run's worktree", calls)
-	}
-	if got := f.baselineRuns(); got != 2 {
-		t.Fatalf("baseline runs = %d, want 2: once early and once on the new head", got)
-	}
-	findings := liveCheckFindings(t, outcome)
-	if findings.TestedHeadSHA != newHead {
-		t.Fatalf("tested head = %q, want the new head %q", findings.TestedHeadSHA, newHead)
-	}
-	if head, _, _, _ := f.review.Shared.Baseline(); head != newHead {
-		t.Fatalf("recorded baseline head = %q, want the new head %q", head, newHead)
-	}
-	if !strings.Contains(f.logText(), "is not used: the run's head has moved") {
-		t.Fatalf("log = %q, want the reason the early work was not used", f.logText())
-	}
-	if _, err := os.Stat(laneDir); !os.IsNotExist(err) {
-		t.Fatalf("the discarded copy %s is still there (stat error %v)", laneDir, err)
-	}
-	if _, err := os.Stat(filepath.Join(f.review.EvidenceDir, sideLaneDirName, string(types.StepTest))); !os.IsNotExist(err) {
-		t.Fatalf("the discarded work's evidence folder is still there (stat error %v)", err)
-	}
-}
-
 // The early work is stopped and removed as soon as the head moves, not left
 // to hold the machine until its step's turn.
 func TestSideBySide_StaleWorkStopsAsSoonAsTheHeadMoves(t *testing.T) {
-	f := newSideBySideFixture(t, config.Commands{})
+	f := newSideBySideFixture(t, config.Commands{Lint: "echo lint"})
 	started := make(chan string, 1)
 	stopped := make(chan struct{})
-	f.agent.evidenceF = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	f.agent.documentF = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		started <- opts.CWD
 		<-ctx.Done()
 		close(stopped)
@@ -383,7 +293,7 @@ func TestSideBySide_StaleWorkStopsAsSoonAsTheHeadMoves(t *testing.T) {
 	select {
 	case laneDir = <-started:
 	case <-time.After(sideBySideWait):
-		t.Fatal("the live check did not start beside the review")
+		t.Fatal("the documentation pass did not start beside the review")
 	}
 
 	// A review fix round commits in the run's worktree and records the head.
@@ -400,120 +310,16 @@ func TestSideBySide_StaleWorkStopsAsSoonAsTheHeadMoves(t *testing.T) {
 	select {
 	case <-stopped:
 	default:
-		t.Fatal("the live check started on the old head was still running after the head moved")
+		t.Fatal("the documentation pass started on the old head was still running after the head moved")
 	}
 	if _, err := os.Stat(laneDir); !os.IsNotExist(err) {
 		t.Fatalf("the stopped copy %s is still there (stat error %v)", laneDir, err)
 	}
-	if lanes, _ := f.review.Shared.SideLanes().(*sideLanes); lanes == nil || lanes.claim(types.StepTest) != nil {
-		t.Fatal("the stopped work was still left for the Test step")
+	if lanes, _ := f.review.Shared.SideLanes().(*sideLanes); lanes == nil || lanes.claim(types.StepDocument) != nil {
+		t.Fatal("the stopped work was still left for the Document step")
 	}
 	if !strings.Contains(f.logText(), "is stopped and removed, because the run's head moved to "+shortObjectID(newHead)) {
 		t.Fatalf("log = %q, want the stop and its reason", f.logText())
-	}
-}
-
-func TestSideBySide_TestWorkIsDiscardedWhenItFailedOrTheWorktreeIsDirty(t *testing.T) {
-	t.Run("the early work failed", func(t *testing.T) {
-		f := newSideBySideFixture(t, config.Commands{Test: "count"})
-		f.agent.evidenceF = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			if !samePath(opts.CWD, f.dir) {
-				return nil, errors.New("harness crashed in the copy")
-			}
-			return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
-		}
-		startSideLanes(f.review, f.baseSHA)
-		f.lanesDone()
-
-		outcome, err := (&TestStep{}).Execute(f.turn())
-		if err != nil {
-			t.Fatalf("Execute() error = %v, want the step run again in the run's worktree", err)
-		}
-		if outcome.NeedsApproval || len(f.agent.evidenceCalls()) != 2 {
-			t.Fatalf("outcome = %#v after %d live checks, want a pass from the second", outcome, len(f.agent.evidenceCalls()))
-		}
-		if !strings.Contains(f.logText(), "is not used: it failed") {
-			t.Fatalf("log = %q, want the failure named", f.logText())
-		}
-	})
-	t.Run("the run's worktree holds changes", func(t *testing.T) {
-		f := newSideBySideFixture(t, config.Commands{Test: "count"})
-		startSideLanes(f.review, f.baseSHA)
-		f.lanesDone()
-		if err := os.WriteFile(filepath.Join(f.dir, "stray.txt"), []byte("stray\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := (&TestStep{}).Execute(f.turn()); err != nil {
-			t.Fatalf("Execute() error = %v", err)
-		}
-		if len(f.agent.evidenceCalls()) != 2 || !strings.Contains(f.logText(), "holds uncommitted changes") {
-			t.Fatalf("live checks = %d log = %q, want the early work discarded over the dirty worktree", len(f.agent.evidenceCalls()), f.logText())
-		}
-	})
-}
-
-// A test file the evidence turn wrote is left in the worktree today, to be
-// committed by a later step. Taken from a copy, it is brought over.
-func TestSideBySide_TestFilesTheEarlyLiveCheckWroteAreBroughtOver(t *testing.T) {
-	f := newSideBySideFixture(t, config.Commands{})
-	// A file at the root: git status names a file in a new folder by its
-	// folder, and the step notes it as a test file only by its own name.
-	f.agent.evidenceF = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-		if err := os.WriteFile(filepath.Join(opts.CWD, "feature_test.go"), []byte("package main\n"), 0o644); err != nil {
-			return nil, err
-		}
-		return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
-	}
-	startSideLanes(f.review, f.baseSHA)
-	f.lanesDone()
-
-	outcome, err := (&TestStep{}).Execute(f.turn())
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if calls := f.agent.evidenceCalls(); len(calls) != 1 || samePath(calls[0], f.dir) {
-		t.Fatalf("live check ran in %q, want once, in a copy, and taken", calls)
-	}
-	content, err := os.ReadFile(filepath.Join(f.dir, "feature_test.go"))
-	if err != nil || string(content) != "package main\n" {
-		t.Fatalf("feature_test.go in the run's worktree = %q, %v, want the file the live check wrote", content, err)
-	}
-	if status := gitStatusPorcelain(t, f.dir); !strings.Contains(status, "feature_test.go") {
-		t.Fatalf("run worktree status = %q, want the new test file uncommitted, as the step leaves it today", status)
-	}
-	var noted bool
-	for _, item := range liveCheckFindings(t, outcome).Items {
-		noted = noted || strings.Contains(item.Description, "new test file written by agent: feature_test.go")
-	}
-	if !noted {
-		t.Fatalf("findings = %#v, want the new test file noted as today", liveCheckFindings(t, outcome).Items)
-	}
-}
-
-// A commit made in the copy by the evidence agent was validated by no step.
-func TestSideBySide_TestWorkThatCommittedIsDiscarded(t *testing.T) {
-	f := newSideBySideFixture(t, config.Commands{})
-	f.agent.evidenceF = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-		if !samePath(opts.CWD, f.dir) {
-			if err := os.WriteFile(filepath.Join(opts.CWD, "sneaked.go"), []byte("package sneaked\n"), 0o644); err != nil {
-				return nil, err
-			}
-			gitCmd(t, opts.CWD, "add", "-A")
-			gitCmd(t, opts.CWD, "-c", "user.name=agent", "-c", "user.email=agent@example.com", "commit", "-m", "agent commit")
-		}
-		return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
-	}
-	startSideLanes(f.review, f.baseSHA)
-	f.lanesDone()
-
-	if _, err := (&TestStep{}).Execute(f.turn()); err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if len(f.agent.evidenceCalls()) != 2 || !strings.Contains(f.logText(), "left a commit") {
-		t.Fatalf("live checks = %d log = %q, want the early work discarded over its commit", len(f.agent.evidenceCalls()), f.logText())
-	}
-	if got := gitCmd(t, f.dir, "rev-parse", "HEAD"); got != f.headSHA {
-		t.Fatalf("run worktree HEAD = %s, want %s: the copy's commit must not reach the run", got, f.headSHA)
 	}
 }
 
@@ -542,7 +348,7 @@ func TestSideBySide_DocumentationCommitIsBroughtOverAtItsTurn(t *testing.T) {
 		t.Fatalf("GUIDE.md reached the run's worktree before the step took it (stat error %v)", err)
 	}
 
-	// The Test step takes its own early work first, as in a real run.
+	// The Test step runs first, as in a real run.
 	if _, err := (&TestStep{}).Execute(f.turn()); err != nil {
 		t.Fatalf("Test Execute() error = %v", err)
 	}
@@ -750,9 +556,9 @@ func TestSideBySide_NothingStartsWhereItCannot(t *testing.T) {
 
 // Work that no step took is stopped and removed when the run ends.
 func TestSideBySide_UnclaimedWorkIsStoppedAndRemovedWhenTheRunEnds(t *testing.T) {
-	f := newSideBySideFixture(t, config.Commands{})
+	f := newSideBySideFixture(t, config.Commands{Lint: "echo lint"})
 	started := make(chan string, 1)
-	f.agent.evidenceF = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	f.agent.documentF = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		started <- opts.CWD
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -762,7 +568,7 @@ func TestSideBySide_UnclaimedWorkIsStoppedAndRemovedWhenTheRunEnds(t *testing.T)
 	select {
 	case laneDir = <-started:
 	case <-time.After(sideBySideWait):
-		t.Fatal("the live check did not start beside the review")
+		t.Fatal("the documentation pass did not start beside the review")
 	}
 
 	closed := make(chan struct{})
@@ -810,7 +616,7 @@ func TestBaselineBeforePush_TheTestedHeadIsPushedAsIs(t *testing.T) {
 	}
 }
 
-func TestSideBySide_WrapperComparisonSurvivesLaneAdoptionAndDefaultMovement(t *testing.T) {
+func TestSideBySide_WrapperComparisonSurvivesDefaultMovement(t *testing.T) {
 	f := newSideBySideFixture(t, config.Commands{Test: "echo configured"})
 	binDir := fakeCLIBinDir(t)
 	linkTestBinary(t, binDir, "turnline")
@@ -824,17 +630,16 @@ func TestSideBySide_WrapperComparisonSurvivesLaneAdoptionAndDefaultMovement(t *t
 	f.review.Run.BaseSHA = strings.Repeat("0", 40)
 	startSideLanes(f.review, f.baseSHA)
 	f.lanesDone()
-	gitCmd(t, f.dir, "branch", "-f", "main", f.headSHA)
-
 	outcome, err := (&TestStep{}).Execute(f.turn())
 
-	if err != nil || outcome == nil || outcome.NeedsApproval || !strings.Contains(f.logText(), "took the test result") {
+	if err != nil || outcome == nil || outcome.NeedsApproval {
 		t.Fatalf("Execute() = %#v, %v; log = %s", outcome, err, f.logText())
 	}
 	_, comparison, passed, recorded := f.review.Shared.Baseline()
 	if comparison != f.baseSHA || !passed || !recorded {
-		t.Fatalf("adopted comparison = %q, passed = %v, recorded = %v", comparison, passed, recorded)
+		t.Fatalf("recorded comparison = %q, passed = %v, recorded = %v", comparison, passed, recorded)
 	}
+	gitCmd(t, f.dir, "branch", "-f", "main", f.headSHA)
 	steps, err := f.review.DB.GetStepsByRun(f.review.Run.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -852,11 +657,11 @@ func TestSideBySide_WrapperComparisonSurvivesLaneAdoptionAndDefaultMovement(t *t
 	wrapped := &wrapperFixture{logFile: logFile}
 	calls := wrapped.calls(t)
 	if len(calls) != 2 {
-		t.Fatalf("wrapper calls = %q, want the side lane and the pre-push baseline", calls)
+		t.Fatalf("wrapper calls = %q, want Test and the pre-push baseline", calls)
 	}
 	for _, call := range calls {
 		if call[1] != f.baseSHA {
-			t.Fatalf("wrapper call = %q, want the lane's original comparison %s", call, f.baseSHA)
+			t.Fatalf("wrapper call = %q, want the Test's original comparison %s", call, f.baseSHA)
 		}
 		assertShellCall(t, call[3:], "echo configured")
 	}
