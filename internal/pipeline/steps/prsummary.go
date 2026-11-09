@@ -390,7 +390,8 @@ func rebindPipelineAttestationWithSteps(body, newHeadSHA string, steps []*db.Ste
 		return body, false
 	}
 	var retainedTestException string
-	if steps == nil {
+	isRetainedRecord := steps == nil
+	if isRetainedRecord {
 		// A CI repair that did not re-run Test keeps the prior Test result,
 		// including an approved-over-failure override_reason. The caller's
 		// current trusted policy still owns allow_test_command_override, so a
@@ -408,7 +409,10 @@ func rebindPipelineAttestationWithSteps(body, newHeadSHA string, steps []*db.Ste
 		}
 	}
 	rebound := newPipelineAttestation(steps, nil, newHeadSHA, policy)
-	if retainedTestException != "" {
+	if isRetainedRecord {
+		// The retained record keeps its exception exactly as published,
+		// including its absence on a body older than test_exception, so the
+		// first refresh adds both representations together.
 		for index := range rebound.Steps {
 			if rebound.Steps[index].Step == types.StepTest {
 				rebound.Steps[index].TestException = neutralizePRControls(retainedTestException)

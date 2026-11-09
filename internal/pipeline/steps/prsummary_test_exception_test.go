@@ -320,3 +320,67 @@ func TestBuildPipelineSummary_TestExceptionIsRedactedAtPublication(t *testing.T)
 		})
 	}
 }
+
+func TestRestampOfALegacyCommandOverrideLeavesTheExceptionToRefresh(t *testing.T) {
+	t.Parallel()
+	oldHead := strings.Repeat("a", 40)
+	commandOverride := "configured test command failed with exit code 7"
+	for _, isOwned := range []bool{false, true} {
+		for _, isApproved := range []bool{false, true} {
+			t.Run(fmt.Sprintf("owned=%v/approved=%v", isOwned, isApproved), func(t *testing.T) {
+				// Arrange: a body published before test_exception existed.
+				marker := pipelineAttestationCommentPrefix + `{"head_sha":"` + oldHead + `","steps":[{"step":"test","status":"completed","override_reason":"` + commandOverride + `"}]}` + pipelineAttestationCommentClosingToken
+				if isOwned {
+					marker = wrapPRAppendix(marker)
+				}
+				prefix, suffix := "Author narrative\n\n", "\n\nAuthor suffix"
+				restampHost := &attestationTestHost{body: prefix + marker + suffix, title: "Author title"}
+
+				// Act: a CI repair restamp that did not re-run Test.
+				if err := restampPRAttestationWithSteps(context.Background(), restampHost, &scm.PR{Number: "17"}, testPipelineHeadSHA, nil, nil, pipelineAttestationPolicy{}); err != nil {
+					t.Fatal(err)
+				}
+
+				// Assert: the restamp keeps the legacy record as it was.
+				restamped := parsePipelineAttestationForTest(t, restampHost.body)
+				if restamped.HeadSHA != testPipelineHeadSHA || restamped.Steps[0].OverrideReason != commandOverride {
+					t.Fatalf("restamp lost the head or the command override: %+v", restamped)
+				}
+				if restamped.Steps[0].TestException != "" || strings.Contains(restampHost.body, testExceptionStart) {
+					t.Fatalf("nil-step restamp invented an exception record: %s", restampHost.body)
+				}
+
+				// Act: the first exact-head refresh of that restamped body.
+				override := commandOverride
+				step := &db.StepResult{StepName: types.StepTest, Status: types.StepStatusCompleted, OverrideReason: &override}
+				if isApproved {
+					reason := "Accept the retained failure for this release"
+					step.ApprovalReason = &reason
+				}
+				url := "https://github.com/owner/repo/pull/17"
+				refreshHost := &refreshPRHost{pr: scm.PR{Number: "17", URL: url}, body: restampHost.body, state: scm.PRStateOpen, observedHead: testPipelineHeadSHA}
+				sctx := &pipeline.StepContext{Ctx: context.Background(), Run: &db.Run{Branch: "feature", HeadSHA: testPipelineHeadSHA, PRURL: &url}}
+				isChanged, err := refreshPublishedPRWithHost(sctx, refreshHost, []*db.StepResult{step})
+
+				// Assert: refresh adds both representations and stays idempotent.
+				if err != nil || !isChanged || refreshHost.writes != 1 {
+					t.Fatalf("refresh refused the restamped legacy body: changed=%v error=%v writes=%d", isChanged, err, refreshHost.writes)
+				}
+				refreshed := parsePipelineAttestationForTest(t, refreshHost.body)
+				if refreshed.Steps[0].TestException != step.TestOverrideReason() || refreshed.Steps[0].OverrideReason != commandOverride {
+					t.Fatalf("refresh published the wrong exception record: %+v", refreshed)
+				}
+				if section := extractTestExceptionSection(refreshHost.body); section == "" || !strings.Contains(section, commandOverride) {
+					t.Fatalf("refresh did not add the human exception: %s", refreshHost.body)
+				}
+				if !strings.HasPrefix(refreshHost.body, prefix) || (isOwned && !strings.Contains(refreshHost.body, suffix)) {
+					t.Fatalf("refresh changed author bytes: %s", refreshHost.body)
+				}
+				isChanged, err = refreshPublishedPRWithHost(sctx, refreshHost, []*db.StepResult{step})
+				if err != nil || isChanged || refreshHost.writes != 1 {
+					t.Fatalf("second refresh was not a no-op: changed=%v error=%v writes=%d", isChanged, err, refreshHost.writes)
+				}
+			})
+		}
+	}
+}
