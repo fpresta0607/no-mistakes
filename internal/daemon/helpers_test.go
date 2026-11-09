@@ -165,7 +165,7 @@ func startTestDaemon(t *testing.T) (*paths.Paths, *db.DB) {
 	}
 	t.Cleanup(func() { d.Close() })
 
-	runTestDaemon(t, p, d, nil, 3*time.Second)
+	runTestDaemon(t, p, d, nil)
 	return p, d
 }
 
@@ -186,7 +186,7 @@ func TestRunTestDaemonStartupError(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = d.Close() })
-		runTestDaemon(t, p, d, nil, time.Second)
+		runTestDaemon(t, p, d, nil)
 		t.Fatal("daemon unexpectedly became ready")
 	}
 
@@ -212,10 +212,11 @@ func TestRunTestDaemonStartupError(t *testing.T) {
 // returned call is a barrier after which recovery results can be asserted, and
 // the registered cleanup can reach a daemon that is still serving. The
 // cleanup asks the daemon to shut down when reachable and waits for
-// RunWithOptions to return. stopWithin only bounds how long a daemon that
-// never exits can stall the test. Register cleanup for resources that must
-// outlive the daemon (d and its root) before calling this.
-func runTestDaemon(t *testing.T, p *paths.Paths, d *db.DB, sf StepFactory, stopWithin time.Duration) {
+// RunWithOptions to return. Shutdown waits out every run's worktree cleanup,
+// which a loaded runner can stretch past any fixed clock, so the wait is
+// bounded only by the test's own deadline. Register cleanup for resources that
+// must outlive the daemon (d and its root) before calling this.
+func runTestDaemon(t *testing.T, p *paths.Paths, d *db.DB, sf StepFactory) {
 	t.Helper()
 
 	stopped := make(chan struct{})
@@ -230,10 +231,14 @@ func runTestDaemon(t *testing.T, p *paths.Paths, d *db.DB, sf StepFactory, stopW
 			_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{Force: true}, nil)
 			client.Close()
 		}
+		var timeout <-chan time.Time
+		if deadline, hasDeadline := t.Deadline(); hasDeadline {
+			timeout = time.After(startWaitBudget(time.Until(deadline)))
+		}
 		select {
 		case <-stopped:
-		case <-time.After(stopWithin):
-			t.Errorf("daemon did not stop within %s", stopWithin)
+		case <-timeout:
+			t.Errorf("daemon did not stop before the test deadline")
 		}
 	})
 
@@ -316,10 +321,7 @@ func startTestDaemonWithSteps(t *testing.T, sf StepFactory) (*paths.Paths, *db.D
 	}
 	t.Cleanup(func() { d.Close() })
 
-	// A run reaches its terminal DB state before its goroutine finishes git
-	// worktree cleanup. On process-spawn-bound Windows that cleanup can take
-	// longer than three seconds, so give graceful shutdown its own budget.
-	runTestDaemon(t, p, d, sf, 15*time.Second)
+	runTestDaemon(t, p, d, sf)
 	return p, d
 }
 
