@@ -53,7 +53,7 @@ func TestGitlabEvidenceSectionUploadsOnceAndRewritesOneSection(t *testing.T) {
 	if uploader.calls != 1 {
 		t.Fatalf("uploads = %d, want 1", uploader.calls)
 	}
-	if strings.Count(first, "## Evidence") != 1 || !strings.Contains(first, "`01RUN/images-default.png`") || !strings.Contains(first, uploader.markdown) {
+	if strings.Count(first, "## Evidence") != 1 || !strings.Contains(first, "`images-default.png`") || strings.Contains(first, "01RUN") || !strings.Contains(first, uploader.markdown) {
 		t.Fatalf("section = %q", first)
 	}
 	if strings.Contains(first, "secret.png") || strings.Contains(first, "notes.txt") {
@@ -85,7 +85,7 @@ func TestGitlabEvidenceSectionUploadsOnceAndRewritesOneSection(t *testing.T) {
 
 func TestAppendGeneratedSectionsKeepsOneEvidenceSection(t *testing.T) {
 	body := "## What Changed\n\n- updated\n\n## Evidence\n\nold image\n"
-	testing := "## Testing\n\n- ok\n\n## Evidence\n\n`01RUN/shot.png`\n\n![shot](/uploads/abc/shot.png)"
+	testing := "## Testing\n\n- ok\n\n## Evidence\n\n`shot.png`\n\n![shot](/uploads/abc/shot.png)"
 	got := appendGeneratedSections(body, "low", testing, "## Pipeline\n\nrecorded", scm.ProviderGitLab)
 	if strings.Count(got, "## Evidence") != 1 || strings.Contains(got, "old image") {
 		t.Fatalf("rewritten body =\n%s", got)
@@ -202,7 +202,7 @@ func TestGitlabEvidenceReportsUnreadableImages(t *testing.T) {
 	if uploader.calls != 1 {
 		t.Fatalf("uploads = %d, want the readable image only", uploader.calls)
 	}
-	if !strings.Contains(got, "run/blocked.png") || !strings.Contains(got, "not uploaded:") || !strings.Contains(got, "run/hidden") {
+	if !strings.Contains(got, "blocked.png") || !strings.Contains(got, "not uploaded:") || !strings.Contains(got, "hidden") {
 		t.Fatalf("section dropped an unreadable path:\n%s", got)
 	}
 	if !strings.Contains(strings.Join(logs, "\n"), "unreadable") {
@@ -231,7 +231,7 @@ func TestGitlabEvidenceAttemptsEveryImageAndReportsRejections(t *testing.T) {
 	if uploader.calls != 52 {
 		t.Fatalf("upload attempts = %d, want every one of 52 images", uploader.calls)
 	}
-	if strings.Count(got, "not uploaded: attachment rejected by server") != 52 || !strings.Contains(got, "run/large.png") {
+	if strings.Count(got, "not uploaded: attachment rejected by server") != 52 || !strings.Contains(got, "large.png") {
 		t.Fatalf("missing rejected evidence entries: %s", got)
 	}
 }
@@ -275,12 +275,12 @@ func TestGitlabEvidenceIndependentOfTestingInEveryAppendixMode(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			owned, err := composeOwnedPRContent(prOwnedBody{before: "Author narrative"}, "Title", appendix, 0, sctx.WorkDir, "")
+			owned, err := composeOwnedPRContent(prOwnedBody{before: "Author narrative"}, "Title", appendix, 0, sctx.WorkDir, "", "")
 			if err != nil {
 				t.Fatal(err)
 			}
 			for name, body := range map[string]string{"ordinary": ordinary, "limited": limited, "fallback": fallback.Body, "owned": owned.Body} {
-				if strings.Count(body, "## Evidence") != 1 || !strings.Contains(body, uploader.markdown) || !strings.Contains(body, sctx.Run.ID+"/shot.png") {
+				if strings.Count(body, "## Evidence") != 1 || !strings.Contains(body, uploader.markdown) || !strings.Contains(body, "`shot.png`") || strings.Contains(body, sctx.Run.ID+"/shot.png") {
 					t.Fatalf("%s omitted evidence: %s", name, body)
 				}
 			}

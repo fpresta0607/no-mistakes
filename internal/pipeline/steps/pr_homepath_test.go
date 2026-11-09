@@ -14,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/safepath"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -52,18 +53,6 @@ func fixtureRedactedPath(elem ...string) string {
 	return "~" + string(filepath.Separator) + filepath.Join(elem...)
 }
 
-// assertFixturePathIsRenderable fails loudly when a fixture path could not
-// survive the allowlist, instead of letting the case pass vacuously.
-func assertFixturePathIsRenderable(t *testing.T, p string) {
-	t.Helper()
-	if !filepath.IsAbs(p) {
-		t.Fatalf("fixture path %q is not absolute on %s; the artifact allowlist would drop it", p, runtime.GOOS)
-	}
-	if filepath.Clean(p) != p {
-		t.Fatalf("fixture path %q is not already clean on %s (want %q); the artifact allowlist would drop it", p, runtime.GOOS, filepath.Clean(p))
-	}
-}
-
 // homePathLeakNeedles are checked against every assembled PR body regardless of
 // which shape a case exercised. A shape-specific assertion would only catch the
 // shape someone already thought of.
@@ -81,10 +70,7 @@ type homePathLeakCase struct {
 	// evidence directory, so a case exercising an artifact path has to put the
 	// evidence directory under the synthetic home the same way production puts
 	// it under the operator's real one.
-	evidenceDir string
-	// evidenceFiles are written under the resolved evidence directory before
-	// assembly, for the case where captured output is embedded from disk.
-	evidenceFiles  map[string]string
+	evidenceDir    string
 	reviewFindings string
 	testFindings   string
 	testStepError  string
@@ -108,7 +94,7 @@ func TestPRStep_BuildPRContentRedactsAbsoluteHomePaths(t *testing.T) {
 
 	cases := []homePathLeakCase{
 		{
-			name:        "artifact path rendered as a local file reference",
+			name:        "artifact path rendered as a private evidence reference",
 			evidenceDir: fixtureEvidenceDir,
 			testFindings: findingsJSON(t, types.Findings{
 				TestingSummary: "Captured the failing request/response pair.",
@@ -118,7 +104,7 @@ func TestPRStep_BuildPRContentRedactsAbsoluteHomePaths(t *testing.T) {
 					Path:  filepath.Join(fixtureEvidenceDir, "pytest.log"),
 				}},
 			}),
-			wantVisible: []string{"pytest output", fixtureRedactedPath(".no-mistakes", "evidence", "run-1", "pytest.log")},
+			wantVisible: []string{"pytest output (private run evidence"},
 		},
 		{
 			name:        "pytest rootdir header in captured output",
@@ -162,24 +148,6 @@ func TestPRStep_BuildPRContentRedactsAbsoluteHomePaths(t *testing.T) {
 				}},
 			}),
 			wantVisible: []string{"cachedir: ~/.no-mistakes/worktrees/ab12cd/1/svc/.pytest_cache"},
-		},
-		{
-			name: "captured output embedded from an evidence file on disk",
-			evidenceFiles: map[string]string{
-				"pytest.log": "============ test session starts ============\n" +
-					"rootdir: " + fixtureWorktreePath + "\n" +
-					"plugins: anyio-4.4.0\n" +
-					"1 passed in 0.10s\n",
-			},
-			testFindings: findingsJSON(t, types.Findings{
-				TestingSummary: "Targeted suite passes.",
-				Artifacts: []types.TestArtifact{{
-					Kind:  "log",
-					Label: "pytest log",
-					Path:  "%EVIDENCEFILE%",
-				}},
-			}),
-			wantVisible: []string{"rootdir: ~/.no-mistakes/worktrees/ab12cd/1/svc", "1 passed in 0.10s"},
 		},
 		{
 			name:        "macOS home root",
@@ -251,7 +219,7 @@ func TestPRStep_BuildPRContentRedactsAbsoluteHomePaths(t *testing.T) {
 			name:          "failed step error text",
 			evidenceDir:   fixtureEvidenceDir,
 			testStepError: "open " + filepath.Join(fixtureEvidenceDir, "pytest.log") + ": no such file or directory",
-			wantVisible:   []string{"open " + fixtureRedactedPath(".no-mistakes", "evidence", "run-1", "pytest.log") + ": no such file or directory"},
+			wantVisible:   []string{"open " + filepath.Join(safepath.EvidencePlaceholder, "pytest.log") + ": no such file or directory"},
 		},
 		{
 			name:        "agent-authored title and what-changed body",
@@ -327,7 +295,7 @@ func TestPRStep_ExecuteRedactsAbsoluteHomePathsBeforePublishing(t *testing.T) {
 			t.Fatalf("published PR content leaked %q:\n%s", needle, published)
 		}
 	}
-	for _, want := range []string{"rootdir: ~/.no-mistakes/worktrees/ab12cd/1/svc", "evidence now lands under " + fixtureRedactedPath(".no-mistakes", "evidence", "run-1")} {
+	for _, want := range []string{"rootdir: ~/.no-mistakes/worktrees/ab12cd/1/svc", "evidence now lands under " + safepath.EvidencePlaceholder} {
 		if !strings.Contains(published, want) {
 			t.Fatalf("expected %q in published PR content:\n%s", want, published)
 		}
@@ -344,7 +312,7 @@ func TestPRStep_BuildPRContentRedactsAfterClampingToHostLimit(t *testing.T) {
 		evidenceDir: fixtureEvidenceDir,
 		agentBody: "## What Changed\n\n- evidence now lands under " + fixtureEvidenceDir + "\n" +
 			strings.Repeat("- and a long tail of change notes that overruns the host cap\n", 200),
-		wantVisible: []string{"evidence now lands under " + fixtureRedactedPath(".no-mistakes", "evidence", "run-1")},
+		wantVisible: []string{"evidence now lands under " + safepath.EvidencePlaceholder},
 	}
 	limit := scm.MaxPRBodyChars(scm.ProviderAzureDevOps)
 	if limit <= 0 {
@@ -392,23 +360,6 @@ func buildHomePathLeakPRContentWithLimit(t *testing.T, tc homePathLeakCase, body
 		sctx.EvidenceDir = tc.evidenceDir
 	}
 
-	testFindings := tc.testFindings
-	if len(tc.evidenceFiles) > 0 {
-		if err := os.MkdirAll(sctx.EvidenceDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		for name, contents := range tc.evidenceFiles {
-			if err := os.WriteFile(filepath.Join(sctx.EvidenceDir, name), []byte(contents), 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}
-		// Substitute the whole native path, JSON-escaped: a ToSlash'd Windows
-		// path is absolute but not filepath.Clean, which the allowlist rejects.
-		evidenceFile := filepath.Join(sctx.EvidenceDir, "pytest.log")
-		assertFixturePathIsRenderable(t, evidenceFile)
-		testFindings = strings.ReplaceAll(testFindings, "%EVIDENCEFILE%", strings.ReplaceAll(evidenceFile, `\`, `\\`))
-	}
-
 	if tc.reviewFindings != "" {
 		reviewFindings := tc.reviewFindings
 		if reviewFindings == "" {
@@ -416,8 +367,8 @@ func buildHomePathLeakPRContentWithLimit(t *testing.T, tc homePathLeakCase, body
 		}
 		insertCompletedStep(t, sctx, types.StepReview, reviewFindings, "")
 	}
-	if testFindings != "" || tc.testStepError != "" {
-		insertCompletedStep(t, sctx, types.StepTest, testFindings, tc.testStepError)
+	if tc.testFindings != "" || tc.testStepError != "" {
+		insertCompletedStep(t, sctx, types.StepTest, tc.testFindings, tc.testStepError)
 	}
 
 	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, bodyLimit)
@@ -570,10 +521,7 @@ func TestTestFindingsSchema_KeepsEvidenceDirectoryPathsReportable(t *testing.T) 
 					Path:  filepath.Join(fixtureEvidenceDir, "session.log"),
 				}},
 			}),
-			wantVisible: []string{
-				"captured session",
-				fixtureRedactedPath(".no-mistakes", "evidence", "run-1", "session.log"),
-			},
+			wantVisible: []string{"captured session (private run evidence"},
 		}
 		content := buildHomePathLeakPRContent(t, tc)
 		assertNoHomePathLeak(t, tc, content)
@@ -602,9 +550,9 @@ func TestTestFindingsSchema_KeepsEvidenceDirectoryPathsReportable(t *testing.T) 
 	})
 }
 
-// TestPRStep_BuildPRContentRedactsRunWorktreePaths covers evidence text inlined
-// into the PR body: the run worktree and any run worktree under an NM_HOME
-// outside the home directory, which home redaction never sees (#1611).
+// TestPRStep_BuildPRContentRedactsRunWorktreePaths covers artifact content in the
+// PR body: the run worktree and any run worktree under an NM_HOME outside the
+// home directory, which home redaction never sees (#1611).
 func TestPRStep_BuildPRContentRedactsRunWorktreePaths(t *testing.T) {
 	nmHome := t.TempDir()
 	t.Setenv("NM_HOME", nmHome)
@@ -617,18 +565,10 @@ func TestPRStep_BuildPRContentRedactsRunWorktreePaths(t *testing.T) {
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	publishValidationTextForTest(sctx)
-	if err := os.MkdirAll(sctx.EvidenceDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	evidenceFile := filepath.Join(sctx.EvidenceDir, "run.log")
 	other := filepath.Join(nmHome, "worktrees", "ab12cd34ef56", "run-0", "out.log")
-	if err := os.WriteFile(evidenceFile, []byte("ran "+filepath.Join(dir, "bin", "tool")+"\nsaw "+other+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	assertFixturePathIsRenderable(t, evidenceFile)
 	insertCompletedStep(t, sctx, types.StepTest, findingsJSON(t, types.Findings{
 		TestingSummary: "Ran the tool.",
-		Artifacts:      []types.TestArtifact{{Kind: "log", Label: "run log", Path: evidenceFile}},
+		Artifacts:      []types.TestArtifact{{Kind: "log", Label: "run log", Content: "ran " + filepath.Join(dir, "bin", "tool") + "\nsaw " + other}},
 	}), "")
 
 	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
