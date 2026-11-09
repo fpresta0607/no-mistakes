@@ -229,3 +229,42 @@ func TestWithSteering_EveryAgentOnlyAddsNewCommits(t *testing.T) {
 		}
 	}
 }
+
+func TestCarriesCapturedPrompt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+		want bool
+	}{
+		{name: "steering preamble", text: WorktreeSteering("/evidence"), want: true},
+		{name: "execution context section", text: ExecutionContextPromptSection("/work/tree"), want: true},
+		{name: "a block heading alone", text: "Execution context:", want: true},
+		{name: "a later execution context line, cut short", text: "- Path contract: every project file you read or edit lives under that exact path...", want: true},
+		{name: "a steering bullet, cut short", text: "- Confine source, project, user-data, and system file changes to the current working directory...", want: true},
+		{name: "an excerpt from the middle of a line", text: "Never amend, squash, reword, reorder, drop, or reset an existing commit", want: true},
+		{name: "an opening sentence wrapped across lines", text: "You are running inside an isolated git\nworktree at the current working directory", want: true},
+		{name: "the wording after a path", text: "use exactly /elsewhere as the prefix - never invent, guess, abbreviate, or re-resolve paths", want: true},
+		{name: "ordinary command output", text: "ok  	example.com/widgets	0.31s", want: false},
+		{name: "a reader's note about the workspace", text: "The workspace boundary was respected.", want: false},
+		{name: "a phrase ordinary prose shares with a prompt", text: "Rebased on top of the current HEAD.", want: false},
+		{name: "a path a prompt would name", text: "/work/tree", want: false},
+		{name: "empty", text: "", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CarriesCapturedPrompt(tc.text); got != tc.want {
+				t.Errorf("CarriesCapturedPrompt(%q) = %v, want %v", tc.text, got, tc.want)
+			}
+		})
+	}
+}
+
+// An excerpt has no reason to start at a block's heading, so every line of both
+// blocks has to be recognized on its own, with real paths in its slots.
+func TestCarriesCapturedPrompt_RecognizesEveryLineOfBothBlocks(t *testing.T) {
+	blocks := WorktreeSteering("/evidence") + ExecutionContextPromptSection("/work/tree")
+	for _, line := range strings.Split(blocks, "\n") {
+		if strings.TrimSpace(line) != "" && !CarriesCapturedPrompt(line) {
+			t.Errorf("CarriesCapturedPrompt missed the line %q", line)
+		}
+	}
+}

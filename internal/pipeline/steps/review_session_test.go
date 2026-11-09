@@ -17,6 +17,11 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+// reviewRunTimeout bounds a wait on a review run, and only has to catch a hang.
+// The Windows leg is process-spawn bound and runs tests in parallel: review
+// tests that take under 3s on an idle machine have taken over a minute there.
+const reviewRunTimeout = 2 * time.Minute
+
 // sessionMockAgent is a session-capable scripted agent for review-loop tests.
 // It mints deterministic session ids ("sess-1", "sess-2", ...) for new
 // sessions and echoes resumed ids, recording every invocation.
@@ -317,7 +322,7 @@ func TestReviewLoop_ParkRespondFixKeepsRoleSessions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("execute: %v", err)
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(reviewRunTimeout):
 		t.Fatal("executor timed out")
 	}
 
@@ -403,7 +408,7 @@ func TestReviewLoop_OtherStepsStaySessionIsolated(t *testing.T) {
 
 func waitForReviewStatus(t *testing.T, database *db.DB, runID string, want types.StepStatus) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(reviewRunTimeout)
 	for time.Now().Before(deadline) {
 		steps, err := database.GetStepsByRun(runID)
 		if err == nil {

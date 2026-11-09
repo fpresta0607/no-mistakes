@@ -188,13 +188,12 @@ type gitlabEvidenceProblem struct {
 
 func gitlabEvidenceImages(runDir string) (images []gitlabEvidenceImage, problems []gitlabEvidenceProblem, err error) {
 	root := filepath.Clean(runDir)
-	parent := filepath.Dir(root)
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			if path == root && os.IsNotExist(walkErr) {
 				return nil
 			}
-			problems = append(problems, gitlabEvidenceProblem{rel: gitlabEvidenceRel(parent, path), reason: walkErr.Error()})
+			problems = append(problems, gitlabEvidenceProblem{rel: gitlabEvidenceRel(root, path), reason: walkErr.Error()})
 			return nil
 		}
 		if entry.IsDir() {
@@ -209,7 +208,7 @@ func gitlabEvidenceImages(runDir string) (images []gitlabEvidenceImage, problems
 		if !gitlabEvidenceImageExt(path) {
 			return nil
 		}
-		rel, err := filepath.Rel(parent, path)
+		rel, err := filepath.Rel(root, path)
 		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
 			return nil
 		}
@@ -233,10 +232,10 @@ func gitlabEvidenceImages(runDir string) (images []gitlabEvidenceImage, problems
 	return images, problems, nil
 }
 
-func gitlabEvidenceRel(parent, path string) string {
-	rel, err := filepath.Rel(parent, path)
-	if err != nil || rel == "." {
-		return filepath.ToSlash(path)
+func gitlabEvidenceRel(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return filepath.Base(path)
 	}
 	return filepath.ToSlash(rel)
 }

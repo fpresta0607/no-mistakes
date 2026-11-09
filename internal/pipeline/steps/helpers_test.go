@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -210,6 +211,20 @@ func newTestContext(t *testing.T, ag agent.Agent, workDir, baseSHA, headSHA stri
 		Log:         func(s string) { t.Log(s) },
 		LogChunk:    func(s string) {},
 		LogFile:     func(s string) {},
+	}
+}
+
+// writeFakeExecutable writes a script the test goes on to exec. A child forked
+// by a parallel test copies this process's descriptors, so it can hold the write
+// descriptor open past the write, and exec then fails with ETXTBSY
+// (golang/go#22315). A fork holds syscall.ForkLock for writing, so no fork can
+// copy the descriptor while this holds it for reading.
+func writeFakeExecutable(t *testing.T, path, script string) {
+	t.Helper()
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
 	}
 }
 

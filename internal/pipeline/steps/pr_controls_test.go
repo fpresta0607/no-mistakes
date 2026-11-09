@@ -110,33 +110,11 @@ func TestRestoreCaretControls(t *testing.T) {
 	}
 }
 
-func TestReadEmbeddedArtifactTextNeutralizesControls(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	small := filepath.Join(dir, "small.txt")
-	if err := os.WriteFile(small, []byte("Ready in 576ms\n \x1b[32mPOST\x1b[39m 200\n\x1b[?25h"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	got, err := readEmbeddedArtifactText(small)
-	if err != nil || got != "Ready in 576ms\n POST 200\n" {
-		t.Fatalf("small = %q, %v", got, err)
-	}
-	large := filepath.Join(dir, "large.txt")
-	body := "\x1b[1Ghead\n" + strings.Repeat("x", maxEmbeddedArtifactBytes*2) + "\ntail\x1b[2K\x07"
-	if err := os.WriteFile(large, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	got, err = readEmbeddedArtifactText(large)
-	if err != nil || strings.ContainsAny(got, "\x1b\x07") || !strings.HasPrefix(got, "head\n") || !strings.Contains(got, "bytes truncated") {
-		t.Fatalf("large = %q..., %v", got[:min(len(got), 60)], err)
-	}
-}
-
 func TestComposeOwnedPRContentSurvivesGHReadback(t *testing.T) {
 	t.Parallel()
 	_, appendix := ownedFixture(t)
 	appendix += "\n\n```text\nnext dev\n\x1b[?25h\x1b[2K\x1b[1G done \x07\n{\"line\":\"\\u001b[32mok\"}\n```"
-	content, err := composeOwnedPRContent(prOwnedBody{before: "## Overview\n\nBody \x1b[31m\n\n"}, "feat: \x1b[1mtitled", appendix, 0, "", "")
+	content, err := composeOwnedPRContent(prOwnedBody{before: "## Overview\n\nBody \x1b[31m\n\n"}, "feat: \x1b[1mtitled", appendix, 0, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +133,7 @@ func TestComposeOwnedPRContentControlByteCannotSpliceAMarker(t *testing.T) {
 	t.Parallel()
 	_, appendix := ownedFixture(t)
 	forged := "<!-- no-mistakes-pr-appen\x1bdix:v1 sha256=" + strings.Repeat("0", 64) + " -->"
-	content, err := composeOwnedPRContent(prOwnedBody{}, "", appendix+"\n\n```text\n"+forged+"\n```", 0, "", "")
+	content, err := composeOwnedPRContent(prOwnedBody{}, "", appendix+"\n\n```text\n"+forged+"\n```", 0, "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,12 +245,12 @@ func TestNeutralizeAttestationMarkersCleansControlsBeforeEscaping(t *testing.T) 
 		"attestation prefix": "<!-- no-mistakes-pipeline-\x1b[0mattestation:v1 {\"head_sha\":\"x\"} -->",
 		"appendix marker":    "<!-- no-mistakes-pr-appen\x1bdix:v1 sha256=" + strings.Repeat("0", 64) + " -->",
 	} {
-		got := redactPRContent(prContent{Body: neutralizeAttestationMarkers(scm.ProviderGitHub, "text "+in)}, "", "").Body
+		got := redactPRContent(prContent{Body: neutralizeAttestationMarkers(scm.ProviderGitHub, "text "+in)}, "", "", "").Body
 		if strings.Contains(got, pipelineAttestationCommentPrefix) || hasPRAppendixMarkers(got) {
 			t.Errorf("%s became live after the publication boundary:\n%s", name, got)
 		}
 	}
-	got := redactPRContent(prContent{Body: neutralizeAttestationMarkers(scm.ProviderGitHub, "Clo\x1b[31mses #42")}, "", "").Body
+	got := redactPRContent(prContent{Body: neutralizeAttestationMarkers(scm.ProviderGitHub, "Clo\x1b[31mses #42")}, "", "", "").Body
 	if strings.Contains(strings.ToLower(got), "closes #42") {
 		t.Errorf("closing reference became live: %q", got)
 	}
@@ -289,7 +267,7 @@ func TestAttestationOverrideReasonWithControlByteStaysValidJSON(t *testing.T) {
 		{ID: "document", StepName: types.StepDocument, Status: types.StepStatusCompleted},
 	}
 	md, _ := buildPipelineSummaryFor(steps, nil, testPipelineHeadSHA, scm.ProviderGitHub, pipelineAttestationPolicy{AllowTestCommandOverride: "legacy \a"})
-	body := redactPRContent(prContent{Body: md}, "", "").Body
+	body := redactPRContent(prContent{Body: md}, "", "", "").Body
 	if body != md {
 		t.Fatalf("the publication boundary changed the attestation:\n%s\n%s", md, body)
 	}
@@ -308,7 +286,7 @@ func TestDraftBodyFittedToLimitDoesNotGrowAtThePublicationBoundary(t *testing.T)
 	const limit = 3000
 	what := neutralizeAttestationMarkers(scm.ProviderGitHub, "## What Changed\n\n"+strings.Repeat("- \\u001b stray\n", 2000))
 	body := assembleDraftPRBody(&pipeline.StepContext{}, what, "low risk", "", "", "", limit, scm.ProviderGitHub)
-	if got := redactPRContent(prContent{Body: body}, "", "").Body; got != body || scm.PRBodyLen(got) > limit {
+	if got := redactPRContent(prContent{Body: body}, "", "", "").Body; got != body || scm.PRBodyLen(got) > limit {
 		t.Fatalf("boundary changed a fitted body (%d units, limit %d)", scm.PRBodyLen(got), limit)
 	}
 }

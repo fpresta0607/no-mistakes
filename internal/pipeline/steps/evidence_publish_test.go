@@ -120,7 +120,7 @@ func TestPublishRunEvidence_LandsOnOrphanBranchAndLinksFromThePRBody(t *testing.
 	if !strings.Contains(md, "https://github.com/example/widgets/blob/"+tip+"/.no-mistakes/evidence/feature/add-login/cli-run.txt") {
 		t.Fatalf("expected the log artifact to link the evidence branch, got:\n%s", md)
 	}
-	if strings.Contains(md, "local file:") {
+	if strings.Contains(md, "private run evidence") {
 		t.Fatalf("published evidence must not render as a local path, got:\n%s", md)
 	}
 
@@ -131,11 +131,13 @@ func TestPublishRunEvidence_LandsOnOrphanBranchAndLinksFromThePRBody(t *testing.
 		"![Checkout screenshot](https://raw.githubusercontent.com/example/widgets/" + tip + "/.no-mistakes/evidence/feature/add-login/checkout.png)",
 		"- Evidence: [Checkout screenshot](" + wantLink + ")",
 		"- Evidence: [CLI run](https://github.com/example/widgets/blob/" + tip + "/.no-mistakes/evidence/feature/add-login/cli-run.txt)",
-		"```text\nit works\n```",
 	} {
 		if !strings.Contains(md, want) {
 			t.Errorf("expanded PR body missing %q:\n%s", want, md)
 		}
+	}
+	if strings.Contains(md, "it works") {
+		t.Errorf("expanded PR body inlined an evidence file:\n%s", md)
 	}
 
 	// Neither the default branch nor the run's own branch carries evidence.
@@ -277,7 +279,7 @@ func TestPublishRunEvidence_InvalidBranchNameFallsBackToLocalPaths(t *testing.T)
 		filepath.Join(evidenceDir, "checkout.png"),
 	))
 	md := BuildTestingSummaryForPR(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), nil)
-	if !strings.Contains(md, "local file:") {
+	if !strings.Contains(md, "private run evidence") {
 		t.Fatalf("expected unpublished evidence to render as a local path, got:\n%s", md)
 	}
 }

@@ -217,7 +217,7 @@ func TestReviewStep_AnswersResumeTheSameSessionAndFinalize(t *testing.T) {
 		if err != nil {
 			t.Fatalf("execute: %v", err)
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(reviewRunTimeout):
 		t.Fatal("executor timed out")
 	}
 
@@ -646,7 +646,7 @@ func TestReviewStep_AnsweringARereviewQuestionDoesNotReRunTheFixer(t *testing.T)
 		if err != nil {
 			t.Fatalf("execute: %v", err)
 		}
-	case <-time.After(15 * time.Second):
+	case <-time.After(reviewRunTimeout):
 		t.Fatal("executor timed out")
 	}
 
