@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 // This fixture makes no live-product claim: it tests setup, not a user journey.
@@ -129,7 +130,7 @@ func TestAgentOnlyPreparation_RestorationFailureRetainsSnapshot(t *testing.T) {
 			t.Fatalf("snapshot indexes=%v, err=%v", indexes, err)
 		}
 		snapshotDir = filepath.Dir(filepath.Dir(indexes[0]))
-		snapshotDir, err = filepath.EvalSymlinks(snapshotDir)
+		snapshotDir, err = realpath.Resolve(snapshotDir)
 		if err != nil {
 			t.Fatalf("resolve snapshot directory: %v", err)
 		}

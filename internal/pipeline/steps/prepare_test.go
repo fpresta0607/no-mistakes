@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testlink"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -730,6 +731,21 @@ func TestPreparationSnapshot_RejectsGateInsideWorktree(t *testing.T) {
 	}
 }
 
+func TestPreparationSnapshot_RejectsGateJunctionedIntoWorktree(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContext(t, nil, dir, baseSHA, headSHA, config.Commands{})
+	gitCmd(t, dir, "init", "--bare", "gate")
+	repos := filepath.Join(t.TempDir(), "repos")
+	testlink.Junction(t, repos, dir)
+
+	_, err := snapshotPreparationState(sctx.Ctx, dir, filepath.Join(repos, "gate"))
+
+	if err == nil || !strings.Contains(err.Error(), "must be outside worktree") {
+		t.Fatalf("snapshot of a gate junctioned into the worktree: %v, want the outside-worktree refusal", err)
+	}
+}
+
 func TestPreparationGateInsideWorktree_AcceptsDifferentWindowsVolumes(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS != "windows" {
@@ -737,6 +753,85 @@ func TestPreparationGateInsideWorktree_AcceptsDifferentWindowsVolumes(t *testing
 	}
 	if preparationGateInsideWorktree(`C:\worktree`, `D:\gate`) {
 		t.Fatal("gate directory on another volume was treated as inside the worktree")
+	}
+}
+
+// A gate home whose worktrees and repos folders are links, as the live gate's
+// are directory junctions to a Dev Drive, must still prepare (issue #172).
+func TestEnsurePrepared_FollowsALinkedHome(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		link func(t *testing.T, home, real string)
+	}{
+		{"plain home", nil},
+		{"home under a symlink", func(t *testing.T, home, real string) {
+			linkHomeFolders(t, home, real, func(link, target string) {
+				if err := os.Symlink(target, link); err != nil {
+					t.Skipf("cannot create a symlink here (Windows needs Developer Mode or administrator rights): %v", err)
+				}
+			})
+		}},
+		{"home under a junction", func(t *testing.T, home, real string) {
+			linkHomeFolders(t, home, real, func(link, target string) { testlink.Junction(t, link, target) })
+		}},
+		{"home under a junction to another volume", func(t *testing.T, home, _ string) {
+			real := testlink.OtherVolumeDir(t, home)
+			linkHomeFolders(t, home, real, func(link, target string) { testlink.Junction(t, link, target) })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ensureGitRepoTemplate(t)
+			home := t.TempDir()
+			if tc.link != nil {
+				tc.link(t, home, t.TempDir())
+			}
+			workDir := filepath.Join(home, "worktrees", "repo", "run")
+			if err := os.MkdirAll(workDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := copyDirContents(gitRepoTemplate.dir, workDir); err != nil {
+				t.Fatal(err)
+			}
+			ignoreTestDependencies(t, workDir)
+			gateDir := filepath.Join(home, "repos", "gate.git")
+			if err := os.MkdirAll(gateDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, gateDir, "init", "--bare")
+			sctx := newTestContext(t, nil, workDir, gitRepoTemplate.baseSHA, gitRepoTemplate.headSHA, config.Commands{Prepare: preparationCommand()})
+			sctx.GateDir = gateDir
+			sctx.Shared = &pipeline.RunShared{}
+
+			err := ensurePrepared(sctx, types.StepTest)
+
+			if err != nil {
+				t.Fatalf("preparation: %v", err)
+			}
+			if got := strings.Count(readFile(t, filepath.Join(workDir, ".deps", "count")), "prepared"); got != 1 {
+				t.Fatalf("materializations=%d, want 1", got)
+			}
+			if got := readFile(t, filepath.Join(workDir, "base.txt")); got != "base content" {
+				t.Fatalf("setup mutation survived: %q", got)
+			}
+		})
+	}
+}
+
+// linkHomeFolders moves a gate home's worktrees/repo and repos folders to real
+// and leaves links at their old paths, the layout the live gate runs on.
+func linkHomeFolders(t *testing.T, home, real string, link func(link, target string)) {
+	t.Helper()
+	for _, folder := range []string{filepath.Join("worktrees", "repo"), "repos"} {
+		target := filepath.Join(real, filepath.Base(folder))
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(home, folder)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		link(filepath.Join(home, folder), target)
 	}
 }
 

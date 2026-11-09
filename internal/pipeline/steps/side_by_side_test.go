@@ -14,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -219,8 +220,8 @@ func (f *sideBySideFixture) commitInRun(name, content, message string) string {
 }
 
 func samePath(a, b string) bool {
-	aa, _ := filepath.EvalSymlinks(a)
-	bb, _ := filepath.EvalSymlinks(b)
+	aa, _ := realpath.Resolve(a)
+	bb, _ := realpath.Resolve(b)
 	if aa == "" {
 		aa = a
 	}

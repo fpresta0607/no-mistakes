@@ -19,6 +19,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/skill"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -1024,7 +1025,7 @@ func TestAxiHomeStartsCurrentBranchWhenOtherBranchIsActive(t *testing.T) {
 	run(t, repoDir, "git", "config", "user.name", "Test")
 	run(t, repoDir, "git", "commit", "--allow-empty", "-m", "initial")
 	run(t, repoDir, "git", "checkout", "-b", "feature/current")
-	rawRoot, err := filepath.EvalSymlinks(repoDir)
+	rawRoot, err := realpath.Resolve(repoDir)
 	if err != nil {
 		rawRoot = repoDir
 	}
@@ -1192,7 +1193,7 @@ func TestAxiStatusIgnoresInvalidGlobalConfig(t *testing.T) {
 	run(t, repoDir, "git", "config", "user.email", "test@test.com")
 	run(t, repoDir, "git", "config", "user.name", "Test")
 	run(t, repoDir, "git", "commit", "--allow-empty", "-m", "initial")
-	rawRoot, err := filepath.EvalSymlinks(repoDir)
+	rawRoot, err := realpath.Resolve(repoDir)
 	if err != nil {
 		rawRoot = repoDir
 	}
@@ -1255,7 +1256,7 @@ func TestAxiRunReportsInvalidGlobalConfig(t *testing.T) {
 	run(t, repoDir, "git", "config", "user.name", "Test")
 	run(t, repoDir, "git", "commit", "--allow-empty", "-m", "initial")
 	run(t, repoDir, "git", "checkout", "-b", "feature/config")
-	rawRoot, err := filepath.EvalSymlinks(repoDir)
+	rawRoot, err := realpath.Resolve(repoDir)
 	if err != nil {
 		rawRoot = repoDir
 	}
@@ -1355,7 +1356,7 @@ func setupAxiQueryRepo(t *testing.T) (string, *paths.Paths, *db.DB, *db.Repo) {
 	run(t, repoDir, "git", "config", "user.email", "test@test.com")
 	run(t, repoDir, "git", "config", "user.name", "Test")
 	run(t, repoDir, "git", "commit", "--allow-empty", "-m", "initial")
-	rawRoot, err := filepath.EvalSymlinks(repoDir)
+	rawRoot, err := realpath.Resolve(repoDir)
 	if err != nil {
 		rawRoot = repoDir
 	}
@@ -1453,7 +1454,7 @@ func TestAxiHomeLeadsWithAnsweringWhenTheGateHasAnOpenQuestion(t *testing.T) {
 			run(t, repoDir, "git", "config", "user.name", "Test")
 			run(t, repoDir, "git", "commit", "--allow-empty", "-m", "initial")
 			run(t, repoDir, "git", "checkout", "-b", "feature/current")
-			rawRoot, err := filepath.EvalSymlinks(repoDir)
+			rawRoot, err := realpath.Resolve(repoDir)
 			if err != nil {
 				rawRoot = repoDir
 			}

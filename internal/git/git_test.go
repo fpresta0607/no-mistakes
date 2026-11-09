@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 )
 
@@ -198,8 +199,8 @@ func TestFindGitRoot(t *testing.T) {
 		t.Fatalf("FindGitRoot failed: %v", err)
 	}
 	// resolve symlinks for comparison (macOS /private/var/...)
-	expected, _ := filepath.EvalSymlinks(dir)
-	got, _ := filepath.EvalSymlinks(root)
+	expected, _ := realpath.Resolve(dir)
+	got, _ := realpath.Resolve(root)
 	if got != expected {
 		t.Fatalf("expected %q, got %q", expected, got)
 	}
@@ -213,7 +214,7 @@ func TestFindGitRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindGitRoot from subdir failed: %v", err)
 	}
-	got, _ = filepath.EvalSymlinks(root)
+	got, _ = realpath.Resolve(root)
 	if got != expected {
 		t.Fatalf("expected %q from subdir, got %q", expected, got)
 	}

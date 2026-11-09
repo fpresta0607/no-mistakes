@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 // Run worktree placeholders. A run worktree lives at
@@ -137,7 +139,7 @@ func pathSpellings(dir string) []string {
 	}
 	dir = filepath.Clean(dir)
 	roots := []string{dir}
-	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+	if resolved, err := realpath.Resolve(dir); err == nil {
 		roots = append(roots, filepath.Clean(resolved))
 	}
 	for _, root := range roots {

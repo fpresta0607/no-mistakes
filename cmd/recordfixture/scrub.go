@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"os"
 	"os/user"
-	"path/filepath"
 	"regexp"
+
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 // scrubFile rewrites path in place to replace PII captured during
@@ -59,7 +60,7 @@ func scrubHomeDir(data []byte) []byte {
 	out := replacePathForms(data, u.HomeDir, placeholder)
 	// macOS reports /private/var/... while os.UserHomeDir reports
 	// /Users/...; both forms can co-occur in transcripts.
-	if resolved, err := filepath.EvalSymlinks(u.HomeDir); err == nil && resolved != u.HomeDir {
+	if resolved, err := realpath.Resolve(u.HomeDir); err == nil && resolved != u.HomeDir {
 		out = replacePathForms(out, resolved, placeholder)
 	}
 	return out

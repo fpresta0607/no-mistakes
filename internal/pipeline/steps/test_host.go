@@ -12,6 +12,7 @@ import (
 	"unicode/utf16"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
@@ -97,7 +98,7 @@ func resolveNativeTestBash(candidates []string, systemRoot string, verify func(s
 	var failures []error
 	seen := make(map[string]bool)
 	for _, candidate := range candidates {
-		path, err := filepath.EvalSymlinks(candidate)
+		path, err := realpath.Resolve(candidate)
 		if err != nil || !filepath.IsAbs(path) || seen[strings.ToLower(path)] {
 			continue
 		}

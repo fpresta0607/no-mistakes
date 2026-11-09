@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -898,7 +899,7 @@ func assertRootNotInitialized(t *testing.T, h *Harness) {
 func assertInitOutput(t *testing.T, h *Harness, out string) {
 	t.Helper()
 	resolved := h.WorkDir
-	if path, err := filepath.EvalSymlinks(h.WorkDir); err == nil {
+	if path, err := realpath.Resolve(h.WorkDir); err == nil {
 		resolved = path
 	}
 	for _, want := range []string{resolved, "git push no-mistakes", "|__| |_/", "Gate initialized"} {
@@ -924,7 +925,7 @@ func assertInitAlreadyInitialized(t *testing.T, h *Harness) {
 func assertEjectOutput(t *testing.T, h *Harness, out string) {
 	t.Helper()
 	resolved := h.WorkDir
-	if path, err := filepath.EvalSymlinks(h.WorkDir); err == nil {
+	if path, err := realpath.Resolve(h.WorkDir); err == nil {
 		resolved = path
 	}
 	for _, want := range []string{resolved, "Gate removed"} {
@@ -2460,7 +2461,7 @@ func assertStatusActiveRunInDir(t *testing.T, h *Harness, dir string, run *ipc.R
 		sha = sha[:8]
 	}
 	resolved := h.WorkDir
-	if path, err := filepath.EvalSymlinks(h.WorkDir); err == nil {
+	if path, err := realpath.Resolve(h.WorkDir); err == nil {
 		resolved = path
 	}
 	for _, want := range []string{"Active run", run.Branch, string(run.Status), sha, resolved} {
@@ -2576,7 +2577,7 @@ func assertStatusInitializedStopped(t *testing.T, h *Harness) {
 		t.Fatalf("nm status after daemon stop: %v\n%s", err, out)
 	}
 	resolved := h.WorkDir
-	if path, err := filepath.EvalSymlinks(h.WorkDir); err == nil {
+	if path, err := realpath.Resolve(h.WorkDir); err == nil {
 		resolved = path
 	}
 	for _, want := range []string{

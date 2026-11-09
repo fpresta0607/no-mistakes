@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/gatecontext"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -3041,7 +3042,7 @@ func isAncestor(ctx context.Context, dir, ancestor, descendant string) bool {
 func samePath(a, b string) bool {
 	resolve := func(path string) string {
 		abs, _ := filepath.Abs(path)
-		if evaluated, err := filepath.EvalSymlinks(abs); err == nil {
+		if evaluated, err := realpath.Resolve(abs); err == nil {
 			return evaluated
 		}
 		return abs
