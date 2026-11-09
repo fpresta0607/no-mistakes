@@ -22,7 +22,7 @@ func TestCIWorkflowRunsTestsOnAllSupportedDesktopPlatforms(t *testing.T) {
 
 	want := map[string]int{
 		"ubuntu-latest":  1,
-		"macos-latest":   1,
+		"macos-latest":   2,
 		"windows-latest": 17,
 	}
 	if len(got) != len(want) {
@@ -98,7 +98,9 @@ func TestCIWorkflowUsesRaceTestsOnUnixRunners(t *testing.T) {
 // old or less. That is exhausted capacity, not a hang - the signature the
 // testing-conventions skill records - so both packages run their own tests in
 // complementary -run/-skip shards, the same split the Windows rows use, and
-// every shard starts beside the rest of the suite. Serializing the suite
+// every shard starts at once (on its own macOS runner, issue #170, where
+// ^Test[A-K] of steps and both daemon halves reached 20m again, so each is cut
+// once more along the Windows rows' -v timings). Serializing the suite
 // instead (-p=1) summed the package walls and overran the job cap, so the
 // remainder keeps its concurrency and only the two packages that exceed the
 // budget on their own are sharded. Each shard owns its own budget while no
@@ -106,8 +108,8 @@ func TestCIWorkflowUsesRaceTestsOnUnixRunners(t *testing.T) {
 // cover go list ./... exactly once and select every declared test exactly once.
 func TestCIWorkflow_UnixShardsThePackagesThatOutgrewTheBudget(t *testing.T) {
 	wantShards := map[string]int{
-		"./internal/pipeline/steps": 3,
-		"./internal/daemon":         2,
+		"./internal/pipeline/steps": 4,
+		"./internal/daemon":         4,
 	}
 	var wanted []string
 	for pkg := range wantShards {
@@ -271,22 +273,15 @@ func TestCIWorkflow_UnixStepFailsClosedWhenTheRemainderPackageSetIsEmpty(t *test
 			wantFailure: true,
 		},
 		{
-			name:   "resolved listing",
-			goList: "github.com/kunchenguid/no-mistakes\ngithub.com/kunchenguid/no-mistakes/internal/daemon\ngithub.com/kunchenguid/no-mistakes/internal/pipeline/steps\ngithub.com/kunchenguid/no-mistakes/internal/git\n",
-			wantTests: []string{
-				"test -race -timeout=20m -p=2 github.com/kunchenguid/no-mistakes github.com/kunchenguid/no-mistakes/internal/git",
-				"test -race -timeout=20m -run ^Test[A-K] ./internal/pipeline/steps",
-				"test -race -timeout=20m -run ^Test[L-Q] ./internal/pipeline/steps",
-				"test -race -timeout=20m -skip ^Test[A-Q] ./internal/pipeline/steps",
-				"test -race -timeout=20m -run ^Test[A-O] ./internal/daemon",
-				"test -race -timeout=20m -skip ^Test[A-O] ./internal/daemon",
-			},
+			name:      "resolved listing",
+			goList:    unixResolvedGoList,
+			wantTests: append([]string{unixRemainderInvocation}, unixShardInvocations...),
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tests, err, output := runUnixTestStep(t, bash, step, tc.goList, tc.goListExit)
+			tests, err, output := runUnixTestStep(t, bash, step, "", tc.goList, tc.goListExit)
 			if tc.wantFailure {
 				if err == nil {
 					t.Fatalf("the Unix test step exited 0 after go list %q (exit %s); it must fail instead of running a narrowed suite\n%s", tc.goList, tc.goListExit, output)
@@ -309,10 +304,131 @@ func TestCIWorkflow_UnixStepFailsClosedWhenTheRemainderPackageSetIsEmpty(t *test
 	}
 }
 
-// runUnixTestStep executes the Unix test step's script with a fake go on PATH
-// that reports the given listing for `go list` and records every other
-// invocation, so the guard observes the command the step really runs.
-func runUnixTestStep(t *testing.T, bash string, step wfStep, goList, goListExit string) ([]string, error, string) {
+const unixResolvedGoList = "github.com/kunchenguid/no-mistakes\ngithub.com/kunchenguid/no-mistakes/internal/daemon\ngithub.com/kunchenguid/no-mistakes/internal/pipeline/steps\ngithub.com/kunchenguid/no-mistakes/internal/git\n"
+
+const unixRemainderInvocation = "test -race -timeout=20m -p=2 github.com/kunchenguid/no-mistakes github.com/kunchenguid/no-mistakes/internal/git"
+
+var unixShardInvocations = []string{
+	"test -race -timeout=20m -run ^TestCIStep ./internal/pipeline/steps",
+	"test -race -timeout=20m -run ^Test[A-K] -skip ^TestCIStep ./internal/pipeline/steps",
+	"test -race -timeout=20m -run ^Test[L-Q] ./internal/pipeline/steps",
+	"test -race -timeout=20m -skip ^Test[A-Q] ./internal/pipeline/steps",
+	"test -race -timeout=20m -run ^Test[A-L] ./internal/daemon",
+	"test -race -timeout=20m -run ^Test[M-O] ./internal/daemon",
+	"test -race -timeout=20m -run ^Test[P-R] ./internal/daemon",
+	"test -race -timeout=20m -skip ^Test[A-R] ./internal/daemon",
+}
+
+// The macOS leg is capacity-bound: splitting its binaries on one runner moved
+// work between them but finished the step no sooner, within minutes of the job
+// cap (issue #170). So each Unix OS runs the whole step on one row, or splits it
+// into exactly one remainder row and one shards row, and macos-latest splits it.
+func TestCIWorkflow_UnixRowsRunEachPartExactlyOnce(t *testing.T) {
+	t.Parallel()
+
+	if got := unixTestStep(t).Env["NM_CI_UNIX_PART"]; normalizeWorkflowCondition(got) != "matrix.unix_part" {
+		t.Fatalf("Unix test step NM_CI_UNIX_PART = %q, want it read from matrix.unix_part", got)
+	}
+	parts := make(map[string][]string)
+	for _, row := range ciTestJob(t).Strategy.Matrix.Include {
+		if row["os"] == "windows-latest" {
+			continue
+		}
+		parts[row["os"]] = append(parts[row["os"]], row["unix_part"])
+	}
+	want := map[string][]string{
+		"ubuntu-latest": {""},
+		"macos-latest":  {"rest", "shards"},
+	}
+	if len(parts) != len(want) {
+		t.Fatalf("Unix matrix rows = %v, want %v", parts, want)
+	}
+	for osName, wantParts := range want {
+		gotParts := slices.Clone(parts[osName])
+		slices.Sort(gotParts)
+		if !slices.Equal(gotParts, wantParts) {
+			t.Errorf("%s rows run Unix parts %q, want %q so every test runs exactly once on that OS", osName, gotParts, wantParts)
+		}
+	}
+}
+
+// A split row must run only its own part, and a part the step does not know
+// must fail rather than run nothing or everything.
+func TestCIWorkflow_UnixStepRunsOnlyItsRowsPart(t *testing.T) {
+	t.Parallel()
+
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash unavailable to execute the Unix test step")
+	}
+	if runtime.GOOS == "windows" && !isNativeGitBash(t, bash) {
+		t.Skipf("resolved bash %q is not native Git Bash, and the guarded Unix step never runs on Windows", bash)
+	}
+	step := unixTestStep(t)
+
+	cases := []struct {
+		name        string
+		part        string
+		goList      string
+		goListExit  string
+		wantTests   []string
+		wantFailure bool
+	}{
+		{
+			name:      "rest runs only the remainder",
+			part:      "rest",
+			goList:    unixResolvedGoList,
+			wantTests: []string{unixRemainderInvocation},
+		},
+		{
+			name:        "rest still fails closed on an empty listing",
+			part:        "rest",
+			wantFailure: true,
+		},
+		{
+			name:       "shards runs only the named shards and needs no listing",
+			part:       "shards",
+			goListExit: "1",
+			wantTests:  unixShardInvocations,
+		},
+		{
+			name:        "an unknown part runs nothing",
+			part:        "all",
+			goList:      unixResolvedGoList,
+			wantFailure: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tests, err, output := runUnixTestStep(t, bash, step, tc.part, tc.goList, tc.goListExit)
+			if tc.wantFailure {
+				if err == nil {
+					t.Fatalf("the Unix test step exited 0 for part %q; it must fail\n%s", tc.part, output)
+				}
+				if len(tests) != 0 {
+					t.Fatalf("the Unix test step ran go %v for part %q, want nothing", tests, tc.part)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("the Unix test step failed for part %q: %v\n%s", tc.part, err, output)
+			}
+			slices.Sort(tests)
+			want := slices.Clone(tc.wantTests)
+			slices.Sort(want)
+			if !slices.Equal(tests, want) {
+				t.Fatalf("Unix go test invocations for part %q = %v, want %v", tc.part, tests, want)
+			}
+		})
+	}
+}
+
+// runUnixTestStep executes the Unix test step's script for one matrix part with
+// a fake go on PATH that reports the given listing for `go list` and records
+// every other invocation, so the guard observes the command the step really
+// runs.
+func runUnixTestStep(t *testing.T, bash string, step wfStep, part, goList, goListExit string) ([]string, error, string) {
 	t.Helper()
 	dir := t.TempDir()
 	shimDir := filepath.Join(dir, "bin")
@@ -355,6 +471,8 @@ printf '%s\n' "$@" > "$record"
 	for name, value := range step.Env {
 		cmd.Env = append(cmd.Env, name+"="+value)
 	}
+	// The step reads its part from the matrix, which only Actions expands.
+	cmd.Env = append(cmd.Env, "NM_CI_UNIX_PART="+part)
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	cmd.Stderr = &output
