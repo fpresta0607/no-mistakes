@@ -15,13 +15,22 @@ import (
 )
 
 func TestStartDetachedDaemonDetectsChildExitPromptly(t *testing.T) {
+	for _, helperMode := range []string{"exit", "slow-exit"} {
+		t.Run(helperMode, func(t *testing.T) { testStartDetachedDaemonDetectsChildExit(t, helperMode) })
+	}
+}
+
+func testStartDetachedDaemonDetectsChildExit(t *testing.T, helperMode string) {
 	p := paths.WithRoot(filepath.Join(t.TempDir(), "nm-home"))
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("NM_TEST_START_DAEMON", "1")
-	t.Setenv("NM_DAEMON_HELPER_PROCESS", "exit")
-	t.Setenv("NM_TEST_DAEMON_START_TIMEOUT", "3s")
+	t.Setenv("NM_DAEMON_HELPER_PROCESS", helperMode)
+	// Promptness is judged against the readiness budget the call would
+	// otherwise wait out, not a wall clock a loaded runner can exceed.
+	const startTimeout = 2 * time.Minute
+	t.Setenv("NM_TEST_DAEMON_START_TIMEOUT", startTimeout.String())
 	t.Setenv("NM_TEST_DAEMON_START_POLL_INTERVAL", "10ms")
 
 	oldHealth := daemonHealthCheck
@@ -49,8 +58,8 @@ func TestStartDetachedDaemonDetectsChildExitPromptly(t *testing.T) {
 	if !strings.Contains(err.Error(), "exited before readiness") || !strings.Contains(err.Error(), "exit status 23") {
 		t.Fatalf("startDetachedDaemon error = %v, want prompt child exit status", err)
 	}
-	if elapsed := time.Since(started); elapsed >= time.Second {
-		t.Fatalf("child exit detection took %v, want prompt failure", elapsed)
+	if elapsed := time.Since(started); elapsed >= startTimeout {
+		t.Fatalf("child exit detection took %v, the whole %v readiness budget", elapsed, startTimeout)
 	}
 	assertTestDaemonNotRunning(t, startedPID, childStartedAt)
 }

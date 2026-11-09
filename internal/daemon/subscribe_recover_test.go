@@ -358,7 +358,7 @@ func TestRecoverStaleRunsOnStartup(t *testing.T) {
 
 	runTestDaemon(t, p, d, func() []pipeline.Step {
 		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
-	}, 3*time.Second)
+	})
 
 	// Verify the stale run was marked as failed.
 	run, err := d.GetRun(staleRun.ID)
@@ -423,7 +423,7 @@ func TestRecoverOnStartup_FinalizesLegacyTerminalPRRun(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			runTestDaemon(t, p, database, func() []pipeline.Step { return []pipeline.Step{&mockPassStep{name: types.StepCI}} }, 3*time.Second)
+			runTestDaemon(t, p, database, func() []pipeline.Step { return []pipeline.Step{&mockPassStep{name: types.StepCI}} })
 
 			got, err := database.GetRun(run.ID)
 			if err != nil {
@@ -732,7 +732,7 @@ func TestRecoverCleansUpOrphanedWorktrees(t *testing.T) {
 
 	runTestDaemon(t, p, d, func() []pipeline.Step {
 		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
-	}, 3*time.Second)
+	})
 
 	// Orphaned worktree directory should be removed.
 	if _, err := os.Stat(orphanDir); !os.IsNotExist(err) {
@@ -794,7 +794,7 @@ func TestRecoverPreservesInterruptedCIMonitorWorktree(t *testing.T) {
 
 	runTestDaemon(t, p, d, func() []pipeline.Step {
 		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
-	}, 3*time.Second)
+	})
 
 	recovered, err := d.GetRun(run.ID)
 	if err != nil {
@@ -1061,7 +1061,7 @@ func TestRecoverOnStartup_FinalizesCommittedCI(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			runTestDaemon(t, p, database, func() []pipeline.Step { return []pipeline.Step{&mockPassStep{name: types.StepCI}} }, 3*time.Second)
+			runTestDaemon(t, p, database, func() []pipeline.Step { return []pipeline.Step{&mockPassStep{name: types.StepCI}} })
 
 			got, err := database.GetRun(run.ID)
 			if err != nil {
