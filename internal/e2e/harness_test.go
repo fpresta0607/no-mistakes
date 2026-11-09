@@ -129,12 +129,8 @@ func TestFixtureRootFromRepoRoot(t *testing.T) {
 }
 
 func TestDaemonStartTimeoutLeavesRoomForLoginShellProbe(t *testing.T) {
-	timeout, err := time.ParseDuration(e2eDaemonStartTimeout)
-	if err != nil {
-		t.Fatalf("parse e2eDaemonStartTimeout: %v", err)
-	}
-	if timeout <= 30*time.Second {
-		t.Fatalf("e2eDaemonStartTimeout = %v, want more than the 30s login-shell probe budget", timeout)
+	if e2eDaemonStartTimeout <= 30*time.Second {
+		t.Fatalf("e2eDaemonStartTimeout = %v, want more than the 30s login-shell probe budget", e2eDaemonStartTimeout)
 	}
 }
 
@@ -197,8 +193,9 @@ func TestDaemonStopDirFallsBackWhenWorkDirMoved(t *testing.T) {
 	}
 }
 
-func TestWaitForRunPrefersNewestRunOnBranch(t *testing.T) {
-	nmHome, err := os.MkdirTemp("/tmp", "nm-e2e-")
+func TestWaitForRunScalesTimeoutAndPrefersNewestRunOnBranch(t *testing.T) {
+	t.Setenv("NM_E2E_TIMEOUT_SCALE", "10000")
+	nmHome, err := os.MkdirTemp("", "nm-e2e-")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
@@ -246,7 +243,7 @@ func TestWaitForRunPrefersNewestRunOnBranch(t *testing.T) {
 	}
 
 	h := &Harness{t: t, NMHome: nmHome, WorkDir: workDir}
-	run := h.WaitForRun("feature/e2e", 2*time.Second)
+	run := h.WaitForRun("feature/e2e", time.Millisecond)
 	if run.ID != "run-new" {
 		t.Fatalf("WaitForRun returned %q, want newest run", run.ID)
 	}
