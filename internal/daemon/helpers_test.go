@@ -44,6 +44,10 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	case "exit":
 		os.Exit(23)
+	case "slow-exit":
+		// A loaded runner can take over a second to start and reap a child.
+		time.Sleep(1500 * time.Millisecond)
+		os.Exit(23)
 	case "block":
 		time.Sleep(30 * time.Second)
 		os.Exit(0)

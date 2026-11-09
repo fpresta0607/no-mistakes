@@ -792,9 +792,26 @@ func (s *notifyBlockStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOut
 	return nil, sctx.Ctx.Err()
 }
 
+func TestWaitForStartedBranchWaitsOutASlowHandoff(t *testing.T) {
+	t.Parallel()
+	started := make(chan string, 1)
+	go func() {
+		// A loaded runner can take seconds to hand a freed slot to the next run.
+		time.Sleep(3500 * time.Millisecond)
+		started <- "feature/slow"
+	}()
+	waitForStartedBranch(t, started, "feature/slow")
+}
+
 func waitForStartedBranch(t *testing.T, started <-chan string, branch string) {
 	t.Helper()
-	timeout := time.After(3 * time.Second)
+	// A start is an event: a loaded race-enabled runner can take seconds to
+	// hand a freed slot over, so wait until just before the test's own
+	// deadline rather than a fixed clock.
+	var timeout <-chan time.Time
+	if deadline, hasDeadline := t.Deadline(); hasDeadline {
+		timeout = time.After(time.Until(deadline) - 30*time.Second)
+	}
 	for {
 		select {
 		case got := <-started:
@@ -802,7 +819,7 @@ func waitForStartedBranch(t *testing.T, started <-chan string, branch string) {
 				return
 			}
 		case <-timeout:
-			t.Fatalf("run for branch %s did not start", branch)
+			t.Fatalf("run for branch %s did not start before the test deadline", branch)
 		}
 	}
 }
