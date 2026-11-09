@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -1951,7 +1952,7 @@ func TestOwnedGateAcceptsARelativeRootSpelling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resolved, err := filepath.EvalSymlinks(absGate); err == nil {
+	if resolved, err := realpath.Resolve(absGate); err == nil {
 		absGate = resolved
 	}
 

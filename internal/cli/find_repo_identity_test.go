@@ -10,6 +10,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 func swapCaseForTest(s string) string {
@@ -59,7 +60,7 @@ func TestFindRepoResolvesOneRepositoryFromMainCheckoutAndLinkedWorktree(t *testi
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repoDir := setupTestRepo(t)
-			root, err := filepath.EvalSymlinks(repoDir)
+			root, err := realpath.Resolve(repoDir)
 			if err != nil {
 				t.Fatal(err)
 			}

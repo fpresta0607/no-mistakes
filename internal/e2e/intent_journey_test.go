@@ -12,6 +12,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -147,7 +148,7 @@ func canonicalForCompare(t *testing.T, p string) string {
 	if p == "" {
 		return ""
 	}
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+	if resolved, err := realpath.Resolve(p); err == nil {
 		return resolved
 	}
 	return p

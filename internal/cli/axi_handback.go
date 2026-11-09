@@ -15,6 +15,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -71,7 +72,7 @@ func newAxiHandbackCmd() *cobra.Command {
 			if err != nil {
 				return emitError(command, 1, err.Error())
 			}
-			caller, err = filepath.EvalSymlinks(caller)
+			caller, err = realpath.Resolve(caller)
 			if err != nil {
 				return emitError(command, 1, err.Error())
 			}

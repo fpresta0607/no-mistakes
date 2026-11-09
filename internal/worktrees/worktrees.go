@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 // Layout maps a repository to the directory holding its run worktrees.
@@ -236,13 +237,13 @@ func Canonical(path string) string {
 	if abs, err := filepath.Abs(cleaned); err == nil {
 		cleaned = abs
 	}
-	// EvalSymlinks fails outright on a path that does not exist yet, and a
+	// realpath.Resolve fails outright on a path that does not exist yet, and a
 	// configured worktree root usually does not until its first run. Resolve
 	// the deepest existing ancestor and keep the remainder, so a root and the
 	// checkout it belongs to are still compared in the same spelling.
 	current, rest := cleaned, ""
 	for {
-		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+		if resolved, err := realpath.Resolve(current); err == nil {
 			return filepath.Clean(filepath.Join(resolved, rest))
 		}
 		parent := filepath.Dir(current)

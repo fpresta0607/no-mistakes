@@ -19,6 +19,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -290,7 +291,7 @@ func TestChildRunKeepsEvidenceUnderEvidenceDir(t *testing.T) {
 	for name, build := range childLaunches {
 		t.Run(name, func(t *testing.T) {
 			fixture := build(t, assertedLaunch)
-			root, err := filepath.EvalSymlinks(t.TempDir())
+			root, err := realpath.Resolve(t.TempDir())
 			if err != nil {
 				t.Fatal(err)
 			}

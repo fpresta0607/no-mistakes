@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 // fakeSystem is an in-memory process table with recorded signals, so the
@@ -497,7 +499,7 @@ func TestSweepReachesDeletedNamedWorktreeThroughSymlinkedRoot(t *testing.T) {
 	const runID = "01JZ8XQ7V6K9M3B0T5N2R4C8YD"
 	// /proc and lsof report a cwd with every symlink already resolved, which is
 	// the spelling that survives the directory's removal.
-	resolvedRoot, err := filepath.EvalSymlinks(realRoot)
+	resolvedRoot, err := realpath.Resolve(realRoot)
 	if err != nil {
 		t.Fatal(err)
 	}

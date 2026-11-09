@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -57,11 +58,11 @@ func TestNormalizeNotifyGatePathResolvesLegacyDotGate(t *testing.T) {
 	if got == "." || !filepath.IsAbs(got) {
 		t.Fatalf("normalizeNotifyGatePath(.) = %q, want absolute path", got)
 	}
-	want, err := filepath.EvalSymlinks(bare)
+	want, err := realpath.Resolve(bare)
 	if err != nil {
 		want = bare
 	}
-	gotResolved, err := filepath.EvalSymlinks(got)
+	gotResolved, err := realpath.Resolve(got)
 	if err != nil {
 		gotResolved = got
 	}

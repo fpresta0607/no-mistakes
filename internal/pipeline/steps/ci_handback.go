@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -87,7 +87,7 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 	if err != nil {
 		return nil, err
 	}
-	caller, err = filepath.EvalSymlinks(caller)
+	caller, err = realpath.Resolve(caller)
 	if err != nil {
 		return nil, err
 	}
@@ -176,14 +176,14 @@ func (s *CIStep) HandbackCI(sctx *pipeline.StepContext, request ipc.CIHandbackPa
 			if err != nil {
 				return fmt.Errorf("ordinary CI managed repository cannot be verified")
 			}
-			common, err = filepath.EvalSymlinks(common)
-			gate, gateErr := filepath.EvalSymlinks(sctx.GateDir)
+			common, err = realpath.Resolve(common)
+			gate, gateErr := realpath.Resolve(sctx.GateDir)
 			if err != nil || gateErr != nil || common != gate {
 				return fmt.Errorf("ordinary CI managed worktree no longer belongs to its gate")
 			}
 			if run.WorktreeDir != nil {
-				recorded, err := filepath.EvalSymlinks(*run.WorktreeDir)
-				managed, managedErr := filepath.EvalSymlinks(sctx.WorkDir)
+				recorded, err := realpath.Resolve(*run.WorktreeDir)
+				managed, managedErr := realpath.Resolve(sctx.WorkDir)
 				if err != nil || managedErr != nil || recorded != managed {
 					return fmt.Errorf("ordinary CI managed directory binding changed")
 				}

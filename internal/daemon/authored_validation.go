@@ -25,6 +25,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/scm/github"
@@ -411,7 +412,7 @@ func proveAuthoredCheckout(ctx context.Context, actualDir string, request *autho
 	if !filepath.IsAbs(actualDir) || !filepath.IsAbs(request.CallerDir) {
 		return fmt.Errorf("authored caller must identify an absolute canonical checkout")
 	}
-	canonical, err := filepath.EvalSymlinks(actualDir)
+	canonical, err := realpath.Resolve(actualDir)
 	if err != nil || !samePath(canonical, request.CallerDir) {
 		return fmt.Errorf("invoking checkout differs from the declared authored source")
 	}
@@ -422,7 +423,7 @@ func proveAuthoredCheckout(ctx context.Context, actualDir string, request *autho
 	if err != nil {
 		return err
 	}
-	top, err = filepath.EvalSymlinks(top)
+	top, err = realpath.Resolve(top)
 	if err != nil || !samePath(top, canonical) {
 		return fmt.Errorf("authored caller must be its canonical repository root")
 	}
@@ -434,11 +435,11 @@ func proveAuthoredCheckout(ctx context.Context, actualDir string, request *autho
 	if err != nil {
 		return err
 	}
-	common, err = filepath.EvalSymlinks(resolveGitPath(canonical, common))
+	common, err = realpath.Resolve(resolveGitPath(canonical, common))
 	if err != nil {
 		return err
 	}
-	registered, err = filepath.EvalSymlinks(resolveGitPath(repo.WorkingPath, registered))
+	registered, err = realpath.Resolve(resolveGitPath(repo.WorkingPath, registered))
 	if err != nil || !samePath(common, registered) {
 		return fmt.Errorf("authored checkout does not belong to the registered repository")
 	}

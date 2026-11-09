@@ -13,6 +13,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -450,7 +451,7 @@ func ordinaryCIHandbackRevalidatesAuthoredCorrection(t *testing.T, hasDocumentCo
 	}
 	invocations := len(h.AgentInvocations())
 	bindingPath := filepath.Join(t.TempDir(), "expected.json")
-	caller, err := filepath.EvalSymlinks(operator)
+	caller, err := realpath.Resolve(operator)
 	if err != nil {
 		t.Fatal(err)
 	}

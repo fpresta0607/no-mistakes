@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 func processAlive(pid int) (bool, error) {
@@ -170,8 +172,8 @@ func samePath(a, b string) bool {
 		return true
 	}
 	// Resolve symlinks when both sides exist (macOS /var vs /private/var).
-	ra, errA := filepath.EvalSymlinks(a)
-	rb, errB := filepath.EvalSymlinks(b)
+	ra, errA := realpath.Resolve(a)
+	rb, errB := realpath.Resolve(b)
 	if errA == nil && errB == nil {
 		return filepath.Clean(ra) == filepath.Clean(rb)
 	}

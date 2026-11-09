@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 func TestWorktreeAddAndRemove(t *testing.T) {
@@ -57,8 +59,8 @@ func TestFindMainRepoRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindMainRepoRoot failed for main repo: %v", err)
 	}
-	expectedMain, _ := filepath.EvalSymlinks(mainRepo)
-	gotMain, _ := filepath.EvalSymlinks(mainRoot)
+	expectedMain, _ := realpath.Resolve(mainRepo)
+	gotMain, _ := realpath.Resolve(mainRoot)
 	if gotMain != expectedMain {
 		t.Fatalf("expected %q, got %q", expectedMain, gotMain)
 	}
@@ -77,8 +79,8 @@ func TestFindMainRepoRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindGitRoot from worktree failed: %v", err)
 	}
-	resolvedWt, _ := filepath.EvalSymlinks(wtDir)
-	gotWt, _ := filepath.EvalSymlinks(wtRoot)
+	resolvedWt, _ := realpath.Resolve(wtDir)
+	gotWt, _ := realpath.Resolve(wtRoot)
 	if gotWt != resolvedWt {
 		t.Fatalf("FindGitRoot should return worktree path %q, got %q", resolvedWt, gotWt)
 	}
@@ -88,7 +90,7 @@ func TestFindMainRepoRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindMainRepoRoot from worktree failed: %v", err)
 	}
-	gotFromWt, _ := filepath.EvalSymlinks(mainFromWt)
+	gotFromWt, _ := realpath.Resolve(mainFromWt)
 	if gotFromWt != expectedMain {
 		t.Fatalf("FindMainRepoRoot from worktree: expected %q, got %q", expectedMain, gotFromWt)
 	}
@@ -160,8 +162,8 @@ func TestFindMainRepoRootSubmodule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindMainRepoRoot from submodule: %v", err)
 	}
-	wantResolved, _ := filepath.EvalSymlinks(subWorktree)
-	gotResolved, _ := filepath.EvalSymlinks(got)
+	wantResolved, _ := realpath.Resolve(subWorktree)
+	gotResolved, _ := realpath.Resolve(got)
 	if gotResolved != wantResolved {
 		t.Fatalf("FindMainRepoRoot from submodule = %q, want %q (superproject's .git/modules would be wrong)", gotResolved, wantResolved)
 	}
@@ -199,8 +201,8 @@ func TestFindMainRepoRootNestedSubmodule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindMainRepoRoot from nested submodule: %v", err)
 	}
-	wantResolved, _ := filepath.EvalSymlinks(innerWorktree)
-	gotResolved, _ := filepath.EvalSymlinks(got)
+	wantResolved, _ := realpath.Resolve(innerWorktree)
+	gotResolved, _ := realpath.Resolve(got)
 	if gotResolved != wantResolved {
 		t.Fatalf("FindMainRepoRoot from nested submodule = %q, want %q", gotResolved, wantResolved)
 	}
@@ -225,8 +227,8 @@ func TestFindMainRepoRootFromWorktreeStillResolvesToMain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindMainRepoRoot from worktree: %v", err)
 	}
-	want, _ := filepath.EvalSymlinks(mainRepo)
-	gotResolved, _ := filepath.EvalSymlinks(got)
+	want, _ := realpath.Resolve(mainRepo)
+	gotResolved, _ := realpath.Resolve(got)
 	if gotResolved != want {
 		t.Fatalf("FindMainRepoRoot from worktree = %q, want %q", gotResolved, want)
 	}

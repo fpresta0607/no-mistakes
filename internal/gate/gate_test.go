@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 func TestMain(m *testing.M) {
@@ -69,7 +70,7 @@ func TestProvisionGateDoesNotStampUnsupportedHookIsolation(t *testing.T) {
 // /var → /private/var but git returns resolved paths).
 func resolveSymlinks(t *testing.T, p string) string {
 	t.Helper()
-	resolved, err := filepath.EvalSymlinks(p)
+	resolved, err := realpath.Resolve(p)
 	if err != nil {
 		t.Fatalf("eval symlinks %q: %v", p, err)
 	}
