@@ -26,6 +26,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -828,7 +829,7 @@ func authoredAdmissionFixtureFor(t *testing.T, factory StepFactory, configure la
 	if err != nil {
 		t.Fatal(err)
 	}
-	caller, err := filepath.EvalSymlinks(repo.WorkingPath)
+	caller, err := realpath.Resolve(repo.WorkingPath)
 	if err != nil {
 		t.Fatal(err)
 	}

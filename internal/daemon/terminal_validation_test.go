@@ -23,6 +23,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/quotarouting"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -116,7 +117,7 @@ func TestTerminalValidationReplacesAnExhaustedProfileWithoutRewritingItsReceipt(
 	}
 	request := authoredvalidation.Request{Branch: "feature", TerminalGeneration: "available-harness-lane", AcceptUnknownSource: true, HistoricalSourceCompleteness: "unknown", Reason: "explicitly validate the committed candidate with unknown historical source", ControllerPolicy: authoredvalidation.ControllerPolicy{SHA256: strings.Repeat("a", 64), Class: "ordinary", ReviewCycles: 2}}
 	request.PredecessorID, request.SnapshotDigest, request.RepoID = parent.ID, snapshot.Digest(), repo.ID
-	request.CallerDir, err = filepath.EvalSymlinks(repo.WorkingPath)
+	request.CallerDir, err = realpath.Resolve(repo.WorkingPath)
 	if err != nil {
 		t.Fatal(err)
 	}

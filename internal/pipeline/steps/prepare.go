@@ -11,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -202,11 +203,11 @@ func preparationSnapshotParent(ctx context.Context, workDir, gateDir string) (st
 	if strings.TrimSpace(gateDir) == "" {
 		return "", fmt.Errorf("preparation snapshot requires a gate directory")
 	}
-	workDir, err := filepath.EvalSymlinks(workDir)
+	workDir, err := realpath.Resolve(workDir)
 	if err != nil {
 		return "", fmt.Errorf("resolve preparation worktree: %w", err)
 	}
-	gateDir, err = filepath.EvalSymlinks(gateDir)
+	gateDir, err = realpath.Resolve(gateDir)
 	if err != nil {
 		return "", fmt.Errorf("resolve preparation gate directory: %w", err)
 	}

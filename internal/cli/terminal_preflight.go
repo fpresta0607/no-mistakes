@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -14,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 func newAxiTerminalPreflightCmd() *cobra.Command {
@@ -50,7 +50,7 @@ func newAxiTerminalPreflightCmd() *cobra.Command {
 			if err != nil {
 				return emitError(command, 1, err.Error())
 			}
-			directory, err = filepath.EvalSymlinks(directory)
+			directory, err = realpath.Resolve(directory)
 			if err != nil {
 				return emitError(command, 1, err.Error())
 			}

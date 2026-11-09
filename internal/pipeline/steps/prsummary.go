@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -1122,11 +1123,11 @@ func artifactPathRelativeToRoot(target, root string) (string, bool) {
 }
 
 func resolveArtifactPathSymlinks(target string) string {
-	if resolved, err := filepath.EvalSymlinks(target); err == nil {
+	if resolved, err := realpath.Resolve(target); err == nil {
 		return filepath.Clean(resolved)
 	}
 	for candidate := target; ; candidate = filepath.Dir(candidate) {
-		resolved, err := filepath.EvalSymlinks(candidate)
+		resolved, err := realpath.Resolve(candidate)
 		if err == nil {
 			rel, err := filepath.Rel(candidate, target)
 			if err != nil || rel == "." {

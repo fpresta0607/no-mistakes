@@ -11,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 type daemonResetError struct {
@@ -170,7 +171,7 @@ func resolveExecutablePath(path string) string {
 	if path == "" {
 		return ""
 	}
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+	if resolved, err := realpath.Resolve(path); err == nil {
 		return resolved
 	}
 	return path

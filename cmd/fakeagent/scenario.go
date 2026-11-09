@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 // Scenario is a list of canned responses matched against the prompt text.
@@ -467,7 +469,7 @@ func scenarioExistingBasePath(path string) (string, error) {
 	current := path
 	for {
 		if _, err := os.Lstat(current); err == nil {
-			return filepath.EvalSymlinks(current)
+			return realpath.Resolve(current)
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return "", err
 		}
@@ -480,7 +482,7 @@ func scenarioExistingBasePath(path string) (string, error) {
 }
 
 func scenarioPathWithinWorkingDirectory(wd, path string) error {
-	resolvedWD, err := filepath.EvalSymlinks(wd)
+	resolvedWD, err := realpath.Resolve(wd)
 	if err != nil {
 		resolvedWD = wd
 	}

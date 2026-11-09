@@ -12,6 +12,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 func makeLongRoot(t *testing.T) string {
@@ -25,7 +26,7 @@ func makeLongRoot(t *testing.T) string {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	resolved, err := filepath.EvalSymlinks(root)
+	resolved, err := realpath.Resolve(root)
 	if err != nil {
 		t.Fatal(err)
 	}
