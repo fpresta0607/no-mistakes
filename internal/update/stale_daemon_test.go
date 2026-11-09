@@ -89,8 +89,8 @@ func TestUpdaterRunStartsDaemonAfterProbeClearsStaleArtifacts(t *testing.T) {
 		executablePath: execPath,
 		now:            func() time.Time { return time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC) },
 		paths:          p,
-		resetDaemon: func(daemonExpected bool) error {
-			return defaultResetDaemon(p, daemonExpected, "")
+		resetDaemon: func(daemonExpected bool, releaseShutdown func()) error {
+			return defaultResetDaemon(p, daemonExpected, "", releaseShutdown)
 		},
 	}
 

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"strings"
@@ -14,6 +15,33 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestPreparedShutdownRetainsHeldPushesInOrder(t *testing.T) {
+	p, database := newParkedRunEnv(t)
+	repo, head := setupTestGitRepo(t, p, database, "prepared-replay")
+	manager := NewRunManager(database, p, nil)
+	for _, branch := range []string{"first", "second"} {
+		if err := manager.holdPush(&ipc.PushReceivedParams{Gate: p.RepoDir(repo.ID), Ref: "refs/heads/" + branch, Old: zeroSHA, New: head}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(p.HeldPushesFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.prepareShutdown(); err != nil {
+		t.Fatal(err)
+	}
+	manager.replayHeldPushes(t.Context())
+	got, err := os.ReadFile(p.HeldPushesFile() + ".replay")
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("prepared shutdown discarded or reordered backlog: %q, %v", got, err)
+	}
+	active, err := database.GetActiveRuns()
+	if err != nil || len(active) != 0 {
+		t.Fatalf("replay admitted runs after shutdown: %+v, %v", active, err)
+	}
+}
 
 // Issue #1691: updating no-mistakes must not fail runs already in progress.
 // A scheduled restart lets the executing run finish on the running daemon,

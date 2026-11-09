@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +37,9 @@ var authoredPRCommandOutput = (*exec.Cmd).Output
 
 func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAuthoredParams, operator int) (*ipc.ValidateAuthoredResult, error) {
 	request := params.Request
+	if len(request.SourceAnchors) == 0 {
+		request.SourceAnchors = nil
+	}
 	if operator <= 0 {
 		return nil, fmt.Errorf("authored admission requires an authenticated local operator")
 	}
@@ -66,10 +70,18 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err := proveAuthoredCheckout(ctx, params.CallerDir, &request, repo); err != nil {
 			return "", err
 		}
+		gateDir := m.paths.RepoDir(repo.ID)
+		anchors, err := branchsync.TerminalValidationAnchors(ctx, m.db, gateDir, request.CallerDir, snapshot.Run.ID)
+		if err != nil {
+			return "", err
+		}
+		if request.TerminalGeneration != "" && !maps.Equal(anchors, request.SourceAnchors) {
+			return "", fmt.Errorf("terminal recovery anchors changed; inspect and bind every known anchor")
+		}
 		m.mu.Lock()
-		predecessorExecutor := m.executors[snapshot.Run.ID]
+		isPredecessorScheduled := m.runScheduledLocked(snapshot.Run.ID)
 		m.mu.Unlock()
-		if predecessorExecutor != nil || !snapshot.Run.Status.Terminal() || snapshot.Run.PushActive {
+		if isPredecessorScheduled || !snapshot.Run.Status.Terminal() || snapshot.Run.PushActive {
 			return "", fmt.Errorf("predecessor must be terminal with no executor or publisher; it will never be restarted")
 		}
 		for _, step := range snapshot.Steps {
@@ -93,7 +105,10 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 			if run.Branch != request.Branch || run.ID == snapshot.Run.ID || event != nil && run.ID == event.ChildID {
 				continue
 			}
-			if !run.Status.Terminal() || run.ID > snapshot.Run.ID {
+			m.mu.Lock()
+			isRunScheduled := m.runScheduledLocked(run.ID)
+			m.mu.Unlock()
+			if !run.Status.Terminal() || run.ID > snapshot.Run.ID || isRunScheduled {
 				return "", fmt.Errorf("a newer or active run owns this branch; authored admission cannot replace it")
 			}
 		}
@@ -141,7 +156,9 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil {
 			return "", err
 		}
-		gateDir := m.paths.RepoDir(repo.ID)
+		if symbolic, err := git.Run(ctx, gateDir, "symbolic-ref", "-q", "refs/heads/"+request.Branch); err == nil && symbolic != "" {
+			return "", fmt.Errorf("gate branch is symbolic")
+		}
 		gateHead, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+request.Branch+"^{commit}")
 		if err != nil {
 			return "", fmt.Errorf("read existing gate branch: %w", err)
@@ -149,30 +166,8 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if _, err := m.db.ValidationFamily(snapshot.Run.ID); err != nil {
 			return "", err
 		}
-		isBoundGateHead := false
-		for historical := snapshot; historical != nil; {
-			heads := []*string{&historical.Run.HeadSHA, historical.Run.SubmittedHeadSHA, historical.Run.LastPushedSHA}
-			for _, rounds := range historical.Rounds {
-				for _, round := range rounds {
-					heads = append(heads, round.StartingHeadSHA, round.ReviewedHeadSHA)
-				}
-			}
-			for _, head := range heads {
-				if head != nil && gateHead == *head {
-					isBoundGateHead = true
-				}
-			}
-			predecessor, err := m.db.GetValidationPredecessor(historical.Run.ID)
-			if err != nil {
-				return "", err
-			}
-			historical = nil
-			if predecessor != nil {
-				historical = &predecessor.Snapshot
-			}
-		}
-		if !isBoundGateHead {
-			return "", fmt.Errorf("gate branch moved outside the immutable predecessor lineage; reconcile its owner before admission")
+		if err := m.proveAuthoredGateLineage(ctx, snapshot, gateDir, gateHead); err != nil {
+			return "", err
 		}
 		// Import only the exact object, without changing a branch, tracking ref or FETCH_HEAD.
 		if _, err := git.Run(ctx, gateDir, "fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", request.CallerDir, request.CandidateSHA); err != nil {
@@ -223,7 +218,12 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil {
 			return "", err
 		}
-		cfg, _, _, err := m.loadRunConfig(ctx, repo, global, candidateConfig, gateDir, trustedSHA, "", request.Branch, snapshot.Run.PiProfile)
+		pin := snapshot.Run.PiProfile
+		storedQuota := snapshot.Run.QuotaRouting
+		if request.TerminalGeneration != "" {
+			pin, storedQuota = nil, ""
+		}
+		cfg, _, _, err := m.loadRunConfig(ctx, repo, global, candidateConfig, gateDir, trustedSHA, "", request.Branch, pin)
 		if err != nil {
 			return "", err
 		}
@@ -251,7 +251,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err := proveAuthoredPublication(ctx, &snapshot.Run, repo, request.CallerDir, cfg, forge); err != nil {
 			return "", err
 		}
-		quotaRecord, err := replayQuotaRouting(cfg, snapshot.Run.QuotaRouting)
+		quotaRecord, err := replayQuotaRouting(cfg, storedQuota)
 		if err != nil {
 			return "", err
 		}
@@ -281,11 +281,18 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil || confirmedGateHead != gateHead {
 			return "", fmt.Errorf("gate branch changed during authored admission")
 		}
+		if err := m.proveAuthoredGateLineage(ctx, snapshot, gateDir, gateHead); err != nil {
+			return "", err
+		}
 		if err := proveAuthoredPublication(ctx, &snapshot.Run, repo, request.CallerDir, cfg, forge); err != nil {
 			return "", err
 		}
 		if err := ctx.Err(); err != nil {
 			return "", err
+		}
+		confirmedAnchors, err := branchsync.TerminalValidationAnchors(ctx, m.db, gateDir, request.CallerDir, snapshot.Run.ID)
+		if err != nil || !maps.Equal(anchors, confirmedAnchors) {
+			return "", fmt.Errorf("terminal recovery anchors changed before acceptance: %v", err)
 		}
 		if event == nil {
 			var plan *verificationplan.Snapshot
@@ -347,6 +354,57 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		return child.ID, nil
 	})
 	return result, err
+}
+
+func (m *RunManager) proveAuthoredGateLineage(ctx context.Context, snapshot *db.TerminalSnapshot, gateDir, gateHead string) error {
+	history, err := m.db.ValidationHistory(snapshot.Run.ID)
+	if err != nil {
+		return err
+	}
+	isBoundGateHead := false
+	for _, entry := range history {
+		historical := entry.Snapshot
+		heads := []*string{&historical.Run.HeadSHA, historical.Run.SubmittedHeadSHA, historical.Run.LastPushedSHA}
+		if entry.Adoption != nil {
+			heads = append(heads, &entry.Adoption.GateHead)
+		}
+		for _, rounds := range historical.Rounds {
+			for _, round := range rounds {
+				heads = append(heads, round.StartingHeadSHA, round.ReviewedHeadSHA)
+			}
+		}
+		for _, head := range heads {
+			if head != nil && gateHead == *head {
+				isBoundGateHead = true
+			}
+		}
+		if adoption := entry.Adoption; adoption != nil {
+			if adoption.Successor.HeadSHA != adoption.CandidateSHA || !reflect.DeepEqual(historical.Run.SubmittedHeadSHA, adoption.Successor.SubmittedHeadSHA) {
+				return fmt.Errorf("terminal adoption successor source binding changed")
+			}
+			if adoption.SourceRef != "refs/no-mistakes/terminal-candidate/"+historical.Run.ID {
+				return fmt.Errorf("terminal adoption source anchor identity changed")
+			}
+			anchors := []struct{ ref, head string }{{adoption.SourceRef, adoption.CandidateSHA}, {"refs/no-mistakes/terminal-lane/" + historical.Run.ID, adoption.GateHead}}
+			if adoption.RecoveryHead != "" {
+				anchors = append(anchors, struct{ ref, head string }{custody.RecoveryRef(adoption.Snapshot.Run.ID), adoption.RecoveryHead})
+			}
+			for _, anchor := range anchors {
+				head, exists, err := git.DirectRefTarget(ctx, gateDir, anchor.ref)
+				if err != nil || !exists || head != anchor.head {
+					return fmt.Errorf("terminal adoption anchor %s changed or is unreadable", anchor.ref)
+				}
+			}
+			tree, err := git.Run(ctx, gateDir, "rev-parse", adoption.CandidateSHA+"^{tree}")
+			if err != nil || tree != adoption.CandidateTree {
+				return fmt.Errorf("terminal adoption candidate tree changed or is unreadable")
+			}
+		}
+	}
+	if !isBoundGateHead {
+		return fmt.Errorf("gate branch moved outside the immutable predecessor lineage; reconcile its owner before admission")
+	}
+	return nil
 }
 
 func proveAuthoredCheckout(ctx context.Context, actualDir string, request *authoredvalidation.Request, repo *db.Repo) error {
@@ -455,7 +513,7 @@ func proveAuthoredPublication(ctx context.Context, run *db.Run, repo *db.Repo, c
 			}
 		}
 	}
-	if json.Unmarshal(output, &pr) != nil || pr.URL != *run.PRURL || pr.State != "open" || pr.Head.SHA != head || pr.Head.Ref != run.Branch || pr.Head.Repo.FullName != github.RepoSlug(repo.PushURL()) || pr.Base.Repo.FullName != github.RepoSlug(repo.UpstreamURL) {
+	if json.Unmarshal(output, &pr) != nil || pr.URL != *run.PRURL || pr.State != "open" || pr.Head.SHA != head || pr.Head.Ref != run.Branch || !strings.EqualFold(pr.Head.Repo.FullName, github.RepoSlug(repo.PushURL())) || !strings.EqualFold(pr.Base.Repo.FullName, github.RepoSlug(repo.UpstreamURL)) {
 		return fmt.Errorf("terminal PR repository, branch, state or public head changed")
 	}
 	base := strings.TrimSpace(repo.DefaultBranch)

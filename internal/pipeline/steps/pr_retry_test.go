@@ -13,6 +13,7 @@ func TestPRStep_ACarriedStepReportsTheRoundsOfTheRunItWasCarriedFrom(t *testing.
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	publishValidationTextForTest(sctx)
 
 	failed, err := sctx.DB.InsertRun(sctx.Repo.ID, sctx.Run.Branch, headSHA, baseSHA)
 	if err != nil {

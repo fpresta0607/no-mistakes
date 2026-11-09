@@ -1492,6 +1492,7 @@ func TestTestStep_AgentScratchDirectoryIsOutsideTheWorktreeAndDiesWithTheStep(t 
 			dir, baseSHA, headSHA := setupGitRepo(t)
 			var scratchDir string
 			ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				scratchDir, _ = envValue(opts.Env, "TMPDIR")
 				if !strings.Contains(opts.Prompt, "Your disposable workspace is this scratch directory outside the worktree: "+scratchDir+".") {
 					t.Errorf("the prompt does not name the scratch directory %s:\n%s", scratchDir, opts.Prompt)
 				}
@@ -1510,7 +1511,6 @@ func TestTestStep_AgentScratchDirectoryIsOutsideTheWorktreeAndDiesWithTheStep(t 
 				return &agent.Result{Output: json.RawMessage(`{"summary":"repair test failure","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
 			}}
 			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-			scratchDir = filepath.Join(sctx.EvidenceDir, testScratchDirName)
 			if tc.isFixing {
 				sctx.Fixing = true
 				sctx.PreviousFindings = `{"items":[{"id":"test-1","severity":"error","file":"fix.txt","description":"test failed"}]}`
@@ -1687,12 +1687,15 @@ func TestTestStep_CommandsAndAgentsKeepTemporaryFilesOutsideTheWorktree(t *testi
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: testCmd})
 	given := []string{"PROBE_OUT=" + probe}
 	sctx.Env = slices.Clone(given)
-	scratchDir := filepath.Join(sctx.EvidenceDir, testScratchDirName)
 
 	if _, err := (&TestStep{}).Execute(sctx); err != nil {
 		t.Fatalf("test step failed: %v", err)
 	}
 
+	scratchDir, _ := envValue(agentEnv, "TMPDIR")
+	if scratchDir == "" || strings.HasPrefix(scratchDir, sctx.EvidenceDir) {
+		t.Fatalf("scratch must be owned outside evidence: %q", scratchDir)
+	}
 	recorded, err := os.ReadFile(probe)
 	if err != nil {
 		t.Fatalf("the test command did not record its temporary directory: %v", err)
@@ -1700,7 +1703,7 @@ func TestTestStep_CommandsAndAgentsKeepTemporaryFilesOutsideTheWorktree(t *testi
 	if got, want := strings.TrimSpace(string(recorded)), scratchDir+"|"+scratchDir+"|"+scratchDir; got != want {
 		t.Errorf("the test command's TMP|TEMP|TMPDIR = %q, want the scratch directory %q", got, want)
 	}
-	for _, name := range []string{"TMP", "TEMP", "TMPDIR"} {
+	for _, name := range []string{"TMP", "TEMP", "TMPDIR", "GOTMPDIR"} {
 		if got, _ := envValue(agentEnv, name); got != scratchDir {
 			t.Errorf("the test agent's %s = %q, want the scratch directory %q", name, got, scratchDir)
 		}

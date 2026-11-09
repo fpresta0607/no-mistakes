@@ -17,6 +17,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
 
@@ -409,7 +410,10 @@ func startTestDaemon(t *testing.T, p *paths.Paths, d *db.DB) {
 	}
 
 	t.Cleanup(func() {
-		_ = daemon.Stop(p)
+		if client, err := ipc.Dial(p.Socket()); err == nil {
+			_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{Force: true}, nil)
+			client.Close()
+		}
 		select {
 		case <-errCh:
 		case <-time.After(3 * time.Second):

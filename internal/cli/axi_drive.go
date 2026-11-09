@@ -1309,7 +1309,7 @@ func driveRunScoped(ctx context.Context, progress io.Writer, client *ipc.Client,
 			if action == types.ActionFix {
 				fixedSteps[gate.Name] = true
 			}
-			if _, err := sendRespond(client, runID, types.StepName(gate.Name), action, findingIDs, nil, nil, nil, "", types.ResponseOriginAutoYes); err != nil {
+			if _, err := sendRespond(client, runID, types.StepName(gate.Name), action, findingIDs, nil, nil, nil, "", types.ResponseOriginAutoYes, nil); err != nil {
 				return nil, false, fmt.Errorf("auto-resolve %s: %w", gate.Name, err)
 			}
 			pendingGate = gateKey
@@ -1414,8 +1414,9 @@ func getRunInfo(ctx context.Context, socketPath, runID string) (*ipc.RunInfo, er
 // what it recorded. A response the daemon refused is returned as a
 // *respondRefusalError - the gate is still parked and the response can be
 // corrected.
-func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, added []types.Finding, approvalReason string, origin types.ResponseOrigin, coverage ...*ipc.CoverageBinding) (ipc.RespondResult, error) {
+func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, added []types.Finding, approvalReason string, origin types.ResponseOrigin, scope *types.ReviewScopeDecision, coverage ...*ipc.CoverageBinding) (ipc.RespondResult, error) {
 	params := &ipc.RespondParams{
+		ScopeDecision:    scope,
 		Origin:           origin,
 		RunID:            runID,
 		Step:             step,
@@ -1433,7 +1434,11 @@ func sendRespond(client *ipc.Client, runID string, step types.StepName, action t
 		params.Coverage = coverage[0]
 	}
 	var result ipc.RespondResult
-	if err := client.Call(ipc.MethodRespond, params, &result); err != nil {
+	method := ipc.MethodRespond
+	if scope != nil {
+		method = ipc.MethodRespondReviewScope
+	}
+	if err := client.Call(method, params, &result); err != nil {
 		return ipc.RespondResult{}, err
 	}
 	if !result.OK {
@@ -1441,6 +1446,9 @@ func sendRespond(client *ipc.Client, runID string, step types.StepName, action t
 			return result, &respondRefusalError{refusal: result.Refusal, missing: result.Missing, help: result.Help}
 		}
 		return result, fmt.Errorf("daemon rejected the response")
+	}
+	if scope != nil && result.ScopeDecisionID != scope.DecisionID {
+		return result, fmt.Errorf("daemon did not acknowledge the accepted scope decision; inspect this run before any further response")
 	}
 	return result, nil
 }
@@ -1689,6 +1697,7 @@ const legacyApprovalReasonRefusal = "an approval reason applies only to Test app
 
 func newAxiRespondCmd() *cobra.Command {
 	var action, step, findings, ignore, instructions, instructionsFile, addFinding, addFindingFile, reason, runID string
+	var scopeDecisionFile string
 	var autoYes bool
 	var wait time.Duration
 
@@ -1735,19 +1744,20 @@ func newAxiRespondCmd() *cobra.Command {
 				"auto_yes": autoYes,
 			}, func() error {
 				return runAxiRespond(cmd, respondArgs{
-					action:           action,
-					step:             step,
-					findings:         findings,
-					ignore:           ignore,
-					instructions:     instructions,
-					instructionsFile: instructionsFile,
-					addFinding:       addFinding,
-					addFindingFile:   addFindingFile,
-					reason:           reason,
-					autoYes:          autoYes,
-					wait:             wait,
-					runID:            strings.TrimSpace(runID),
-					runFlagSet:       cmd.Flags().Changed("run"),
+					scopeDecisionFile: scopeDecisionFile,
+					action:            action,
+					step:              step,
+					findings:          findings,
+					ignore:            ignore,
+					instructions:      instructions,
+					instructionsFile:  instructionsFile,
+					addFinding:        addFinding,
+					addFindingFile:    addFindingFile,
+					reason:            reason,
+					autoYes:           autoYes,
+					wait:              wait,
+					runID:             strings.TrimSpace(runID),
+					runFlagSet:        cmd.Flags().Changed("run"),
 				})
 			})
 		},
@@ -1759,6 +1769,7 @@ func newAxiRespondCmd() *cobra.Command {
 	cmd.Flags().StringVar(&ignore, "ignore", "", "comma-separated finding IDs to decline (with --action fix); every finding the gate shows must be in --findings or --ignore unless an earlier round of this step already decided it, and a finding that round chose to fix cannot be declined")
 	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to selected findings; '-' reads stdin (exclusive with --instructions-file)")
 	cmd.Flags().StringVar(&instructionsFile, "instructions-file", "", "read fix guidance from a file (exclusive with --instructions)")
+	cmd.Flags().StringVar(&scopeDecisionFile, "scope-decision-file", "", "explicit controller_assertion bound to this Review fix response; never ordinary fix guidance")
 	cmd.Flags().StringVar(&reason, "reason", "", "reason preserved with a Test approval exception (--step test --action approve), and required with --action abort")
 	cmd.Flags().StringVar(&addFinding, "add-finding", "", "JSON finding object to add and fix; '-' reads stdin (exclusive with --add-finding-file)")
 	cmd.Flags().StringVar(&addFindingFile, "add-finding-file", "", "read JSON finding object from a file (exclusive with --add-finding)")
@@ -1768,22 +1779,34 @@ func newAxiRespondCmd() *cobra.Command {
 }
 
 type respondArgs struct {
-	action           string
-	step             string
-	findings         string
-	ignore           string
-	instructions     string
-	instructionsFile string
-	addFinding       string
-	addFindingFile   string
-	reason           string
-	autoYes          bool
-	wait             time.Duration
-	runID            string
-	runFlagSet       bool
+	scopeDecisionFile string
+	action            string
+	step              string
+	findings          string
+	ignore            string
+	instructions      string
+	instructionsFile  string
+	addFinding        string
+	addFindingFile    string
+	reason            string
+	autoYes           bool
+	wait              time.Duration
+	runID             string
+	runFlagSet        bool
 }
 
 func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
+	var scope *types.ReviewScopeDecision
+	if cmd.Flags().Changed("scope-decision-file") {
+		if ra.action != string(types.ActionFix) || ra.autoYes || ra.scopeDecisionFile == "" {
+			return emitError(cmd, 2, "--scope-decision-file requires an explicit Review fix response, a file path and no --yes")
+		}
+		var err error
+		scope, err = readReviewScopeDecision(ra.scopeDecisionFile)
+		if err != nil {
+			return emitError(cmd, 2, err.Error())
+		}
+	}
 	if ra.runFlagSet && ra.runID == "" {
 		return emitError(cmd, 2, "--run requires a run id; an empty value would answer the current branch's run instead",
 			"Pass `--run <id>`, or omit --run to answer the active run of the current branch")
@@ -1961,7 +1984,7 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 			return emitError(cmd, 1, "daemon did not provide a bound review round for coverage continuation")
 		}
 	}
-	result, err := sendRespond(env.client, runID, stepName, act, findingIDs, ignoreIDs, instructions, added, reason, types.ResponseOriginInteractive, coverage)
+	result, err := sendRespond(env.client, runID, stepName, act, findingIDs, ignoreIDs, instructions, added, reason, types.ResponseOriginInteractive, scope, coverage)
 	if err != nil {
 		var refusal *respondRefusalError
 		if errors.As(err, &refusal) {
@@ -1978,6 +2001,9 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	// outcome, or the bounded wait elapsing - so a driver always sees the
 	// dispositions of the decision it just made.
 	lead := respondDispositionFields(result)
+	if scope != nil {
+		lead = append(lead, toon.Field{Key: "accepted_scope", Value: scope})
+	}
 	if act == types.ActionAbort {
 		lead = append(lead, toon.Field{Key: "rejected", Value: toon.NewObject(
 			toon.Field{Key: "run", Value: runID},

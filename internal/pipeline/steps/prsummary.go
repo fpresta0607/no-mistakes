@@ -137,15 +137,45 @@ type pipelineAttestationPolicy struct {
 }
 
 func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, provider scm.Provider, policy pipelineAttestationPolicy) (string, string) {
+	return buildPipelineSummaryWithVisibility(steps, rounds, headSHA, provider, policy, true)
+}
+
+func buildPipelineSummaryWithVisibility(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, provider scm.Provider, policy pipelineAttestationPolicy, shouldPublishValidationText bool) (string, string) {
 	if len(steps) == 0 {
 		return "", ""
 	}
 
 	flavor := prBodyFlavorFor(provider)
 	var detailBlocks []string
+	var findingCounts []string
+	recordedFindingCount := func(raw *string) string {
+		if raw != nil {
+			if findings, err := types.ParseFindingsJSON(*raw); err == nil {
+				return fmt.Sprint(len(findings.Items))
+			}
+		}
+		return "unavailable"
+	}
 
 	for _, sr := range steps {
 		if shouldOmitPipelineStep(sr) {
+			continue
+		}
+		if !shouldPublishValidationText {
+			line := fmt.Sprintf("- **%s**: %s", stepDisplayName(sr.StepName), sr.Status)
+			if sr.OverrideReason != nil && strings.TrimSpace(*sr.OverrideReason) != "" {
+				line += " (with override)"
+			}
+			counts := fmt.Sprintf("%s: final %s", stepDisplayName(sr.StepName), recordedFindingCount(sr.FindingsJSON))
+			var roundCounts []string
+			for _, round := range rounds[sr.ID] {
+				roundCounts = append(roundCounts, fmt.Sprintf("%d: %s", round.Round, recordedFindingCount(round.FindingsJSON)))
+			}
+			if len(roundCounts) > 0 {
+				counts += ", rounds [" + strings.Join(roundCounts, ", ") + "]"
+			}
+			findingCounts = append(findingCounts, counts)
+			detailBlocks = append(detailBlocks, line+"\n")
 			continue
 		}
 		stepRounds := rounds[sr.ID]
@@ -181,7 +211,12 @@ func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.Ste
 		b.WriteString(detail)
 	}
 
-	riskLine := extractRiskLine(steps, rounds)
+	riskLine := "Validation text withheld because intent publication is disabled. Full results remain in the local run record."
+	if shouldPublishValidationText {
+		riskLine = extractRiskLine(steps, rounds)
+	} else {
+		riskLine += " Recorded finding counts by snapshot: " + strings.Join(findingCounts, "; ") + "."
+	}
 	return b.String(), riskLine
 }
 

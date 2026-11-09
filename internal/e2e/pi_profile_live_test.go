@@ -590,6 +590,7 @@ func invocationsForRun(t *testing.T, h *Harness, runID string) []Invocation {
 // waitForRunIDTerminal polls until the named run reaches a terminal status.
 func waitForRunIDTerminal(t *testing.T, h *Harness, runID string, timeout time.Duration) *ipc.RunInfo {
 	t.Helper()
+	timeout = h.timeout(timeout)
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		run := h.RunInfo(runID)

@@ -124,6 +124,8 @@ const FindingCategoryTestCommand = "test-command"
 // verdict finding because the cut supplies no new verdict.
 const FindingCategoryTestVerdict = "test-verdict"
 
+const FindingIDAgentSafetyRefusal = "agent-safety-refusal"
+
 // FindingIDTestAgentTimeout is the Test-step park when an evidence or repair
 // invocation burned its wall-clock budget. It is a budget/provider-slowness
 // cut, not a product defect; TestOverrideReason treats an approval of this

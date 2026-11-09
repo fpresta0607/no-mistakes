@@ -150,7 +150,7 @@ func TestProtectedPathRefusalSurvivesShutdownCleanup(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if err := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil); err != nil {
+	if err := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{Force: true}, nil); err != nil {
 		t.Fatal(err)
 	}
 	client.Close()

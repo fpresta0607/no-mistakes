@@ -23,13 +23,14 @@ func publicPRIntent(sctx *pipeline.StepContext) string {
 }
 
 func publicPRIntentSource(sctx *pipeline.StepContext) string {
-	if sctx == nil || sctx.Config == nil || !sctx.Config.PR.PublishesIntent() {
-		return ""
-	}
-	if runOmitsIntent(sctx) {
+	if !shouldPublishPRIntent(sctx) {
 		return ""
 	}
 	return cleanedUserIntent(sctx)
+}
+
+func shouldPublishPRIntent(sctx *pipeline.StepContext) bool {
+	return sctx != nil && sctx.Config != nil && sctx.Config.PR.PublishesIntent() && !runOmitsIntent(sctx)
 }
 
 // runOmitsIntent reports whether this run was started with the caller-side,

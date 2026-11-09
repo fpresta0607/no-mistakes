@@ -41,28 +41,40 @@ jobs:
         include:
           - os: ubuntu-latest
             name: test (ubuntu-latest)
+          # The macOS leg is split across two runners by unix_part (see the
+          # Unix step): the go list remainder on one, the pipeline/steps and
+          # daemon shards on the other. ubuntu-latest runs both parts.
           - os: macos-latest
             name: test (macos-latest)
+            unix_part: rest
+          - os: macos-latest
+            name: test (macos-shards)
+            unix_part: shards
           - os: windows-latest
             name: test (windows-core)
             shard: core
           - os: windows-latest
             name: test (windows-git)
             shard: git
-          # pipeline/steps, daemon, and gate are each split by test name. The
-          # last row of a group skips the union of the other rows' patterns, so
-          # a new test always lands in exactly one shard; rebalance the ranges
-          # against the shards' -v timings (issue #1580, #1682).
+          # pipeline/steps, daemon, gate, branchsync, and cli are each split by test
+          # name. The last row of a group skips the union of the other rows'
+          # patterns, so a new test always lands in exactly one shard; rebalance
+          # the ranges against the shards' -v timings (issue #1580, #1682, #58, #108).
           - os: windows-latest
             name: test (windows-steps-1)
             shard: steps
             steps_run: '^Test[A-K]'
+            steps_skip: '^TestCIHandback'
           - os: windows-latest
             name: test (windows-steps-2)
             shard: steps
-            steps_run: '^Test[L-Q]'
+            steps_run: '^TestCIHandback'
           - os: windows-latest
             name: test (windows-steps-3)
+            shard: steps
+            steps_run: '^Test[L-Q]'
+          - os: windows-latest
+            name: test (windows-steps-4)
             shard: steps
             steps_skip: '^Test[A-Q]'
           - os: windows-latest
@@ -93,6 +105,22 @@ jobs:
             name: test (windows-gate-3)
             shard: gate
             gate_skip: '^Test([A-I]|ReconcileStale)'
+          - os: windows-latest
+            name: test (windows-branchsync-1)
+            shard: branchsync
+            branchsync_run: '^Test([A-Q]|Recover[A-L])'
+          - os: windows-latest
+            name: test (windows-branchsync-2)
+            shard: branchsync
+            branchsync_skip: '^Test([A-Q]|Recover[A-L])'
+          - os: windows-latest
+            name: test (windows-cli-1)
+            shard: cli
+            cli_run: '^TestAxi'
+          - os: windows-latest
+            name: test (windows-cli-2)
+            shard: cli
+            cli_skip: '^TestAxi'
     runs-on: ${{ matrix.os }}
     # Sized for each Windows shard, which still sets the floor: git.exe plus
     # Defender tax makes git-backed packages ~10x their Linux time (see the
@@ -100,10 +128,10 @@ jobs:
     # and then ran those packages sequentially, so total wall could exceed
     # timeout-minutes with no package hitting go test -timeout - an
     # evidence-free cancellation. Git-heavy packages are split from the core
-    # remainder; pipeline/steps, daemon, and gate are their own shards, each
-    # also split by test name, so a 15m per-package hang still dumps
-    # goroutines instead of cancelling the job. 40 is a runaway guard, not a
-    # target - Linux and macOS finish far inside it, and it still keeps a
+    # remainder; pipeline/steps, daemon, gate, branchsync, and cli are their own
+    # shards, each also split by test name, so a 15m per-package hang still
+    # dumps goroutines instead of cancelling the job. 40 is a runaway guard,
+    # not a target - Linux and macOS finish far inside it, and it still keeps a
     # wedged runner well short of the six-hour default.
     timeout-minutes: 40
     steps:
@@ -147,23 +175,111 @@ jobs:
       # 594s and timed out at 600s with no test hung on runners up to ~1.9x
       # slower across the board, and internal/daemon and internal/cli reached
       # the same limit (issue #73). 20m clears that variation for every one of
-      # them. The heavy packages queue behind each other, so pipeline/steps can
-      # start ~12 minutes into this step; 20m still lands a real hang as a
-      # goroutine dump well before timeout-minutes cancels the job.
+      # them. pipeline/steps then outgrew it again: it timed out at 1201s in the
+      # merge train while internal/daemon passed the same run at 1136s, with
+      # every parked goroutine a t.Parallel waiter and the three running tests a
+      # second old or less - exhausted capacity, not a hang. Running the whole
+      # suite one package at a time (-p=1) gave each package the runner but
+      # summed every package's wall and overran the 40m job cap on both Unix
+      # legs, so the two packages whose own wall exceeds the budget are split by
+      # test name, the -run/-skip partition the Windows rows already use, and
+      # every binary of a part starts at once.
+      #
+      # Splitting on one runner moved work between binaries but finished the
+      # macOS leg no sooner: its step took 25-33m unsharded and 26-39m sharded,
+      # within minutes of the 40m job cap, while ^Test[A-K] of pipeline/steps
+      # and both daemon shards still reached 20m on a slower runner (issue
+      # #170). The leg is capacity-bound, so macos-latest runs its two parts on
+      # two runners (matrix unix_part): rest is the go list remainder at -p=2,
+      # and shards is pipeline/steps in four shards (^TestCIStep, the rest of
+      # ^Test[A-K], ^Test[L-Q], the rest) and daemon in four (^Test[A-L],
+      # ^Test[M-O], ^Test[P-R], the rest), cut by the Windows rows' -v
+      # timings. A row with no unix_part runs both parts on one runner, as
+      # ubuntu-latest does, and an unknown part fails the step.
+      # The remainder package set is computed once from go list filtered by
+      # NM_CI_UNIX_SHARD_EXCLUDE, and the step fails closed when that listing
+      # fails or leaves nothing, so a resolution failure cannot quietly run the
+      # repository root alone. No test, timeout or coverage is given up, and a
+      # hang in any shard still lands as a goroutine dump inside
+      # timeout-minutes.
       - name: Test on Unix
         if: runner.os != 'Windows'
-        run: go test -race -timeout=20m ./...
+        env:
+          NM_CI_UNIX_SHARD_EXCLUDE: '/(internal/pipeline/steps|internal/daemon)$'
+          NM_CI_UNIX_PART: ${{ matrix.unix_part }}
+        run: |
+          case "$NM_CI_UNIX_PART" in
+            '') run_rest=1 run_shards=1 ;;
+            rest) run_rest=1 run_shards= ;;
+            shards) run_rest= run_shards=1 ;;
+            *)
+              echo "::error::unknown NM_CI_UNIX_PART '$NM_CI_UNIX_PART'; refusing to guess which tests to run" >&2
+              exit 1
+              ;;
+          esac
+          pids=
+          if [ -n "$run_rest" ]; then
+            if ! packages=$(go list ./...); then
+              echo "::error::go list ./... failed; refusing to run a narrowed suite" >&2
+              exit 1
+            fi
+            rest=$(printf '%s\n' "$packages" | grep -Ev "$NM_CI_UNIX_SHARD_EXCLUDE" || true)
+            if [ -z "$rest" ]; then
+              echo "::error::go list ./... left no Unix remainder packages; refusing to run a narrowed suite" >&2
+              exit 1
+            fi
+            go test -race -timeout=20m -p=2 $rest &
+            pids=$!
+          fi
+          if [ -n "$run_shards" ]; then
+            go test -race -timeout=20m -run '^TestCIStep' ./internal/pipeline/steps &
+            pids="$pids $!"
+            go test -race -timeout=20m -run '^Test[A-K]' -skip '^TestCIStep' ./internal/pipeline/steps &
+            pids="$pids $!"
+            go test -race -timeout=20m -run '^Test[L-Q]' ./internal/pipeline/steps &
+            pids="$pids $!"
+            go test -race -timeout=20m -skip '^Test[A-Q]' ./internal/pipeline/steps &
+            pids="$pids $!"
+            go test -race -timeout=20m -run '^Test[A-L]' ./internal/daemon &
+            pids="$pids $!"
+            go test -race -timeout=20m -run '^Test[M-O]' ./internal/daemon &
+            pids="$pids $!"
+            go test -race -timeout=20m -run '^Test[P-R]' ./internal/daemon &
+            pids="$pids $!"
+            go test -race -timeout=20m -skip '^Test[A-R]' ./internal/daemon &
+            pids="$pids $!"
+          fi
+          status=0
+          for pid in $pids; do
+            wait "$pid" || status=1
+          done
+          exit $status
 
       # Git-heavy packages are the Windows wall floor. NM_CI_WINDOWS_GIT_EXCLUDE
-      # on the core shard is the union of the git, steps, daemon, and gate
-      # shards; the workflow tests resolve every shard through `go list` and
-      # fail if they drift or overlap. pipeline/steps, daemon, and gate are
-      # their own shards (daemon and gate also split by test name) so they run
-      # in parallel with the remaining git-heavy packages instead of setting a
-      # serial floor that hits go test -timeout (issue #1682).
+      # on the core shard is the union of the git, steps, daemon, gate,
+      # branchsync, and cli shards; the workflow tests resolve every shard through
+      # `go list` and fail if they drift or overlap. pipeline/steps, daemon,
+      # gate, branchsync, and cli are their own shards (each also split by test
+      # name) so they run in parallel with the remaining git-heavy packages
+      # instead of setting a serial floor that hits go test -timeout (issue
+      # #1682).
       - name: Test on Windows (git-heavy)
         if: runner.os == 'Windows' && matrix.shard == 'git'
-        run: go test -v -timeout=15m ./internal/git ./internal/branchsync ./internal/evidence ./internal/eval
+        run: go test -v -timeout=15m ./internal/git ./internal/evidence ./internal/eval
+
+      # branchsync's wall follows the CPU a runner can give it: whole on one
+      # runner it took up to 558s of this 15m budget even after daemon and gate
+      # left it, and timed out with no test hung while they shared it (issue
+      # #58). Split it for less work per runner. On four pinned local CPUs a
+      # whole-package shard of its own gained nothing, and a higher -parallel
+      # only took time from eval while the shard as a whole got slower.
+      - name: Test on Windows (branchsync)
+        if: runner.os == 'Windows' && matrix.shard == 'branchsync'
+        shell: pwsh
+        env:
+          NM_CI_WINDOWS_BRANCHSYNC_RUN: ${{ matrix.branchsync_run }}
+          NM_CI_WINDOWS_BRANCHSYNC_SKIP: ${{ matrix.branchsync_skip }}
+        run: go test -v -timeout=15m "-run=$env:NM_CI_WINDOWS_BRANCHSYNC_RUN" "-skip=$env:NM_CI_WINDOWS_BRANCHSYNC_SKIP" ./internal/branchsync
 
       - name: Test on Windows (pipeline/steps)
         if: runner.os == 'Windows' && matrix.shard == 'steps'
@@ -189,11 +305,23 @@ jobs:
           NM_CI_WINDOWS_GATE_SKIP: ${{ matrix.gate_skip }}
         run: go test -v -timeout=15m "-run=$env:NM_CI_WINDOWS_GATE_RUN" "-skip=$env:NM_CI_WINDOWS_GATE_SKIP" ./internal/gate
 
+      # internal/cli ran almost serially for 810-889s and twice hit the 15m
+      # budget (issue #108). In run 42085620356, TestAxi* took 440.5s and
+      # the remaining tests 364.2s, so complementary rows split the work
+      # without changing process-wide test isolation or the timeout.
+      - name: Test on Windows (cli)
+        if: runner.os == 'Windows' && matrix.shard == 'cli'
+        shell: pwsh
+        env:
+          NM_CI_WINDOWS_CLI_RUN: ${{ matrix.cli_run }}
+          NM_CI_WINDOWS_CLI_SKIP: ${{ matrix.cli_skip }}
+        run: go test -v -timeout=15m "-run=$env:NM_CI_WINDOWS_CLI_RUN" "-skip=$env:NM_CI_WINDOWS_CLI_SKIP" ./internal/cli
+
       - name: Test on Windows (core)
         if: runner.os == 'Windows' && matrix.shard == 'core'
         shell: pwsh
         env:
-          NM_CI_WINDOWS_GIT_EXCLUDE: '/internal/(git|branchsync|gate|evidence|pipeline/steps(/.*)?|daemon|eval)$'
+          NM_CI_WINDOWS_GIT_EXCLUDE: '/internal/(git|branchsync|gate|evidence|pipeline/steps(/.*)?|daemon|eval|cli)$'
         run: |
           $pkgs = go list ./... | Where-Object { $_ -notmatch $env:NM_CI_WINDOWS_GIT_EXCLUDE }
           go test -v -timeout=15m @pkgs

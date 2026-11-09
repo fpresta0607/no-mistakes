@@ -27,6 +27,24 @@ When set, everything else moves under this root:
 
 A push is handled by the root that owns the gate it was pushed to, not by the root `NM_HOME` names. Git does not set `NM_HOME` for a hook, so the managed `pre-receive` and `post-receive` hooks would otherwise reach whichever daemon the pushing shell happened to point at - usually the default `~/.no-mistakes`, since the variable is normally unset. Instead the CLI resolves its root from the gate path the hook passes it: a gate always lives at `$NM_HOME/repos/<id>.git`, so the owning root is a property of where the gate sits. A push to a gate under one root therefore reaches that root's daemon even when `NM_HOME` is unset or names a different root. A path that is not a managed gate is refused rather than resolved against the default root, so `pre-receive` fails the push and `post-receive` stays non-blocking and records the skipped notification in the gate's `notify-push.log`. The daemon enforces the same ownership on its own side of both calls, refusing to admit or to start a run for a gate that does not sit under its root. Existing installs get this by updating the binary; the hook scripts are unchanged, so no gate needs regenerating.
 
+## `NM_E2E_TIMEOUT_SCALE`
+
+Scale the e2e harness's command and run-wait budgets on slow hosts without editing the tests.
+This setting applies only to tests built with `-tags=e2e`.
+
+|         |                      |
+| ------- | -------------------- |
+| Type    | positive integer     |
+| Default | `1`                  |
+
+For example, set `$env:NM_E2E_TIMEOUT_SCALE = '4'` in PowerShell before `make e2e` to give a 30-second gate push two minutes, a 60-second command four minutes, and a 90-second run wait six minutes.
+The scale also applies to harness ref reads, worktree operations, daemon startup, daemon ownership acquisition, and shared run and step status waits.
+It does not change the five-second daemon stop safety bound, polling intervals, product timeout settings, or deadlines written directly in individual tests.
+Invalid, non-positive, fractional, or overflowing values fail the test instead of silently using the default.
+
+Go's package timeout remains the outer limit.
+Raise it separately when the complete suite needs more time, for example: `bash scripts/e2e.sh -tags=e2e -count=1 -timeout=60m ./internal/e2e/... ./internal/pipeline/steps/...`.
+
 ## `NM_DAEMON_CONNECT_TIMEOUT`
 
 Override how long a CLI client waits for an existing daemon socket to accept a connection before failing instead of hanging.
@@ -123,6 +141,29 @@ See the [gate contract](/no-mistakes/reference/repo-config/#structured-findings)
 Absolute path to the file that tells [`commands.test_focused`](/no-mistakes/reference/repo-config/#commandstest_focused) what a Test repair touched.
 
 This is a command-child variable, not a daemon setting. no-mistakes sets it only around the configured checks of a focused re-run, in the step's scratch directory outside the worktree, and agent turns never see it. See that key for the file's format.
+
+## `NO_MISTAKES_TEST_BASH`
+
+Absolute path to the native Git Bash executable verified by Test on Windows.
+This is supplied to Test commands and agent turns, not a daemon configuration setting.
+
+Before behavioral checks or either repair or evidence turn, Test looks beside the Git executable found on `PATH` and in the standard Program Files Git locations, excludes Windows-system executables, and verifies that the candidate is MSYS Bash.
+A WSL launcher earlier on `PATH` is never a fallback.
+The Test prompt names the verified executable and directs the agent to invoke that exact path with `--noprofile --norc -o igncr` for existing Bash scripts, allowing CRLF checkouts without editing source.
+When verification fails, the prompt directs the agent to report Bash-dependent scenarios as `untested` with the missing prerequisite and continue checks using available native tools.
+
+## `TMP`, `TEMP`, `TMPDIR`, `GOTMPDIR` in Test
+
+Test sets all four variables for its commands and agent turns to one uniquely owned temporary directory outside the worktree and recorded evidence directory.
+The directory is created before checks or either agent turn and is shared only within that Test execution.
+Disposable Git repositories, build trees, and other temporary testing files belong there; retained artifacts belong in the recorded [evidence directory](/no-mistakes/reference/global-config/#evidence_dir).
+
+On Windows, the scratch path must fit within 60 UTF-16 code units, leaving room for nested test and Git paths.
+Test normally uses the process temporary root; if a nested temporary root leaves insufficient room, it uses the existing per-user Windows `Temp` directory instead.
+If the resulting path is still too long, Test removes the newly created directory and refuses execution with a request for a shorter `TEMP` directory.
+
+When Test returns, including on failure or cancellation, it attempts to remove only its owned scratch directory and logs any cleanup failure.
+Retained evidence and other executions' temporary directories are left in place.
 
 ## `NO_MISTAKES_BITBUCKET_EMAIL`
 
@@ -298,6 +339,7 @@ Mutation pageviews are sent alongside command events, so command status and dura
 They include only flag-derived context: `/axi/run` records booleans such as whether `--yes` or `--skip` was supplied and whether explicit intent was supplied through any [intent input transport](/no-mistakes/reference/cli/#intent-input); `/axi/respond` records the sanitized action and whether `--yes` was present. The intent boolean does not distinguish text, file, and stdin input, and intent input rejected by the CLI resolver emits no `axi-run` command event or pageview.
 
 Read-only surfaces (`axi` home, `axi status`, `axi logs`, `axi rounds`, `status`, `runs`) emit no telemetry at all, so agent status polling cannot flood remote analytics. Mutation surfaces (`axi run`, `axi respond`, `axi abort`, `axi retry`, `axi handoff`, run lifecycle, approvals, and fixes) stay full-fidelity.
+Execution of an [authored validation child](/no-mistakes/reference/cli/#no-mistakes-axi-validate-authored) emits a `run` event with `action: started` and uses `trigger: authored` for both its start and finish events.
 Each explicit human CLI, AXI, or TUI branch-sync check/apply attempt emits one command event and no additional pageview.
 Its fields are bounded enums and booleans only: surface, mode, state, relation, target kind, pipeline phase, PR state, result, refusal reason, dirty state, and duration.
 It never sends a SHA, run ID, path, branch name, URL, remote name, or command argument.

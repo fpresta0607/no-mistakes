@@ -75,7 +75,7 @@ func (m *RunManager) HandleCIHandback(ctx context.Context, params ipc.CIHandback
 				return "", fmt.Errorf("accepted CI handback worktree or latest ownership changed")
 			}
 			if receipt.Source != nil {
-				if err := steps.VerifyCIHandbackSource(&pipeline.StepContext{Ctx: ctx, GateDir: service.GateDir}, receipt); err != nil {
+				if err := steps.VerifyCIHandbackSource(&pipeline.StepContext{Ctx: ctx, GateDir: service.GateDir, DB: m.db}, receipt); err != nil {
 					return "", err
 				}
 				binding.CallerHead = receipt.Source.CallerHead

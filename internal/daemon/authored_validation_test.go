@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oklog/ulid/v2"
+
 	"github.com/kunchenguid/no-mistakes/internal/authoredvalidation"
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -22,6 +26,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -43,11 +48,22 @@ func TestAuthoredPublicationProofChecksLiveProviderFactsAndRefusesRaces(t *testi
 	parent.PRURL, parent.PRState, parent.LastPushedSHA, parent.PushRef, parent.PushTargetFingerprint, parent.PushTargetKind, parent.PushGeneration, parent.LastPushedAt = &prURL, &state, &publicHead, &ref, &fingerprint, &kind, &generation, &publishedAt
 	originalOutput := authoredPRCommandOutput
 	t.Cleanup(func() { authoredPRCommandOutput = originalOutput })
-	for _, change := range []string{"matching", "generation", "fingerprint", "kind", "ref", "closed PR", "repository", "head", "branch", "base", "provider failure", "head racing PR"} {
+	for _, change := range []string{"matching", "mixed-case registration", "generation", "fingerprint", "kind", "ref", "closed PR", "repository", "head", "branch", "branch case", "base", "provider failure", "head racing PR"} {
 		t.Run(change, func(t *testing.T) {
 			candidate := *parent
+			candidateRepo := *repo
+			providerTarget := "repos/test/repo/pulls/17"
 			provider := fmt.Sprintf(`{"html_url":%q,"state":"open","head":{"sha":%q,"ref":"feature","repo":{"full_name":"test/repo"}},"base":{"ref":"main","repo":{"full_name":"test/repo"}}}`, prURL, publicHead)
 			switch change {
+			case "mixed-case registration":
+				candidateRepo.UpstreamURL = "https://github.com/Test/Repo.git"
+				fingerprint := branchsync.TargetFingerprint(candidateRepo.PushURL())
+				candidate.PushTargetFingerprint = &fingerprint
+				gitCmd(t, repo.WorkingPath, "config", "url."+filepath.ToSlash(gate)+".insteadOf", candidateRepo.UpstreamURL)
+				t.Cleanup(func() {
+					gitCmd(t, repo.WorkingPath, "config", "url."+filepath.ToSlash(gate)+".insteadOf", repo.UpstreamURL)
+				})
+				providerTarget = "repos/Test/Repo/pulls/17"
 			case "generation":
 				value := int64(0)
 				candidate.PushGeneration = &value
@@ -68,11 +84,13 @@ func TestAuthoredPublicationProofChecksLiveProviderFactsAndRefusesRaces(t *testi
 				provider = strings.Replace(provider, publicHead, request.Request.CandidateSHA, 1)
 			case "branch":
 				provider = strings.Replace(provider, `"ref":"feature"`, `"ref":"other"`, 1)
+			case "branch case":
+				provider = strings.Replace(provider, `"ref":"feature"`, `"ref":"Feature"`, 1)
 			case "base":
 				provider = strings.Replace(provider, `"ref":"main"`, `"ref":"other"`, 1)
 			}
 			authoredPRCommandOutput = func(command *exec.Cmd) ([]byte, error) {
-				if !strings.Contains(strings.Join(command.Args, " "), "repos/test/repo/pulls/17") {
+				if !strings.Contains(strings.Join(command.Args, " "), providerTarget) {
 					t.Fatalf("queried an unrelated provider target: %v", command.Args)
 				}
 				if change == "provider failure" {
@@ -87,9 +105,124 @@ func TestAuthoredPublicationProofChecksLiveProviderFactsAndRefusesRaces(t *testi
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			err := proveAuthoredPublication(ctx, &candidate, repo, repo.WorkingPath, &config.Config{}, nil)
-			if (change == "matching") != (err == nil) {
+			err := proveAuthoredPublication(ctx, &candidate, &candidateRepo, repo.WorkingPath, &config.Config{}, nil)
+			if (change == "matching" || change == "mixed-case registration") != (err == nil) {
 				t.Fatalf("publication proof %s: %v", change, err)
+			}
+		})
+	}
+}
+
+func TestAuthoredAdmissionTracksItsOwnTelemetryTrigger(t *testing.T) {
+	recorder := &telemetryRecorder{}
+	restore := telemetry.SetDefaultForTesting(recorder)
+	defer restore()
+	manager, database, _, request, _ := authoredAdmissionFixture(t, func() []pipeline.Step {
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+	})
+
+	result, err := manager.validateAuthored(context.Background(), request, os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := waitForRunTerminalState(t, database, result.Receipt.RunID)
+	if child.Status != types.RunCompleted {
+		t.Fatalf("child status = %s", child.Status)
+	}
+	finished := waitForTelemetryEvent(t, recorder, "run", "action", "finished")
+	if finished == nil || finished.fields["trigger"] != "authored" {
+		t.Fatalf("authored finished telemetry = %+v", finished)
+	}
+	started := recorder.find("run", "action", "started")
+	if started == nil || started.fields["trigger"] != "authored" {
+		t.Fatalf("authored started telemetry = %+v", started)
+	}
+}
+
+func TestAuthoredAdmissionRefusesAnInheritedPRWithoutPushBinding(t *testing.T) {
+	manager, database, repo, request, gate := authoredAdmissionFixture(t, nil)
+	if err := database.UpdateRunPRURL(request.Request.PredecessorID, "https://github.com/test/repo/pull/17"); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := database.ReadTerminalSnapshot(request.Request.PredecessorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Request.SnapshotDigest = snapshot.Digest()
+	gateHead := gitOutput(t, gate, "rev-parse", "refs/heads/feature")
+	before, err := database.GetRunsByRepo(repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = manager.validateAuthored(context.Background(), request, os.Getpid())
+
+	if err == nil || !strings.Contains(err.Error(), "publication binding is incomplete") {
+		t.Fatalf("inherited PR became a publication binding: %v", err)
+	}
+	after, err := database.GetRunsByRepo(repo.ID)
+	if err != nil || !reflect.DeepEqual(before, after) || gitOutput(t, gate, "rev-parse", "refs/heads/feature") != gateHead {
+		t.Fatalf("refusal changed runs or the gate: %v", err)
+	}
+}
+
+func TestAuthoredInfrastructureFailureRetriesOnlyThroughFreshTerminalValidation(t *testing.T) {
+	for _, status := range []types.RunStatus{types.RunFailed, types.RunCancelled} {
+		t.Run(string(status), func(t *testing.T) {
+			var calls atomic.Int32
+			manager, database, repo, params, gate := authoredAdmissionFixture(t, func() []pipeline.Step {
+				var result []pipeline.Step
+				for _, step := range steps.AllSteps() {
+					result = append(result, &authoredFixtureStep{name: step.Name(), calls: &calls})
+				}
+				return result
+			})
+			root, err := database.ReadTerminalSnapshot(params.Request.PredecessorID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proof, err := params.Request.LaunchAssertion.Verify(params.Request.LaunchAssertion.TrustedSHA, params.Request.LaunchAssertion.Profiles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			first, _, err := database.AcceptValidationAdmission(context.Background(), db.ValidationAdmission{Request: params.Request, Snapshot: *root, AssertionProof: proof, WorktreeRoot: filepath.Dir(manager.paths.WorktreeDir(repo.ID, "pending")), Gates: "[]", Steps: types.AllSteps(), Operator: "fixture"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, gate, "fetch", "--no-tags", "--no-write-fetch-head", repo.WorkingPath, params.Request.CandidateSHA)
+			gitCmd(t, gate, "update-ref", "refs/no-mistakes/authored-candidate/"+first.ID, params.Request.CandidateSHA)
+			if err := database.UpdateRunErrorStatus(first.ChildID, "infrastructure interrupted validation", status); err != nil {
+				t.Fatal(err)
+			}
+			child, err := database.ReadTerminalSnapshot(first.ChildID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			params.Request.PredecessorID, params.Request.SnapshotDigest = child.Run.ID, child.Digest()
+			params.Request.LaunchNonce = *child.Run.LaunchNonce
+			if _, err := manager.validateAuthored(context.Background(), params, os.Getpid()); err == nil {
+				t.Fatal("unchanged authored request implicitly retried the candidate")
+			}
+			params.Request.TerminalGeneration, params.Request.AcceptUnknownSource = "explicit-infrastructure-retry", true
+			params.Request.LaunchAssertion.Apply = true
+			params.Request.SourceAnchors, err = branchsync.TerminalValidationAnchors(context.Background(), database, gate, repo.WorkingPath, child.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			result, err := manager.validateAuthored(context.Background(), params, os.Getpid())
+
+			if err != nil || !result.Started {
+				t.Fatalf("explicit terminal retry: %+v %v", result, err)
+			}
+			retried := waitForRunTerminalState(t, database, result.Receipt.RunID)
+			manager.wg.Wait()
+			if retried.Status != types.RunCompleted || retried.HeadSHA != child.Run.HeadSHA || calls.Load() != int32(len(steps.AllSteps())) || result.Family.HasChildRepairs || result.Family.Spending[types.StepReview].Remaining != 0 {
+				t.Fatalf("retry did not validate unchanged source fresh with zero repairs: %+v calls=%d family=%+v", retried, calls.Load(), result.Family)
+			}
+			after, err := database.ReadTerminalSnapshot(child.Run.ID)
+			if err != nil || !reflect.DeepEqual(child, after) {
+				t.Fatalf("retry changed its terminal predecessor: %v", err)
 			}
 		})
 	}
@@ -280,6 +413,8 @@ func TestAuthoredAdmissionContinuesAnUnpublishedTerminalChild(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			gitCmd(t, gate, "fetch", "--no-tags", "--no-write-fetch-head", repo.WorkingPath, request.Request.CandidateSHA)
+			gitCmd(t, gate, "update-ref", "refs/no-mistakes/authored-candidate/"+event.ID, request.Request.CandidateSHA)
 			if status == types.RunCancelled {
 				err = manager.HandleCancel(event.ChildID)
 			} else {
@@ -380,6 +515,278 @@ func TestAuthoredAdmissionRefusesGateMovementDuringAdmission(t *testing.T) {
 	}
 }
 
+func TestAuthoredAdmissionAcceptsATerminalAdoptionsOriginalSubmittedHead(t *testing.T) {
+	var calls atomic.Int32
+	manager, database, repo, request, gate, adoption := authoredTerminalAdoptionFixture(t, func() []pipeline.Step {
+		var sequence []pipeline.Step
+		for _, name := range types.AllSteps() {
+			sequence = append(sequence, &authoredFixtureStep{name: name, calls: &calls})
+		}
+		return sequence
+	})
+	before, err := database.ReadTerminalSnapshot(request.Request.PredecessorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateHead := gitOutput(t, gate, "rev-parse", "refs/heads/feature")
+	if gateHead != *adoption.Snapshot.Run.SubmittedHeadSHA || gateHead == before.Run.HeadSHA {
+		t.Fatal("fixture must leave the gate at the original submitted head")
+	}
+
+	result, err := manager.validateAuthored(t.Context(), request, os.Getpid())
+
+	if err != nil || !result.Started {
+		t.Fatalf("recorded terminal-adoption lineage was rejected: %+v %v", result, err)
+	}
+	child := waitForRunTerminalState(t, database, result.Receipt.RunID)
+	if child.Status != types.RunCompleted || calls.Load() != int32(len(types.AllSteps())) {
+		t.Fatalf("fresh stages: status=%s calls=%d", child.Status, calls.Load())
+	}
+	manager.wg.Wait()
+	if result.Family.HistoricalSourceCompleteness != "unknown" || result.Family.HasChildRepairs {
+		t.Fatalf("admission changed uncertainty or repair authority: %+v", result.Family)
+	}
+	if spending := result.Family.Spending[types.StepReview]; spending.Automatic != 0 || spending.Manual != 1 || spending.Remaining != 0 {
+		t.Fatalf("admission lost or duplicated the linked root repair: %+v", spending)
+	}
+	after, err := database.ReadTerminalSnapshot(before.Run.ID)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("admission changed its predecessor: %v", err)
+	}
+	root, err := database.ReadContinuationSnapshot(adoption.Snapshot.Run.ID)
+	if err != nil || !reflect.DeepEqual(root, &adoption.Snapshot) {
+		t.Fatalf("admission changed the adopted root: %v", err)
+	}
+	if gitOutput(t, gate, "rev-parse", "refs/heads/feature") != gateHead || gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD") != request.Request.CandidateSHA {
+		t.Fatal("admission moved the gate or authored source")
+	}
+	replay, err := manager.validateAuthored(t.Context(), request, os.Getpid())
+	if err != nil || replay.Started || replay.Receipt.RunID != child.ID || calls.Load() != int32(len(types.AllSteps())) {
+		t.Fatalf("replay restarted fresh validation: %+v %v", replay, err)
+	}
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "authored.txt"), []byte("another additive authored correction\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "commit", "-am", "correct validated source")
+	validated, err := database.ReadTerminalSnapshot(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Request.PredecessorID, request.Request.SnapshotDigest = child.ID, validated.Digest()
+	request.Request.LaunchNonce = *child.LaunchNonce
+	request.Request.CandidateSHA = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	request.Request.CandidateTree = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD^{tree}")
+	descendant, err := manager.validateAuthored(t.Context(), request, os.Getpid())
+	if err != nil || !descendant.Started {
+		t.Fatalf("mixed admission/adoption lineage was rejected: %+v %v", descendant, err)
+	}
+	if terminal := waitForRunTerminalState(t, database, descendant.Receipt.RunID); terminal.Status != types.RunCompleted || calls.Load() != 2*int32(len(types.AllSteps())) {
+		t.Fatalf("descendant skipped fresh validation: %+v calls=%d", terminal, calls.Load())
+	}
+}
+
+func TestAuthoredAdmissionRefusesBrokenTerminalAdoptionLineageWithoutMutation(t *testing.T) {
+	for _, change := range []string{"unrecorded gate head", "moved source anchor", "missing source anchor", "symbolic source anchor", "moved lane anchor", "wrong source identity", "wrong candidate tree", "missing link", "unreadable link", "contradictory link", "cycle", "changed predecessor", "changed successor", "native safety refusal", "unreadable findings", "ancestral safety refusal", "ancestral unreadable findings"} {
+		t.Run(change, func(t *testing.T) {
+			manager, database, repo, request, gate, adoption := authoredTerminalAdoptionFixture(t, nil)
+			connection, err := sql.Open("sqlite", manager.paths.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer connection.Close()
+			if _, err := connection.Exec(`DROP TRIGGER terminal_adoptions_immutable`); err != nil {
+				t.Fatal(err)
+			}
+			switch change {
+			case "unrecorded gate head":
+				gitCmd(t, gate, "fetch", "--no-tags", repo.WorkingPath, request.Request.CandidateSHA)
+				gitCmd(t, gate, "update-ref", "refs/heads/feature", request.Request.CandidateSHA)
+			case "moved source anchor":
+				gitCmd(t, gate, "update-ref", adoption.SourceRef, adoption.GateHead)
+			case "missing source anchor":
+				gitCmd(t, gate, "update-ref", "-d", adoption.SourceRef)
+			case "symbolic source anchor":
+				gitCmd(t, gate, "symbolic-ref", adoption.SourceRef, "refs/heads/main")
+			case "moved lane anchor":
+				gitCmd(t, gate, "update-ref", "refs/no-mistakes/terminal-lane/"+adoption.SuccessorID, adoption.CandidateSHA)
+			case "wrong source identity":
+				adoption.SourceRef = "refs/heads/feature"
+			case "wrong candidate tree":
+				adoption.CandidateTree = strings.Repeat("b", 40)
+			case "missing link":
+				if _, err := connection.Exec(`DROP TRIGGER terminal_adoptions_no_delete`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := connection.Exec(`DELETE FROM terminal_adoptions`); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable link":
+				if _, err := connection.Exec(`UPDATE terminal_adoptions SET event_json = '{'`); err != nil {
+					t.Fatal(err)
+				}
+			case "contradictory link":
+				adoption.SuccessorID = adoption.Snapshot.Run.ID
+			case "cycle":
+				adoption.Snapshot.Run.ID = adoption.SuccessorID
+			case "changed predecessor":
+				adoption.Snapshot.Run.HeadSHA = adoption.GateHead
+			case "changed successor":
+				if _, err := connection.Exec(`UPDATE runs SET launch_nonce = 'changed' WHERE id = ?`, adoption.SuccessorID); err != nil {
+					t.Fatal(err)
+				}
+			case "native safety refusal", "unreadable findings", "ancestral safety refusal", "ancestral unreadable findings":
+				stepID := adoption.Snapshot.Steps[0].ID
+				if strings.HasPrefix(change, "ancestral") {
+					if _, err := connection.Exec(`DROP TRIGGER terminal_predecessor_step_update`); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					step, err := database.InsertStepResult(adoption.SuccessorID, types.StepTest)
+					if err != nil {
+						t.Fatal(err)
+					}
+					stepID = step.ID
+				}
+				findings := `{"findings":[{"id":"agent-safety-refusal","description":"native safety refusal"}]}`
+				if strings.Contains(change, "unreadable") {
+					findings = `{`
+				}
+				if err := database.SetStepFindings(stepID, findings); err != nil {
+					t.Fatal(err)
+				}
+				if strings.HasPrefix(change, "ancestral") {
+					snapshot, err := database.ReadContinuationSnapshot(adoption.Snapshot.Run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					adoption.Snapshot = *snapshot
+				}
+			}
+			if change != "missing link" && change != "unreadable link" {
+				payload, err := json.Marshal(adoption)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := connection.Exec(`UPDATE terminal_adoptions SET event_json = ?`, string(payload)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			snapshot, err := database.ReadTerminalSnapshot(request.Request.PredecessorID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Request.SnapshotDigest = snapshot.Digest()
+			request.Request.LaunchNonce = *snapshot.Run.LaunchNonce
+			before, err := database.GetRunsByRepo(repo.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			refs := gitOutput(t, gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)")
+
+			result, err := manager.validateAuthored(t.Context(), request, os.Getpid())
+
+			if err == nil {
+				t.Fatalf("broken terminal adoption admitted: %+v", result)
+			}
+			after, readErr := database.GetRunsByRepo(repo.ID)
+			if readErr != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("refusal changed run history: %v", readErr)
+			}
+			status, statusErr := git.Run(t.Context(), repo.WorkingPath, "status", "--porcelain=v1")
+			if gitOutput(t, gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)") != refs || gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD") != request.Request.CandidateSHA || statusErr != nil || status != "" {
+				t.Fatal("refusal changed refs or authored source")
+			}
+			if event, err := database.GetValidationAdmission(request.Request.PredecessorID); err != nil || event != nil {
+				t.Fatalf("refusal recorded admission/accounting: %+v %v", event, err)
+			}
+		})
+	}
+}
+
+func TestAuthoredAdmissionRefusesAnAdoptionAnchorChangedDuringAdmission(t *testing.T) {
+	var gate, sourceRef, originalHead string
+	manager, database, repo, request, gateDir, adoption := authoredTerminalAdoptionFixture(t, func() []pipeline.Step {
+		gitCmd(t, gate, "update-ref", sourceRef, originalHead)
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+	})
+	gate, sourceRef, originalHead = gateDir, adoption.SourceRef, adoption.GateHead
+	before, err := database.GetRunsByRepo(repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = manager.validateAuthored(t.Context(), request, os.Getpid())
+
+	if err == nil || !strings.Contains(err.Error(), "terminal adoption anchor") {
+		t.Fatalf("changed source anchor was accepted: %v", err)
+	}
+	after, err := database.GetRunsByRepo(repo.ID)
+	if err != nil || !reflect.DeepEqual(before, after) || gitOutput(t, gate, "rev-parse", "refs/heads/feature") != originalHead {
+		t.Fatalf("anchor race changed run history or gate head: %v", err)
+	}
+}
+
+func authoredTerminalAdoptionFixture(t *testing.T, factory StepFactory) (*RunManager, *db.DB, *db.Repo, ipc.ValidateAuthoredParams, string, *db.TerminalAdoption) {
+	t.Helper()
+	manager, database, repo, request, gate := authoredAdmissionFixture(t, factory)
+	if err := database.UpdateRunHeadSHA(request.Request.PredecessorID, request.Request.CandidateSHA); err != nil {
+		t.Fatal(err)
+	}
+	step, err := database.InsertStepResult(request.Request.PredecessorID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, selected := `{"findings":[{"id":"old-repair","description":"old native repair"}]}`, `["old-repair"]`
+	round, err := database.InsertStepRound(step.ID, 1, "initial", &findings, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetStepRoundSelection(round.ID, &selected, db.RoundSelectionSourceUser); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := database.ReadContinuationSnapshot(request.Request.PredecessorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, err := request.Request.LaunchAssertion.Verify(request.Request.LaunchAssertion.TrustedSHA, request.Request.LaunchAssertion.Profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successorID := ulid.Make().String()
+	gateHead := gitOutput(t, gate, "rev-parse", "refs/heads/feature")
+	sourceRef := "refs/no-mistakes/terminal-candidate/" + successorID
+	gitCmd(t, gate, "fetch", "--no-tags", repo.WorkingPath, request.Request.CandidateSHA)
+	gitCmd(t, gate, "update-ref", sourceRef, request.Request.CandidateSHA)
+	gitCmd(t, gate, "update-ref", "refs/no-mistakes/terminal-lane/"+successorID, gateHead)
+	adoption, _, err := database.AdoptTerminalCandidate(t.Context(), db.TerminalAdoption{
+		Snapshot: *snapshot, SuccessorID: successorID, CandidateSHA: request.Request.CandidateSHA, CandidateTree: request.Request.CandidateTree,
+		SourceRef: sourceRef, GateHead: gateHead, CallerDir: request.CallerDir, CallerHead: gateHead,
+		Reason: "validate the retained terminal source", Operator: "fixture", Assertion: request.Request.LaunchAssertion, Proof: proof,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(successorID, types.RunCancelled); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunCustodyReturned(successorID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "authored.txt"), []byte("additive correction after returned adoption custody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "commit", "-am", "correct adopted source")
+	predecessor, err := database.ReadTerminalSnapshot(successorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Request.PredecessorID, request.Request.SnapshotDigest = successorID, predecessor.Digest()
+	request.Request.LaunchNonce = *predecessor.Run.LaunchNonce
+	request.Request.CandidateSHA = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	request.Request.CandidateTree = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD^{tree}")
+	return manager, database, repo, request, gate, adoption
+}
+
 func (step *authoredFixtureStep) Name() types.StepName { return step.name }
 func (step *authoredFixtureStep) Execute(*pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	step.calls.Add(1)
@@ -477,7 +884,7 @@ func TestAuthoredAdmissionSchedulesEveryStageFreshWithoutMovingSourceOrPredecess
 }
 
 func TestAuthoredAdmissionRefusesSourceAndLaunchMismatchesWithoutMutation(t *testing.T) {
-	for _, change := range []string{"dirty", "untracked hidden by config", "wrong tree", "wrong branch", "wrong repository", "wrong trusted repository", "unrelated gate head", "stale snapshot", "wrong generation", "wrong launch", "unauthenticated"} {
+	for _, change := range []string{"dirty", "untracked hidden by config", "wrong tree", "wrong branch", "wrong repository", "wrong trusted repository", "unrelated gate head", "stale snapshot", "wrong generation", "wrong launch", "unauthenticated", "native safety refusal", "unreadable findings"} {
 		t.Run(change, func(t *testing.T) {
 			manager, database, repo, request, gate := authoredAdmissionFixture(t, nil)
 			operator := os.Getpid()
@@ -510,6 +917,23 @@ func TestAuthoredAdmissionRefusesSourceAndLaunchMismatchesWithoutMutation(t *tes
 				request.Request.LaunchAssertion.Profiles["primary"][0].Model = "other"
 			case "unauthenticated":
 				operator = 0
+			case "native safety refusal", "unreadable findings":
+				step, err := database.InsertStepResult(request.Request.PredecessorID, types.StepTest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				findings := `{"findings":[{"id":"agent-safety-refusal","severity":"error","description":"native provider refused execution","action":"ask-user"}]}`
+				if change == "unreadable findings" {
+					findings = `{"findings":`
+				}
+				if err := database.SetStepFindings(step.ID, findings); err != nil {
+					t.Fatal(err)
+				}
+				snapshot, err := database.ReadTerminalSnapshot(request.Request.PredecessorID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request.Request.SnapshotDigest = snapshot.Digest()
 			}
 			before, err := database.GetRunsByRepo(repo.ID)
 			if err != nil {
