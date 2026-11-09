@@ -54,7 +54,7 @@ func TestDaemonTemporaryDirectorySurvivesLauncherCleanup(t *testing.T) {
 	t.Setenv("FAKEAGENT_SCENARIO", "")
 	t.Setenv("FAKEAGENT_FIXTURE", "")
 	t.Setenv("NM_TEST_START_DAEMON", "1")
-	t.Setenv("NM_TEST_DAEMON_START_TIMEOUT", e2eDaemonStartTimeout)
+	t.Setenv("NM_TEST_DAEMON_START_TIMEOUT", h.timeout(e2eDaemonStartTimeout).String())
 	t.Setenv("NO_MISTAKES_TELEMETRY", "off")
 	t.Setenv("NO_MISTAKES_NO_UPDATE_CHECK", "1")
 	t.Setenv("GIT_CONFIG_COUNT", "0")
