@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
@@ -119,7 +120,7 @@ func isAllowedTempRoot(nmHome string) bool {
 		if samePath(nmHome, shared) {
 			return false
 		}
-		if resolved, err := filepath.EvalSymlinks(shared); err == nil && samePath(nmHome, resolved) {
+		if resolved, err := realpath.Resolve(shared); err == nil && samePath(nmHome, resolved) {
 			return false
 		}
 	}

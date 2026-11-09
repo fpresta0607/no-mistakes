@@ -20,6 +20,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/e2edaemon"
 	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -88,7 +89,7 @@ func TestAxiAuthoredValidationHasFreshStagesAndNoRepairAuthorityAfterCrash(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	canonical, err := filepath.EvalSymlinks(caller)
+	canonical, err := realpath.Resolve(caller)
 	if err != nil {
 		t.Fatal(err)
 	}
