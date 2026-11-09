@@ -127,18 +127,18 @@ func wrapPRAppendix(appendix string) string {
 // publication fails. That includes suffix text/closing lines added after the
 // generated block. Model-authored copies of ownership markers in evidence are
 // escaped before the actual delimiters are inserted, like foreign attestations.
-func composeOwnedPRContent(parts prOwnedBody, title, appendix string, bodyLimit int, runWorktree, worktreesRoot string) (prContent, error) {
-	before := redactPRContent(prContent{Body: parts.before}, runWorktree, worktreesRoot).Body
-	after := redactPRContent(prContent{Body: parts.after}, runWorktree, worktreesRoot).Body
+func composeOwnedPRContent(parts prOwnedBody, title, appendix string, bodyLimit int, runWorktree, worktreesRoot, runEvidence string) (prContent, error) {
+	before := redactPRContent(prContent{Body: parts.before}, runWorktree, worktreesRoot, runEvidence).Body
+	after := redactPRContent(prContent{Body: parts.after}, runWorktree, worktreesRoot, runEvidence).Body
 	// Before the marker escape: removing a control byte must not be able to
 	// splice a marker together after the escape has looked for one.
 	appendix = neutralizePRControls(appendix)
 	appendix = escapePRAppendixMarkers(appendix)
-	appendix = redactPRContent(prContent{Body: appendix}, runWorktree, worktreesRoot).Body
+	appendix = redactPRContent(prContent{Body: appendix}, runWorktree, worktreesRoot, runEvidence).Body
 	if !parts.managed && before != "" {
 		before += "\n\n"
 	}
-	content := prContent{Title: redactPRContent(prContent{Title: title}, runWorktree, worktreesRoot).Title, Body: before + wrapPRAppendix(appendix) + after}
+	content := prContent{Title: redactPRContent(prContent{Title: title}, runWorktree, worktreesRoot, runEvidence).Title, Body: before + wrapPRAppendix(appendix) + after}
 	if err := validateOwnedPRBudget(content.Body, bodyLimit); err != nil {
 		return prContent{}, err
 	}
@@ -176,7 +176,7 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 		// The author text around the appendix is kept verbatim, so only
 		// references it does not already close are added.
 		authorText := parts.before + "\n" + parts.after
-		content, err := composeOwnedPRContent(parts, title, appendIssuesSection(appendix, issuesSection(sctx, authorText)), bodyLimit, sctx.WorkDir, nmWorktreesRoot())
+		content, err := composeOwnedPRContent(parts, title, appendIssuesSection(appendix, issuesSection(sctx, authorText)), bodyLimit, sctx.WorkDir, nmWorktreesRoot(), testEvidenceDir(sctx))
 		if err != nil {
 			return err
 		}
