@@ -313,11 +313,8 @@ func (h *Harness) RunInDirWithEnv(dir string, env map[string]string, args ...str
 	winproc.Harden(cmd)
 	cmd.Dir = dir
 	cmd.Env = mergedEnv(os.Environ(), env)
-	out, err := cmd.CombinedOutput()
+	out, err := combinedOutput(ctx, cmd)
 	h.syncDaemonOwnership()
-	if err != nil && ctx.Err() != nil {
-		err = errors.Join(err, ctx.Err())
-	}
 	return string(out), err
 }
 
@@ -804,6 +801,10 @@ func (h *Harness) runGit(ctx context.Context, dir string, args ...string) ([]byt
 		"GIT_COMMITTER_NAME=E2E Test",
 		"GIT_COMMITTER_EMAIL=e2e@example.com",
 	)
+	return combinedOutput(ctx, cmd)
+}
+
+func combinedOutput(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
 	out, err := cmd.CombinedOutput()
 	if err != nil && ctx.Err() != nil {
 		err = errors.Join(err, ctx.Err())

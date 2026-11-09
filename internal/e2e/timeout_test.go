@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"os/exec"
 	"testing"
 	"time"
 )
@@ -47,12 +48,13 @@ func TestScaledTimeoutRejectsInvalidScale(t *testing.T) {
 
 func TestRunGitReportsContextDeadline(t *testing.T) {
 	h := &Harness{t: t}
-	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	_, err := h.runGit(ctx, t.TempDir(), "--version")
+	_, err := h.runGit(ctx, t.TempDir(), "-c", "alias.wait=!sleep 4", "wait")
 
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("runGit error = %v; want context deadline exceeded", err)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runGit error = %v; want the killed process's exit error joined with context deadline exceeded", err)
 	}
 }
