@@ -238,6 +238,7 @@ func TestGitlabEvidenceAttemptsEveryImageAndReportsRejections(t *testing.T) {
 
 func TestGitlabEvidenceIndependentOfTestingInEveryAppendixMode(t *testing.T) {
 	sctx, _ := newEvidencePublishContext(t, "feature/gitlab-evidence")
+	publishValidationTextForTest(sctx)
 	sctx.Repo.UpstreamURL = "https://gitlab.example.com/group/project.git"
 	review, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
 	if err != nil {

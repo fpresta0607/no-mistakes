@@ -936,7 +936,8 @@ It is global-only: it decides how a command starts on this machine, so no reposi
 
 ### side_by_side
 
-Starts the Test step's work and the documentation pass beside the review, instead of after it.
+Starts the documentation pass beside Review when a deterministic lint command is configured.
+Test always starts after Review and its accepted scope have settled.
 Unset, the steps run one after another, as they always have.
 
 ```yaml
@@ -948,19 +949,16 @@ side_by_side: true
 | Type    | `bool`   |
 | Default | `false`  |
 
-When the review starts, its later steps' work starts with it, each in a throwaway clone of the run's worktree at the commit the review reads:
-
-- the Test step's work: the baseline test command, then the live check
-- the documentation pass, when the repository names [`commands.lint`](/no-mistakes/reference/repo-config/#commandslint). Without it the pass also fixes lint and may change code, so it keeps its place after the Test step.
+When Review starts, the documentation pass starts with it in a throwaway clone of the run's worktree at the commit Review reads, when the repository names [`commands.lint`](/no-mistakes/reference/repo-config/#commandslint).
+Without that command the pass also fixes lint and may change code, so it keeps its place after Test.
 
 The run still runs one step at a time and holds one approval gate at a time.
 Work started early changes nothing of the run: it has its own clone, its own copy of the run record, and no approval.
-Each step takes that work at its own turn, in its usual order, only when it is still what the step would do now:
+Document takes that work at its own turn only when it is still what the step would do now:
 
 - The run's head is still the commit the work ran on. A review fix moves the head, and work on the old head is stopped at once and removed unless it refused.
 - The work finished without an error.
-- For the Test step, the work made no commit and the run's worktree holds nothing uncommitted. The test files its live check left uncommitted are brought into the run's worktree, where the step leaves them without the setting.
-- For the documentation pass, its commit changes no path the run's worktree holds uncommitted changes to. The commit is brought over as a fast-forward of the unchanged head.
+- Its commit changes no path the run's worktree holds uncommitted changes to. The commit is brought over as a fast-forward of the unchanged head.
 
 Anything else discards the work, the step log says why, and the step runs as it does without the setting.
 Work that ended in a native agent safety refusal is the exception: during the running daemon's lifetime it is not run again, even after the head moved, and the step stops on that refusal at its turn.
@@ -972,10 +970,11 @@ A fix round never takes work started early.
 Nothing starts beside the review when a harness other than `claude` or `codex` is configured, since those are the harnesses known to serve two calls at once, or when the repository has submodules or Git LFS files, which a plain clone would not hold.
 The review's log says which.
 
-Taking a Test lane also takes its resolved comparison, and a pre-push baseline re-run keeps that comparison even if the default branch tip has moved.
+An accepted Review scope decision discards speculative documentation, which is reassessed at its own turn.
+The canonical Test turn records its resolved comparison, and a pre-push baseline re-run keeps that comparison even if the default branch tip has moved.
 
 What is pushed is the hard part.
-The baseline ran on the commit the review started on, and the documentation pass, the Lint step and the formatter can each add a commit after it.
+The baseline runs after Review settles, and the documentation pass, the Lint step and the formatter can each add a commit after it.
 So before anything is pushed, the Push step compares the head to push with the commit the baseline last ran on:
 
 - With a baseline configured, missing or malformed in-memory Test comparison proof refuses push until normal Test runs again.
@@ -990,13 +989,13 @@ So before anything is pushed, the Push step compares the head to push with the c
 This holds whether or not early work was taken.
 With the setting on, a commit made after the Test step is pushed without the baseline running on it only when it is documentation.
 
-What it costs: the machine does more at once, a test suite and up to three agent turns beside each other.
+What it costs: the machine can run the documentation pass alongside Review and Test.
 Each clone runs [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) for itself.
 The baseline runs twice when the commits after the tested one change more than documentation, and the test files a live check writes are such a change.
 
 What still catches each kind of defect with it on:
 
-- a defect a review fix brings in: the Test step, which runs again on the new head, as it does today
+- a defect a review fix brings in: Test, which starts after Review settles on the new head
 - a defect a later commit brings in, from the documentation pass, the Lint step or the formatter: the baseline on the head to push, or for documentation only, the review and CI
 - a difference between a clone and the run's worktree: work starts only where a clone holds what the worktree holds, and the baseline before the push runs in the run's own worktree
 
@@ -1408,13 +1407,17 @@ The template supports literal text and three Go-style placeholders:
 
 The value must be a valid UTF-8 template that renders to a non-empty, single-line commit subject.
 The template source is limited to 1,024 bytes and 16 placeholders.
-The fix-agent summary and final rendered subject are each limited to 4,096 bytes.
+The raw fix-agent summary and final rendered subject are each limited to 4,096 bytes.
+An accepted summary is normalized to one line, trimmed, and shortened to its first 72 Unicode characters before template rendering.
+Shortening never hides invalid UTF-8, an over-limit raw summary, or an unsafe character later in the summary; those inputs are refused.
 Before rendering, no-mistakes predicts the subject size from the validated literal text and placeholders, then rejects oversized output without allocating the expanded message.
 Template functions, control actions, named templates, unknown placeholders, malformed syntax, control characters, unsafe Unicode format characters, and Unicode line or paragraph separators cause configuration loading to fail.
 The blocked format set includes every Unicode `Bidi_Control` code point plus `U+00AD`, `U+180E`, `U+200B`, `U+2060` through `U+2064`, the deprecated bidi controls `U+206A` through `U+206F`, `U+FEFF`, `U+FFF9` through `U+FFFB`, and Unicode tag characters in `U+E0000` through `U+E007F`.
 Legitimate `U+200C` zero-width non-joiner and `U+200D` zero-width joiner text shaping remains allowed.
 The final rendered subject is validated again, so unsafe characters in an agent-provided summary are also rejected.
-Each fix prompt, including CI repair, tells the agent how many characters the summary may use so the subject stays within 72: 72 minus the rendered text around the summary, divided by the number of times the template uses `{{.Summary}}`, with a floor of 20. The limit is guidance only; no-mistakes does not truncate or reject a longer subject.
+Each fix prompt, including CI repair, tells the agent how many characters the summary may use so the subject stays within 72: 72 minus the rendered text around the summary, divided by the number of times the template uses `{{.Summary}}`, with a floor of 20.
+That template-specific budget remains guidance; the enforced 72-character cap applies to the summary alone, so a rendered subject may be longer.
+Custom template expansion must still fit the 4,096-byte rendered-subject limit after shortening.
 CI repair prompts direct the agent to keep detailed diagnosis and verification evidence in its explanatory output, recorded in the run log, rather than in the summary.
 The setting does not change commit subjects created by the Rebase step or the evidence-branch commit; see [`test.evidence`](#testevidence) for the latter.
 A per-repo [`commit.fix_message`](/no-mistakes/reference/repo-config/#commitfix_message) value overrides this global setting.
@@ -1686,7 +1689,7 @@ For PR-drafting context and publication, see [`pr.publish_intent`](/no-mistakes/
 
 Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `pi`, and `copilot`.
 
-`intent.publish_intent: false` records a caller-side omission of intent from the generated `## Intent` section and PR-drafting context.
+`intent.publish_intent: false` records a caller-side omission under the repository's [intent and validation publication policy](/no-mistakes/reference/repo-config/#prpublish_intent).
 The default `true` leaves publication to the repository's trusted [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
 A run records the folded decision (the `axi run --no-publish-intent` flag OR this global default) at start; reruns inherit it, and a mid-run config change never re-publishes.
 This field is global-only: a pushed branch's `.no-mistakes.yaml` cannot express it.
@@ -1741,7 +1744,9 @@ For GitLab image uploads from that run directory, see [Pull request](/no-mistake
 ### test.evidence
 
 Test-step evidence storage settings.
-By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>`. [`evidence_dir`](#evidence_dir) moves that parent for new runs. On GitHub.com/GHEC, supported image and video artifacts are also uploaded when the PR is rendered; see `attach_media` below.
+By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>`.
+[`evidence_dir`](#evidence_dir) moves that parent for new runs.
+PR artifact rendering, uploads, and evidence-branch publication described below follow [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent).
 
 |      |          |
 | ---- | -------- |
@@ -1820,6 +1825,7 @@ Local review-evaluation corpus settings for [`no-mistakes eval`](/no-mistakes/re
 | `eval.diversified_size`   | `int`  | `32`    | Cap on the official gold-only `diversified` set; `0` is one gold case per stratum |
 
 `capture_provenance` is what makes a review pass replayable at all. It is recorded when the round is written and cannot be added afterwards, because the pinned configuration is a point-in-time snapshot, so a run reviewed with it off can never be captured later.
+New Review rounds retain their trusted configuration SHA even with this setting off, so [explicit scope decisions](/no-mistakes/reference/cli/#no-mistakes-axi-respond) remain source-bound without storing eval configuration snapshots.
 
 `auto_capture` collects without any command: when an eligible run finishes, its decided review rounds become cases and fixed `ci-check` and `ci-review-bot` findings become Review false negatives. It does nothing while `capture_provenance` is off. Collection runs after the pipeline has already reported its outcome and can never change it; a failure is logged and nothing else. The [Evaluation toolkit](/no-mistakes/reference/eval/#how-cases-are-collected) owns eligibility and labeling details.
 

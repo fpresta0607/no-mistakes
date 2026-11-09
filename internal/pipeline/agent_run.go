@@ -82,6 +82,11 @@ func (sctx *StepContext) RunAgentSessionBudget(parent context.Context, timeout, 
 }
 
 func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, sessionRole SessionRole, timeout, working time.Duration, cause error) (*agent.Result, error) {
+	scope, err := sctx.acceptedReviewScopePrompt()
+	if err != nil {
+		return nil, err
+	}
+	opts.Prompt += scope
 	if sctx != nil {
 		if err := sctx.AssertValidationSource(); err != nil {
 			return nil, err

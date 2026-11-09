@@ -1131,6 +1131,56 @@ func TestRerunInheritsPRBaseBranchFromSelectedRun(t *testing.T) {
 	}
 }
 
+func TestCancelActiveRunsWaitsForTerminalCleanup(t *testing.T) {
+	for _, status := range []types.RunStatus{types.RunCompleted, types.RunFailed, types.RunCancelled} {
+		t.Run(string(status), func(t *testing.T) {
+			p := paths.WithRoot(t.TempDir())
+			database, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			repo, err := database.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunStatus(run.ID, status); err != nil {
+				t.Fatal(err)
+			}
+			manager := NewRunManager(database, p, nil)
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			cleanupDone := make(chan struct{})
+			manager.cancels[run.ID] = cancel
+			manager.dones[run.ID] = cleanupDone
+			returned := make(chan struct{})
+			go func() {
+				manager.cancelActiveRuns(repo.ID, run.Branch)
+				close(returned)
+			}()
+
+			select {
+			case <-returned:
+				t.Error("replacement passed a terminal run whose cleanup is unfinished")
+			case <-time.After(100 * time.Millisecond):
+			}
+			close(cleanupDone)
+			select {
+			case <-returned:
+			case <-time.After(5 * time.Second):
+				t.Fatal("replacement stayed blocked after cleanup finished")
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("terminal run was cancelled again: %v", context.Cause(ctx))
+			}
+		})
+	}
+}
+
 // The omit-intent decision folds once at run start: the caller's tighten-only
 // request OR the operator's global intent.publish_intent default, stamped on
 // the run row at creation. Reruns inherit the selected run's decision and can

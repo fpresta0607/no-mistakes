@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -211,10 +210,10 @@ func TestReviewStep_SafetyRefusedCoverageCompletionIsNotACoverageGap(t *testing.
 func TestSideBySide_RefusedLaneIsKeptAndNotRunAgain(t *testing.T) {
 	for _, exit := range []string{"taken", "head moved", "stopped", "refused while stopping"} {
 		t.Run(exit, func(t *testing.T) {
-			f := newSideBySideFixture(t, config.Commands{})
+			f := newSideBySideFixture(t, config.Commands{Lint: "echo lint"})
 			started := make(chan string, 1)
 			var calls atomic.Int32
-			f.agent.evidenceF = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			f.agent.documentF = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 				if calls.Add(1) > 1 {
 					return nil, errors.New("the refused work ran again")
 				}
@@ -232,7 +231,7 @@ func TestSideBySide_RefusedLaneIsKeptAndNotRunAgain(t *testing.T) {
 			select {
 			case laneDir = <-started:
 			case <-time.After(sideBySideWait):
-				t.Fatal("the live check did not start beside the review")
+				t.Fatal("the documentation pass did not start beside the review")
 			}
 			t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(laneDir)) })
 			switch exit {
@@ -255,13 +254,13 @@ func TestSideBySide_RefusedLaneIsKeptAndNotRunAgain(t *testing.T) {
 				f.lanesDone()
 			}
 
-			_, err := (&TestStep{}).Execute(f.turn())
+			_, err := (&DocumentStep{}).Execute(f.turn())
 
 			if !agent.IsSafetyRefusal(err) {
 				t.Fatalf("Execute() error = %v, want the lane's refusal", err)
 			}
-			if calls := f.agent.evidenceCalls(); len(calls) != 1 {
-				t.Fatalf("live checks = %q, want the refused one alone", calls)
+			if calls := f.agent.documentCalls(); len(calls) != 1 {
+				t.Fatalf("documentation passes = %q, want the refused one alone", calls)
 			}
 			if data, err := os.ReadFile(filepath.Join(laneDir, "refused.txt")); err != nil || string(data) != "kept" {
 				t.Fatalf("the refused lane's edit = %q, %v; want it kept", data, err)
@@ -270,86 +269,12 @@ func TestSideBySide_RefusedLaneIsKeptAndNotRunAgain(t *testing.T) {
 	}
 }
 
-// A refusal stops every lane, but a lane that refused on its own keeps that
-// refusal for its step rather than letting the step start the work again.
-func TestSideBySide_RefusedDocumentLaneSurvivesStop(t *testing.T) {
-	f := newSideBySideFixture(t, config.Commands{Lint: "true"})
-	started := make(chan string, 1)
-	f.agent.documentF = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-		started <- opts.CWD
-		return nil, errors.Join(agent.ErrSafetyRefusal, errors.New(nativeSafetyRefusal))
-	}
-	startSideLanes(f.review, f.baseSHA)
-	var laneDir string
-	select {
-	case laneDir = <-started:
-	case <-time.After(sideBySideWait):
-		t.Fatal("the documentation pass did not start beside the review")
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(filepath.Dir(laneDir)) })
-	f.lanesDone()
-	f.review.Shared.SideLanes().Stop(f.review)
-
-	_, err := (&DocumentStep{}).Execute(f.turn())
-
-	if !agent.IsSafetyRefusal(err) {
-		t.Fatalf("Execute() error = %v, want the lane's refusal", err)
-	}
-	if calls := f.agent.documentCalls(); len(calls) != 1 {
-		t.Fatalf("documentation passes = %q, want the refused one alone", calls)
-	}
-}
-
-// Stop cancels every lane before it waits for any, so no lane goes on
-// starting work while another winds down.
-func TestSideBySide_StopCancelsEveryLaneBeforeWaiting(t *testing.T) {
-	f := newSideBySideFixture(t, config.Commands{Lint: "true"})
-	var mu sync.Mutex
-	contexts := map[string]context.Context{}
-	started := make(chan struct{}, 2)
-	var otherStillRunning atomic.Bool
-	block := func(name, other string) func(context.Context, agent.RunOpts) (*agent.Result, error) {
-		return func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
-			mu.Lock()
-			contexts[name] = ctx
-			mu.Unlock()
-			started <- struct{}{}
-			<-ctx.Done()
-			mu.Lock()
-			otherCtx := contexts[other]
-			mu.Unlock()
-			select {
-			case <-otherCtx.Done():
-			case <-time.After(2 * time.Second):
-				otherStillRunning.Store(true)
-			}
-			return nil, ctx.Err()
-		}
-	}
-	f.agent.evidenceF = block("test", "document")
-	f.agent.documentF = block("document", "test")
-	startSideLanes(f.review, f.baseSHA)
-	for range 2 {
-		select {
-		case <-started:
-		case <-time.After(sideBySideWait):
-			t.Fatal("both lanes did not start beside the review")
-		}
-	}
-
-	f.review.Shared.SideLanes().Stop(f.review)
-
-	if otherStillRunning.Load() {
-		t.Fatal("Stop waited for one lane while another was still running")
-	}
-}
-
 // Parking on a refusal stops the work beside the review and keeps its log.
 func TestSideBySide_StopEndsTheLanesAndKeepsTheirLogs(t *testing.T) {
-	f := newSideBySideFixture(t, config.Commands{})
+	f := newSideBySideFixture(t, config.Commands{Lint: "echo lint"})
 	started := make(chan string, 1)
 	longLog := "beginning of lane log " + strings.Repeat("x", 1<<20) + " end of lane log"
-	f.agent.evidenceF = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	f.agent.documentF = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		opts.OnChunk(longLog)
 		started <- opts.CWD
 		<-ctx.Done()
@@ -360,7 +285,7 @@ func TestSideBySide_StopEndsTheLanesAndKeepsTheirLogs(t *testing.T) {
 	select {
 	case laneDir = <-started:
 	case <-time.After(sideBySideWait):
-		t.Fatal("the live check did not start beside the review")
+		t.Fatal("the documentation pass did not start beside the review")
 	}
 
 	f.review.Shared.SideLanes().Stop(f.review)
@@ -368,10 +293,10 @@ func TestSideBySide_StopEndsTheLanesAndKeepsTheirLogs(t *testing.T) {
 	if _, err := os.Stat(laneDir); !os.IsNotExist(err) {
 		t.Fatalf("the stopped copy %s is still there (stat error %v)", laneDir, err)
 	}
-	if lanes, _ := f.review.Shared.SideLanes().(*sideLanes); lanes == nil || lanes.claim(types.StepTest) != nil {
-		t.Fatal("the stopped work was still left for the Test step")
+	if lanes, _ := f.review.Shared.SideLanes().(*sideLanes); lanes == nil || lanes.claim(types.StepDocument) != nil {
+		t.Fatal("the stopped work was still left for the Document step")
 	}
-	if !strings.Contains(f.logText(), "log of the stopped test work") || !strings.Contains(f.logText(), "a native agent safety refusal stopped automatic execution") {
+	if !strings.Contains(f.logText(), "log of the stopped document work") || !strings.Contains(f.logText(), "a native agent safety refusal stopped automatic execution") {
 		t.Fatalf("log = %q, want the lane's log and the reason it stopped", f.logText())
 	}
 	if strings.Contains(f.logText(), "beginning of lane log") || !strings.Contains(f.logText(), "end of lane log") || !strings.Contains(f.logText(), "[earlier lane log truncated]") {

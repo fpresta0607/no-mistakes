@@ -63,17 +63,14 @@ func TestStartInstallsLaunchAgentAndBootstrapsManagedDaemon(t *testing.T) {
 			t.Fatalf("launch agent should contain %q, got:\n%s", want, text)
 		}
 	}
-	if len(commands) != 3 {
-		t.Fatalf("expected bootout, bootstrap, and kickstart, got %v", commands)
+	if len(commands) != 2 {
+		t.Fatalf("expected bootstrap and non-destructive kickstart, got %v", commands)
 	}
-	if want := "launchctl bootout gui/501/" + launchdServiceLabel(p); commands[0] != want {
-		t.Fatalf("bootout command = %q, want %q", commands[0], want)
+	if want := "launchctl bootstrap gui/501 " + plistPath; commands[0] != want {
+		t.Fatalf("bootstrap command = %q, want %q", commands[0], want)
 	}
-	if want := "launchctl bootstrap gui/501 " + plistPath; commands[1] != want {
-		t.Fatalf("bootstrap command = %q, want %q", commands[1], want)
-	}
-	if want := "launchctl kickstart -k gui/501/" + launchdServiceLabel(p); commands[2] != want {
-		t.Fatalf("kickstart command = %q, want %q", commands[2], want)
+	if want := "launchctl kickstart gui/501/" + launchdServiceLabel(p); commands[1] != want {
+		t.Fatalf("kickstart command = %q, want %q", commands[1], want)
 	}
 }
 

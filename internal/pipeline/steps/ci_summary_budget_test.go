@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,5 +104,85 @@ func TestCIStep_ConciseRepairSummaryPreservesDiagnosticLog(t *testing.T) {
 	}
 	if got := logged.String(); got != diagnosis {
 		t.Fatalf("diagnosis log = %q, want original untruncated evidence", got)
+	}
+}
+
+func TestCIStep_RejectedSummaryPreservesRepairSource(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name         string
+		output       json.RawMessage
+		shouldRefuse bool
+		wantSummary  string
+	}{
+		{name: "unsafe suffix", output: json.RawMessage(`{"summary":"` + strings.Repeat("a", 73) + `\u202e","code_change_needed":true}`), shouldRefuse: true},
+		{name: "over byte limit", output: json.RawMessage(`{"summary":"` + strings.Repeat("a", 4097) + `","code_change_needed":true}`), shouldRefuse: true},
+		{name: "invalid utf8", output: json.RawMessage("{\"summary\":\"\xff\",\"code_change_needed\":true}"), shouldRefuse: true},
+		{name: "normal", output: json.RawMessage(`{"summary":"repair source","code_change_needed":true}`), wantSummary: "repair source"},
+		{name: "missing output", wantSummary: "repair failing checks"},
+		{name: "invalid json", output: json.RawMessage(`{invalid`), wantSummary: "repair failing checks"},
+		{name: "missing decision", output: json.RawMessage(`{"summary":"repair source"}`), wantSummary: "repair failing checks"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			workDir, base, head := setupGitRepo(t)
+			const rawText = "raw CI repair response"
+			ag := &mockAgent{name: "fixture", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				for _, name := range []string{"feature.txt", "staged.txt", "untracked.txt"} {
+					if err := os.WriteFile(filepath.Join(opts.CWD, name), []byte("completed repair\n"), 0o600); err != nil {
+						return nil, err
+					}
+				}
+				gitCmd(t, opts.CWD, "add", "staged.txt")
+				return &agent.Result{Output: test.output, Text: rawText}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, workDir, base, head, config.Commands{})
+			sctx.Config.CI.RevalidateRepairs = true
+			logPath := filepath.Join(t.TempDir(), "ci.log")
+			log, err := os.Create(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { log.Close() })
+			sctx.LogFile = func(text string) {
+				if _, err := log.WriteString(text + "\n"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pr := &scm.PR{Number: "42", URL: "https://github.com/test/repo/pull/42"}
+
+			repair, err := (&CIStep{}).autoFixCI(sctx, &forgejoLogTestHost{}, pr, ciTargetsFor([]string{"test"}, false))
+
+			if test.shouldRefuse {
+				if !errors.Is(err, errRejectedCommitSummary) || repair.HeadAdvanced || gitCmd(t, workDir, "rev-parse", "HEAD") != head {
+					t.Fatalf("rejected summary reached commit: repair=%+v, error=%v", repair, err)
+				}
+				if staged := gitCmd(t, workDir, "show", ":staged.txt"); staged != "completed repair" {
+					t.Fatalf("rejection lost staged source: %q", staged)
+				}
+			} else if err != nil || !repair.HeadAdvanced || lastCommitMessage(t, workDir) != "no-mistakes(ci): "+test.wantSummary {
+				t.Fatalf("ordinary summary or parse fallback changed: repair=%+v, error=%v", repair, err)
+			}
+			if len(ag.calls) != 1 {
+				t.Fatalf("agent calls = %d, want one repair turn", len(ag.calls))
+			}
+			if err := log.Close(); err != nil {
+				t.Fatal(err)
+			}
+			recorded, err := os.ReadFile(logPath)
+			if err != nil || !strings.Contains(string(recorded), rawText+"\n"+string(test.output)+"\n") {
+				t.Fatalf("raw CI repair result was not retained exactly: %v", err)
+			}
+			for _, name := range []string{"feature.txt", "staged.txt", "untracked.txt"} {
+				content, err := os.ReadFile(filepath.Join(workDir, name))
+				if err != nil || string(content) != "completed repair\n" {
+					t.Fatalf("repair source %s lost: %v", name, err)
+				}
+			}
+			recordedRun, err := sctx.DB.GetRun(sctx.Run.ID)
+			if err != nil || recordedRun.HeadSHA != sctx.Run.HeadSHA || recordedRun.LastPushedSHA != nil || test.shouldRefuse && recordedRun.HeadSHA != head {
+				t.Fatalf("repair changed recorded custody or publication: run=%+v, error=%v", recordedRun, err)
+			}
+		})
 	}
 }

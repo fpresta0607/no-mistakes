@@ -64,7 +64,12 @@ func Run() (retErr error) {
 	if err := p.EnsureDirs(); err != nil {
 		return fmt.Errorf("create directories: %w", err)
 	}
+	releaseStartup, err := acquireLifecycleLock(p, false)
+	if err != nil {
+		return err
+	}
 	lock, err := acquireSingletonLock(p)
+	releaseStartup()
 	if err != nil {
 		return err
 	}
@@ -220,7 +225,12 @@ func RunWithOptions(p *paths.Paths, d *db.DB, stepFactory StepFactory) error {
 	// live daemon's active runs as crashed and delete worktrees out from
 	// under it (see "Daemon Singleton Lock" in
 	// .agents/skills/daemon-runtime/SKILL.md).
+	releaseStartup, err := acquireLifecycleLock(p, false)
+	if err != nil {
+		return err
+	}
 	lock, err := acquireSingletonLock(p)
+	releaseStartup()
 	if err != nil {
 		return err
 	}
@@ -277,6 +287,12 @@ func runWithOptionsLocked(p *paths.Paths, d *db.DB, globalCfg *config.GlobalConf
 	if err != nil {
 		return fmt.Errorf("build pid file: %w", err)
 	}
+	startupRuns, err := d.GetActiveRuns()
+	if err != nil {
+		return fmt.Errorf("snapshot startup runs: %w", err)
+	}
+	mgr.startup = newStartupProgress(pidPath, pidRecord, startupRuns)
+	pidRecord = mgr.startup.record
 	if err := writeDaemonPIDFile(pidPath, pidRecord); err != nil {
 		return fmt.Errorf("write pid file: %w", err)
 	}
@@ -328,6 +344,8 @@ func runWithOptionsLocked(p *paths.Paths, d *db.DB, globalCfg *config.GlobalConf
 		return fmt.Errorf("bind IPC: %w", err)
 	}
 	logStartupPhase("ipc_bind", bindStarted)
+	mgr.startup.complete("ipc_bind")
+	mgr.startup = nil
 
 	serveErrCh := make(chan error, 1)
 	// Held pushes from before a restart start ahead of any fresh push.
@@ -438,6 +456,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	orphanStarted := time.Now()
 	reapOrphanedServers(p)
 	logStartupPhase("orphan_servers", orphanStarted)
+	mgr.startup.complete("orphan_servers")
 
 	gateStarted := time.Now()
 	gateStats := migrateGateConfigs(context.Background(), d, p)
@@ -448,6 +467,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 		"rejected", gateStats.Rejected,
 		"failed", gateStats.Failed,
 	)
+	mgr.startup.complete("gate_migration")
 
 	terminalPRStarted := time.Now()
 	terminalPRCount, err := d.ReconcileTerminalPRRuns()
@@ -461,6 +481,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 		logStartupPhase("terminal_pr_runs", terminalPRStarted, "reconciled", terminalPRCount)
 	}
 
+	mgr.startup.complete("terminal_pr_runs")
 	parkedStarted := time.Now()
 	plans, preserved := mgr.recoverableParkedRuns(context.Background())
 	active, err := d.GetActiveRuns()
@@ -497,6 +518,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 		}
 	}
 	logStartupPhase("parked_runs", parkedStarted, "preserved", len(preserved))
+	mgr.startup.complete("parked_runs")
 
 	// Read while the runs that were executing when this daemon started still say
 	// so: recovery below turns them terminal, and they are the ones whose
@@ -518,6 +540,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 		slog.Info("recovered stale runs from previous crash", "count", count)
 	}
 	logStartupPhase("stale_runs", staleStarted, "recovered", count)
+	mgr.startup.complete("stale_runs")
 
 	reportUnusableWorktreeRoots(d, layout)
 	leftover := leftoverRecordedRunWorktrees(d, p)
@@ -538,6 +561,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	orphanProcStarted := time.Now()
 	sweepOrphanRunProcesses(d, p, sweepableWorktrees(leftover, activeWorktrees), retainedDefaultTreeRunIDs(d, p, wtPolicy, now))
 	logStartupPhase("orphan_processes", orphanProcStarted)
+	mgr.startup.complete("orphan_processes")
 
 	// reapWorktrees applies the operator's retention policy to the default
 	// <NM_HOME>/worktrees tree before cleanupOrphanWorktrees runs its
@@ -548,6 +572,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	mgr.reapWorktrees(wtPolicy, now)
 	cleanupOrphanWorktrees(d, p, leftover)
 	logStartupPhase("worktree_cleanup", worktreeStarted)
+	mgr.startup.complete("worktree_cleanup")
 
 	// Evidence is reaped after stale-run recovery for the same reason worktrees
 	// are: every run's status is settled by now, so the active-run guard can
@@ -560,6 +585,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	}
 	reapRunLogs(d, p.LogsDir(), policy, now)
 	logStartupPhase("evidence_cleanup", evidenceStarted)
+	mgr.startup.complete("evidence_cleanup")
 
 	mgr.resumeRecoveredRuns(plans)
 }
@@ -1338,9 +1364,28 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return mgr.RestartStatus(), nil
 	})
 
-	srv.Handle(ipc.MethodShutdown, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
+	srv.Handle(ipc.MethodPrepareShutdown, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
 		if err := refuseNested(ctx, false); err != nil {
 			return nil, err
+		}
+		if err := mgr.prepareShutdown(); err != nil {
+			return nil, err
+		}
+		return &ipc.ShutdownResult{OK: true}, nil
+	})
+
+	srv.Handle(ipc.MethodShutdown, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var request ipc.ShutdownParams
+		if err := json.Unmarshal(params, &request); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if !request.Force {
+			if err := mgr.prepareShutdown(); err != nil {
+				return nil, err
+			}
 		}
 		go shutdown()
 		return &ipc.ShutdownResult{OK: true}, nil
@@ -1481,6 +1526,10 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 	})
 
 	srv.Handle(ipc.MethodAdmitPush, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := mgr.beginAdmission(); err != nil {
+			return nil, err
+		}
+		defer mgr.endAdmission()
 		var p ipc.AdmitPushParams
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
@@ -1499,6 +1548,10 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 	})
 
 	srv.Handle(ipc.MethodClaimLaunchReceipt, func(_ context.Context, params json.RawMessage) (interface{}, error) {
+		if err := mgr.beginAdmission(); err != nil {
+			return nil, err
+		}
+		defer mgr.endAdmission()
 		var p ipc.ClaimLaunchReceiptParams
 		if err := decodeLaunchParams(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
@@ -1715,7 +1768,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return mgr.HandleCIHandback(ctx, request)
 	})
 
-	srv.Handle(ipc.MethodRespond, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+	respond := func(ctx context.Context, params json.RawMessage, isScopeResponse bool) (interface{}, error) {
 		if err := refuseNested(ctx, false); err != nil {
 			return nil, err
 		}
@@ -1723,7 +1776,10 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		dispositions, err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, respondInstructions(p), p.AddedFindings, p.ApprovalReason, pipeline.ResponseOptions{Origin: p.Origin, Coverage: p.Coverage})
+		if isScopeResponse && p.ScopeDecision == nil {
+			return nil, fmt.Errorf("respond_review_scope requires scope_decision")
+		}
+		dispositions, err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, respondInstructions(p), p.AddedFindings, p.ApprovalReason, pipeline.ResponseOptions{Origin: p.Origin, Coverage: p.Coverage, ScopeDecision: p.ScopeDecision})
 		if err != nil {
 			// A refused fix response is the caller's input to fix, not a
 			// transport failure: the gate is still parked. Report it as a
@@ -1735,7 +1791,17 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			}
 			return nil, err
 		}
-		return &ipc.RespondResult{OK: true, Fixed: dispositions.Fixed, Ignored: dispositions.Ignored, Kept: dispositions.Kept}, nil
+		result := &ipc.RespondResult{OK: true, Fixed: dispositions.Fixed, Ignored: dispositions.Ignored, Kept: dispositions.Kept}
+		if p.ScopeDecision != nil {
+			result.ScopeDecisionID = p.ScopeDecision.DecisionID
+		}
+		return result, nil
+	}
+	srv.Handle(ipc.MethodRespond, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		return respond(ctx, params, false)
+	})
+	srv.Handle(ipc.MethodRespondReviewScope, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		return respond(ctx, params, true)
 	})
 
 	srv.Handle(ipc.MethodAnswerReview, func(ctx context.Context, params json.RawMessage) (interface{}, error) {

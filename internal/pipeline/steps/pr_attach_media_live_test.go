@@ -71,6 +71,7 @@ func TestPRMediaOptOutWithRealGH(t *testing.T) {
 				t.Fatal(err)
 			}
 			sctx.Config = config.Merge(global, repo)
+			publishValidationTextForTest(sctx)
 			var artifacts []types.TestArtifact
 			for _, name := range []string{"one.png", "two.png", "three.png"} {
 				path := writeEvidenceFile(t, sctx.EvidenceDir, name, []byte("\x89PNG binary"))

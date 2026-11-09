@@ -17,6 +17,12 @@ func UninstallSupported() bool {
 // It returns the removed plist path, or an empty string when no LaunchAgent is
 // installed or the platform has none. Application data is kept.
 func Uninstall(p *paths.Paths) (string, error) {
+	return UninstallGuarded(p, func() (func(), error) { return PrepareShutdownIfIdle(p) })
+}
+
+// UninstallGuarded invokes beforeStop only when a managed service exists,
+// before any service mutation. The caller must supply the preparation callback.
+func UninstallGuarded(p *paths.Paths, beforeStop func() (func(), error)) (string, error) {
 	if serviceManagerBypassed() || !UninstallSupported() {
 		return "", nil
 	}
@@ -30,6 +36,11 @@ func Uninstall(p *paths.Paths) (string, error) {
 		}
 		return "", fmt.Errorf("inspect managed service %s: %w", definition, err)
 	}
+	release, err := beforeStop()
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	instance := captureRunningDaemon(p)
 	if err := stopLaunchAgent(p); err != nil {
 		return "", fmt.Errorf("stop managed service: %w", err)

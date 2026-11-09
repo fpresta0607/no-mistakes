@@ -267,6 +267,7 @@ func TestPRStep_ExecuteRedactsAbsoluteHomePathsBeforePublishing(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	publishValidationTextForTest(sctx)
 	sctx.Env = env
 	sctx.EvidenceDir = fixtureEvidenceDir
 
@@ -563,6 +564,7 @@ func TestPRStep_BuildPRContentRedactsRunWorktreePaths(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	publishValidationTextForTest(sctx)
 	other := filepath.Join(nmHome, "worktrees", "ab12cd34ef56", "run-0", "out.log")
 	insertCompletedStep(t, sctx, types.StepTest, findingsJSON(t, types.Findings{
 		TestingSummary: "Ran the tool.",

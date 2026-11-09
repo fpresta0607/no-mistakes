@@ -190,8 +190,8 @@ type StepContext struct {
 	// TestComparisonSHA is the comparison already resolved by Test, shared by
 	// its head checks and base attribution. It is not the previous pushed head.
 	TestComparisonSHA string
-	// SideLaneContext returns a context in which another step of this run can
-	// do its work early, or false when that step is skipped or absent. The
+	// SideLaneContext returns a context in which Document can
+	// do its work early, or false when it is skipped or absent. The
 	// executor offers it to the review step alone, and only under global
 	// side_by_side. Nil everywhere else.
 	SideLaneContext func(step types.StepName) (*StepContext, bool)

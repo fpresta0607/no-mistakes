@@ -86,7 +86,7 @@ func executablePathsMatch(a, b string) bool {
 // child: the in-process daemon.Start is the old version's code and would
 // reinstall the systemd unit or LaunchAgent from the old template, so new
 // service settings would never land.
-func defaultResetDaemon(p *paths.Paths, daemonExpected bool, exe string) error {
+func defaultResetDaemon(p *paths.Paths, daemonExpected bool, exe string, releaseShutdown func()) error {
 	if p == nil {
 		return nil
 	}
@@ -97,6 +97,7 @@ func defaultResetDaemon(p *paths.Paths, daemonExpected bool, exe string) error {
 	if err := daemonStop(p); err != nil {
 		return fmt.Errorf("stop daemon: %w", err)
 	}
+	releaseShutdown()
 	start := func() error { return daemonStart(p) }
 	if exe != "" && (currentGOOS == "linux" || currentGOOS == "darwin") {
 		start = func() error { return daemonStartExecutable(exe) }

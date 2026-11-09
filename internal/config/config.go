@@ -251,11 +251,11 @@ type GlobalConfig struct {
 	// command exactly as before. Global-only: it decides how a command starts
 	// on this machine, so no repository file, trusted or pushed, may set it.
 	TestCommandWrapper CommandWrapper `yaml:"-"`
-	// SideBySide starts the Test step's work and the documentation pass beside
-	// the review instead of after it, each on a throwaway copy of the run's
+	// SideBySide starts the documentation pass beside
+	// the review instead of after it, on a throwaway copy of the run's
 	// worktree, and makes the Push step answer for every commit that came
 	// after the tested one. False, the default, runs the steps one after
-	// another exactly as before. Global-only: how many agents and test runs
+	// another exactly as before. Global-only: how many agents
 	// work at once is this machine's decision, never a repository's.
 	SideBySide bool `yaml:"-"`
 	// CIEndAtGreen ends a run when CI is first green on the head it pushed,
@@ -1797,9 +1797,9 @@ test_agent_timeout: "30m"
 #   command: ["cfo", "gate", "turn", "--as", "{repo} {branch}, run {run_short}", "--"]
 #   refusal_prefix: "cfo gate turn: "
 
-# Start the Test step's work (the baseline test command, then the live check)
-# and the documentation pass beside the review instead of after it, each on a
-# throwaway copy of the run's worktree. A step takes that work at its own turn
+# Start the documentation pass beside Review instead of after it, on a
+# throwaway copy of the run's worktree. Test starts after Review settles.
+# Document takes that work at its own turn
 # only when the run's head is still the commit it was done on. Before the
 # push, every commit that came after the tested one is listed, and when those
 # commits touch more than documentation the baseline runs again on the head to
