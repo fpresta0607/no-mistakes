@@ -246,23 +246,22 @@ func TestAxiAnswer_GenuineReaskIsReturnedAfterTheGrace(t *testing.T) {
 		stale = reviewParkedOn(t, fx, types.StepStatusAwaitingApproval, reviewQuestion("q1"))
 		reask = reviewParkedOn(t, fx, types.StepStatusAwaitingApproval, reviewQuestion("q2"))
 	}
-	fx, _ = newAnswerFollowFixture(t, "1s", closedLastResumed, []answerPhase{
+	fx, follow := newAnswerFollowFixture(t, "1s", closedLastResumed, []answerPhase{
 		{reads: 2, run: func() *ipc.RunInfo { once.Do(build); return stale() }},
 		{reads: 2, run: func() *ipc.RunInfo { return reviewRunning(fx) }},
 		{run: func() *ipc.RunInfo { once.Do(build); return reask() }},
 	})
 
-	started := time.Now()
 	out, err := executeCmd("axi", "answer", "--question", "q1", "--answer", "Keep it", "--wait", "8s")
-	elapsed := time.Since(started)
 	if err != nil {
 		t.Fatalf("axi answer: %v\n%s", err, out)
 	}
+	waited := follow.sinceAnswer(t)
 	if !strings.Contains(out, "question-q2") || !strings.Contains(out, "gate:") {
 		t.Fatalf("genuine re-ask was not returned as the next gate:\n%s", out)
 	}
-	if elapsed < time.Second {
-		t.Fatalf("re-ask returned after %s, before its grace", elapsed)
+	if waited < time.Second {
+		t.Fatalf("re-ask returned %s after the answer, before its grace", waited)
 	}
 }
 
