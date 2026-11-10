@@ -14,6 +14,13 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+// gateCompletionTimeout bounds the wait from an approval to Execute returning.
+// That span includes terminalizing the run, with its database and Git work,
+// which took over a second on a loaded Windows runner (issue #87), so it is no
+// measure of the reconcile timeout: tests read that from the reconcile
+// context's deadline (reconcilingApprovalStep.budget) instead.
+const gateCompletionTimeout = time.Minute
+
 type reconcilingApprovalStep struct {
 	name      types.StepName
 	resolved  atomic.Bool
@@ -24,9 +31,26 @@ type reconcilingApprovalStep struct {
 	callStart chan int64
 	release   chan struct{}
 	startOnce atomic.Bool
+	// budget is the time the first reconcile call had left before its
+	// context's deadline, or -1 when that context had no deadline. It is
+	// stored before started closes.
+	budget atomic.Int64
 }
 
 func (s *reconcilingApprovalStep) Name() types.StepName { return s.name }
+
+// assertReconcileBudget fails the test unless the first reconcile call ran
+// under a deadline no further away than want.
+func assertReconcileBudget(t *testing.T, step *reconcilingApprovalStep, want time.Duration) {
+	t.Helper()
+	budget := time.Duration(step.budget.Load())
+	if budget < 0 {
+		t.Fatal("reconcile context had no deadline")
+	}
+	if budget > want {
+		t.Fatalf("reconcile context deadline was %v away, want at most %v", budget, want)
+	}
+}
 
 func (s *reconcilingApprovalStep) Execute(*StepContext) (*StepOutcome, error) {
 	return &StepOutcome{
@@ -40,8 +64,15 @@ func (s *reconcilingApprovalStep) ReconcileApprovalGate(sctx *StepContext) (bool
 	if s.callStart != nil {
 		s.callStart <- call
 	}
-	if s.startOnce.CompareAndSwap(false, true) && s.started != nil {
-		close(s.started)
+	if s.startOnce.CompareAndSwap(false, true) {
+		budget := time.Duration(-1)
+		if deadline, ok := sctx.Ctx.Deadline(); ok {
+			budget = time.Until(deadline)
+		}
+		s.budget.Store(int64(budget))
+		if s.started != nil {
+			close(s.started)
+		}
 	}
 	if s.release != nil {
 		<-s.release
@@ -282,6 +313,7 @@ func TestExecutor_GateRecheckIsBoundedAndApprovalWinsAfterTimeout(t *testing.T) 
 	case <-time.After(3 * time.Second):
 		t.Fatal("gate reconciliation did not start")
 	}
+	assertReconcileBudget(t, step, 25*time.Millisecond)
 	if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -290,8 +322,8 @@ func TestExecutor_GateRecheckIsBoundedAndApprovalWinsAfterTimeout(t *testing.T) 
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("blocking provider check was not bounded")
+	case <-time.After(gateCompletionTimeout):
+		t.Fatal("approval did not complete the gate after the bounded provider check")
 	}
 }
 
@@ -300,8 +332,8 @@ func TestExecutor_GateRecheckIsBoundedAndApprovalWinsAfterTimeout(t *testing.T) 
 // global config.yaml, load + merge, construct NewExecutor with that Config
 // (no SetGateReconcileTimings), and prove a hanging reconcile is bounded by
 // the configured timeout rather than the hardcoded 30s default. If wiring
-// were missing, the blocking check would hold the gate for ~30s and this
-// 1s deadline would fail.
+// were missing, the reconcile context's deadline would be ~30s away and
+// assertReconcileBudget would fail.
 func TestExecutor_AppliesGateReconcileTimingsFromGlobalConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -337,6 +369,7 @@ func TestExecutor_AppliesGateReconcileTimingsFromGlobalConfig(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("gate reconciliation did not start")
 	}
+	assertReconcileBudget(t, step, 25*time.Millisecond)
 	if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -345,8 +378,8 @@ func TestExecutor_AppliesGateReconcileTimingsFromGlobalConfig(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("configured gate_reconcile_timeout was not applied; blocking check still used the hardcoded default")
+	case <-time.After(gateCompletionTimeout):
+		t.Fatal("approval did not complete the gate after the bounded provider check")
 	}
 }
 
