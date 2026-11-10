@@ -38,8 +38,8 @@ func (d *DB) RecordTerminalSourceState(runID, state string) error {
 // replay run's source. A completed or custody-returned run never can, nor can
 // a continuation successor, which acceptance refuses as a predecessor, nor a
 // run that a newer run on its branch superseded. A run's own successor
-// supersedes it only once that successor has recorded a step: until then,
-// replaying the pending acceptance re-checks the predecessor's checkout.
+// supersedes it once that successor has left pending or recorded a step: until
+// then, replaying the pending acceptance re-checks the predecessor's checkout.
 func (d *DB) SourceMayContinue(run *Run) (bool, error) {
 	if run.Status == types.RunCompleted || run.CustodyReturnedAt != nil {
 		return false, nil
@@ -47,7 +47,7 @@ func (d *DB) SourceMayContinue(run *Run) (bool, error) {
 	var isReleased bool
 	if err := d.sql.QueryRow(`SELECT EXISTS(SELECT 1 FROM terminal_adoptions WHERE successor_run_id = ?)
 		OR EXISTS(SELECT 1 FROM runs WHERE repo_id = ? AND branch = ? AND id > ? AND id NOT IN (
-			SELECT successor_run_id FROM terminal_adoptions WHERE run_id = ? AND NOT EXISTS (SELECT 1 FROM step_results WHERE step_results.run_id = terminal_adoptions.successor_run_id)))`,
+			SELECT successor_run_id FROM terminal_adoptions JOIN runs AS successor ON successor.id = terminal_adoptions.successor_run_id WHERE terminal_adoptions.run_id = ? AND successor.status = 'pending' AND NOT EXISTS (SELECT 1 FROM step_results WHERE step_results.run_id = terminal_adoptions.successor_run_id)))`,
 		run.ID, run.RepoID, run.Branch, run.ID, run.ID).Scan(&isReleased); err != nil {
 		return false, err
 	}

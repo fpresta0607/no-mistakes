@@ -172,14 +172,17 @@ func TestTerminalAdoptionRefusesASuccessorAsPredecessor(t *testing.T) {
 
 func TestSourceMayContinueOnlyWhileContinuationCanAcceptOrReplay(t *testing.T) {
 	for _, test := range []struct {
-		name         string
-		isSuccessor  bool
-		hasStep      bool
-		isReplayable bool
-		shouldRetain bool
+		name            string
+		isSuccessor     bool
+		hasStep         bool
+		successorStatus types.RunStatus
+		isReplayable    bool
+		shouldRetain    bool
 	}{
 		{name: "predecessor of an untouched successor", isReplayable: true, shouldRetain: true},
 		{name: "predecessor of a progressed successor", hasStep: true},
+		{name: "predecessor of a successor that failed before its first step", successorStatus: types.RunFailed},
+		{name: "predecessor of a successor cancelled before its first step", successorStatus: types.RunCancelled},
 		{name: "failed successor", isSuccessor: true, hasStep: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -191,6 +194,11 @@ func TestSourceMayContinueOnlyWhileContinuationCanAcceptOrReplay(t *testing.T) {
 			}
 			if test.hasStep {
 				if _, err := database.InsertStepResult(accepted.Successor.ID, types.StepIntent); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.successorStatus != "" {
+				if err := database.UpdateRunStatus(accepted.Successor.ID, test.successorStatus); err != nil {
 					t.Fatal(err)
 				}
 			}

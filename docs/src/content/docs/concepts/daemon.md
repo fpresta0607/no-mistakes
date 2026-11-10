@@ -159,7 +159,7 @@ An unresolved [`protected_paths`](/no-mistakes/reference/repo-config/#protected_
 An operator abort of an unresolved refusal still discards the checkout at the run's original submitted head, but never adopted or later committed source.
 Otherwise, terminal cleanup of a run that [terminal continuation](/no-mistakes/reference/cli/#continue-validation-of-preserved-terminal-source) could still accept preserves staged or unstaged tracked changes, untracked files, and unreadable nonempty checkouts.
 Source retention ends once continuation can never accept or replay the run: a completed or custody-returned run, a continuation successor, or one a newer run superseded on its branch, follows ordinary cleanup and the [`worktree` retention bound](/no-mistakes/reference/global-config/#worktree) even when it left untracked pipeline artifacts.
-A run's own continuation successor supersedes it only once that successor has recorded a step, because until then the pending acceptance can still be replayed against the run's checkout.
+A run's own continuation successor supersedes it once that successor has left pending or recorded a step, because only an untouched pending successor's acceptance can still be replayed against the run's checkout.
 A directory without its own `.git`, such as the leftover of a partial `git worktree remove`, holds no checkout to retain and is reclaimed without running Git inside it, except that an interrupted CI monitor's directory is still preserved because its head cannot be read.
 The untracked check includes hidden files even when Git's status display settings hide them.
 Clean committed corrections are also retained unless an exact durable preservation anchor or a recorded successful push binding protects the checked-out head.
