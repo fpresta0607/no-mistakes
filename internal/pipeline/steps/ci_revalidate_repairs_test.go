@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,9 +22,14 @@ import (
 // ciRepairFixture is one CI monitor run wired to a real git worktree, a real
 // bare upstream, and a fake gh reporting one failing check, so a test can
 // observe what a repair does to the local head, the remote, and the run's
-// review authority. Tests using this process-heavy fixture intentionally run
-// serially: running all of their git and fake-gh subprocesses in parallel can
-// exhaust macOS CI process capacity and stall a child indefinitely.
+// review authority. Tests using this process-heavy fixture run serially:
+// running all of their git and fake-gh subprocesses in parallel can exhaust
+// process capacity, stalling a child indefinitely on macOS and pushing a
+// repair past its retry bound on Windows (issue #40). newCIRepairFixture
+// enforces that by holding ciRepairFixtureSlot until the test ends, so a
+// caller may still call t.Parallel. The cost: a fixture test waiting for the
+// slot still holds one of the package's -parallel slots, so while fixture
+// tests queue up they can fill every slot and run the package serially.
 type ciRepairFixture struct {
 	sctx     *pipeline.StepContext
 	dir      string
@@ -32,8 +39,14 @@ type ciRepairFixture struct {
 	logs     *[]string
 }
 
+var ciRepairFixtureSlot sync.Mutex
+
 func newCIRepairFixture(t *testing.T, revalidate bool, agentAction func(workDir string)) *ciRepairFixture {
 	t.Helper()
+	ciRepairFixtureSlot.Lock()
+	// Registered first, so it runs after every other cleanup of the test,
+	// once the fixture's processes and temporary directories are gone.
+	t.Cleanup(ciRepairFixtureSlot.Unlock)
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
 
@@ -129,6 +142,43 @@ func (f *ciRepairFixture) log() string { return strings.Join(*f.logs, "\n") }
 
 func writeCIFix(workDir string) {
 	os.WriteFile(filepath.Join(workDir, "ci-fix.txt"), []byte("fixed"), 0o644)
+}
+
+// TestCIStep_RepairFixtureAdmitsOneTestAtATime is the regression for issue
+// #40: the fixture's users call t.Parallel, so the fixture itself must keep a
+// second test from building its repositories while the first test still runs.
+func TestCIStep_RepairFixtureAdmitsOneTestAtATime(t *testing.T) {
+	t.Parallel()
+	firstBuilt := make(chan struct{})
+	markFirstBuilt := sync.OnceFunc(func() { close(firstBuilt) })
+	secondBuilt := make(chan struct{})
+	var isFirstRunning atomic.Bool
+	t.Run("first", func(t *testing.T) {
+		t.Parallel()
+		defer markFirstBuilt()
+		newCIRepairFixture(t, false, nil)
+		isFirstRunning.Store(true)
+		t.Cleanup(func() { isFirstRunning.Store(false) })
+		markFirstBuilt()
+		// Long enough for an unguarded second fixture to finish building.
+		select {
+		case <-secondBuilt:
+		case <-time.After(5 * time.Second):
+		}
+	})
+	t.Run("second", func(t *testing.T) {
+		t.Parallel()
+		select {
+		case <-firstBuilt:
+		case <-time.After(10 * time.Second):
+		}
+		newCIRepairFixture(t, false, nil)
+		wasFirstRunning := isFirstRunning.Load()
+		close(secondBuilt)
+		if wasFirstRunning {
+			t.Fatal("a second CI repair fixture was built while the first test still ran")
+		}
+	})
 }
 
 // TestCIStep_RevalidateRepairsPolicySelectsRepairDelivery is the behavioral
