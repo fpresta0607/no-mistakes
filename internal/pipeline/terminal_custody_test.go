@@ -60,7 +60,7 @@ func terminalSuccessorFixture(t *testing.T, name types.StepName, limit, spent in
 	if err != nil {
 		t.Fatal(err)
 	}
-	event, _, err := database.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, StepNames: []types.StepName{name}, CandidateSHA: parent.HeadSHA, CandidateTree: tree, Reason: "fresh validation", Operator: "fixture", Assertion: assertion, Proof: proof})
+	event, err := database.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, StepNames: []types.StepName{name}, CandidateSHA: parent.HeadSHA, CandidateTree: tree, Reason: "fresh validation", Operator: "fixture", Assertion: assertion, Proof: proof})
 	if err != nil {
 		t.Fatal(err)
 	}

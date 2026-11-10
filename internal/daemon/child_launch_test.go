@@ -161,7 +161,7 @@ func terminalChildLaunch(t *testing.T, configure launchConfigurer) childLaunchFi
 	}
 	gitCmd(t, managed, "add", "correction.txt")
 	gitCmd(t, managed, "commit", "-m", "correction")
-	request := ipc.RecoverTerminalParams{RepoID: repo.ID, RunID: run.ID, Branch: run.Branch, CallerDir: repo.WorkingPath, SnapshotDigest: observed.Digest(), Reason: "continue from the correction"}
+	request := ipc.RecoverTerminalParams{RepoID: repo.ID, Branch: run.Branch, CallerDir: repo.WorkingPath, SnapshotDigest: observed.Digest(), Reason: "continue from the correction"}
 	return childLaunchFixture{manager: manager, database: database, repoID: repo.ID, calls: calls, evidence: evidence, launch: func() (string, bool, error) {
 		result, err := manager.recoverTerminal(context.Background(), request, os.Getpid())
 		if err != nil {

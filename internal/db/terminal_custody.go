@@ -34,6 +34,26 @@ func (d *DB) RecordTerminalSourceState(runID, state string) error {
 	return err
 }
 
+// SourceMayContinue reports whether terminal continuation could still accept or
+// replay run's source. A completed or custody-returned run never can, nor can
+// a continuation successor, which acceptance refuses as a predecessor, nor a
+// run that a newer run on its branch superseded. A run's own successor
+// supersedes it once that successor has left pending or recorded a step: until
+// then, replaying the pending acceptance re-checks the predecessor's checkout.
+func (d *DB) SourceMayContinue(run *Run) (bool, error) {
+	if run.Status == types.RunCompleted || run.CustodyReturnedAt != nil {
+		return false, nil
+	}
+	var isReleased bool
+	if err := d.sql.QueryRow(`SELECT EXISTS(SELECT 1 FROM terminal_adoptions WHERE successor_run_id = ?)
+		OR EXISTS(SELECT 1 FROM runs WHERE repo_id = ? AND branch = ? AND id > ? AND id NOT IN (
+			SELECT successor_run_id FROM terminal_adoptions JOIN runs AS successor ON successor.id = terminal_adoptions.successor_run_id WHERE terminal_adoptions.run_id = ? AND successor.status = 'pending' AND NOT EXISTS (SELECT 1 FROM step_results WHERE step_results.run_id = terminal_adoptions.successor_run_id)))`,
+		run.ID, run.RepoID, run.Branch, run.ID, run.ID).Scan(&isReleased); err != nil {
+		return false, err
+	}
+	return !isReleased, nil
+}
+
 func (snapshot ContinuationSnapshot) Digest() string {
 	payload, _ := json.Marshal(snapshot)
 	return fmt.Sprintf("%x", sha256.Sum256(payload))
@@ -143,92 +163,82 @@ func readTerminalAdoption(row *sql.Row, runID string) (*TerminalAdoption, error)
 	return &event, nil
 }
 
-func (d *DB) AdoptTerminalCandidate(ctx context.Context, event TerminalAdoption) (*TerminalAdoption, bool, error) {
+func (d *DB) AdoptTerminalCandidate(ctx context.Context, event TerminalAdoption) (*TerminalAdoption, error) {
 	run := &event.Snapshot.Run
 	for _, object := range []string{event.CandidateSHA, event.CandidateTree} {
 		decoded, err := hex.DecodeString(object)
 		if err != nil || len(decoded) != 20 || object != strings.ToLower(object) {
-			return nil, false, fmt.Errorf("terminal adoption requires full commit and tree identities")
+			return nil, fmt.Errorf("terminal adoption requires full commit and tree identities")
 		}
 	}
 	if !run.Status.Terminal() || run.Status == types.RunCompleted || run.CustodyReturnedAt != nil || run.PushActive || run.LaunchAssertion == nil || run.LaunchValidationGeneration == nil || event.Assertion == nil || strings.TrimSpace(event.Reason) == "" || len(event.Reason) > 4096 || event.Operator == "" {
-		return nil, false, fmt.Errorf("terminal adoption requires an unrecovered terminal run, original launch authority and an explicit operator reason")
+		return nil, fmt.Errorf("terminal adoption requires an unrecovered terminal run, original launch authority and an explicit operator reason")
 	}
 	if err := run.LaunchAssertionProof.Check(run.LaunchAssertion); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if err := event.Proof.Check(event.Assertion); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	fresh := *event.Assertion
 	fresh.TrustedSHA = run.LaunchAssertion.TrustedSHA
 	if !fresh.Matches(run.LaunchAssertion) {
-		return nil, false, fmt.Errorf("recovery cannot change the authorized agent selection")
+		return nil, fmt.Errorf("recovery cannot change the authorized agent selection")
 	}
 	if event.ID != "" || event.CreatedAt != 0 || !reflect.DeepEqual(event.Successor, Run{}) {
-		return nil, false, fmt.Errorf("recovery cannot supply historical event identity")
+		return nil, fmt.Errorf("recovery cannot supply historical event identity")
 	}
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(`INSERT INTO terminal_adoptions (run_id,id,event_json) SELECT '', '', '' WHERE 0`); err != nil {
-		return nil, false, err
-	}
-	existing, err := readTerminalAdoption(tx.QueryRow(`SELECT id, successor_run_id, event_json FROM terminal_adoptions WHERE run_id = ?`, run.ID), run.ID)
-	if err != nil {
-		return nil, false, err
-	}
-	if existing != nil {
-		comparison := *existing
-		comparison.ID, comparison.CreatedAt = "", 0
-		comparison.Successor = Run{}
-		if event.SuccessorID == "" {
-			comparison.SuccessorID = ""
-		}
-		if !reflect.DeepEqual(comparison, event) {
-			return nil, false, fmt.Errorf("terminal adoption already has a different binding")
-		}
-		if err := validateTerminalSuccessor(tx, existing); err != nil {
-			return nil, false, err
-		}
-		return existing, false, nil
+		return nil, err
 	}
 	current, err := readContinuationSnapshot(tx, run.ID)
 	if err != nil || !reflect.DeepEqual(current, &event.Snapshot) {
-		return nil, false, fmt.Errorf("terminal source, publication, receipt or history changed")
+		return nil, fmt.Errorf("terminal source, publication, receipt or history changed")
 	}
 	var competing bool
 	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM runs WHERE repo_id = ? AND branch = ? AND id <> ? AND (status IN ('pending','running') OR id > ?))`, run.RepoID, run.Branch, run.ID, run.ID).Scan(&competing); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if competing {
-		return nil, false, fmt.Errorf("another run owns this branch")
+		return nil, fmt.Errorf("another run owns this branch")
+	}
+	// A successor is continued only by replaying its own acceptance, so the
+	// budget ledger never walks more than one predecessor.
+	var isSuccessor bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM terminal_adoptions WHERE successor_run_id = ?)`, run.ID).Scan(&isSuccessor); err != nil {
+		return nil, err
+	}
+	if isSuccessor {
+		return nil, fmt.Errorf("a terminal continuation successor cannot be adopted as a predecessor")
 	}
 	// Only the successor receives fresh launch authority and inherited public binding.
 	childID, nonce, ts := event.SuccessorID, "terminal-"+newID(), now()
 	if event.Plan != nil {
 		if run.VerificationPlan == nil || event.Plan.SHA256 != run.VerificationPlan.SHA256 || event.SuccessorID != "" && event.SuccessorID != event.Plan.ID {
-			return nil, false, fmt.Errorf("successor verification input binding changed")
+			return nil, fmt.Errorf("successor verification input binding changed")
 		}
 		if _, err := event.Plan.Read(); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		childID = event.Plan.ID
 	} else if run.VerificationPlan != nil {
-		return nil, false, fmt.Errorf("successor cannot drop captured verification input")
+		return nil, fmt.Errorf("successor cannot drop captured verification input")
 	}
 	if childID == "" {
 		childID = newID()
 	}
 	if _, err := ulid.ParseStrict(childID); err != nil || childID <= run.ID {
-		return nil, false, fmt.Errorf("invalid successor identity")
+		return nil, fmt.Errorf("invalid successor identity")
 	}
 	var workDir *string
 	if event.WorktreeRoot != "" {
 		if !filepath.IsAbs(event.WorktreeRoot) {
-			return nil, false, fmt.Errorf("successor worktree root must be absolute")
+			return nil, fmt.Errorf("successor worktree root must be absolute")
 		}
 		resolved := filepath.Join(event.WorktreeRoot, childID)
 		workDir = &resolved
@@ -251,23 +261,23 @@ func (d *DB) AdoptTerminalCandidate(ctx context.Context, event TerminalAdoption)
 		closing_issue_refs, closing_issue_refs_locked_at, ?, ?, ? FROM runs WHERE id = ?`,
 		childID, event.CandidateSHA, event.CandidateSHA, workDir, buildinfo.CurrentVersion(), buildinfo.Commit, nonce,
 		event.Assertion, event.Proof, event.Plan, event.Gates, evidenceDir, ts, ts, run.ID); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	event.ID, event.CreatedAt, event.SuccessorID = newID(), now(), childID
 	if err := scanRun(tx.QueryRow(`SELECT `+runColumnsFrom(tx)+` FROM runs WHERE id = ?`, childID), &event.Successor); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	payload, err := json.Marshal(event)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if _, err := tx.Exec(`INSERT INTO terminal_adoptions (run_id, id, successor_run_id, event_json) VALUES (?, ?, ?, ?)`, run.ID, event.ID, childID, string(payload)); err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	return &event, true, nil
+	return &event, nil
 }
 
 func validateTerminalSuccessor(tx *sql.Tx, event *TerminalAdoption) error {
@@ -309,7 +319,9 @@ type TerminalPhaseBudget struct {
 	Remaining int `json:"remaining"`
 }
 
-// TerminalPhaseRemaining includes manual fixes and dispatched attempts in family spending.
+// TerminalPhaseRemaining includes manual fixes and dispatched attempts in family
+// spending. A family is one predecessor and its successor, because acceptance
+// refuses to adopt a successor.
 func (d *DB) TerminalPhaseRemaining(runID string, name types.StepName, configured int) (TerminalPhaseBudget, bool, error) {
 	event, err := d.GetTerminalPredecessor(runID)
 	if err != nil || event == nil {
@@ -320,29 +332,17 @@ func (d *DB) TerminalPhaseRemaining(runID string, name types.StepName, configure
 	if err != nil {
 		return TerminalPhaseBudget{}, true, err
 	}
-	snapshots := []ContinuationSnapshot{*current}
-	seen := map[string]bool{runID: true}
-	for event != nil {
-		if seen[event.Snapshot.Run.ID] {
-			return TerminalPhaseBudget{}, true, fmt.Errorf("terminal predecessor cycle")
-		}
-		seen[event.Snapshot.Run.ID] = true
-		original, err := d.ReadContinuationSnapshot(event.Snapshot.Run.ID)
-		if err != nil {
-			return TerminalPhaseBudget{}, true, fmt.Errorf("terminal predecessor history changed")
-		}
-		// The repository record is registration, not run history: re-registering
-		// may change its remotes or default branch while the successor runs.
-		original.Repo = event.Snapshot.Repo
-		if !reflect.DeepEqual(original, &event.Snapshot) {
-			return TerminalPhaseBudget{}, true, fmt.Errorf("terminal predecessor history changed")
-		}
-		snapshots = append(snapshots, event.Snapshot)
-		event, err = d.GetTerminalPredecessor(event.Snapshot.Run.ID)
-		if err != nil {
-			return TerminalPhaseBudget{}, true, err
-		}
+	original, err := d.ReadContinuationSnapshot(event.Snapshot.Run.ID)
+	if err != nil {
+		return TerminalPhaseBudget{}, true, fmt.Errorf("terminal predecessor history changed")
 	}
+	// The repository record is registration, not run history: re-registering
+	// may change its remotes or default branch while the successor runs.
+	original.Repo = event.Snapshot.Repo
+	if !reflect.DeepEqual(original, &event.Snapshot) {
+		return TerminalPhaseBudget{}, true, fmt.Errorf("terminal predecessor history changed")
+	}
+	snapshots := []ContinuationSnapshot{*current, event.Snapshot}
 	spent := 0
 	for _, snapshot := range snapshots {
 		hasPhase := false

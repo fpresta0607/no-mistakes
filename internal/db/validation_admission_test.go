@@ -447,7 +447,7 @@ func TestValidationAdmissionRejectsLinkedAdoptionHeads(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			adoption, _, err := database.AdoptTerminalCandidate(context.Background(), TerminalAdoption{
+			adoption, err := database.AdoptTerminalCandidate(context.Background(), TerminalAdoption{
 				Snapshot: *source, CandidateSHA: proposal.Request.CandidateSHA, CandidateTree: proposal.Request.CandidateTree,
 				RetainedSHA: strings.Repeat("1", 40), GateHead: strings.Repeat("2", 40), RecoveryHead: strings.Repeat("3", 40), CallerHead: strings.Repeat("4", 40),
 				WorktreeRoot: proposal.WorktreeRoot, Reason: "accept retained source", Operator: "fixture", Assertion: source.Run.LaunchAssertion, Proof: source.Run.LaunchAssertionProof,

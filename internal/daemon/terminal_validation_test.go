@@ -239,10 +239,10 @@ func TestTerminalValidationRefusesChangedBindingsWithoutAdmission(t *testing.T) 
 
 func TestTerminalValidationPreservesAdoptedGateOwnershipAndEveryBoundAnchor(t *testing.T) {
 	for _, descendant := range []string{"none", "authored", "terminal", "adopted archive"} {
-		changes := []string{"unchanged", "candidate moved", "candidate deleted", "lane moved", "lane deleted", "ancestor recovery moved", "ancestor recovery deleted", "archive moved", "archive deleted", "symbolic candidate", "noncommit lane", "unrelated gate"}
+		changes := []string{"unchanged", "candidate moved", "candidate deleted", "ancestor recovery moved", "ancestor recovery deleted", "archive moved", "archive deleted", "symbolic candidate", "unrelated gate"}
 		switch descendant {
 		case "authored":
-			changes = []string{"unchanged", "lane moved", "lane deleted", "admission candidate moved", "admission candidate deleted"}
+			changes = []string{"unchanged", "admission candidate moved", "admission candidate deleted"}
 		case "terminal":
 			changes = []string{"unchanged", "inherited recovery moved", "inherited recovery deleted", "admission candidate moved", "admission candidate deleted"}
 		case "adopted archive":
@@ -277,21 +277,19 @@ func TestTerminalValidationPreservesAdoptedGateOwnershipAndEveryBoundAnchor(t *t
 				candidate := params.Request.CandidateSHA
 				successorID := ulid.Make().String()
 				candidateRef := "refs/no-mistakes/terminal-candidate/" + successorID
-				laneRef := "refs/no-mistakes/terminal-lane/" + successorID
 				recoveryRef := custody.RecoveryRef(original.Run.ID)
 				archiveRef := "refs/heads/archive/retained-terminal-source"
 				adoptedArchiveRef := "refs/heads/archive/adopted-terminal-source"
 				localRecoveryRef := custody.RecoveryLocalRef(original.Run.ID)
 				gitCmd(t, gate, "fetch", "--no-tags", repo.WorkingPath, candidate)
 				gitCmd(t, gate, "update-ref", candidateRef, candidate)
-				gitCmd(t, gate, "update-ref", laneRef, original.Run.HeadSHA)
 				gitCmd(t, gate, "update-ref", recoveryRef, original.Run.HeadSHA)
 				gitCmd(t, repo.WorkingPath, "update-ref", archiveRef, original.Run.HeadSHA)
 				gitCmd(t, repo.WorkingPath, "update-ref", localRecoveryRef, original.Run.HeadSHA)
 				if _, err := database.RecordRecoveryArchive(db.RecoveryArchive{RepoID: repo.ID, RunID: original.Run.ID, Branch: original.Run.Branch, RequiredHeadSHA: original.Run.HeadSHA, PreservedHeadSHA: original.Run.HeadSHA, ArchiveRef: archiveRef}); err != nil {
 					t.Fatal(err)
 				}
-				adoption, _, err := database.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *original, SuccessorID: successorID, CandidateSHA: candidate, CandidateTree: params.Request.CandidateTree, RetainedSHA: candidate, SourceRef: candidateRef, GateHead: original.Run.HeadSHA, RecoveryHead: original.Run.HeadSHA, CallerDir: params.CallerDir, CallerHead: original.Run.HeadSHA, Reason: "accept the retained committed correction", Operator: "fixture", Assertion: original.Run.LaunchAssertion, Proof: original.Run.LaunchAssertionProof})
+				adoption, err := database.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *original, SuccessorID: successorID, CandidateSHA: candidate, CandidateTree: params.Request.CandidateTree, RetainedSHA: candidate, SourceRef: candidateRef, GateHead: original.Run.HeadSHA, RecoveryHead: original.Run.HeadSHA, CallerDir: params.CallerDir, CallerHead: original.Run.HeadSHA, Reason: "accept the retained committed correction", Operator: "fixture", Assertion: original.Run.LaunchAssertion, Proof: original.Run.LaunchAssertionProof})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -322,8 +320,8 @@ func TestTerminalValidationPreservesAdoptedGateOwnershipAndEveryBoundAnchor(t *t
 						params.Request.TerminalGeneration, params.Request.AcceptUnknownSource = "first-terminal-lane", true
 						params.Request.LaunchAssertion = launchSelection(params.Request.LaunchAssertion.TrustedSHA, selectedCodex)
 						params.Request.SourceAnchors = map[string]string{
-							"gate/" + candidateRef: candidate, "gate/" + laneRef: original.Run.HeadSHA,
-							"gate/" + recoveryRef: original.Run.HeadSHA, "caller/" + archiveRef: original.Run.HeadSHA,
+							"gate/" + candidateRef: candidate,
+							"gate/" + recoveryRef:  original.Run.HeadSHA, "caller/" + archiveRef: original.Run.HeadSHA,
 							"caller/" + localRecoveryRef: original.Run.HeadSHA,
 						}
 					}
@@ -356,8 +354,8 @@ func TestTerminalValidationPreservesAdoptedGateOwnershipAndEveryBoundAnchor(t *t
 				params.Request.TerminalGeneration, params.Request.AcceptUnknownSource = "independent-adopted-lane", true
 				params.Request.LaunchAssertion = launchSelection(params.Request.LaunchAssertion.TrustedSHA, selectedCodex)
 				params.Request.SourceAnchors = map[string]string{
-					"gate/" + candidateRef: candidate, "gate/" + laneRef: original.Run.HeadSHA,
-					"gate/" + recoveryRef: original.Run.HeadSHA, "caller/" + archiveRef: original.Run.HeadSHA,
+					"gate/" + candidateRef: candidate,
+					"gate/" + recoveryRef:  original.Run.HeadSHA, "caller/" + archiveRef: original.Run.HeadSHA,
 					"caller/" + localRecoveryRef: original.Run.HeadSHA,
 				}
 				if descendant == "adopted archive" {
@@ -377,8 +375,6 @@ func TestTerminalValidationPreservesAdoptedGateOwnershipAndEveryBoundAnchor(t *t
 				switch change {
 				case "admission candidate moved", "admission candidate deleted":
 					ref = admissionCandidateRef
-				case "lane moved", "lane deleted", "noncommit lane":
-					ref, replacement = laneRef, candidate
 				case "ancestor recovery moved", "ancestor recovery deleted":
 					ref, replacement = recoveryRef, candidate
 				case "archive moved", "archive deleted":
@@ -394,8 +390,6 @@ func TestTerminalValidationPreservesAdoptedGateOwnershipAndEveryBoundAnchor(t *t
 				switch {
 				case change == "symbolic candidate":
 					gitCmd(t, gate, "symbolic-ref", candidateRef, "refs/heads/feature")
-				case change == "noncommit lane":
-					gitCmd(t, gate, "update-ref", laneRef, params.Request.CandidateTree)
 				case strings.HasSuffix(change, "deleted"):
 					gitCmd(t, directory, "update-ref", "-d", ref)
 					name := "gate"
