@@ -39,6 +39,7 @@ const (
 	MethodAnswerReview              = "answer_review_question"
 	MethodCancelRun                 = "cancel_run"
 	MethodHandoffRun                = "handoff_run"
+	MethodRefreshPR                 = "refresh_pr"
 	MethodGateContext               = "gate_context"
 	MethodAdmitPush                 = "admit_push"
 	MethodHealth                    = "health"
@@ -84,6 +85,22 @@ type RPCError struct {
 func (e *RPCError) Error() string { return e.Message }
 
 // --- Method parameters ---
+
+type RefreshPRParams struct {
+	RunID          string `json:"run_id"`
+	RepoID         string `json:"repo_id"`
+	Branch         string `json:"branch"`
+	HeadSHA        string `json:"head_sha"`
+	PRURL          string `json:"pr_url"`
+	PushGeneration int64  `json:"push_generation"`
+}
+
+type RefreshPRResult struct {
+	RunID   string `json:"run_id"`
+	HeadSHA string `json:"head_sha"`
+	PRURL   string `json:"pr_url"`
+	Updated bool   `json:"updated"`
+}
 
 type CIHandbackParams struct {
 	RepoID                string             `json:"repo_id"`

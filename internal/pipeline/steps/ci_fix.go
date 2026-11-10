@@ -1066,8 +1066,15 @@ func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*d
 
 func attestationPolicyFrom(sctx *pipeline.StepContext) pipelineAttestationPolicy {
 	policy := pipelineAttestationPolicy{}
-	if sctx != nil && sctx.Config != nil {
-		policy.AllowTestCommandOverride = strings.TrimSpace(sctx.Config.Test.AllowApproveOverFailure)
+	if sctx != nil {
+		policy.RunWorktree = sctx.WorkDir
+		policy.RunEvidence = testEvidenceDir(sctx)
+		if sctx.Run != nil && sctx.Run.WorktreePath() != "" {
+			policy.RunWorktree = sctx.Run.WorktreePath()
+		}
+		if sctx.Config != nil {
+			policy.AllowTestCommandOverride = strings.TrimSpace(sctx.Config.Test.AllowApproveOverFailure)
+		}
 	}
 	return policy
 }

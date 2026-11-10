@@ -65,23 +65,20 @@ func wrapValidation(inner string) string {
 // carries that comment inside a text fence, and the fence is kept so the
 // marker stays visible there.
 func minimalTail(risk, pipelineMD string, provider scm.Provider) string {
-	return joinBlocks(oneLineRisk(neutralizeAttestationMarkers(provider, risk)), noMistakesPRSignature, carriedAttestation(pipelineMD))
+	return joinBlocks(oneLineRisk(neutralizeAttestationMarkers(provider, risk)), noMistakesPRSignature, carriedPipelineMetadata(pipelineMD))
 }
 
 func oneLineRisk(risk string) string {
 	return strings.Join(strings.Fields(risk), " ")
 }
 
-func carriedAttestation(pipelineMD string) string {
+func carriedPipelineMetadata(pipelineMD string) string {
 	marker := extractPipelineAttestationMarker(pipelineMD)
-	if marker == "" {
-		return ""
-	}
 	fenced := "```text\n" + marker + "\n```"
-	if strings.Contains(pipelineMD, fenced) {
-		return fenced
+	if marker != "" && strings.Contains(pipelineMD, fenced) {
+		marker = fenced
 	}
-	return marker
+	return joinBlocks(marker, extractTestExceptionSection(pipelineMD))
 }
 
 func extractPipelineAttestationMarker(pipelineMD string) string {
@@ -114,6 +111,12 @@ func narrativeWithIntent(sctx *pipeline.StepContext, whatChanged string) string 
 }
 
 func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) string {
+	if extractTestExceptionSection(pipelineMD) != "" {
+		header := pipelineSectionHeader(pipelineMD)
+		if len(header) > maxPullRequestBodyBytes || (bodyLimit > 0 && scm.PRBodyLen(header) > bodyLimit) {
+			return carriedPipelineMetadata(pipelineMD)
+		}
+	}
 	switch appendixMode(sctx) {
 	case config.PRAppendixMinimal:
 		return assembleMinimalPRBody(sctx, whatChanged, riskLine, pipelineMD, bodyLimit, provider)
@@ -150,6 +153,9 @@ func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.St
 // buildPRBodyWithin is buildPRBody under a byte budget below the default,
 // which the Issues section uses to reserve its own room.
 func buildPRBodyWithin(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext, provider scm.Provider, maxBytes int) string {
+	if extractTestExceptionSection(pipelineMD) != "" && len(pipelineSectionHeader(pipelineMD)) > maxBytes {
+		return carriedPipelineMetadata(pipelineMD)
+	}
 	switch appendixMode(sctx) {
 	case config.PRAppendixMinimal:
 		return buildMinimalPRBody(body, riskLine, pipelineMD, sctx, maxBytes, provider)
@@ -200,7 +206,7 @@ func fitCollapsed(prefix, risk, testing, pipeline string, limit int, units func(
 	}
 	folded := foldedWithin(risk, "", pipeline, limit, provider)
 	if folded == "" {
-		return shrinkMeasuredKeepingTail(joinBlocks(prefix, carriedAttestation(pipeline)), carriedAttestation(pipeline), limit, units, clamp)
+		return shrinkMeasuredKeepingTail(joinBlocks(prefix, carriedPipelineMetadata(pipeline)), carriedPipelineMetadata(pipeline), limit, units, clamp)
 	}
 	sep := 0
 	if strings.TrimSpace(prefix) != "" {
@@ -220,7 +226,7 @@ func fitCollapsed(prefix, risk, testing, pipeline string, limit int, units func(
 	if units(folded) <= limit {
 		return folded
 	}
-	return shrinkMeasuredKeepingTail(folded, carriedAttestation(pipeline), limit, units, clamp)
+	return shrinkMeasuredKeepingTail(folded, carriedPipelineMetadata(pipeline), limit, units, clamp)
 }
 
 func foldedWithin(risk, testing, pipeline string, innerBudget int, provider scm.Provider) string {
@@ -229,7 +235,7 @@ func foldedWithin(risk, testing, pipeline string, innerBudget int, provider scm.
 	}
 	minimum := pipelineSectionHeader(pipeline)
 	if minimum == "" {
-		minimum = carriedAttestation(pipeline)
+		minimum = carriedPipelineMetadata(pipeline)
 	}
 	budget := innerBudget - len(validationDetailsOpen) - len(validationDetailsClose)
 	if budget < len(minimum) {
@@ -244,7 +250,7 @@ func foldedWithin(risk, testing, pipeline string, innerBudget int, provider scm.
 		}
 	}
 	inner := strings.Trim(appendGeneratedSectionsToCleanBodyWithinLimit("", risk, testing, pipeline, budget, provider), "\n")
-	if !strings.Contains(inner, carriedAttestation(pipeline)) {
+	if !strings.Contains(inner, carriedPipelineMetadata(pipeline)) {
 		inner = minimum
 	}
 	return wrapValidation(inner)
@@ -262,9 +268,12 @@ func shrinkMeasuredKeepingTail(full, tail string, limit int, units func(string) 
 		return clamp(full, limit)
 	}
 	if units(tail) > limit {
-		marker := extractPipelineAttestationMarker(tail)
-		if marker != "" && units(marker) <= limit {
-			return marker
+		minimum := carriedPipelineMetadata(tail)
+		if extractTestExceptionSection(minimum) == "" {
+			minimum = extractPipelineAttestationMarker(tail)
+		}
+		if minimum != "" && (units(minimum) <= limit || extractTestExceptionSection(minimum) != "") {
+			return minimum
 		}
 		return clamp(tail, limit)
 	}

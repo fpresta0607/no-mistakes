@@ -968,6 +968,26 @@ The daemon accepts this only while the CI step is actively monitoring an open PR
 
 Use `axi abort` to discard a run instead; its cancellation behavior is unchanged. Handoff is explicit and opt-in, not an automatic finish-on-green policy. If the run has already completed, no active monitor remains to hand off.
 
+## no-mistakes axi refresh-pr
+
+Publish a settled run's recorded Test approval exception in its existing open PR:
+
+```sh
+no-mistakes axi refresh-pr --run <id>
+```
+
+The explicit run ID is required and works from outside the repository.
+The run must be the latest on its branch, settled as `completed`, `checks_passed` or `handed_off`, and have no active executor.
+Its recorded push target, generation and head must still match the live PR and its existing native attestation.
+A changed or closed PR, missing or ambiguous attestation, edited exception block, or concurrent body edit is refused.
+
+The command publishes only `steps[].test_exception` and the human Test approval exception text.
+It preserves author text, original scenario and failure history, and the configured-command waiver fields.
+It starts no agent, validation, push or daemon, and changes no run state, evidence, spending or repair budget.
+An unchanged repeat reports `updated: false`.
+A write error or failed readback returns an uncertain outcome without automatically replaying the write; inspect the PR before deciding whether another call is appropriate.
+The running daemon must support this command.
+
 ## no-mistakes axi abort
 
 Cancel the active run for the current branch.
