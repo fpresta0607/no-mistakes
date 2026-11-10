@@ -31,10 +31,11 @@ type reconcilingApprovalStep struct {
 	callStart chan int64
 	release   chan struct{}
 	startOnce atomic.Bool
-	// budget is the time the first reconcile call had left before its
-	// context's deadline, or -1 when that context had no deadline. It is
-	// stored before started closes.
-	budget atomic.Int64
+	// hasDeadline records whether the first reconcile call's context had a
+	// deadline, and budget the time it had left before that deadline, which
+	// is negative once it has passed. Both are stored before started closes.
+	hasDeadline atomic.Bool
+	budget      atomic.Int64
 }
 
 func (s *reconcilingApprovalStep) Name() types.StepName { return s.name }
@@ -43,10 +44,10 @@ func (s *reconcilingApprovalStep) Name() types.StepName { return s.name }
 // under a deadline no further away than want.
 func assertReconcileBudget(t *testing.T, step *reconcilingApprovalStep, want time.Duration) {
 	t.Helper()
-	budget := time.Duration(step.budget.Load())
-	if budget < 0 {
+	if !step.hasDeadline.Load() {
 		t.Fatal("reconcile context had no deadline")
 	}
+	budget := time.Duration(step.budget.Load())
 	if budget > want {
 		t.Fatalf("reconcile context deadline was %v away, want at most %v", budget, want)
 	}
@@ -65,11 +66,10 @@ func (s *reconcilingApprovalStep) ReconcileApprovalGate(sctx *StepContext) (bool
 		s.callStart <- call
 	}
 	if s.startOnce.CompareAndSwap(false, true) {
-		budget := time.Duration(-1)
 		if deadline, ok := sctx.Ctx.Deadline(); ok {
-			budget = time.Until(deadline)
+			s.budget.Store(int64(time.Until(deadline)))
+			s.hasDeadline.Store(true)
 		}
-		s.budget.Store(int64(budget))
 		if s.started != nil {
 			close(s.started)
 		}
