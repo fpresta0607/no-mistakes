@@ -95,6 +95,14 @@ func TestMain(m *testing.M) {
 	case "stderr-marker":
 		_, _ = os.Stderr.WriteString("child-stderr-marker\n")
 		os.Exit(0)
+	case "agent-env":
+		// A Claude gate agent that records the environment it was started with.
+		recorded, err := json.Marshal(os.Environ())
+		if err != nil || writeFileAtomic(os.Getenv("NM_TEST_AGENT_ENV_FILE"), recorded, 0o600) != nil {
+			os.Exit(2)
+		}
+		_, _ = os.Stdout.WriteString(`{"type":"result","subtype":"success","is_error":false,"result":"ok"}` + "\n")
+		os.Exit(0)
 	case "capture-output":
 		p := paths.WithRoot(os.Getenv("NM_HOME"))
 		if err := p.EnsureDirs(); err != nil {

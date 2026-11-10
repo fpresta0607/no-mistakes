@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -120,15 +122,43 @@ func Run() (retErr error) {
 	return runWithOptionsLocked(p, d, globalCfg, nil, startupStarted)
 }
 
+// launcherIdentityEnv names the launching session and worker terminal. The
+// daemon outlives its launcher and every gate agent inherits its environment,
+// so an orchestration harness's hooks inside those agents would otherwise
+// report as a worker long gone (#74). CFO_HOME, CFO_STATE_OVERRIDE and
+// CFO_PROJECTS_ROOT name the harness installation rather than one worker, and
+// a test command wrapper needs them, so they stay.
+var launcherIdentityEnv = []string{
+	"CLAUDECODE",
+	"CLAUDE_CODE_ENTRYPOINT",
+	"CLAUDE_CODE_ENTRY_POINT",
+	"CLAUDE_CODE_SESSION_ID",
+	"CLAUDE_CODE_SESSION_ACCESS_TOKEN",
+	"CFO_ROLE",
+	"CFO_TASK_ID",
+	"CFO_SPAWN_GEN",
+	"CFO_HOST_ID",
+	"CFO_HOST_PROOF",
+	"CFO_PARENT_SESSION_ID",
+	"CFO_PARENT_HARNESS",
+	"CFO_ROOT_SESSION_ID",
+	"CFO_SESSION_ID",
+	"CFO_SESSION_HARNESS",
+	"CHROME_DEVTOOLS_AXI_SESSION",
+	launcherCommandGuardEnv,
+}
+
+// launcherCommandGuardEnv lists the worker's command guard folders, which lead
+// its PATH.
+const launcherCommandGuardEnv = "CFO_CODEX_GUARD"
+
 func prepareDaemonEnvironment(p *paths.Paths) error {
 	nmHome := os.Getenv("NM_HOME")
-	for _, key := range []string{
-		"CLAUDECODE",
-		"CLAUDE_CODE_ENTRYPOINT",
-		"CLAUDE_CODE_ENTRY_POINT",
-		"CLAUDE_CODE_SESSION_ID",
-		"CLAUDE_CODE_SESSION_ACCESS_TOKEN",
-	} {
+	if err := dropLauncherCommandGuard(); err != nil {
+		return err
+	}
+	// Windows compares environment names without case, and so does Unsetenv there.
+	for _, key := range launcherIdentityEnv {
 		if err := os.Unsetenv(key); err != nil {
 			return fmt.Errorf("unset %s: %w", key, err)
 		}
@@ -158,6 +188,31 @@ func prepareDaemonEnvironment(p *paths.Paths) error {
 		}
 	}
 	logDaemonPathSummary()
+	return nil
+}
+
+// dropLauncherCommandGuard removes the launching worker's command guard folders
+// while they lead PATH; the same folder later in PATH is the user's own.
+func dropLauncherCommandGuard() error {
+	var guards []string
+	for _, dir := range filepath.SplitList(os.Getenv(launcherCommandGuardEnv)) {
+		if dir != "" {
+			guards = append(guards, dir)
+		}
+	}
+	entries := filepath.SplitList(os.Getenv("PATH"))
+	kept := entries
+	for len(kept) > 0 && slices.ContainsFunc(guards, func(dir string) bool {
+		return samePath(dir, kept[0]) || runtime.GOOS == "windows" && strings.EqualFold(filepath.Clean(dir), filepath.Clean(kept[0]))
+	}) {
+		kept = kept[1:]
+	}
+	if len(kept) == len(entries) {
+		return nil
+	}
+	if err := os.Setenv("PATH", strings.Join(kept, string(os.PathListSeparator))); err != nil {
+		return fmt.Errorf("drop launcher command guard from PATH: %w", err)
+	}
 	return nil
 }
 
