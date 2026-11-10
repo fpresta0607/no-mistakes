@@ -429,7 +429,8 @@ A progressed child is observed or recovered through its existing execution; a ca
 Later authored descendants must preserve the same controller policy assertion, historical uncertainty and zero repair authority.
 Continuing from a published predecessor requires a GitHub repository with the predecessor's PR open.
 The lineage therefore ends once its newest authored child is terminal and its CI step recorded the PR merged or closed: ordinary launches and `rerun` on that branch are accepted again, since nothing can continue the lineage.
-A child that ended with its PR still open, through `ci_end_at_green` or the CI idle timeout, keeps refusing after a later merge or close on the forge, because nothing refreshes a terminal run's recorded PR state (tracked in issue #194).
+Only the CI step records a PR as merged or closed, and nothing refreshes a terminal run's recorded PR state.
+Any child that ended while its PR was still open therefore keeps refusing after a later merge or close on the forge (tracked in issue #194), for example one finished by `ci_end_at_green`, `ci.release_after_checks_pass` or the CI idle timeout, or one that failed or was cancelled.
 The way out today is [`eject`](#no-mistakes-eject) followed by [`init`](#no-mistakes-init), which also deletes the repository's run history.
 The live PR's head and base repository names are compared case-insensitively with the registered repositories; head and base branch names must match exactly, including case.
 A predecessor that inherited an open PR URL through a same-head relaunch or `rerun`, but never recorded its own complete push binding, is ineligible even if that PR is still open.
@@ -839,7 +840,8 @@ The predecessor's status, source, steps, findings, rounds, decisions and launch 
 Initial acceptance requires the latest run on the current repository and branch to be terminal, neither completed nor custody-returned.
 It requires the complete recorded pipeline with completed Intent and Rebase, no deliberately skipped required step, and the original bound launch selection and frozen policy.
 A branch whose validation-only [authored lineage](#no-mistakes-axi-validate-authored) has not ended refuses, so that lineage never regains repair authority.
-The lineage ends only when its newest authored child's CI step recorded the PR merged or closed; a child that ended with its PR open (`ci_end_at_green` or the CI idle timeout) keeps refusing after a later forge merge or close (issue #194), and the way out today is `eject` followed by `init`, which also deletes the repository's run history.
+The lineage ends only when its newest authored child's CI step recorded the PR merged or closed.
+Any child that ended while its PR was still open (`ci_end_at_green`, `ci.release_after_checks_pass`, the CI idle timeout, or a failed or cancelled child) keeps refusing after a later forge merge or close (issue #194), and the way out today is `eject` followed by `init`, which also deletes the repository's run history.
 Active parked CI adoption and conflict handback use their own operations.
 This command accepts no caller-selected run or candidate SHA.
 Use it without `--check`, `--keep-local`, `--adopt-published`, or `--bind-archive-ref`.
