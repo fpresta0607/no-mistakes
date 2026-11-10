@@ -14,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -247,6 +248,13 @@ func startSideLanes(sctx *pipeline.StepContext, baseSHA string) {
 	laneCtx.Ctx = ctx
 	laneCtx.Env = sctx.Env
 	lane := &sideLane{step: step, head: sctx.Run.HeadSHA, started: time.Now(), cancel: cancel, done: make(chan struct{})}
+	// A refusal the lane meets must outlive this daemon, so the lane exists on
+	// its step's row before its agent can start.
+	if err := laneCtx.DB.StartSideLane(laneCtx.StepResultID, lane.head); err != nil {
+		cancel(errSideLaneStopped)
+		sctx.Log(fmt.Sprintf("side by side: nothing starts beside the review: the start of the %s step's work could not be recorded: %v", name, err))
+		return
+	}
 	lanes.mu.Lock()
 	lanes.lanes[name] = lane
 	lanes.mu.Unlock()
@@ -334,6 +342,7 @@ func stopStaleSideLanes(sctx *pipeline.StepContext, head string) {
 func (lane *sideLane) run(sctx *pipeline.StepContext, runWorkDir, baseSHA string) {
 	defer close(lane.done)
 	defer func() { lane.elapsed = time.Since(lane.started) }()
+	defer lane.record(sctx)
 	// The lane is speculative. A panic in it must cost the lane, never the daemon.
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -341,6 +350,33 @@ func (lane *sideLane) run(sctx *pipeline.StepContext, runWorkDir, baseSHA string
 		}
 	}()
 	lane.outcome, lane.err = lane.execute(sctx, runWorkDir, baseSHA)
+}
+
+// record settles the lane's record on its step's row before the lane is seen
+// to end: a refusal is recorded for the step's turn, and any other ending
+// clears the record. A refusal that cannot be recorded leaves the record saying
+// the lane never said how it ended, which a later daemon stops on as well.
+func (lane *sideLane) record(sctx *pipeline.StepContext) {
+	var err error
+	if agent.IsSafetyRefusal(lane.err) {
+		err = sctx.DB.RecordSideLaneRefusal(sctx.StepResultID, lane.head, sideLaneRefusalDiagnostic(lane.err))
+	} else {
+		err = sctx.DB.EndSideLane(sctx.StepResultID, lane.head)
+	}
+	if err != nil {
+		lane.log.line(fmt.Sprintf("side by side: how this work ended could not be recorded: %v", err))
+	}
+}
+
+// sideLaneRefusalDiagnostic is the redacted refusal a lane records, bounded so
+// a provider's long output cannot grow the step's row without limit.
+func sideLaneRefusalDiagnostic(err error) string {
+	const limit = 16 << 10
+	diagnostic := safeurl.RedactText(err.Error())
+	if len(diagnostic) > limit {
+		diagnostic = strings.ToValidUTF8(diagnostic[:limit], "")
+	}
+	return diagnostic
 }
 
 func (lane *sideLane) execute(sctx *pipeline.StepContext, runWorkDir, baseSHA string) (*pipeline.StepOutcome, error) {
@@ -447,19 +483,19 @@ func (lane *sideLane) removeClone() {
 // when that work is still what the step would do now. Otherwise it discards
 // the lane, says why, and returns false, and the caller runs the step as it
 // always has. Work that ended in a native agent safety refusal is never run
-// again: its refusal is returned as the step's error.
+// again: its refusal is returned as the step's error, also when an earlier
+// daemon ran the work and only its record on the step's row is left.
 func takeSideLane(sctx *pipeline.StepContext) (*pipeline.StepOutcome, bool, error) {
 	const name = types.StepDocument
-	if sctx.SideLane || sctx.Shared == nil {
+	if sctx.SideLane {
 		return nil, false, nil
 	}
-	lanes, _ := sctx.Shared.SideLanes().(*sideLanes)
-	if lanes == nil {
-		return nil, false, nil
+	var lane *sideLane
+	if lanes, _ := sctx.Shared.SideLanes().(*sideLanes); lanes != nil {
+		lane = lanes.claim(name)
 	}
-	lane := lanes.claim(name)
 	if lane == nil {
-		return nil, false, nil
+		return nil, false, takeRecordedSideLane(sctx, name)
 	}
 	on := shortObjectID(lane.head)
 	refuse := func(reason string) (*pipeline.StepOutcome, bool, error) {
@@ -469,7 +505,13 @@ func takeSideLane(sctx *pipeline.StepContext) (*pipeline.StepOutcome, bool, erro
 		}
 		if agent.IsSafetyRefusal(lane.err) {
 			sctx.Log(fmt.Sprintf("side by side: the refused %s work is kept at %s", name, lane.checkout))
-			return nil, false, fmt.Errorf("side by side: the %s work started beside the review on %s: %w", name, on, lane.err)
+			refusal := fmt.Errorf("side by side: the %s work started beside the review on %s: %w", name, on, lane.err)
+			if sctx.DB != nil {
+				if _, err := sctx.DB.TakeSideLane(sctx.StepResultID); err != nil {
+					refusal = errors.Join(refusal, fmt.Errorf("side by side: its record could not be cleared, so this step stops on it again at its next turn: %w", err))
+				}
+			}
+			return nil, false, refusal
 		}
 		sctx.Log(fmt.Sprintf("side by side: the %s work started beside the review on %s is not used: %s. The step runs now, as it does without side by side.", name, on, reason))
 		return nil, false, nil
@@ -508,6 +550,30 @@ func takeSideLane(sctx *pipeline.StepContext) (*pipeline.StepOutcome, bool, erro
 	}
 	sctx.Log(fmt.Sprintf("side by side: took the %s result of the work started beside the review on %s, which is still the run's head. It ran for %s there.", name, on, lane.elapsed.Round(time.Second)))
 	return lane.outcome, true, nil
+}
+
+// takeRecordedSideLane takes the record an earlier daemon's lane left on the
+// step's row, which this daemon's memory does not hold. A recorded refusal is
+// returned as the step's error, as it would have been at its turn in that
+// daemon. So is a lane that never recorded how it ended: it may have been
+// refused, and running its work again would repeat the request without an
+// explicit decision.
+func takeRecordedSideLane(sctx *pipeline.StepContext, name types.StepName) error {
+	if sctx.DB == nil {
+		return nil
+	}
+	record, err := sctx.DB.TakeSideLane(sctx.StepResultID)
+	if err != nil {
+		return fmt.Errorf("side by side: the record of the %s work started beside the review could not be read; restore it before continuing: %w", name, err)
+	}
+	if record == nil {
+		return nil
+	}
+	on := shortObjectID(record.Head)
+	if record.Refusal == "" {
+		return fmt.Errorf("side by side: the %s work started beside the review on %s did not record how it ended, so it may have ended in a %w and is not run again without an explicit decision", name, on, agent.ErrSafetyRefusal)
+	}
+	return fmt.Errorf("side by side: the %s work started beside the review on %s ended in a %w, as its record holds: %s", name, on, agent.ErrSafetyRefusal, record.Refusal)
 }
 
 // adopt brings a finished lane's result into the run, or returns why it
