@@ -962,11 +962,13 @@ Document takes that work at its own turn only when it is still what the step wou
 - Its commit changes no path the run's worktree holds uncommitted changes to. The commit is brought over as a fast-forward of the unchanged head.
 
 Anything else discards the work, the step log says why, and the step runs as it does without the setting.
-Work that ended in a native agent safety refusal is the exception: during the running daemon's lifetime it is not run again, even after the head moved, and the step stops on that refusal at its turn.
+Work that ended in a native agent safety refusal is the exception: it is not run again, even after the head moved or the daemon restarted, and the step stops on that refusal at its turn.
 Its copy of the worktree, with its edits, is kept and the step log says where; its evidence folder is still removed, since the run's evidence is published and refused work never is.
 When the run stops on a native agent safety refusal, all work still going beside the review is stopped and work that did not itself refuse is removed.
 The stopped step's log includes up to the last 1 MiB of each lane's log and marks any earlier output that was truncated.
-Refused side-lane state is not carried across a daemon restart or crash.
+The step's record notes the work before it starts and keeps a refusal until the step stops on it, so a daemon that restarts in between stops the step the same way, without the refusal's log or the location of the kept copy.
+Work that never recorded how it ended, because the daemon stopped while it ran or its refusal could not be recorded, may have been refused, so its step stops on it too.
+Nothing starts beside the review when the work cannot be recorded, or while earlier work is still recorded and not yet reported.
 A fix round never takes work started early.
 Nothing starts beside the review when a harness other than `claude` or `codex` is configured, since those are the harnesses known to serve two calls at once, or when the repository has submodules or Git LFS files, which a plain clone would not hold.
 The review's log says which.
