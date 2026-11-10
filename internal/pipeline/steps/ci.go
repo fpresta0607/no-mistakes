@@ -127,9 +127,14 @@ func (s *CIStep) Name() types.StepName { return types.StepCI }
 // approval gate. A PR can be merged or closed after a timeout/failure gate was
 // recorded; either terminal state supersedes the stale gate just as it does in
 // the normal CI polling loop. Open, unknown, and provider-error states remain
-// parked so reconciliation never guesses success.
+// parked so reconciliation never guesses success. Only a head proven to have
+// diverged from the recorded head is fatal; a continuity check git could not
+// complete keeps the gate parked like any other transient failure.
 func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error) {
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
+		if errors.Is(err, errHeadContinuityUnverified) {
+			return false, err
+		}
 		return false, fmt.Errorf("%w: %w", pipeline.ErrFatalGateReconciliation, err)
 	}
 	if err := sctx.Ctx.Err(); err != nil {

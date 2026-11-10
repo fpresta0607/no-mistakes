@@ -1,11 +1,13 @@
 package steps
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -294,7 +296,7 @@ func TestPostReviewStepsRefuseUnverifiableRecordedHeadAtEntry(t *testing.T) {
 			sctx := newTestContext(t, ag, dir, baseSHA, strings.Repeat("f", 40), config.Commands{})
 
 			_, err := step.Execute(sctx)
-			if err == nil || !strings.Contains(err.Error(), "not a descendant") {
+			if err == nil || !strings.Contains(err.Error(), "cannot verify that worktree HEAD") {
 				t.Fatalf("%s must reject an unverifiable recorded head at entry, got %v", step.Name(), err)
 			}
 			if len(ag.calls) != 0 {
@@ -329,6 +331,55 @@ func TestCIGateReconciliationRefusesHeadClobberAtEntry(t *testing.T) {
 	}
 	if sctx.Run.HeadSHA != reviewedHead {
 		t.Fatalf("CI gate reconciliation changed recorded reviewed head: got %s, want %s", sctx.Run.HeadSHA, reviewedHead)
+	}
+}
+
+// TestCIGateReconciliationPreservesTheGateWhenGitCannotCheckTheHead is the
+// issue #88 regression: a head check git could not complete is no evidence of
+// a rewrite, so it must not end the run the way a proven divergence does.
+func TestCIGateReconciliationPreservesTheGateWhenGitCannotCheckTheHead(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		arrange func(t *testing.T, sctx *pipeline.StepContext)
+		want    string
+	}{
+		{
+			name: "head read hits its deadline",
+			arrange: func(t *testing.T, sctx *pipeline.StepContext) {
+				ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				t.Cleanup(cancel)
+				sctx.Ctx = ctx
+			},
+			want: "resolve head before ci step",
+		},
+		{
+			name: "ancestry check fails inside git",
+			arrange: func(t *testing.T, sctx *pipeline.StepContext) {
+				sctx.Run.HeadSHA = strings.Repeat("f", 40)
+			},
+			want: "cannot verify that worktree HEAD",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			sctx := newTestContext(t, &mockAgent{name: "codex"}, dir, baseSHA, headSHA, config.Commands{})
+			tc.arrange(t, sctx)
+
+			reconciled, err := (&CIStep{}).ReconcileApprovalGate(sctx)
+
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CI gate reconciliation error = %v, want one containing %q", err, tc.want)
+			}
+			if errors.Is(err, pipeline.ErrFatalGateReconciliation) {
+				t.Fatalf("CI gate reconciliation classified a git failure as fatal: %v", err)
+			}
+			if reconciled {
+				t.Fatal("CI gate reconciliation resolved the gate without checking the head")
+			}
+		})
 	}
 }
 
