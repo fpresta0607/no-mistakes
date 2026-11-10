@@ -59,7 +59,7 @@ func TestIntentJourney(t *testing.T) {
 	// sequence; clean fakeagent responses keep it under ~30s.
 	run := h.WaitForRun(branch, 90*time.Second)
 	if run.Status != types.RunCompleted {
-		t.Fatalf("run status = %q, want completed; error = %v", run.Status, run.Error)
+		t.Fatalf("run status = %q, want completed; error = %v", run.Status, deref(run.Error))
 	}
 
 	invocations := h.AgentInvocations()

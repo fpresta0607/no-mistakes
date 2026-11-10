@@ -97,7 +97,7 @@ commit:
 	h.Respond(gated.ID, types.StepReview, types.ActionApprove)
 	run := h.WaitForRun(branch, 60*time.Second)
 	if run.Status != types.RunCompleted {
-		t.Fatalf("run status = %s, want completed (error=%v)", run.Status, run.Error)
+		t.Fatalf("run status = %s, want completed (error=%v)", run.Status, deref(run.Error))
 	}
 
 	log, err := h.runGit(context.Background(), h.UpstreamDir, "log", "--format=%s", "main..refs/heads/"+branch)
@@ -146,7 +146,7 @@ func TestFixCommitTrailersJourney(t *testing.T) {
 	h.Respond(gated.ID, types.StepReview, types.ActionApprove)
 	run := h.WaitForRun(branch, 60*time.Second)
 	if run.Status != types.RunCompleted {
-		t.Fatalf("run status = %s, want completed (error=%v)", run.Status, run.Error)
+		t.Fatalf("run status = %s, want completed (error=%v)", run.Status, deref(run.Error))
 	}
 
 	// git's own trailer parser reads the pushed commits, so this checks that
@@ -217,7 +217,7 @@ commit:
 	h.Respond(gated.ID, types.StepReview, types.ActionApprove)
 	run := h.WaitForRun(branch, 60*time.Second)
 	if run.Status != types.RunCompleted {
-		t.Fatalf("run status = %s, want completed (error=%v)", run.Status, run.Error)
+		t.Fatalf("run status = %s, want completed (error=%v)", run.Status, deref(run.Error))
 	}
 
 	log, err := h.runGit(context.Background(), h.UpstreamDir, "log", "--format=%s", "main..refs/heads/"+branch)
@@ -270,7 +270,7 @@ func TestPerRepositoryMachineLocalFixCommitJourney(t *testing.T) {
 	h.Respond(gated.ID, types.StepReview, types.ActionApprove)
 	run := h.WaitForRun(branch, 60*time.Second)
 	if run.Status != types.RunCompleted {
-		t.Fatalf("run status = %s, want completed (error=%v)", run.Status, run.Error)
+		t.Fatalf("run status = %s, want completed (error=%v)", run.Status, deref(run.Error))
 	}
 
 	log, err := h.runGit(context.Background(), h.UpstreamDir, "log", "--format=%s", "main..refs/heads/"+branch)

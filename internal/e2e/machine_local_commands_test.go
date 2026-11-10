@@ -95,7 +95,7 @@ exit 0
 		h.PushToGate(branch)
 		run := h.WaitForRun(branch, 120*time.Second)
 		if run.Status != types.RunCompleted {
-			t.Fatalf("run status = %s, want completed (error=%v)", run.Status, run.Error)
+			t.Fatalf("run status = %s, want completed (error=%v)", run.Status, deref(run.Error))
 		}
 
 		markerData, err := os.ReadFile(marker)
@@ -276,7 +276,7 @@ exit 0
 		h.CommitChange(branch, "feature.txt", "hello\n", "add feature")
 		h.PushToGate(branch)
 		run := h.WaitForRun(branch, 120*time.Second)
-		t.Logf("run status = %s (error=%v)", run.Status, run.Error)
+		t.Logf("run status = %s (error=%v)", run.Status, deref(run.Error))
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {
 			t.Fatalf("a repository-declared machine-local check executed: %v", err)
 		}
@@ -295,7 +295,7 @@ exit 0
 		h.PushToGate(branch)
 		run := h.WaitForRun(branch, 120*time.Second)
 		if run.Status != types.RunCompleted {
-			t.Fatalf("run status = %s (error=%v)", run.Status, run.Error)
+			t.Fatalf("run status = %s (error=%v)", run.Status, deref(run.Error))
 		}
 		if _, err := os.Stat(filepath.Join(h.NMHome, "logs", run.ID, machineLocalConfigFile)); !os.IsNotExist(err) {
 			t.Errorf("command config evidence written without an override: %v", err)

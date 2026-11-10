@@ -173,7 +173,7 @@ func TestReviewPipelineOwnedPRCriterionDoesNotPark(t *testing.T) {
 
 	completed := h.WaitForRun("feature/open-pr-a", 90*time.Second)
 	if completed.Status != types.RunCompleted {
-		t.Fatalf("run status = %q, want completed; error=%v\naxi out:\n%s", completed.Status, completed.Error, out)
+		t.Fatalf("run status = %q, want completed; error=%v\naxi out:\n%s", completed.Status, deref(completed.Error), out)
 	}
 	if logs, logsErr := h.RunInDir(fw, "axi", "logs", "--step", "pr", "--full"); logsErr == nil {
 		t.Logf("PR step logs:\n%s", logs)
