@@ -239,6 +239,7 @@ Existing evidence remains in place.
 ### Pipeline HEAD continuity
 
 At entry to every repository gate and every core step from Test through CI, no-mistakes compares the live worktree `HEAD` with the pipeline-recorded head. An equal head or a pipeline-descendant commit continues. A backward reset, divergent sibling, or unverifiable relationship fails the run before that step performs work, including for steps that would not create a commit.
+While a run is parked at its CI approval gate, the periodic re-check makes the same comparison: a head git proves is not a descendant fails the run, while a check git could not complete (an unreadable `HEAD`, or an ancestry check that errors instead of answering) keeps the gate parked with a warning, like any other transient re-check failure.
 
 ## Test
 
