@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -12,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
@@ -182,6 +185,121 @@ func TestPrepareDaemonEnvironment_RemovesClaudeSessionVarsAndAppliesShellEnv(t *
 	if got := os.Getenv("PATH"); got != "/resolved/bin" {
 		t.Fatalf("expected applied PATH, got %q", got)
 	}
+}
+
+// A daemon started from an orchestration harness's worker terminal must not
+// hand that worker's identity to the gate agents it starts, or their hooks
+// report as a worker long gone (#74). The installation variables stay.
+func TestPrepareDaemonEnvironment_DropsTheLaunchingWorkersIdentity(t *testing.T) {
+	// Arrange
+	p := daemonEnvironmentTestPaths(t)
+	dropped := []string{
+		"CFO_ROLE", "CFO_TASK_ID", "CFO_SPAWN_GEN",
+		"CFO_HOST_ID", "CFO_HOST_PROOF",
+		"CFO_PARENT_SESSION_ID", "CFO_PARENT_HARNESS", "CFO_ROOT_SESSION_ID", "CFO_SESSION_ID", "CFO_SESSION_HARNESS",
+		"CHROME_DEVTOOLS_AXI_SESSION",
+		"CFO_CODEX_GUARD",
+	}
+	kept := map[string]string{
+		"CFO_HOME":           filepath.Join(p.Root(), "fleet"),
+		"CFO_STATE_OVERRIDE": filepath.Join(p.Root(), "fleet", "state"),
+		"CFO_PROJECTS_ROOT":  filepath.Join(p.Root(), "projects"),
+	}
+	ownGuard := filepath.Join(p.Root(), "fleet", "state", "codex-guard", "worker-1")
+	inheritedGuard := filepath.Join(p.Root(), "fleet", "state", "codex-guard", "rig-1")
+	list := string(os.PathListSeparator)
+	userPath := os.Getenv("PATH")
+	for index, key := range dropped {
+		value := "worker-1"
+		if key == "CFO_CODEX_GUARD" {
+			value = ownGuard + list + inheritedGuard
+		}
+		spelled := key
+		if runtime.GOOS == "windows" && index%2 == 0 {
+			spelled = strings.ToLower(key)
+		}
+		t.Setenv(key, "")
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Setenv(spelled, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for key, value := range kept {
+		t.Setenv(key, value)
+	}
+	guardedPath := ownGuard + list + inheritedGuard + list + userPath
+	if runtime.GOOS == "windows" {
+		guardedPath = strings.ToUpper(ownGuard) + list + inheritedGuard + list + userPath
+	}
+	t.Setenv("PATH", guardedPath)
+	oldApply := applyShellEnvToProcess
+	t.Cleanup(func() { applyShellEnvToProcess = oldApply })
+	var probed []string
+	applyShellEnvToProcess = func(...string) error {
+		probed = os.Environ()
+		return nil
+	}
+	assertNoWorkerIdentity := func(t *testing.T, surface string, env []string) {
+		t.Helper()
+		values := map[string]string{}
+		for _, entry := range env {
+			name, value, _ := strings.Cut(entry, "=")
+			if runtime.GOOS == "windows" {
+				name = strings.ToUpper(name)
+			}
+			values[name] = value
+			for _, key := range dropped {
+				if name == key {
+					t.Errorf("%s carries the worker's %s", surface, entry)
+				}
+			}
+		}
+		if values["NM_HOME"] != p.Root() {
+			t.Errorf("%s NM_HOME = %q, want %q", surface, values["NM_HOME"], p.Root())
+		}
+		for key, value := range kept {
+			if values[key] != value {
+				t.Errorf("%s %s = %q, want %q", surface, key, values[key], value)
+			}
+		}
+		if values["PATH"] != userPath {
+			t.Errorf("%s PATH = %q, want the worker's PATH without its guard folders %q", surface, values["PATH"], userPath)
+		}
+	}
+
+	// Act
+	if err := prepareDaemonEnvironment(p); err != nil {
+		t.Fatal(err)
+	}
+	agentEnvFile := filepath.Join(t.TempDir(), "agent-env.json")
+	gateAgent, err := agent.New(types.AgentClaude, os.Args[0], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if _, err := gateAgent.Run(ctx, agent.RunOpts{
+		CWD:    t.TempDir(),
+		Prompt: "review",
+		Env:    []string{"NM_DAEMON_HELPER_PROCESS=agent-env", "NM_TEST_AGENT_ENV_FILE=" + agentEnvFile},
+	}); err != nil {
+		t.Fatalf("run gate agent: %v", err)
+	}
+	recorded, err := os.ReadFile(agentEnvFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var agentEnv []string
+	if err := json.Unmarshal(recorded, &agentEnv); err != nil {
+		t.Fatal(err)
+	}
+
+	// Assert
+	assertNoWorkerIdentity(t, "login shell probe", probed)
+	assertNoWorkerIdentity(t, "daemon", os.Environ())
+	assertNoWorkerIdentity(t, "gate agent", agentEnv)
 }
 
 func TestPrepareDaemonEnvironment_PreservesExistingNMHome(t *testing.T) {
