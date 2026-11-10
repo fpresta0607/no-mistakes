@@ -61,7 +61,7 @@ func TestHostSearchBoundaryReachesEveryPipelinePrompt(t *testing.T) {
 
 	run := h.WaitForRun(branch, 90*time.Second)
 	if run.Status != types.RunCompleted {
-		t.Fatalf("run status = %s, want completed (error=%v)", run.Status, run.Error)
+		t.Fatalf("run status = %s, want completed (error=%v)", run.Status, deref(run.Error))
 	}
 
 	invocations := h.AgentInvocations()

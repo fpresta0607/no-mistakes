@@ -47,7 +47,7 @@ func TestTestEvidenceLivesUnderAppRootNotSharedTemp(t *testing.T) {
 
 	run := h.WaitForRun(branch, 90*time.Second)
 	if run.Status != types.RunCompleted {
-		t.Fatalf("run status = %s, want completed (error=%v)", run.Status, run.Error)
+		t.Fatalf("run status = %s, want completed (error=%v)", run.Status, deref(run.Error))
 	}
 
 	appEvidenceRoot := filepath.Join(h.NMHome, "evidence")
@@ -117,7 +117,7 @@ func TestRunCleanupLeavesNoEmptyEvidenceDirectory(t *testing.T) {
 
 	run := h.WaitForRun(branch, 90*time.Second)
 	if run.Status != types.RunCompleted {
-		t.Fatalf("run status = %s, want completed (error=%v)", run.Status, run.Error)
+		t.Fatalf("run status = %s, want completed (error=%v)", run.Status, deref(run.Error))
 	}
 
 	runDir := filepath.Join(h.NMHome, "evidence", run.ID)
