@@ -170,6 +170,56 @@ func TestTerminalAdoptionRefusesASuccessorAsPredecessor(t *testing.T) {
 	}
 }
 
+func TestSourceMayContinueOnlyWhileContinuationCanAcceptOrReplay(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		isSuccessor  bool
+		hasStep      bool
+		isReplayable bool
+		shouldRetain bool
+	}{
+		{name: "predecessor of an untouched successor", isReplayable: true, shouldRetain: true},
+		{name: "predecessor of a progressed successor", hasStep: true},
+		{name: "failed successor", isSuccessor: true, hasStep: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Arrange
+			database, event := newTerminalAdoptionFixture(t)
+			accepted, err := database.AdoptTerminalCandidate(context.Background(), event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.hasStep {
+				if _, err := database.InsertStepResult(accepted.Successor.ID, types.StepIntent); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := database.ValidateTerminalSuccessor(accepted); (err == nil) != test.isReplayable {
+				t.Fatalf("replay error = %v, want replayable=%v", err, test.isReplayable)
+			}
+			runID := event.Snapshot.Run.ID
+			if test.isSuccessor {
+				if err := database.UpdateRunErrorStatusWithVerifiedHead(accepted.Successor.ID, "interrupted", types.RunFailed, accepted.CandidateSHA); err != nil {
+					t.Fatal(err)
+				}
+				runID = accepted.Successor.ID
+			}
+			run, err := database.GetRun(runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Act
+			mayContinue, err := database.SourceMayContinue(run)
+
+			// Assert
+			if err != nil || mayContinue != test.shouldRetain {
+				t.Fatalf("SourceMayContinue = %v, %v; want %v", mayContinue, err, test.shouldRetain)
+			}
+		})
+	}
+}
+
 func TestTerminalAdoptionRefusalIsAtomic(t *testing.T) {
 	for _, test := range []struct {
 		name   string

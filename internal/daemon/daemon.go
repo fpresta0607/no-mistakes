@@ -1158,12 +1158,6 @@ func terminalWorktreeSourceReason(ctx context.Context, database *db.DB, runID, w
 	}
 	// An original protected-path refusal can explicitly discard its working
 	// files. That permission never extends to adopted or later committed source.
-	if adoption == nil {
-		adoption, err = database.GetTerminalPredecessor(runID)
-		if err != nil {
-			return fmt.Sprintf("run %s successor provenance cannot be read; preserving", runID)
-		}
-	}
 	if adoption == nil && headErr == nil && statusErr == nil && run.SubmittedHeadSHA != nil && head == *run.SubmittedHeadSHA && head == run.HeadSHA {
 		steps, err := database.GetStepsByRun(runID)
 		if err != nil {

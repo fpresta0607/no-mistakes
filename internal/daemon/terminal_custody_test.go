@@ -531,30 +531,6 @@ func TestTerminalAbortDoesNotExtendProtectedPathDisposal(t *testing.T) {
 			if err := git.WorktreeAdd(context.Background(), f.p.RepoDir(repo.ID), workDir, head); err != nil {
 				t.Fatal(err)
 			}
-			if test.isAdopted {
-				if err := f.db.UpdateRunStatus(run.ID, types.RunFailed); err != nil {
-					t.Fatal(err)
-				}
-				snapshot, err := f.db.ReadContinuationSnapshot(run.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				adoption, err := f.db.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: head, CandidateTree: gitOutput(t, workDir, "rev-parse", "HEAD^{tree}"), SourceRef: custody.RecoveryRef(run.ID), Reason: "fixture source adoption", Operator: "fixture", Assertion: assertion, Proof: proof})
-				if err != nil {
-					t.Fatal(err)
-				}
-				run, err = f.db.GetRun(adoption.Successor.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				workDir = f.p.WorktreeDir(repo.ID, run.ID)
-				if err := f.db.SetRunWorktreeDir(run.ID, workDir); err != nil {
-					t.Fatal(err)
-				}
-				if err := git.WorktreeAdd(context.Background(), f.p.RepoDir(repo.ID), workDir, head); err != nil {
-					t.Fatal(err)
-				}
-			}
 			if test.isAdopted || test.hasLaterHead {
 				step, err := f.db.InsertStepResult(run.ID, types.StepPush)
 				if err != nil {
@@ -587,6 +563,15 @@ func TestTerminalAbortDoesNotExtendProtectedPathDisposal(t *testing.T) {
 			gitCmd(t, workDir, "add", "staged.txt")
 			if err := f.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, types.RunCancelReasonAbortedByUser, types.RunCancelled, head); err != nil {
 				t.Fatal(err)
+			}
+			if test.isAdopted {
+				snapshot, err := f.db.ReadContinuationSnapshot(run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.db.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: head, CandidateTree: gitOutput(t, workDir, "rev-parse", "HEAD^{tree}"), SourceRef: custody.RecoveryRef(run.ID), Reason: "fixture source adoption", Operator: "fixture", Assertion: assertion, Proof: proof}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			manager := NewRunManager(f.db, f.p, nil)
 			manager.removeRunWorktree(repo.ID, run.ID, f.p.RepoDir(repo.ID), workDir, "abort preservation regression")
