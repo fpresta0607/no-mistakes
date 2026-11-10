@@ -15,7 +15,11 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
-func TestOpenReadOnlyAfterCrashWithMappedSharedMemory(t *testing.T) {
+// crashWithMappedSharedMemory leaves a registry the way a Windows crash can:
+// a writer that exited without closing SQLite, its committed rows only in the
+// WAL, and its -shm section still mapped with no SQLite owner.
+func crashWithMappedSharedMemory(t *testing.T) string {
+	t.Helper()
 	if root := os.Getenv("NM_DB_CRASH_WRITER"); root != "" {
 		database, err := Open(filepath.Join(root, "state.sqlite"))
 		if err != nil {
@@ -37,7 +41,7 @@ func TestOpenReadOnlyAfterCrashWithMappedSharedMemory(t *testing.T) {
 	path := filepath.Join(root, "state.sqlite")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	writer := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestOpenReadOnlyAfterCrashWithMappedSharedMemory$")
+	writer := exec.CommandContext(ctx, os.Args[0], "-test.run=^"+t.Name()+"$")
 	writer.Env = append(os.Environ(), "NM_DB_CRASH_WRITER="+root)
 	winproc.Harden(writer)
 	if output, err := writer.CombinedOutput(); err != nil {
@@ -50,17 +54,52 @@ func TestOpenReadOnlyAfterCrashWithMappedSharedMemory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer sharedMemory.Close()
+	t.Cleanup(func() { sharedMemory.Close() })
 	mapping, err := windows.CreateFileMapping(windows.Handle(sharedMemory.Fd()), nil, windows.PAGE_READONLY, 0, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer windows.CloseHandle(mapping)
+	t.Cleanup(func() { windows.CloseHandle(mapping) })
 	view, err := windows.MapViewOfFile(mapping, windows.FILE_MAP_READ, 0, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer windows.UnmapViewOfFile(view)
+	t.Cleanup(func() { windows.UnmapViewOfFile(view) })
+	return path
+}
+
+func requireCrashWriterRun(t *testing.T, database *DB) {
+	t.Helper()
+	run, err := database.GetRunByLaunchNonce("crash-repo", "feature/crash", "nonce")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run == nil || run.HeadSHA != "head" || run.PiProfile == nil || run.PiProfile.Model != "provider/crash-model" || run.PiProfile.Effort != agentcfg.EffortHigh || run.LaunchReceiptClaimedAt != nil {
+		t.Fatalf("persisted run or unclaimed receipt changed: %+v", run)
+	}
+}
+
+func TestOpenAfterCrashWithMappedSharedMemory(t *testing.T) {
+	path := crashWithMappedSharedMemory(t)
+
+	database, err := Open(path)
+	if err != nil {
+		t.Fatalf("writable registry after crash: %v", err)
+	}
+	defer database.Close()
+
+	requireCrashWriterRun(t, database)
+	if _, err := database.InsertRepoWithID("after-crash", "after-crash", "https://example.com/after.git", "main"); err != nil {
+		t.Fatalf("write after crash recovery: %v", err)
+	}
+	repos, err := database.GetRepos()
+	if err != nil || len(repos) != 2 {
+		t.Fatalf("registry after crash recovery and a new write: %v, %v", repos, err)
+	}
+}
+
+func TestOpenReadOnlyAfterCrashWithMappedSharedMemory(t *testing.T) {
+	path := crashWithMappedSharedMemory(t)
 
 	before := make(map[string][]byte)
 	for _, filename := range []string{path, path + "-wal", path + "-shm"} {
@@ -79,13 +118,7 @@ func TestOpenReadOnlyAfterCrashWithMappedSharedMemory(t *testing.T) {
 		t.Fatalf("read-only registry after crash: %v", err)
 	}
 	defer readonly.Close()
-	run, err := readonly.GetRunByLaunchNonce("crash-repo", "feature/crash", "nonce")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if run == nil || run.HeadSHA != "head" || run.PiProfile == nil || run.PiProfile.Model != "provider/crash-model" || run.PiProfile.Effort != agentcfg.EffortHigh || run.LaunchReceiptClaimedAt != nil {
-		t.Fatalf("persisted run or unclaimed receipt changed: %+v", run)
-	}
+	requireCrashWriterRun(t, readonly)
 	if _, err := readonly.sql.Exec("DELETE FROM repos"); err == nil {
 		t.Fatal("read-only registry accepted a write")
 	}

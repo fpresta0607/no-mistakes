@@ -35,7 +35,7 @@ See the [quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick
 
 ## Repo conventions
 
-- Go 1.25+, standard toolchain. See `AGENTS.md` for agent instructions.
+- Go 1.26+, standard toolchain. See `AGENTS.md` for agent instructions.
 - Run `make fmt`, `make lint`, and `make test` before pushing. Run `make e2e` too when you touch agent integrations, the e2e harness, or recorded fixtures. The pipeline will run them again, but a fast local pass saves rounds.
 - Run `make skill` when you change the canonical agent skill content under `internal/skill`; `make lint` fails if any committed no-mistakes skill file has drifted.
 - Run `make winres` when you change the Windows application manifest in `internal/winres`; it regenerates the committed `cmd/no-mistakes/rsrc_windows_*.syso` objects, and `make lint` fails if they have drifted. Never replace them with objects built by another tool.
