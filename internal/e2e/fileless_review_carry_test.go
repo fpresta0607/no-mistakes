@@ -100,7 +100,7 @@ func TestFilelessSelectedReviewFindingRequiresCompleteVerification(t *testing.T)
 			if tc.clears {
 				run := h.WaitForRun(branch, 90*time.Second)
 				if run.Status != types.RunCompleted {
-					t.Fatalf("positive verification did not clear selected finding: status=%s error=%v response=%s", run.Status, run.Error, response)
+					t.Fatalf("positive verification did not clear selected finding: status=%s error=%v response=%s", run.Status, deref(run.Error), response)
 				}
 				status, err := h.Run("axi", "status")
 				if err != nil || !strings.Contains(status, "status: completed") || strings.Contains(status, "legacy-unanchored,warning") {

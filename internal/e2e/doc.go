@@ -1,9 +1,11 @@
 // Package e2e holds end-to-end tests that drive the real no-mistakes
 // binary against a temporary git repo and a fake agent. Tests live behind
 // the `e2e` build tag so they are excluded from `go test ./...` and only
-// run via `make e2e` (or `go test -tags=e2e ./internal/e2e/...`). The one
-// exception is TestRunbookHooksKeepTheirCitedNames, which the root package's
-// dogfood contract test runs through a nested `go test -tags=e2e`.
+// run via `make e2e` (or `go test -tags=e2e ./internal/e2e/...`). The two
+// exceptions are TestRunbookHooksKeepTheirCitedNames, which the root package's
+// dogfood contract test runs through a nested `go test -tags=e2e`, and
+// TestErrorPointersReachCallsOnlyThroughDeref, a source check of these files
+// that carries no tag so `go test ./...` runs it.
 //
 // The fake agent (cmd/fakeagent) is hard-linked under each agent's binary
 // name (claude, codex, grok, opencode, pi, antigravity; Antigravity is also linked

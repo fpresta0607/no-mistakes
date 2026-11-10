@@ -158,7 +158,7 @@ func TestDocumentAnalyzerSummaryContractOnRealBinary(t *testing.T) {
 			t.Fatalf("%s: document step status = %s, want failed", label, step.Status)
 		}
 		if step.Error == nil || !strings.Contains(*step.Error, "validate document analyzer findings: missing summary") {
-			t.Fatalf("%s: document step error = %v, want it to name the missing summary", label, step.Error)
+			t.Fatalf("%s: document step error = %v, want it to name the missing summary", label, deref(step.Error))
 		}
 		return run
 	}

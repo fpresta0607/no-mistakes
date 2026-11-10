@@ -75,7 +75,7 @@ func runRecursiveIncident(t *testing.T, agentName, executable, expectedPhase str
 		expectedStatus = types.RunCompleted
 	}
 	if outer.Status != expectedStatus {
-		t.Fatalf("outer run status = %s, want %s (error=%v)", outer.Status, expectedStatus, outer.Error)
+		t.Fatalf("outer run status = %s, want %s (error=%v)", outer.Status, expectedStatus, deref(outer.Error))
 	}
 
 	attempts, err := os.ReadFile(attemptLog)

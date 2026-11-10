@@ -110,7 +110,7 @@ func TestSelectedFixFollowedByDocumentEditDoesNotRestartReview(t *testing.T) {
 	h.Respond(gated.ID, types.StepLint, types.ActionFix)
 	run := h.WaitForRun(branch, 90*time.Second)
 	if run.Status != types.RunCompleted {
-		t.Fatalf("run status %s, error %v, response %s", run.Status, run.Error, result)
+		t.Fatalf("run status %s, error %v, response %s", run.Status, deref(run.Error), result)
 	}
 	invocations := h.AgentInvocations()
 	var reviewCount int

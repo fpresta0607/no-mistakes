@@ -202,7 +202,7 @@ func TestRepositoryOverrideReviewAgentsRouteOnRealBinary(t *testing.T) {
 		h.PushToGate(branch)
 		run := h.WaitForRun(branch, 120*time.Second)
 		if run.Status != types.RunCompleted {
-			t.Fatalf("run status = %q, want completed (error: %v)", run.Status, run.Error)
+			t.Fatalf("run status = %q, want completed (error: %v)", run.Status, deref(run.Error))
 		}
 		review := firstInvocationMatching(h.AgentInvocations(), func(p string) bool {
 			return strings.Contains(p, reviewTurnMarker)

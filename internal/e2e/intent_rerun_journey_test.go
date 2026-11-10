@@ -78,7 +78,7 @@ func runCLIAndWait(t *testing.T, h *Harness, dir, branch string, args ...string)
 	t.Logf("CLI %s: %s", strings.Join(args, " "), strings.TrimSpace(out))
 	run := h.WaitForRun(branch, 90*time.Second)
 	if run.Status != types.RunCompleted {
-		t.Fatalf("%s status=%s error=%v", strings.Join(args, " "), run.Status, run.Error)
+		t.Fatalf("%s status=%s error=%v", strings.Join(args, " "), run.Status, deref(run.Error))
 	}
 	return run
 }
