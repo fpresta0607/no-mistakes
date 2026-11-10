@@ -143,6 +143,7 @@ func TestPiStrictDeclarationSatisfiesTheStrictFunctionContract(t *testing.T) {
 	schemas := map[string]json.RawMessage{
 		"review":                reviewSchemaForFinalize(false),
 		"review finalize":       reviewSchemaForFinalize(true),
+		"review repair round":   repairReviewSchema,
 		"lint findings":         findingsSchema,
 		"test findings":         testFindingsSchema,
 		"commit summary":        commitSummarySchema,

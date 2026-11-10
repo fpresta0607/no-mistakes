@@ -72,6 +72,8 @@ func findingKey(item types.Finding) types.Finding {
 	item.Source = ""
 	item.UserInstructions = ""
 	item.DriverInstructions = ""
+	item.FailingInput = ""
+	item.WrongResult = ""
 	return item
 }
 
@@ -445,6 +447,24 @@ func selectedFindingIdentities(rounds []*db.StepRound) map[string]types.Finding 
 	return identity
 }
 
+// SelectedOutstandingFindingIDs reads from a step's recorded rounds the findings
+// a fixer was sent to close that are still outstanding. They are what a later
+// round can clear on its coverage, in a recovered run and in an eval replay alike.
+func SelectedOutstandingFindingIDs(rounds []*db.StepRound) []string {
+	var selected []string
+	latest := ""
+	for _, round := range rounds {
+		latest = ""
+		if round.FindingsJSON != nil {
+			latest = *round.FindingsJSON
+		}
+		if round.SelectedFindingIDs != nil {
+			selected = combineFindingIDLists(selected, findingIDsFromSelectionJSON(*round.SelectedFindingIDs))
+		}
+	}
+	return retainFindingIDsByIdentity(latest, selected, selectedFindingIdentities(rounds))
+}
+
 // retainFindingIDsByIdentity is retainFindingIDs plus a content-identity
 // check: an ID only survives into the retained set when the finding it
 // currently names in latestRaw has the SAME content (findingKey) as the
@@ -711,6 +731,8 @@ func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string, reviewedPat
 		}
 		findings.ReviewedPaths = append([]string(nil), reviewedPaths...)
 		findings.WithdrawnFindings = nil
+		findings.ClosedFindings = nil
+		findings.FollowUps = nil
 		encoded, err := types.MarshalFindingsJSON(findings)
 		if err != nil {
 			return existingRaw
@@ -734,6 +756,9 @@ func mergeOutstandingFindingsJSON(existingRaw, additionalRaw string, reviewedPat
 	merged.ReviewedPaths = append([]string(nil), reviewedPaths...)
 	if currentErr == nil {
 		merged.ReviewCoverageScope = current.ReviewCoverageScope
+		// Both describe one round, so its record never inherits an earlier one's.
+		merged.ClosedFindings = current.ClosedFindings
+		merged.FollowUps = current.FollowUps
 	}
 	merged.WithdrawnFindings = nil
 	seen := make(map[string]bool, len(merged.Items))

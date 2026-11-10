@@ -21,17 +21,23 @@ const previousCoverageFinding = `{"findings":[{"id":"f-1","severity":"warning","
 
 var previousCoverage = []string{"a.go", "b.go"}
 
+// fixRoundInputs is what a fix round was handed to judge its rereview by.
+type fixRoundInputs struct {
+	coverage []string
+	pending  []string
+}
+
 // coverageRecordingStep parks its first round on one ask-user finding with a
-// full coverage record, and on a fix round sends the coverage it received and
+// full coverage record, and on a fix round sends the inputs it received and
 // verifies the finding so the run completes.
-func coverageRecordingStep(received chan<- []string) *adaptiveCallStep {
+func coverageRecordingStep(received chan<- fixRoundInputs) *adaptiveCallStep {
 	return &adaptiveCallStep{
 		name: types.StepReview,
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			if !sctx.Fixing {
 				return &StepOutcome{NeedsApproval: true, Findings: previousCoverageFinding, ReviewedPaths: previousCoverage, ReviewablePaths: previousCoverage}, nil
 			}
-			received <- sctx.PreviousReviewedPaths
+			received <- fixRoundInputs{coverage: sctx.PreviousReviewedPaths, pending: sctx.PendingVerificationIDs}
 			return &StepOutcome{ReviewedPaths: previousCoverage, ReviewablePaths: previousCoverage}, nil
 		},
 	}
@@ -48,12 +54,15 @@ func respondFixWhenParked(t *testing.T, exec *Executor) {
 	}
 }
 
-func expectPreviousCoverage(t *testing.T, received <-chan []string, done <-chan error) {
+func expectPreviousCoverage(t *testing.T, received <-chan fixRoundInputs, done <-chan error) {
 	t.Helper()
 	select {
 	case got := <-received:
-		if !reflect.DeepEqual(got, previousCoverage) {
-			t.Fatalf("fix round received PreviousReviewedPaths %v, want the parked round's %v", got, previousCoverage)
+		if !reflect.DeepEqual(got.coverage, previousCoverage) {
+			t.Fatalf("fix round received PreviousReviewedPaths %v, want the parked round's %v", got.coverage, previousCoverage)
+		}
+		if !reflect.DeepEqual(got.pending, []string{"f-1"}) {
+			t.Fatalf("fix round received PendingVerificationIDs %v, want the selection it can clear", got.pending)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the fix round never ran")
@@ -70,7 +79,7 @@ func expectPreviousCoverage(t *testing.T, received <-chan []string, done <-chan 
 
 func TestExecutor_FixResponseHandsTheFixRoundThePreviousCoverage(t *testing.T) {
 	database, p, run, repo := setupTest(t)
-	received := make(chan []string, 1)
+	received := make(chan fixRoundInputs, 1)
 	exec := NewExecutor(database, p, &config.Config{}, newFakeSessionAgent(), []Step{coverageRecordingStep(received)}, nil)
 
 	done := make(chan error, 1)
@@ -110,7 +119,7 @@ func TestExecutor_RecoveredFixResponseHandsTheFixRoundThePreviousCoverage(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	received := make(chan []string, 1)
+	received := make(chan fixRoundInputs, 1)
 	exec := NewExecutor(database, p, &config.Config{}, newFakeSessionAgent(), []Step{coverageRecordingStep(received)}, nil)
 
 	done := make(chan error, 1)

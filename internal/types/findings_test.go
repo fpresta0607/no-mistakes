@@ -576,6 +576,30 @@ func TestNormalizeFindingsAvoidsIDCollisions(t *testing.T) {
 
 // Findings fields are copied explicitly on parse, so a new one must be listed
 // or it drops on every read.
+func TestParseFindingsJSON_KeepsTheRepairRoundRecord(t *testing.T) {
+	want := Findings{
+		Items:          []Finding{{ID: "n-1", Severity: "error", Description: "d", Action: ActionAutoFix, FailingInput: "an empty name", WrongResult: "the record is lost"}},
+		ClosedFindings: []string{"f-1"},
+		FollowUps:      []Finding{{ID: "n-2", Severity: "warning", File: "a.go", Line: 3, Description: "later", Action: ActionAutoFix}},
+	}
+	raw, err := MarshalFindingsJSON(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ParseFindingsJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got.Items[0].FailingInput != "an empty name" || got.Items[0].WrongResult != "the record is lost" {
+		t.Fatalf("finding = %+v, want its concrete failure kept", got.Items[0])
+	}
+	if !reflect.DeepEqual(got.ClosedFindings, want.ClosedFindings) || !reflect.DeepEqual(got.FollowUps, want.FollowUps) {
+		t.Fatalf("round trip = %v, %+v", got.ClosedFindings, got.FollowUps)
+	}
+}
+
 func TestParseFindingsJSON_KeepsTheTestStepRecords(t *testing.T) {
 	want := Findings{
 		BaselineFailure: &TestBaselineFailure{Tests: []string{"--- FAIL: TestBroken"}, Attribution: "attributed", Incomplete: true},

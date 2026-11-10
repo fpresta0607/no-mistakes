@@ -58,6 +58,14 @@ func TestReviewStep_ContinuationRefusesUnboundRecordsAndChangedSources(t *testin
 	}
 }
 
+// A coverage park after a repair round stores that round's follow-ups and
+// closed findings. They describe the repair round, so the continuation's own
+// record must not carry them again, or the PR lists them under both rounds.
+func TestReviewStep_ContinuationDoesNotRepeatTheSourceRoundsFollowUps(t *testing.T) {
+	t.Parallel()
+	testRetainedCoverageCase(t, false, "record:follow-ups")
+}
+
 func TestReviewStep_ContinuationCannotCertifySourceChangedDuringItsTurn(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []string{"head changed during turn", "dirty during turn"} {
@@ -279,6 +287,9 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 			scope["trusted_config_sha"] = "different-trusted-config"
 		case "record:scope":
 			scope["paths"] = []string{"feature.txt", "feature2.txt", "different-path.txt"}
+		case "record:follow-ups":
+			body["closed_findings"] = []string{"review-1"}
+			body["follow_ups"] = []map[string]any{{"id": "review-2", "file": "feature.txt", "line": 1, "severity": "warning", "description": "outside the repair"}}
 		}
 		encoded, err := json.Marshal(body)
 		if err != nil {
@@ -295,7 +306,7 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		expectRefusal = mode != "record:scope"
+		expectRefusal = mode != "record:scope" && mode != "record:follow-ups"
 	}
 	for {
 		_, err := executor.RespondWithOverrides(types.StepReview, types.ActionCompleteCoverage, nil, nil, nil, nil, "", pipeline.ResponseOptions{Coverage: binding})
@@ -324,7 +335,8 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if mode != "complete" && len(steps) == 2 && steps[0].Status == types.StepStatusAwaitingApproval {
+		isCompletingMode := mode == "complete" || mode == "record:follow-ups"
+		if !isCompletingMode && len(steps) == 2 && steps[0].Status == types.StepStatusAwaitingApproval {
 			rounds, readErr := sctx.DB.GetRoundsByStep(binding.StepResultID)
 			if readErr != nil {
 				t.Fatal(readErr)
@@ -361,7 +373,7 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 			}
 		}
 		if len(steps) == 2 && steps[0].Status == types.StepStatusCompleted && steps[1].Status == types.StepStatusAwaitingApproval {
-			if mode != "complete" {
+			if !isCompletingMode {
 				t.Fatalf("continuation certified source which must remain gated: %s", mode)
 			}
 			rounds, err := sctx.DB.GetRoundsByStep(binding.StepResultID)
@@ -377,6 +389,9 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 			findings, err := types.ParseFindingsJSON(*rounds[1].FindingsJSON)
 			if err != nil || findings.ReviewCoverageScope == nil || findings.ReviewCoverageScope.SourceRoundID != binding.RoundID {
 				t.Fatalf("continued coverage is not bound to its stored source round: %+v %v", findings.ReviewCoverageScope, err)
+			}
+			if len(findings.FollowUps) != 0 || len(findings.ClosedFindings) != 0 {
+				t.Fatalf("continued round repeated its source round's record: follow-ups=%+v closed=%v", findings.FollowUps, findings.ClosedFindings)
 			}
 			checkEvidence()
 			return
