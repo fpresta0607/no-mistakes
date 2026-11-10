@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -273,7 +274,7 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 	defer baseAgent.Close()
 	observed := &observedAgent{inner: agent.WithSteering(baseAgent, isolatedPaths.EvidenceDir()), ownership: ownership}
 
-	replayDB, stepResultID, fixing, previousFindings, deferredFindings, previousReviewedPaths, err := replayRoundContext(isolatedPaths, c, workDir)
+	replayDB, stepResultID, fixing, previousFindings, deferredFindings, previousReviewedPaths, pendingVerificationIDs, err := replayRoundContext(isolatedPaths, c, workDir)
 	if err != nil {
 		evaluation.Error = safeurl.RedactText(err.Error())
 		evaluation.CompletedAt = time.Now().Unix()
@@ -301,21 +302,22 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 	replayRepo := &db.Repo{ID: "eval", WorkingPath: workDir, DefaultBranch: defaultBranch}
 	step := &steps.ReviewStep{}
 	outcome, err := step.Execute(&pipeline.StepContext{
-		Ctx:                   ctx,
-		Run:                   replayRun,
-		Repo:                  replayRepo,
-		WorkDir:               workDir,
-		Agent:                 observed,
-		Config:                cfg,
-		DB:                    replayDB,
-		StepResultID:          stepResultID,
-		Fixing:                fixing,
-		SkipFixExecution:      fixing,
-		EvalReplay:            true,
-		ReviewStartingHeadSHA: startingHeadSHA,
-		PreviousFindings:      previousFindings,
-		DeferredFindings:      deferredFindings,
-		PreviousReviewedPaths: previousReviewedPaths,
+		Ctx:                    ctx,
+		Run:                    replayRun,
+		Repo:                   replayRepo,
+		WorkDir:                workDir,
+		Agent:                  observed,
+		Config:                 cfg,
+		DB:                     replayDB,
+		StepResultID:           stepResultID,
+		Fixing:                 fixing,
+		SkipFixExecution:       fixing,
+		EvalReplay:             true,
+		ReviewStartingHeadSHA:  startingHeadSHA,
+		PreviousFindings:       previousFindings,
+		DeferredFindings:       deferredFindings,
+		PreviousReviewedPaths:  previousReviewedPaths,
+		PendingVerificationIDs: pendingVerificationIDs,
 		// Keep NM_HOME on the nested sandbox so replay cannot see or mutate
 		// production pipeline/eval state. Do not rewrite HOME: candidates use
 		// the same harness sign-in and user settings as an ordinary pipeline
@@ -375,22 +377,22 @@ func replayOne(ctx context.Context, store *Store, c Case, session Session, candi
 	return evaluation
 }
 
-func replayRoundContext(p *paths.Paths, c Case, workDir string) (*db.DB, string, bool, string, string, []string, error) {
+func replayRoundContext(p *paths.Paths, c Case, workDir string) (*db.DB, string, bool, string, string, []string, []string, error) {
 	var selected sourceRound
 	if err := readJSON(filepath.Join(c.Dir, "original", "round.json"), &selected); err != nil {
-		return nil, "", false, "", "", nil, fmt.Errorf("read captured review round: %w", err)
+		return nil, "", false, "", "", nil, nil, fmt.Errorf("read captured review round: %w", err)
 	}
 	var rounds []sourceRound
 	if err := readJSON(filepath.Join(c.Dir, "original", "rounds.json"), &rounds); err != nil {
-		return nil, "", false, "", "", nil, fmt.Errorf("read captured round history: %w", err)
+		return nil, "", false, "", "", nil, nil, fmt.Errorf("read captured round history: %w", err)
 	}
 	database, err := db.Open(p.DB())
 	if err != nil {
-		return nil, "", false, "", "", nil, fmt.Errorf("open isolated replay database: %w", err)
+		return nil, "", false, "", "", nil, nil, fmt.Errorf("open isolated replay database: %w", err)
 	}
-	fail := func(err error) (*db.DB, string, bool, string, string, []string, error) {
+	fail := func(err error) (*db.DB, string, bool, string, string, []string, []string, error) {
 		database.Close()
-		return nil, "", false, "", "", nil, err
+		return nil, "", false, "", "", nil, nil, err
 	}
 	repo, err := database.InsertRepoWithID("eval-repo", workDir, "local://eval", c.DefaultBranch)
 	if err != nil {
@@ -434,6 +436,26 @@ func replayRoundContext(p *paths.Paths, c Case, workDir string) (*db.DB, string,
 			if previousFindings == "" {
 				previousFindings = stringValue(round.FindingsJSON)
 			}
+			if previousFindings != "" {
+				findings, err := types.ParseFindingsJSON(previousFindings)
+				if err != nil {
+					return fail(fmt.Errorf("read captured selected findings: %w", err))
+				}
+				var selectedIDs []string
+				if round.SelectedFindingIDs != nil {
+					if err := json.Unmarshal([]byte(*round.SelectedFindingIDs), &selectedIDs); err != nil {
+						return fail(fmt.Errorf("read captured finding selection: %w", err))
+					}
+				}
+				selectedFindings := types.FindingsMetadata(findings)
+				if len(selectedIDs) > 0 {
+					selectedFindings = types.FilterFindings(findings, selectedIDs)
+				}
+				previousFindings, err = types.MarshalFindingsJSON(selectedFindings)
+				if err != nil {
+					return fail(fmt.Errorf("restore captured selected findings: %w", err))
+				}
+			}
 			deferredFindings = pipeline.DeferredFindingsJSON(stringValue(round.FindingsJSON), previousFindings)
 			if recorded, err := types.ParseFindingsJSON(stringValue(round.FindingsJSON)); err == nil {
 				previousReviewedPaths = recorded.ReviewedPaths
@@ -444,7 +466,19 @@ func replayRoundContext(p *paths.Paths, c Case, workDir string) (*db.DB, string,
 	if fixing && previousFindings == "" {
 		return fail(fmt.Errorf("captured fix round %d has no previous findings", selected.Round))
 	}
-	return database, step.ID, fixing, previousFindings, deferredFindings, previousReviewedPaths, nil
+	restored, err := database.GetRoundsByStep(step.ID)
+	if err != nil {
+		return fail(fmt.Errorf("read restored review history: %w", err))
+	}
+	// A round recorded as initial is the step starting over, and a restart at
+	// Review starts a fresh carry set, so only the rounds from the last one count.
+	carried := 0
+	for i, round := range restored {
+		if round.Trigger == "initial" {
+			carried = i
+		}
+	}
+	return database, step.ID, fixing, previousFindings, deferredFindings, previousReviewedPaths, pipeline.SelectedOutstandingFindingIDs(restored[carried:]), nil
 }
 
 func stringValue(value *string) string {

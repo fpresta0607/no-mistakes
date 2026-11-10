@@ -105,7 +105,7 @@ func TestPRStep_DefaultConfigEmbedsGitHubScreenshotAttachment(t *testing.T) {
 	if !strings.Contains(body, "![Checkout screenshot]("+testAttachmentURL+")") {
 		t.Fatalf("expected GitHub user-attachments image, got:\n%s", body)
 	}
-	if strings.Contains(body, "local file:") {
+	if strings.Contains(body, "private run evidence") {
 		t.Fatalf("default-config screenshot must not cite a local path, got:\n%s", body)
 	}
 	if len(uploader.calls) != 1 {
@@ -187,7 +187,7 @@ func TestPRStep_StoreInRepoKeepsCommitLinkAndAttachment(t *testing.T) {
 	if !strings.Contains(content.Body, "- Evidence: [Checkout screenshot]("+wantLink+")") {
 		t.Fatalf("expected commit-pinned evidence link %q, got:\n%s", wantLink, content.Body)
 	}
-	if strings.Contains(content.Body, "local file:") {
+	if strings.Contains(content.Body, "private run evidence") {
 		t.Fatalf("published screenshot must not cite a local path, got:\n%s", content.Body)
 	}
 }
@@ -222,7 +222,7 @@ func TestPRStep_AttachMediaOptOutDisablesUploads(t *testing.T) {
 				if !strings.Contains(content.Body, "[Checkout screenshot]("+wantLink+")") {
 					t.Fatalf("expected commit-pinned evidence link %q, got:\n%s", wantLink, content.Body)
 				}
-			} else if !strings.Contains(content.Body, "local file:") {
+			} else if !strings.Contains(content.Body, "private run evidence") {
 				t.Fatalf("unpublished screenshot should keep local rendering, got:\n%s", content.Body)
 			}
 		})
@@ -262,7 +262,7 @@ func TestPRStep_UploadFailureKeepsTodaysRendering(t *testing.T) {
 	if failed.Body != today.Body {
 		t.Fatalf("upload failure must keep today's body.\ntoday:\n%s\nfailed:\n%s", today.Body, failed.Body)
 	}
-	if !strings.Contains(today.Body, "local file:") {
+	if !strings.Contains(today.Body, "private run evidence") {
 		t.Fatalf("today's rendering should cite the local screenshot, got:\n%s", today.Body)
 	}
 	joined := strings.Join(logs, "\n")
@@ -335,7 +335,7 @@ func TestPRStep_NonGitHubForgeLeavesScreenshotUnchanged(t *testing.T) {
 	if strings.Contains(body, "user-attachments") {
 		t.Fatalf("GitLab PR must not embed GitHub attachments, got:\n%s", body)
 	}
-	if !strings.Contains(body, "local file:") {
+	if !strings.Contains(body, "private run evidence") {
 		t.Fatalf("GitLab screenshot should keep local rendering, got:\n%s", body)
 	}
 	if len(uploader.calls) != 0 {
@@ -365,8 +365,11 @@ func TestPRStep_TextArtifactIsNotUploaded(t *testing.T) {
 	if strings.Contains(content.Body, "user-attachments") {
 		t.Fatalf("text artifact must not become a user-attachment, got:\n%s", content.Body)
 	}
-	if !strings.Contains(content.Body, "it works") {
-		t.Fatalf("expected inlined text evidence, got:\n%s", content.Body)
+	if strings.Contains(content.Body, "it works") {
+		t.Fatalf("text evidence must stay private, got:\n%s", content.Body)
+	}
+	if !strings.Contains(content.Body, "CLI run (private run evidence, ") {
+		t.Fatalf("expected a private evidence reference, got:\n%s", content.Body)
 	}
 }
 
@@ -390,7 +393,7 @@ func TestPRStep_OversizedImageIsSkippedWithReason(t *testing.T) {
 	if strings.Contains(content.Body, "user-attachments") {
 		t.Fatalf("oversized image must not embed an attachment, got:\n%s", content.Body)
 	}
-	if !strings.Contains(content.Body, "local file:") {
+	if !strings.Contains(content.Body, "private run evidence") {
 		t.Fatalf("oversized image should keep local rendering, got:\n%s", content.Body)
 	}
 	if !strings.Contains(strings.Join(logs, "\n"), "images must be at most") {
@@ -499,7 +502,7 @@ func TestPRStep_VideoAttachmentIsBareURL(t *testing.T) {
 	if strings.Contains(content.Body, "![Checkout recording](") {
 		t.Fatalf("video must not use image markdown, got:\n%s", content.Body)
 	}
-	if strings.Contains(content.Body, "local file:") {
+	if strings.Contains(content.Body, "private run evidence") {
 		t.Fatalf("uploaded video must not cite a local path, got:\n%s", content.Body)
 	}
 }

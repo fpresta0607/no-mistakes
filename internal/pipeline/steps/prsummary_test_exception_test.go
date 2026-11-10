@@ -114,7 +114,7 @@ func TestBuildPipelineSummary_RendersTestException(t *testing.T) {
 					pipelineMD += "\n\n```text\n" + attestation + "\n```"
 				}
 				appendix := appendixEvidence(mode, prBodyFlavorFor(provider), "low risk", "", pipelineMD, provider)
-				content, err := composeOwnedPRContent(prOwnedBody{before: "Author narrative"}, "title", appendix, 0, "", "")
+				content, err := composeOwnedPRContent(prOwnedBody{before: "Author narrative"}, "title", appendix, 0, "", "", "")
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -124,7 +124,7 @@ func TestBuildPipelineSummary_RendersTestException(t *testing.T) {
 				if _, err := parsePROwnedBody(content.Body); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := composeOwnedPRContent(prOwnedBody{before: "Author narrative"}, "title", appendix, minimumBudget-1, "", ""); err == nil {
+				if _, err := composeOwnedPRContent(prOwnedBody{before: "Author narrative"}, "title", appendix, minimumBudget-1, "", "", ""); err == nil {
 					t.Fatal("owned publication dropped required metadata to fit")
 				}
 			})
@@ -296,9 +296,9 @@ func TestBuildPipelineSummary_TestExceptionIsRedactedAtPublication(t *testing.T)
 			step := &db.StepResult{StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings, ApprovalReason: &reason}
 			markdown, _ := BuildPipelineSummary([]*db.StepResult{step}, nil, testPipelineHeadSHA)
 			for _, isOwned := range []bool{false, true} {
-				published := redactPRContent(prContent{Body: markdown}, root, "").Body
+				published := redactPRContent(prContent{Body: markdown}, root, "", "").Body
 				if isOwned {
-					content, err := composeOwnedPRContent(prOwnedBody{before: "Author narrative"}, "title", markdown, 0, root, "")
+					content, err := composeOwnedPRContent(prOwnedBody{before: "Author narrative"}, "title", markdown, 0, root, "", "")
 					if err != nil {
 						t.Fatal(err)
 					}

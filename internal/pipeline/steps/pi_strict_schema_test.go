@@ -47,9 +47,7 @@ cat "$0.events"
 		}, "\r\n")
 	}
 	bin := filepath.Join(dir, name)
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeExecutable(t, bin, script)
 	events := `{"type":"message_end","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"final-1","name":"no_mistakes_output","arguments":{}}]}}` + "\n" +
 		`{"type":"tool_execution_end","toolCallId":"final-1","toolName":"no_mistakes_output","isError":false,"result":{"content":[],"details":{"output":` + output + `},"terminate":true}}` + "\n"
 	if err := os.WriteFile(bin+".events", []byte(events), 0o644); err != nil {
@@ -145,6 +143,7 @@ func TestPiStrictDeclarationSatisfiesTheStrictFunctionContract(t *testing.T) {
 	schemas := map[string]json.RawMessage{
 		"review":                reviewSchemaForFinalize(false),
 		"review finalize":       reviewSchemaForFinalize(true),
+		"review repair round":   repairReviewSchema,
 		"lint findings":         findingsSchema,
 		"test findings":         testFindingsSchema,
 		"commit summary":        commitSummarySchema,

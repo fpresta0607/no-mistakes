@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
@@ -21,7 +22,7 @@ func resolveHome(override string) (string, error) {
 }
 
 // canonicalPath returns the path with symlinks evaluated and cleaned. It
-// silently falls back to filepath.Clean(abs) if EvalSymlinks fails (e.g.
+// silently falls back to filepath.Clean(abs) if realpath.Resolve fails (e.g.
 // the path does not exist), since both sides of the comparison receive
 // the same fallback treatment.
 func canonicalPath(p string) string {
@@ -32,7 +33,7 @@ func canonicalPath(p string) string {
 	if err != nil {
 		abs = p
 	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+	if resolved, err := realpath.Resolve(abs); err == nil {
 		return filepath.Clean(resolved)
 	}
 	return filepath.Clean(abs)

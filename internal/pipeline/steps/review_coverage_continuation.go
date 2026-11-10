@@ -53,6 +53,10 @@ func retainedCoverageForReview(sctx *pipeline.StepContext, base, head string, pa
 		}
 	}
 	sctx.Log(fmt.Sprintf("validated retained coverage from stored round %s at head %s, base %s, trusted config %s", stored.ID, head, base, scope.TrustedConfigSHA))
+	// These describe the stored round that raised them and stay on its record;
+	// the continuation's own round must not list them a second time.
+	findings.ClosedFindings = nil
+	findings.FollowUps = nil
 	return findings, nil
 }
 

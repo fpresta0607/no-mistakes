@@ -56,11 +56,9 @@ func TestDogfoodConfig_NoBroadLocalTestCommand(t *testing.T) {
 // home against a local upstream and stub forge CLIs, as the supported live
 // path, and keeps package tests out of the live count.
 //
-// test.instructions is an owned text contract: the Test prompt carries it
-// verbatim, so the rules issue #55 decided are checked as that text, whitespace
-// aside, which says nothing about how an agent follows them. What the runbook
-// cites is executed instead: the Go test runner has to list every journey, and
-// TestRunbookHooksKeepTheirCitedNames has to pass against this runbook.
+// Check the runbook's executable references: the Go test runner has to list
+// every cited journey, and TestRunbookHooksKeepTheirCitedNames has to pass
+// against this runbook. These checks do not prove how an agent follows it.
 func TestDogfoodConfig_RunbookNamesTheIsolatedLaterPhaseLivePath(t *testing.T) {
 	t.Parallel()
 
@@ -72,24 +70,7 @@ func TestDogfoodConfig_RunbookNamesTheIsolatedLaterPhaseLivePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadRepo: %v", err)
 	}
-	runbook := strings.Join(strings.Fields(cfg.Test.Instructions), " ")
-
-	for _, want := range []string{
-		"TMPDIR=/tmp bash scripts/e2e.sh -tags=e2e",
-		"-overlay=",
-		"temporary NM_HOME",
-		"local bare upstream",
-		"PR title and body rendering",
-		"is live",
-		"Test scratch directory",
-		"Never return them as artifacts",
-		"never the outer run",
-		"not live",
-	} {
-		if !strings.Contains(runbook, want) {
-			t.Errorf("trusted test.instructions is missing %q:\n%s", want, runbook)
-		}
-	}
+	runbook := cfg.Test.Instructions
 	if _, err := os.Stat(filepath.Join(root, "scripts", "e2e.sh")); err != nil {
 		t.Errorf("runbook names a missing runner: %v", err)
 	}

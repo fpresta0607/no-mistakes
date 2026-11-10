@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	toon "github.com/toon-format/toon-go"
@@ -14,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/skill"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
@@ -336,7 +336,7 @@ func executablePath() string {
 	if err != nil {
 		return os.Args[0]
 	}
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+	if resolved, err := realpath.Resolve(exe); err == nil {
 		return resolved
 	}
 	return exe

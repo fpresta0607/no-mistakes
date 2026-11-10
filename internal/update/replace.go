@@ -5,13 +5,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 var renameFile = os.Rename
 var removeFile = os.Remove
 
 func replaceExecutable(target string, binaryData []byte) error {
-	resolved, err := filepath.EvalSymlinks(target)
+	resolved, err := realpath.Resolve(target)
 	if err == nil {
 		target = resolved
 	}
@@ -70,7 +72,7 @@ func CleanupOldExecutable() error {
 	if err != nil {
 		return fmt.Errorf("resolve executable for update cleanup: %w", err)
 	}
-	if resolved, err := filepath.EvalSymlinks(target); err == nil {
+	if resolved, err := realpath.Resolve(target); err == nil {
 		target = resolved
 	}
 	return cleanupOldExecutable(target)

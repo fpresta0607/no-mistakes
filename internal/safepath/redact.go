@@ -1,6 +1,6 @@
 // Package safepath keeps operator filesystem identity - home directory paths,
-// and run worktree paths (RedactWorktrees) - out of the text a caller passes
-// it.
+// run worktree paths (RedactWorktrees), and the run's evidence directory
+// (RedactRunEvidence) - out of the text a caller passes it.
 //
 // It guarantees nothing on its own about what no-mistakes publishes: coverage
 // is exactly the set of publication boundaries that call it. Today that is the
@@ -41,7 +41,8 @@ const Placeholder = "~"
 
 // genericHomePattern matches the conventional home roots regardless of which
 // account the daemon runs as: /home/<user>, /Users/<user>, and their Windows
-// (C:\Users\<user>) and file:// URL spellings. Only the "<user>" segment is
+// (C:\Users\<user>), drive-mount (/c/Users/<user>, /cygdrive/c/Users/<user>,
+// /mnt/c/Users/<user>) and file:// URL spellings. Only the "<user>" segment is
 // consumed, so the rest of the path survives and the result still reads as a
 // path.
 //
@@ -62,7 +63,7 @@ const Placeholder = "~"
 // https://users/list as https:~, and leaving the rare //home/<user> spelling
 // intact costs less than mangling every such URL.
 var genericHomePattern = regexp.MustCompile(
-	`(^|-[A-Za-z]|\\[nrt]|\\u0020|[^A-Za-z0-9_./\\-])((?i:file://)?(?:[A-Za-z]:)?(?:\\\\|[/\\])(?i:home|users)(?:\\\\|[/\\])[^/\\\s"'` + "`" + `<>()\[\]{},;:&|*?]+)`)
+	`(^|-[A-Za-z]|\\[nrt]|\\u0020|[^A-Za-z0-9_./\\-])((?i:file://)?(?:/?[A-Za-z]:|(?:/cygdrive|/mnt)?/[A-Za-z])?(?:\\\\|[/\\])(?i:home|users)(?:\\\\|[/\\])[^/\\\s"'` + "`" + `<>()\[\]{},;:&|*?]+)`)
 
 // RedactText replaces every absolute home directory path in text with
 // Placeholder. It is unconditional: there is no detect-and-warn mode, because
@@ -128,6 +129,23 @@ func addBothSeparatorSpellings(add func(string), home string) {
 		encoded, _ := json.Marshal(candidate)
 		add(string(encoded[1 : len(encoded)-1]))
 		add(strings.ReplaceAll(string(encoded[1:len(encoded)-1]), " ", `\u0020`))
+	}
+}
+
+// addDriveSpellings registers the other spellings of a Windows drive path: the
+// drive letter in either case, since tools print both, and the mounts Git Bash,
+// Cygwin, and WSL show the drive under. A bare drive has none, because a mount
+// spelling of it would pass usableHomeCandidate and rewrite the whole drive.
+func addDriveSpellings(add func(string), dir string) {
+	if !usableHomeCandidate(dir) || dir[1] != ':' || !isASCIILetter(dir[0]) {
+		return
+	}
+	slashed := strings.ReplaceAll(dir[2:], `\`, "/")
+	for _, drive := range []string{strings.ToLower(dir[:1]), strings.ToUpper(dir[:1])} {
+		addBothSeparatorSpellings(add, drive+dir[1:])
+		for _, mount := range []string{"/", "/cygdrive/", "/mnt/"} {
+			add(mount + drive + slashed)
+		}
 	}
 }
 
@@ -229,8 +247,9 @@ func boundaryBefore(text string, i int, specific bool) bool {
 	}
 	switch c := text[i-1]; {
 	case c == '/':
-		// The one slash that legitimately precedes an absolute path.
-		return strings.HasSuffix(text[:i], "://")
+		// The one slash that legitimately precedes an absolute path. A file URL
+		// to a drive path puts one more slash before the drive letter.
+		return strings.HasSuffix(text[:i], "://") || strings.HasSuffix(text[:i], ":///")
 	case c == '\\' || isPathNameByte(c):
 		if strings.HasSuffix(text[:i], `\u0020`) {
 			return true

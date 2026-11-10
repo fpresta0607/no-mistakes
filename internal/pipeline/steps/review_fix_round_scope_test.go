@@ -111,6 +111,11 @@ func TestFixRoundCarriedPaths(t *testing.T) {
 func fixRoundScopeHarness(t *testing.T, mock *sessionMockAgent) (*pipeline.Executor, *db.DB, *db.Run, *db.Repo, string) {
 	t.Helper()
 	workDir, baseSHA, headSHA := twoFileRepo(t)
+	return fixRoundScopeHarnessOn(t, mock, workDir, baseSHA, headSHA)
+}
+
+func fixRoundScopeHarnessOn(t *testing.T, mock *sessionMockAgent, workDir, baseSHA, headSHA string) (*pipeline.Executor, *db.DB, *db.Run, *db.Repo, string) {
+	t.Helper()
 	ensureHermeticOrigin(t, workDir)
 	database, err := db.Open(filepath.Join(t.TempDir(), "state.sqlite"))
 	if err != nil {
@@ -131,25 +136,28 @@ func fixRoundScopeHarness(t *testing.T, mock *sessionMockAgent) (*pipeline.Execu
 }
 
 // executeWithoutAPark runs the executor and fails the test, aborting the run,
-// when the review parks for a decision instead of completing on its own.
+// when the review parks for a decision instead of completing on its own. Abort
+// is refused until a gate is waiting, so its acceptance is the park itself and a
+// slow machine reads as slow.
 func executeWithoutAPark(t *testing.T, exec *pipeline.Executor, run *db.Run, repo *db.Repo, workDir string) {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("execute: %v", err)
-		}
-	case <-time.After(60 * time.Second):
-		if err := exec.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
-			t.Errorf("abort the parked run: %v", err)
-		}
+	go func() { done <- exec.Execute(ctx, run, repo, workDir) }()
+	for {
 		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			return
+		case <-time.After(50 * time.Millisecond):
+			if exec.Respond(types.StepReview, types.ActionAbort, nil) == nil {
+				<-done
+				t.Fatal("the review parked for a decision instead of completing")
+			}
 		}
-		t.Fatal("the review parked for a decision instead of completing")
 	}
 }
 
@@ -270,7 +278,7 @@ func TestReviewLoop_DeferredFindingKeepsPendingFindingUnverified(t *testing.T) {
 			case 1:
 				return &agent.Result{Output: []byte(`{"findings":[{"id":"f-1","severity":"error","file":"feature.txt","line":1,"description":"original bug","action":"auto-fix"}],"summary":"bug","risk_level":"medium","risk_rationale":"bug","risk_scope":"source-or-external","reviewed_paths":["feature.txt","feature2.txt"]}`)}
 			case 2:
-				return &agent.Result{Output: []byte(`{"findings":[{"id":"note","severity":"info","file":"feature.txt","line":1,"description":"still relevant","action":"no-op"},{"id":"f-2","severity":"error","file":"feature2.txt","line":1,"description":"second bug","action":"auto-fix"}],"summary":"issues","risk_level":"medium","risk_rationale":"issues","risk_scope":"source-or-external","reviewed_paths":["feature.txt","feature2.txt"]}`)}
+				return &agent.Result{Output: []byte(`{"findings":[{"id":"note","severity":"info","file":"feature.txt","line":1,"description":"still relevant","action":"no-op"},{"id":"f-2","severity":"error","file":"feature2.txt","line":1,"description":"second bug","action":"auto-fix","failing_input":"an empty name","wrong_result":"the record is lost"}],"summary":"issues","risk_level":"medium","risk_rationale":"issues","risk_scope":"source-or-external","reviewed_paths":["feature.txt","feature2.txt"]}`)}
 			default:
 				return &agent.Result{Output: []byte(`{"findings":[{"id":"decision","severity":"warning","file":"feature2.txt","line":1,"description":"needs decision","action":"ask-user"}],"summary":"decision","risk_level":"medium","risk_rationale":"decision","risk_scope":"source-or-external","reviewed_paths":["feature2.txt"]}`)}
 			}
@@ -321,6 +329,12 @@ func TestReviewLoop_DeferredFindingKeepsPendingFindingUnverified(t *testing.T) {
 	if !strings.Contains(held, "- feature.txt\n") || strings.Contains(carried, "- feature.txt\n") {
 		t.Fatalf("deferred finding's file must be held for review, not carried: %s", reviews[2].Prompt)
 	}
+	if !strings.Contains(reviews[2].Prompt, "f-1: feature.txt:1: original bug") {
+		t.Fatalf("a round that can clear an earlier selection must be asked to check it: %s", reviews[2].Prompt)
+	}
+	if strings.Contains(reviews[2].Prompt, "note: feature.txt:1: still relevant") {
+		t.Fatalf("a finding no repair was sent to close is not a check for this round: %s", reviews[2].Prompt)
+	}
 	if parked.FindingsJSON == nil || !strings.Contains(*parked.FindingsJSON, "original bug") {
 		t.Fatalf("unverified original finding disappeared: %+v", parked.FindingsJSON)
 	}
@@ -362,8 +376,8 @@ func TestReviewLoop_RepairScopeIncludesUnchangedHeldFile(t *testing.T) {
 	if !ok || !strings.Contains(held, "- feature2.txt\n") || !strings.Contains(carried, "- feature3.txt\n") {
 		t.Fatalf("uncovered file must be held and covered untouched file carried: %s", prompt)
 	}
-	want := "the branch changes relative to base commit " + run.BaseSHA + " in the changed files this review is held to, including this fix round's changes since starting head " + startingHead
+	want := "only this repair's change since starting head " + startingHead + ", plus the branch changes relative to base commit " + run.BaseSHA + " in the files no earlier round judged"
 	if !strings.Contains(prompt, want) {
-		t.Fatalf("review scope must include branch changes in all held files, want %q in %s", want, prompt)
+		t.Fatalf("review scope must name the repair and the files never judged, want %q in %s", want, prompt)
 	}
 }

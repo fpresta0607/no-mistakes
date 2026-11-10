@@ -33,6 +33,31 @@ func TestRedactText_ConventionalHomeRoots(t *testing.T) {
 			want: `~\.no-mistakes\evidence\run-1\pytest.log`,
 		},
 		{
+			name: "git bash drive mount",
+			in:   "/c/Users/testuser/x.log",
+			want: "~/x.log",
+		},
+		{
+			name: "cygwin drive mount",
+			in:   "/cygdrive/c/Users/testuser/x.log",
+			want: "~/x.log",
+		},
+		{
+			name: "wsl drive mount",
+			in:   "/mnt/c/Users/testuser/x.log",
+			want: "~/x.log",
+		},
+		{
+			name: "lower-case windows drive",
+			in:   `c:\Users\testuser\x.log`,
+			want: `~\x.log`,
+		},
+		{
+			name: "windows drive file url",
+			in:   "opened file:///C:/Users/testuser/report.html",
+			want: "opened ~/report.html",
+		},
+		{
 			name: "windows home prefix with forward slashes",
 			in:   "C:/Users/testuser/.no-mistakes/evidence/run-1/pytest.log",
 			want: "~/.no-mistakes/evidence/run-1/pytest.log",
@@ -197,6 +222,10 @@ func TestRedactText_LeavesUnrelatedTextIntact(t *testing.T) {
 			in:   "/usr/local/go/bin/go test ./...",
 		},
 		{
+			name: "a mount directory merely called home",
+			in:   "/mnt/data/home/config.yaml",
+		},
+		{
 			name: "a directory merely called home",
 			in:   "/srv/home/config.yaml",
 		},
@@ -245,6 +274,11 @@ func TestRedactText_UnconventionalHomeFromEnvironment(t *testing.T) {
 		{name: "windows redirected profile forward slashes", home: `D:\profiles\operator`, in: "D:/profiles/operator/evidence/x.log", want: "~/evidence/x.log"},
 		{name: "windows redirected profile flag-attached path", home: `D:\profiles\operator`, in: "-LD:/profiles/operator/lib", want: "-L~/lib"},
 		{name: "windows redirected profile json-escaped", home: `D:\profiles\operator`, in: `{"path":"D:\\profiles\\operator\\x.log"}`, want: `{"path":"~\\x.log"}`},
+		{name: "windows redirected profile lower-case drive", home: `D:\profiles\operator`, in: `d:\profiles\operator\x.log`, want: `~\x.log`},
+		{name: "windows redirected profile git bash spelling", home: `D:\profiles\operator`, in: "/d/profiles/operator/x.log", want: "~/x.log"},
+		{name: "windows redirected profile cygwin spelling", home: `D:\profiles\operator`, in: "/cygdrive/d/profiles/operator/x.log", want: "~/x.log"},
+		{name: "windows redirected profile wsl spelling", home: `D:\profiles\operator`, in: "/mnt/d/profiles/operator/x.log", want: "~/x.log"},
+		{name: "windows redirected profile file url", home: `D:\profiles\operator`, in: "file:///D:/profiles/operator/x.log", want: "file:///~/x.log"},
 		// Git Bash, MSYS2, and Cygwin set a POSIX-rooted HOME on Windows, and
 		// captured output from a test run under those shells prints it. The
 		// conventional-root rules cannot see it: the "/Users" in
@@ -312,6 +346,18 @@ func TestRedactText_DegenerateHomeIsIgnored(t *testing.T) {
 	t.Setenv("USERPROFILE", "")
 
 	const in = "/usr/local/bin/no-mistakes and /etc/hosts"
+	if got := RedactText(in); got != in {
+		t.Fatalf("RedactText(%q) = %q, want it unchanged", in, got)
+	}
+}
+
+// A bare drive names no account, so none of its mount spellings may become a
+// candidate either: each one would rewrite every path on the drive.
+func TestRedactText_BareDriveHomeIsIgnored(t *testing.T) {
+	t.Setenv("HOME", `C:\`)
+	t.Setenv("USERPROFILE", `C:\`)
+
+	const in = "/cygdrive/c/Windows and /mnt/c/Windows and C:/Windows"
 	if got := RedactText(in); got != in {
 		t.Fatalf("RedactText(%q) = %q, want it unchanged", in, got)
 	}

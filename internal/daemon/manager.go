@@ -33,6 +33,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/procreap"
 	"github.com/kunchenguid/no-mistakes/internal/quotarouting"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
@@ -580,10 +581,10 @@ func resolveGitPath(workDir, value string) string {
 func samePath(a, b string) bool {
 	a = filepath.Clean(a)
 	b = filepath.Clean(b)
-	if resolved, err := filepath.EvalSymlinks(a); err == nil {
+	if resolved, err := realpath.Resolve(a); err == nil {
 		a = resolved
 	}
-	if resolved, err := filepath.EvalSymlinks(b); err == nil {
+	if resolved, err := realpath.Resolve(b); err == nil {
 		b = resolved
 	}
 	return a == b

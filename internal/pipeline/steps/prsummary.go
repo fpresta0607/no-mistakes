@@ -1,20 +1,19 @@
 package steps
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"html"
 	"net/url"
-	"os"
 	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -34,8 +33,6 @@ func prBodyFlavorFor(provider scm.Provider) prBodyFlavor {
 }
 
 const (
-	maxEmbeddedArtifactBytes               = 16 * 1024
-	maxEmbeddedArtifactsTotalBytes         = 32 * 1024
 	noMistakesPRSignature                  = "Updates from [git push no-mistakes](https://github.com/kunchenguid/no-mistakes)"
 	pipelineAttestationCommentPrefix       = "<!-- no-mistakes-pipeline-attestation:v1 "
 	pipelineAttestationCommentClosingToken = " -->"
@@ -86,16 +83,16 @@ type pipelineAttestationLiveValidation struct {
 	Total   int    `json:"total"`
 }
 
+// withheldArtifactContent stands in for artifact content that carries a captured
+// agent prompt, so the PR says something was held back instead of dropping it.
+const withheldArtifactContent = "Withheld from this pull request: the content carries a captured agent prompt."
+
 // pipelineAttestationFocusedCheck reports a focused check's result and how many
 // failures and repaired paths it was given.
 type pipelineAttestationFocusedCheck struct {
 	ExitCode int `json:"exit_code"`
 	Tests    int `json:"tests"`
 	Paths    int `json:"paths"`
-}
-
-type testingArtifactRenderState struct {
-	remainingEmbeddedBytes int
 }
 
 type testingSummaryOptions struct {
@@ -114,11 +111,11 @@ type testingSummaryOptions struct {
 	evidenceRoot string
 	// evidence links artifacts published to the repository's orphan evidence
 	// branch. It is nil when nothing was published, and the artifacts then
-	// render as local paths rather than as links that would not resolve.
+	// render as private references rather than as links that would not resolve.
 	evidence *evidenceLinks
 	// attachments maps a local evidence path to a GitHub user-attachments URL
 	// uploaded at PR render time. Nil means nothing was uploaded; the renderer
-	// then keeps today's local-path or commit-pinned link.
+	// then keeps its private reference or commit-pinned link.
 	attachments map[string]string
 }
 
@@ -240,7 +237,7 @@ func buildPipelineAttestationWithPolicy(steps []*db.StepResult, rounds map[strin
 	if err != nil {
 		return ""
 	}
-	redacted := redactPRContent(prContent{Body: string(payload)}, policy.RunWorktree, nmWorktreesRoot()).Body
+	redacted := redactPRContent(prContent{Body: string(payload)}, policy.RunWorktree, nmWorktreesRoot(), "").Body
 	return renderPipelineAttestation(redacted)
 }
 
@@ -427,7 +424,7 @@ func rebindPipelineAttestationWithSteps(body, newHeadSHA string, steps []*db.Ste
 	if err != nil {
 		return body, false
 	}
-	redacted := redactPRContent(prContent{Body: string(payload)}, policy.RunWorktree, nmWorktreesRoot()).Body
+	redacted := redactPRContent(prContent{Body: string(payload)}, policy.RunWorktree, nmWorktreesRoot(), "").Body
 	rebuilt := renderPipelineAttestation(redacted)
 	oldEnd := end + len(pipelineAttestationCommentClosingToken)
 	if body[start:oldEnd] == rebuilt {
@@ -521,11 +518,10 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 				b.WriteString("\n")
 			}
 		}
-		renderState := testingArtifactRenderState{remainingEmbeddedBytes: maxEmbeddedArtifactsTotalBytes}
 		previousArtifact := ""
 		previousAttachment := false
 		for _, artifact := range artifacts {
-			rendered := renderTestingArtifact(artifact, opts, &renderState)
+			rendered := renderTestingArtifact(artifact, opts)
 			if rendered == "" {
 				continue
 			}
@@ -709,6 +705,9 @@ func appendTestingArtifacts(artifacts []types.TestArtifact, seen map[string]bool
 		artifact.Path = sanitizeArtifactPath(artifact.Path, opts)
 		artifact.URL = sanitizeArtifactURL(artifact.URL)
 		artifact.Content = sanitizePromptMultilineText(artifact.Content)
+		if agent.CarriesCapturedPrompt(artifact.Content) {
+			artifact.Content = withheldArtifactContent
+		}
 		key := artifact.Kind + "\x00" + artifact.Label + "\x00" + artifact.Path + "\x00" + artifact.URL + "\x00" + artifact.Content
 		if artifact.Label == "" || seen[key] {
 			continue
@@ -779,28 +778,22 @@ func renderTestingSummaryFor(summary string, flavor prBodyFlavor) string {
 	return clean
 }
 
-func renderTestingArtifact(artifact types.TestArtifact, opts testingSummaryOptions, state *testingArtifactRenderState) string {
+func renderTestingArtifact(artifact types.TestArtifact, opts testingSummaryOptions) string {
 	label := sanitizePromptText(artifact.Label)
 	if label == "" {
 		return ""
 	}
 	if opts.compactArtifacts {
-		return renderCompactTestingArtifact(artifact, opts, label, state)
+		return renderCompactTestingArtifact(artifact, opts, label)
 	}
 	target := artifact.URL
 	if target == "" {
 		target = artifactTargetForPath(artifact, opts)
 	}
 	localPath := localArtifactPath(artifact.Path, opts)
-	fileText, hasFile := embeddedArtifactText(artifact, opts, state)
-	caption := artifact.Content
-	fenceBody, descriptionLine := caption, ""
-	if hasFile {
-		fenceBody, descriptionLine = fileText, caption
-	}
 
 	var b strings.Builder
-	// Keep an inspectable source before any preview, which may be truncated.
+	// Keep an inspectable source before any preview.
 	link := artifact.URL
 	if link == "" {
 		link = artifactLinkTargetForPath(artifact, opts)
@@ -823,46 +816,38 @@ func renderTestingArtifact(artifact types.TestArtifact, opts testingSummaryOptio
 		} else {
 			b.WriteString(fmt.Sprintf("**%s**\n\n<video src=\"%s\" controls></video>\n", html.EscapeString(label), html.EscapeString(target)))
 		}
-	} else if !hasFile && link == "" {
+	} else if link == "" {
 		if target != "" {
 			b.WriteString(fmt.Sprintf("- Evidence: [%s](%s)\n", html.EscapeString(label), target))
 		} else if localPath != "" {
-			b.WriteString(renderLocalArtifactLine(label, localPath, opts.flavor))
+			b.WriteString(renderPrivateEvidenceReference("- Evidence", label, localPath, opts.flavor))
 		}
 	}
-	if descriptionLine != "" {
+	if artifact.Content != "" {
 		if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n\n") {
 			b.WriteString("\n")
 		}
-		b.WriteString(renderTestedDetailFor(descriptionLine, opts.flavor))
-		b.WriteString("\n")
-	}
-	if fenceBody != "" {
-		if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n\n") {
-			b.WriteString("\n")
-		}
-		b.WriteString(fmt.Sprintf("**%s**\n\n```text\n%s\n```\n", html.EscapeString(label), escapeMarkdownFence(escapePipelineFoldMarkers(fenceBody))))
+		b.WriteString(fmt.Sprintf("**%s**\n\n```text\n%s\n```\n", html.EscapeString(label), escapeMarkdownFence(escapePipelineFoldMarkers(artifact.Content))))
 	}
 	return strings.TrimRight(b.String(), "\n") + "\n"
 }
 
-func renderCompactTestingArtifact(artifact types.TestArtifact, opts testingSummaryOptions, label string, state *testingArtifactRenderState) string {
+func renderCompactTestingArtifact(artifact types.TestArtifact, opts testingSummaryOptions, label string) string {
 	target := artifact.URL
 	if target == "" {
 		target = artifactLinkTargetForPath(artifact, opts)
 	}
 	localPath := localArtifactPath(artifact.Path, opts)
-	fileText, hasFile := embeddedArtifactText(artifact, opts, state)
 	caption := artifact.Content
 	attachment := opts.attachmentURL(artifact)
 
-	if target == "" && localPath == "" && caption == "" && !hasFile && attachment == "" {
+	if target == "" && localPath == "" && caption == "" && attachment == "" {
 		return ""
 	}
 
-	// No embeddable text: render a link, attachment, or local-file reference
-	// (images, videos, binaries).
-	if caption == "" && !hasFile {
+	// No agent-written content: render a link, attachment, or private evidence
+	// reference.
+	if caption == "" {
 		if attachment != "" {
 			var b strings.Builder
 			b.WriteString(renderAttachmentMarkdown(artifact, attachment, label))
@@ -874,26 +859,17 @@ func renderCompactTestingArtifact(artifact types.TestArtifact, opts testingSumma
 		if target != "" {
 			return fmt.Sprintf("- Evidence: [%s](%s)\n", html.EscapeString(label), target)
 		}
-		return renderLocalArtifactLine(label, localPath, opts.flavor)
-	}
-
-	fenceBody, descriptionLine := caption, ""
-	if hasFile {
-		fenceBody, descriptionLine = fileText, caption
+		return renderPrivateEvidenceReference("- Evidence", label, localPath, opts.flavor)
 	}
 
 	var inner strings.Builder
 	if target != "" {
 		inner.WriteString(fmt.Sprintf("Source: [%s](%s)\n\n", html.EscapeString(label), target))
-	} else if attachment == "" && !hasFile && localPath != "" {
-		inner.WriteString(renderLocalArtifactReference("Source", label, localPath, opts.flavor))
+	} else if attachment == "" && localPath != "" {
+		inner.WriteString(renderPrivateEvidenceReference("Source", label, localPath, opts.flavor))
 		inner.WriteString("\n")
 	}
-	if descriptionLine != "" {
-		inner.WriteString(renderTestedDetailFor(descriptionLine, opts.flavor))
-		inner.WriteString("\n\n")
-	}
-	inner.WriteString(fmt.Sprintf("```text\n%s\n```\n", escapeMarkdownFence(escapePipelineFoldMarkers(fenceBody))))
+	inner.WriteString(fmt.Sprintf("```text\n%s\n```\n", escapeMarkdownFence(escapePipelineFoldMarkers(caption))))
 	folded := foldPRBlock("Evidence: "+html.EscapeString(label), inner.String(), opts.flavor)
 	if attachment == "" {
 		return folded
@@ -916,121 +892,6 @@ func renderAttachmentMarkdown(artifact types.TestArtifact, url, label string) st
 		return url + "\n"
 	}
 	return fmt.Sprintf("![%s](%s)\n", markdownAltText(label), url)
-}
-
-// embeddedArtifactText reads a file artifact and returns its text content,
-// truncated from the middle when it exceeds maxEmbeddedArtifactBytes. ok is
-// false when the artifact has no path, points at an image/video, resolves
-// outside the allowed roots, is missing, empty, or is not UTF-8 text.
-func embeddedArtifactText(artifact types.TestArtifact, opts testingSummaryOptions, state *testingArtifactRenderState) (string, bool) {
-	if artifact.Path == "" {
-		return "", false
-	}
-	if state == nil || state.remainingEmbeddedBytes <= 0 {
-		return "", false
-	}
-	if isImageArtifact(artifact.Kind, artifact.Path) || isVideoArtifact(artifact.Kind, artifact.Path) {
-		return "", false
-	}
-	fsPath := artifactFilesystemPath(artifact.Path, opts)
-	if fsPath == "" {
-		return "", false
-	}
-	text, err := readEmbeddedArtifactText(fsPath)
-	if err != nil {
-		return "", false
-	}
-	text = strings.TrimRight(text, "\n")
-	if text == "" {
-		return "", false
-	}
-	if len(text) > state.remainingEmbeddedBytes {
-		return "", false
-	}
-	state.remainingEmbeddedBytes -= len(text)
-	return text, true
-}
-
-func artifactFilesystemPath(p string, opts testingSummaryOptions) string {
-	if p == "" {
-		return ""
-	}
-	if !filepath.IsAbs(p) {
-		return ""
-	}
-	if opts.evidenceRoot == "" {
-		return ""
-	}
-	if _, ok := artifactPathRelativeToRoot(p, opts.evidenceRoot); !ok {
-		return ""
-	}
-	return p
-}
-
-func readEmbeddedArtifactText(fsPath string) (string, error) {
-	info, err := os.Stat(fsPath)
-	if err != nil || info.IsDir() {
-		return "", err
-	}
-	if info.Size() <= int64(maxEmbeddedArtifactBytes) {
-		data, err := os.ReadFile(fsPath)
-		if err != nil || !looksLikeTextArtifact(data) {
-			return "", err
-		}
-		return neutralizePRControls(string(data)), nil
-	}
-
-	file, err := os.Open(fsPath)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	headSize := maxEmbeddedArtifactBytes / 2
-	tailSize := maxEmbeddedArtifactBytes - headSize
-	head := make([]byte, headSize)
-	if _, err := file.ReadAt(head, 0); err != nil {
-		return "", err
-	}
-	tail := make([]byte, tailSize)
-	if _, err := file.ReadAt(tail, info.Size()-int64(tailSize)); err != nil {
-		return "", err
-	}
-	head = trimUTF8End(head)
-	tail = trimUTF8Start(tail)
-	if !looksLikeTextArtifact(head) || !looksLikeTextArtifact(tail) {
-		return "", nil
-	}
-	omitted := info.Size() - int64(len(head)+len(tail))
-	return neutralizePRControls(string(head) + fmt.Sprintf("\n\n... [%d bytes truncated] ...\n\n", omitted) + string(tail)), nil
-}
-
-func looksLikeTextArtifact(data []byte) bool {
-	if len(data) == 0 {
-		return false
-	}
-	if bytes.IndexByte(data, 0) != -1 {
-		return false
-	}
-	return utf8.Valid(data)
-}
-
-func trimUTF8End(data []byte) []byte {
-	for len(data) > 0 && !utf8.Valid(data) {
-		data = data[:len(data)-1]
-	}
-	return data
-}
-
-func trimUTF8Start(data []byte) []byte {
-	for len(data) > 0 && !utf8.Valid(data) {
-		_, size := utf8.DecodeRune(data)
-		if size <= 0 {
-			return nil
-		}
-		data = data[size:]
-	}
-	return data
 }
 
 func artifactTargetForPath(artifact types.TestArtifact, opts testingSummaryOptions) string {
@@ -1151,11 +1012,11 @@ func artifactPathRelativeToRoot(target, root string) (string, bool) {
 }
 
 func resolveArtifactPathSymlinks(target string) string {
-	if resolved, err := filepath.EvalSymlinks(target); err == nil {
+	if resolved, err := realpath.Resolve(target); err == nil {
 		return filepath.Clean(resolved)
 	}
 	for candidate := target; ; candidate = filepath.Dir(candidate) {
-		resolved, err := filepath.EvalSymlinks(candidate)
+		resolved, err := realpath.Resolve(candidate)
 		if err == nil {
 			rel, err := filepath.Rel(candidate, target)
 			if err != nil || rel == "." {
@@ -1174,16 +1035,21 @@ func sameVolume(a, b string) bool {
 	return strings.EqualFold(filepath.VolumeName(a), filepath.VolumeName(b)) || filepath.VolumeName(a) == "" || filepath.VolumeName(b) == ""
 }
 
-func renderLocalArtifactLine(label, localPath string, flavor prBodyFlavor) string {
-	return renderLocalArtifactReference("- Evidence", label, localPath, flavor)
-}
-
-func renderLocalArtifactReference(prefix, label, localPath string, flavor prBodyFlavor) string {
-	path := "<code>" + html.EscapeString(localPath) + "</code>"
-	if flavor == prBodyMarkdown {
-		path = "`" + localPath + "`"
+// renderPrivateEvidenceReference names an evidence file the PR does not publish.
+// The file is a raw capture that can hold agent prompts and local execution
+// context, and redaction only trims path prefixes, so neither its bytes nor its
+// path may reach the body. Its digest binds the public claim to the exact file a
+// reviewer with access to the run can open.
+func renderPrivateEvidenceReference(prefix, label, localPath string, flavor prBodyFlavor) string {
+	digest, err := mediaFileDigest(localPath)
+	if err != nil {
+		return fmt.Sprintf("%s: %s (private run evidence, unreadable when this PR was rendered)\n", prefix, html.EscapeString(label))
 	}
-	return fmt.Sprintf("%s: %s (local file: %s)\n", prefix, html.EscapeString(label), path)
+	code := "<code>" + digest + "</code>"
+	if flavor == prBodyMarkdown {
+		code = "`" + digest + "`"
+	}
+	return fmt.Sprintf("%s: %s (private run evidence, %s)\n", prefix, html.EscapeString(label), code)
 }
 
 func sanitizeArtifactURL(target string) string {
@@ -1578,6 +1444,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 				inner.WriteString("✅ No issues found.\n")
 			}
 			writeTestedDetails(&inner, sr, &findings, flavor)
+			writeReviewFollowUps(&inner, &findings, flavor)
 			inner.WriteString("\n")
 			continue
 		}
@@ -1588,6 +1455,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 			inner.WriteString(fmt.Sprintf("%s still open:\n\n", countFindingsBySeverity(&findings)))
 		}
 		writeFindingItems(&inner, sr, &findings, flavor)
+		writeReviewFollowUps(&inner, &findings, flavor)
 		inner.WriteString("\n")
 	}
 
@@ -1665,18 +1533,34 @@ func fixRoundLine(r *db.StepRound) string {
 // followed by any test command details for the test step.
 func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Findings, flavor prBodyFlavor) {
 	for _, f := range findings.Items {
-		emoji := severityEmoji(f.Severity)
-		loc := ""
-		if f.File != "" {
-			loc = fmt.Sprintf("`%s", escapePRText(f.File, flavor))
-			if f.Line > 0 {
-				loc += fmt.Sprintf(":%d", f.Line)
-			}
-			loc += "` - "
-		}
-		b.WriteString(fmt.Sprintf("- %s %s%s\n", emoji, loc, escapePRText(f.Description, flavor)))
+		writeFindingLine(b, f, flavor)
 	}
 	writeTestedDetails(b, sr, findings, flavor)
+}
+
+func writeFindingLine(b *strings.Builder, f types.Finding, flavor prBodyFlavor) {
+	emoji := severityEmoji(f.Severity)
+	loc := ""
+	if f.File != "" {
+		loc = fmt.Sprintf("`%s", escapePRText(f.File, flavor))
+		if f.Line > 0 {
+			loc += fmt.Sprintf(":%d", f.Line)
+		}
+		loc += "` - "
+	}
+	b.WriteString(fmt.Sprintf("- %s %s%s\n", emoji, loc, escapePRText(f.Description, flavor)))
+}
+
+// writeReviewFollowUps lists a repair round's findings outside the repair, so a
+// reader of the PR has what the run recorded without blocking on it.
+func writeReviewFollowUps(b *strings.Builder, findings *types.Findings, flavor prBodyFlavor) {
+	if len(findings.FollowUps) == 0 {
+		return
+	}
+	b.WriteString("\nFollow-ups outside the repair, not blocking:\n\n")
+	for _, f := range findings.FollowUps {
+		writeFindingLine(b, f, flavor)
+	}
 }
 
 // writeTestedDetails lists what the test step exercised: its live-validation

@@ -16,7 +16,7 @@ const (
 func renderTestExceptionSection(steps []*db.StepResult, provider scm.Provider, workDir string) string {
 	for _, step := range steps {
 		if exception := step.TestOverrideReason(); exception != "" {
-			exception = redactPRContent(prContent{Body: exception}, workDir, nmWorktreesRoot()).Body
+			exception = redactPRContent(prContent{Body: exception}, workDir, nmWorktreesRoot(), "").Body
 			quoted := strings.ReplaceAll(closingGrammarFor(provider).neutralize(html.EscapeString(exception)), "\n", "\n> ")
 			return testExceptionStart + "\n### Test approval exception\n\n> " + quoted + "\n" + testExceptionEnd
 		}

@@ -19,6 +19,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 func init() {
@@ -322,7 +323,7 @@ func cleanupWorktree(t *testing.T, repoDir, wtDir string) {
 		if runtime.GOOS == "windows" {
 			time.Sleep(500 * time.Millisecond)
 		}
-		if resolved, err := filepath.EvalSymlinks(wtDir); err == nil {
+		if resolved, err := realpath.Resolve(wtDir); err == nil {
 			wtDir = resolved
 		}
 

@@ -5,13 +5,16 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
+	"github.com/kunchenguid/no-mistakes/internal/testlink"
 )
 
 func TestResolveEvidenceRootUsesAUsableSettingAndFallsBack(t *testing.T) {
 	root := t.TempDir()
 	// TempDir may use a symlink (macOS) or a short Windows path. The
 	// resolver returns the canonical spelling of configured directories.
-	root, err := filepath.EvalSymlinks(root)
+	root, err := realpath.Resolve(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +80,36 @@ func TestResolveEvidenceRootUsesAUsableSettingAndFallsBack(t *testing.T) {
 	got, warning = p.ResolveEvidenceRoot(inside, "")
 	if got != p.EvidenceDir() || !strings.Contains(warning, "worktrees") {
 		t.Fatalf("worktree evidence_dir = %q warning %q, want the default", got, warning)
+	}
+}
+
+func TestResolveEvidenceRootRefusesAnEvidenceDirBelowJunctionedWorktrees(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target func(t *testing.T, root string) string
+	}{
+		{"same volume", func(t *testing.T, root string) string { return filepath.Join(root, "real") }},
+		{"another volume", func(t *testing.T, root string) string { return testlink.OtherVolumeDir(t, root) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			home := filepath.Join(root, "home")
+			if err := os.Mkdir(home, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			real := filepath.Join(tc.target(t, root), "worktrees")
+			if err := os.MkdirAll(filepath.Join(real, "evidence"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			p := WithRoot(home)
+			testlink.Junction(t, p.WorktreesDir(), real)
+
+			got, warning := p.ResolveEvidenceRoot(filepath.Join(p.WorktreesDir(), "evidence"), "")
+
+			if got != p.EvidenceDir() || !strings.Contains(warning, "inside managed worktrees") {
+				t.Fatalf("evidence_dir below a junctioned worktrees folder = %q warning %q, want the default and the worktrees warning", got, warning)
+			}
+		})
 	}
 }
 

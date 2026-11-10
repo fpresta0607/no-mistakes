@@ -212,7 +212,7 @@ func TestRefreshPublishedPR_RedactsStoredException(t *testing.T) {
 		reason := "Accept retained command failure"
 		override := "  test wrapper refused " + root + "/check and /home/private-person/work\x1b[31m\x01  "
 		step := &db.StepResult{StepName: types.StepTest, Status: types.StepStatusCompleted, OverrideReason: &override, ApprovalReason: &reason}
-		body := redactPRContent(prContent{Body: buildPipelineAttestationWithPolicy([]*db.StepResult{step}, nil, testPipelineHeadSHA, pipelineAttestationPolicy{AllowTestCommandOverride: "existing opt-in"})}, root, "").Body
+		body := redactPRContent(prContent{Body: buildPipelineAttestationWithPolicy([]*db.StepResult{step}, nil, testPipelineHeadSHA, pipelineAttestationPolicy{AllowTestCommandOverride: "existing opt-in"})}, root, "", "").Body
 		attestation := parsePipelineAttestationForTest(t, body)
 		attestation.Steps[0].TestException = ""
 		payloadBytes, err := json.Marshal(attestation)

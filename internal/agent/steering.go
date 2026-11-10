@@ -3,7 +3,39 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 )
+
+// capturedPhraseWords is how many consecutive words of a prompt's fixed wording
+// mark text as a capture: more than ordinary prose shares with a prompt, and
+// few enough that an excerpt from the middle of a line still reaches it.
+const capturedPhraseWords = 8
+
+// capturedPromptPhrases holds every capturedPhraseWords-word run of the fixed
+// lines of the steering and execution-context blocks, and whole any fixed line
+// shorter than that. Rendering the blocks with a slot where each takes a path
+// keeps the wording in one place.
+var capturedPromptPhrases = fixedPromptPhrases()
+
+func fixedPromptPhrases() []string {
+	const pathSlot = "\x00"
+	var phrases []string
+	for _, block := range []string{WorktreeSteering(pathSlot), ExecutionContextPromptSection(pathSlot)} {
+		for _, line := range strings.Split(block, "\n") {
+			for _, fixed := range strings.Split(line, pathSlot) {
+				words := strings.Fields(fixed)
+				for len(words) > capturedPhraseWords {
+					phrases = append(phrases, strings.Join(words[:capturedPhraseWords], " "))
+					words = words[1:]
+				}
+				if len(words) > 0 {
+					phrases = append(phrases, strings.Join(words, " "))
+				}
+			}
+		}
+	}
+	return phrases
+}
 
 // WorktreeSteering renders the preamble prepended to every pipeline agent
 // prompt. It keeps the agent's writes inside the git worktree and steers it
@@ -56,6 +88,20 @@ func WorktreeSteering(evidenceRoot string) string {
 - Only add new commits on top of the current HEAD. Never amend, squash, reword, reorder, drop, or reset an existing commit, and never otherwise rewrite history, unless your prompt explicitly asks you to run or continue a rebase or merge. The pipeline records the head it validated, and a rewritten history strands the run. This holds even when a finding or instruction asks you to change a commit message or an existing commit: make any file changes it needs as new work, and report that you left history unchanged.
 
 `, location)
+}
+
+// CarriesCapturedPrompt reports whether text holds a pipeline prompt's fixed
+// steering or execution-context wording, the mark of a prompt captured from a
+// run rather than text written for a reader. Any fixed line counts, whole or
+// excerpted, and wrapping does not hide it.
+func CarriesCapturedPrompt(text string) bool {
+	normalized := strings.Join(strings.Fields(text), " ")
+	for _, phrase := range capturedPromptPhrases {
+		if strings.Contains(normalized, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // steeredAgent wraps an Agent and prepends the steering preamble to each prompt.

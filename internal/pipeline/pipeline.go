@@ -74,6 +74,10 @@ type StepContext struct {
 	// names, and judges the rest. Nil when unknown, which
 	// has the rereview judge every changed file.
 	PreviousReviewedPaths []string
+	// PendingVerificationIDs names the outstanding findings this review round
+	// can clear on coverage: every selection dispatched to a fixer and not yet
+	// verified. Unused by every other step.
+	PendingVerificationIDs []string
 	// CoverageContinuation names the exact stored round accepted at the gate.
 	// The real review consumer re-reads and validates its scope before reuse.
 	CoverageContinuation *db.StepRound

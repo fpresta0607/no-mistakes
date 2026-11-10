@@ -23,6 +23,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/e2edaemon"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
@@ -813,12 +814,12 @@ func combinedOutput(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
 }
 
 // repoID mirrors gate.repoID(): sha256 of the absolute work path, first
-// 6 bytes hex. Tests need this to query runs by repo. EvalSymlinks
+// 6 bytes hex. Tests need this to query runs by repo. realpath.Resolve
 // matches gate.Init's normalisation (macOS /var → /private/var bites here
 // without it).
 func (h *Harness) repoID() string {
 	abs := h.WorkDir
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+	if resolved, err := realpath.Resolve(abs); err == nil {
 		abs = resolved
 	}
 	sum := sha256.Sum256([]byte(abs))

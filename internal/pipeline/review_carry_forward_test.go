@@ -6,6 +6,7 @@ import (
 	"os"
 	gitexec "os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -993,6 +994,57 @@ func TestMergeOutstandingFindingsJSON_UsesCurrentReviewedPathsWhenRoundIsEmpty(t
 	}
 	if len(parsed.ReviewedPaths) != 1 || parsed.ReviewedPaths[0] != "current.go" {
 		t.Fatalf("reviewed paths = %v, want [current.go]", parsed.ReviewedPaths)
+	}
+}
+
+func TestMergeOutstandingFindingsJSON_RepairRecordIsThisRoundsAlone(t *testing.T) {
+	prior := `{"findings":[{"id":"review-1","severity":"error","file":"service.go","description":"outstanding","action":"auto-fix"}],` +
+		`"closed_findings":["old-closed"],"follow_ups":[{"id":"old","severity":"warning","file":"old.go","line":1,"description":"an older follow-up","action":"auto-fix"}]}`
+	cases := []struct {
+		name          string
+		current       string
+		wantClosed    []string
+		wantFollowUps []string
+	}{
+		{
+			name:          "the round's own record replaces the earlier one",
+			current:       `{"findings":[],"closed_findings":["f-1"],"follow_ups":[{"id":"new","severity":"warning","file":"new.go","line":1,"description":"this round's follow-up","action":"auto-fix"}]}`,
+			wantClosed:    []string{"f-1"},
+			wantFollowUps: []string{"this round's follow-up"},
+		},
+		{name: "a round with no record inherits none", current: `{"findings":[]}`},
+		{name: "a round with no payload inherits none", current: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			merged := mergeOutstandingFindingsJSON(prior, tc.current, []string{"current.go"})
+
+			parsed, err := types.ParseFindingsJSON(merged)
+			if err != nil {
+				t.Fatalf("parse merged findings: %v", err)
+			}
+			var followUps []string
+			for _, followUp := range parsed.FollowUps {
+				followUps = append(followUps, followUp.Description)
+			}
+			if !reflect.DeepEqual(parsed.ClosedFindings, tc.wantClosed) || !reflect.DeepEqual(followUps, tc.wantFollowUps) {
+				t.Fatalf("record = %v, %v, want %v, %v", parsed.ClosedFindings, followUps, tc.wantClosed, tc.wantFollowUps)
+			}
+			if len(parsed.Items) != 1 || parsed.Items[0].Description != "outstanding" {
+				t.Fatalf("items = %+v, want the outstanding finding kept", parsed.Items)
+			}
+		})
+	}
+}
+
+func TestSameFinding_IgnoresTheNamedFailure(t *testing.T) {
+	reported := types.Finding{Severity: "error", File: "a.go", Line: 3, Description: "d"}
+	withFailure := reported
+	withFailure.FailingInput = "an empty name"
+	withFailure.WrongResult = "the record is lost"
+
+	if !SameFinding(reported, withFailure) {
+		t.Fatal("a finding that gained a named failure must stay the same finding")
 	}
 }
 
