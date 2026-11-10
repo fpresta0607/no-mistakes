@@ -536,4 +536,9 @@ COMMIT;`,
 	// An earlier release's copy of idx_step_results_run_order_id, under another
 	// name. Left in place, a database that has it maintains both on every write.
 	`DROP INDEX IF EXISTS idx_step_results_run_order`,
+	// The durable record of a step's work started beside the review under
+	// global side_by_side (internal/db/side_lane.go). NULL head means no lane's
+	// outcome is outstanding for the step.
+	`ALTER TABLE step_results ADD COLUMN side_lane_head TEXT`,
+	`ALTER TABLE step_results ADD COLUMN side_lane_refusal TEXT`,
 }

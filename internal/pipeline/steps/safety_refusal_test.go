@@ -15,7 +15,9 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/intent"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -206,9 +208,10 @@ func TestReviewStep_SafetyRefusedCoverageCompletionIsNotACoverageGap(t *testing.
 // Work refused beside the review is never thrown away for its step to run
 // again, which would repeat the refused request. However the lane is reached,
 // its step returns the refusal at its turn and the lane's copy, with its
-// edits, is kept for the operator.
+// edits, is kept for the operator. A daemon restart before that turn leaves
+// only the lane's record on the step's row, and the step stops on it as well.
 func TestSideBySide_RefusedLaneIsKeptAndNotRunAgain(t *testing.T) {
-	for _, exit := range []string{"taken", "head moved", "stopped", "refused while stopping"} {
+	for _, exit := range []string{"taken", "head moved", "stopped", "refused while stopping", "daemon restarted"} {
 		t.Run(exit, func(t *testing.T) {
 			f := newSideBySideFixture(t, config.Commands{Lint: "echo lint"})
 			started := make(chan string, 1)
@@ -250,11 +253,14 @@ func TestSideBySide_RefusedLaneIsKeptAndNotRunAgain(t *testing.T) {
 				f.review.Shared.SideLanes().Stop(f.review)
 			case "refused while stopping":
 				f.review.Shared.SideLanes().Stop(f.review)
+			case "daemon restarted":
+				f.lanesDone()
+				f.review.Shared = &pipeline.RunShared{}
 			default:
 				f.lanesDone()
 			}
 
-			_, err := (&DocumentStep{}).Execute(f.turn())
+			_, err := (&DocumentStep{}).Execute(f.documentTurn())
 
 			if !agent.IsSafetyRefusal(err) {
 				t.Fatalf("Execute() error = %v, want the lane's refusal", err)
@@ -264,6 +270,169 @@ func TestSideBySide_RefusedLaneIsKeptAndNotRunAgain(t *testing.T) {
 			}
 			if data, err := os.ReadFile(filepath.Join(laneDir, "refused.txt")); err != nil || string(data) != "kept" {
 				t.Fatalf("the refused lane's edit = %q, %v; want it kept", data, err)
+			}
+			if record, err := f.review.DB.TakeSideLane(f.documentID); err != nil || record != nil {
+				t.Fatalf("record after the step stopped on it = %+v, %v; want it spent", record, err)
+			}
+		})
+	}
+}
+
+// The documentation pass started beside the review is refused while the review
+// waits at its gate, and the daemon restarts there. Once the recovered review
+// gate is answered, the Document step stops on that refusal at its turn
+// instead of repeating the refused request.
+func TestSideBySide_RefusedLaneSurvivesADaemonRestart(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	appPaths := paths.WithRoot(t.TempDir())
+	if err := appPaths.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(appPaths.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	repo, err := database.InsertRepo(dir, "https://example.invalid/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "refs/heads/feature", head, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Agent: types.AgentClaude, SideBySide: true, TrustedConfigSHA: "trusted", Commands: config.Commands{Lint: "echo lint"}}
+	ensureHermeticOrigin(t, dir)
+	ag := &sideBySideAgent{}
+	var passes atomic.Int32
+	ag.documentF = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		if passes.Add(1) > 1 {
+			return nil, errors.New("the refused work ran again")
+		}
+		return nil, errors.Join(agent.ErrSafetyRefusal, errors.New(nativeSafetyRefusal))
+	}
+	review := &transitionStep{name: types.StepReview, execute: func(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+		startSideLanes(sctx, base)
+		(&sideBySideFixture{t: t, review: sctx}).lanesDone()
+		return &pipeline.StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"R1","severity":"error","file":"feature.txt","description":"needs a decision","action":"ask-user"}]}`, ReviewApprovedHeadSHA: head}, nil
+	}}
+	steps := []pipeline.Step{review, &DocumentStep{}}
+	parks := make(chan types.StepName, 4)
+	emit := func(event ipc.Event) {
+		if event.Type == ipc.EventStepCompleted && event.StepName != nil && event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
+			parks <- *event.StepName
+		}
+	}
+	executor := pipeline.NewExecutor(database, appPaths, cfg, ag, steps, emit)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	done := make(chan error, 1)
+	finished := make(chan struct{})
+	go func() { defer close(finished); done <- executor.Execute(ctx, run, repo, dir) }()
+	t.Cleanup(func() {
+		cancel(pipeline.ErrDaemonShutdown)
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Error("executor did not stop")
+		}
+	})
+	waitForPark := func(want types.StepName) {
+		t.Helper()
+		select {
+		case got := <-parks:
+			if got != want {
+				t.Fatalf("%s parked, want %s", got, want)
+			}
+		case err := <-done:
+			t.Fatalf("%s did not park: %v", want, err)
+		case <-time.After(30 * time.Second):
+			t.Fatalf("%s did not park", want)
+		}
+	}
+	waitForPark(types.StepReview)
+	cancel(pipeline.ErrDaemonShutdown)
+	select {
+	case err := <-done:
+		if !errors.Is(err, pipeline.ErrParkedAtShutdown) {
+			t.Fatalf("park was not retained: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("executor did not stop at its park")
+	}
+	<-finished
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if database, err = db.Open(appPaths.DB()); err != nil {
+		t.Fatal(err)
+	}
+	if run, err = database.GetRun(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	executor = pipeline.NewExecutor(database, appPaths, cfg, ag, steps, emit)
+	ctx, cancel = context.WithCancelCause(context.Background())
+	defer cancel(pipeline.ErrDaemonShutdown)
+	done = make(chan error, 1)
+	finished = make(chan struct{})
+	go func() { defer close(finished); done <- executor.Resume(ctx, run, repo, dir) }()
+	waitForPark(types.StepReview)
+
+	if err := executor.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	waitForPark(types.StepDocument)
+	if got := passes.Load(); got != 1 {
+		t.Fatalf("documentation passes = %d, want the refused one alone", got)
+	}
+	records, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		if record.StepName == types.StepDocument && (record.FindingsJSON == nil || !pipeline.HasSafetyRefusal(*record.FindingsJSON)) {
+			t.Fatalf("Document parked on %v, want the native safety refusal", record.FindingsJSON)
+		}
+	}
+}
+
+// A daemon started after work beside the review ended knows only that work's
+// record. The step stops on a recorded refusal, and on work that never
+// recorded how it ended, such as a refusal whose record could not be written,
+// instead of doing that work again; and nothing new starts beside a review
+// while either is outstanding. Once the step has stopped on it the record is
+// spent, so the step's next turn does its work.
+func TestSideBySide_RecordedLaneStopsItsStepAfterARestart(t *testing.T) {
+	for _, outcome := range []string{"refused", "never recorded how it ended"} {
+		t.Run(outcome, func(t *testing.T) {
+			f := newSideBySideFixture(t, config.Commands{Lint: "echo lint"})
+			if err := f.review.DB.StartSideLane(f.documentID, f.headSHA); err != nil {
+				t.Fatal(err)
+			}
+			if outcome == "refused" {
+				if err := f.review.DB.RecordSideLaneRefusal(f.documentID, f.headSHA, "native agent safety refusal: "+nativeSafetyRefusal); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			startSideLanes(f.review, f.baseSHA)
+			f.lanesDone()
+			_, err := (&DocumentStep{}).Execute(f.documentTurn())
+
+			if !agent.IsSafetyRefusal(err) {
+				t.Fatalf("Execute() error = %v, want the recorded refusal", err)
+			}
+			if calls := f.agent.documentCalls(); len(calls) != 0 {
+				t.Fatalf("documentation passes = %q, want none", calls)
+			}
+			if !strings.Contains(f.logText(), "nothing starts beside the review") {
+				t.Fatalf("log = %q, want nothing started beside the review", f.logText())
+			}
+			if _, err := (&DocumentStep{}).Execute(f.documentTurn()); err != nil {
+				t.Fatalf("next turn error = %v, want the step's own pass", err)
+			}
+			if calls := f.agent.documentCalls(); len(calls) != 1 || !samePath(calls[0], f.dir) {
+				t.Fatalf("documentation passes = %q, want one in the run's worktree", calls)
 			}
 		})
 	}

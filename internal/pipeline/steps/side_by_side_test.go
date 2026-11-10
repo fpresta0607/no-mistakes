@@ -104,8 +104,10 @@ type sideBySideFixture struct {
 	agent   *sideBySideAgent
 	review  *pipeline.StepContext
 	counter string
-	logMu   sync.Mutex
-	logs    []string
+	// documentID is the Document step's row, which holds its lane's record.
+	documentID string
+	logMu      sync.Mutex
+	logs       []string
 }
 
 func newSideBySideFixture(t *testing.T, cmds config.Commands) *sideBySideFixture {
@@ -132,6 +134,7 @@ func newSideBySideFixture(t *testing.T, cmds config.Commands) *sideBySideFixture
 		}
 		stepIDs[name] = sr.ID
 	}
+	f.documentID = stepIDs[types.StepDocument]
 	// What the executor offers the review step under side_by_side.
 	sctx.SideLaneContext = func(name types.StepName) (*pipeline.StepContext, bool) {
 		id, ok := stepIDs[name]
@@ -167,6 +170,13 @@ func (f *sideBySideFixture) turn() *pipeline.StepContext {
 	sctx := *f.review
 	sctx.SideLaneContext = nil
 	return &sctx
+}
+
+// documentTurn is the context the Document step has at its own turn.
+func (f *sideBySideFixture) documentTurn() *pipeline.StepContext {
+	sctx := f.turn()
+	sctx.StepResultID = f.documentID
+	return sctx
 }
 
 func (f *sideBySideFixture) baselineRuns() int {
