@@ -595,6 +595,46 @@ func TestCIWorkflow_WindowsHandbackDoesNotShareTheCIMonitorBudget(t *testing.T) 
 	}
 }
 
+// The CI monitor tests (TestCIStep*: a third of pipeline/steps' ^Test[A-K] and
+// all of steps/citest) shared windows-steps-1 with the serial-heavy rest of
+// that range, and the package took 713-913s of its 15m budget there, timing
+// out with no test hung (issue #98). They run on a row of their own.
+func TestCIWorkflow_WindowsCIMonitorTestsDoNotShareARunner(t *testing.T) {
+	t.Parallel()
+	names := declaredTestNames(t, filepath.Join("internal", "pipeline", "steps"))
+	hasMonitorRow := false
+	for _, row := range ciTestJob(t).Strategy.Matrix.Include {
+		if row["os"] != "windows-latest" || row["shard"] != "steps" {
+			continue
+		}
+		shard := namedTestShard{
+			name: row["name"],
+			run:  namedShardPattern(t, row, "steps_run"),
+			skip: namedShardPattern(t, row, "steps_skip"),
+		}
+		var monitor, other string
+		for _, name := range names {
+			switch {
+			case !shard.selects(name):
+			case strings.HasPrefix(name, "TestCIStep"):
+				monitor = name
+			default:
+				other = name
+			}
+		}
+		if monitor == "" {
+			continue
+		}
+		hasMonitorRow = true
+		if other != "" {
+			t.Errorf("%s runs %s beside %s; the CI monitor tests fill a Windows runner's package budget on their own", shard.name, monitor, other)
+		}
+	}
+	if !hasMonitorRow {
+		t.Error("no Windows steps row selects a TestCIStep test")
+	}
+}
+
 func TestCIWorkflow_WindowsDaemonShardsRunEveryTestExactlyOnce(t *testing.T) {
 	t.Parallel()
 	assertWindowsNamedShardsCoverEveryTest(t, windowsNamedShardSpec{

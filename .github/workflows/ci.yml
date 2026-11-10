@@ -60,11 +60,18 @@ jobs:
           # name. The last row of a group skips the union of the other rows'
           # patterns, so a new test always lands in exactly one shard; rebalance
           # the ranges against the shards' -v timings (issue #1580, #1682, #58, #108).
+          # ^TestCIStep has a row of its own: it is a third of pipeline/steps'
+          # ^Test[A-K] and all of steps/citest, and beside the serial-heavy rest
+          # of that range the package took 713-913s of its 15m budget and timed
+          # out with no test hung (issue #98). In run 42872853185, the slowest
+          # that passed (908s), ^TestCIStep was 28s of serial and 1309s of
+          # parallel test time across both packages, and the rest of the range
+          # 291s and 614s.
           - os: windows-latest
             name: test (windows-steps-1)
             shard: steps
             steps_run: '^Test[A-K]'
-            steps_skip: '^TestCIHandback'
+            steps_skip: '^TestCI(Step|Handback)'
           - os: windows-latest
             name: test (windows-steps-2)
             shard: steps
@@ -72,9 +79,13 @@ jobs:
           - os: windows-latest
             name: test (windows-steps-3)
             shard: steps
-            steps_run: '^Test[L-Q]'
+            steps_run: '^TestCIStep'
           - os: windows-latest
             name: test (windows-steps-4)
+            shard: steps
+            steps_run: '^Test[L-Q]'
+          - os: windows-latest
+            name: test (windows-steps-5)
             shard: steps
             steps_skip: '^Test[A-Q]'
           - os: windows-latest
