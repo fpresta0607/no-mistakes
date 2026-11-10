@@ -2,11 +2,13 @@ package evidence
 
 import (
 	"context"
+	"encoding/binary"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 )
@@ -557,6 +559,58 @@ func TestPublish_WithholdsTextEvidenceCarryingACapturedPrompt(t *testing.T) {
 	}
 	if local, err := os.ReadFile(filepath.Join(source, "agent-prompts.txt")); err != nil || !strings.Contains(string(local), prompt) {
 		t.Errorf("local evidence = %q (%v), want it untouched", local, err)
+	}
+}
+
+// The withholding decision is made for every evidence file, not only clean
+// UTF-8 text. Windows PowerShell 5.1 redirection saves a capture as UTF-16, and
+// a log cut mid-rune or holding a NUL is not valid text either; each used to
+// reach the branch as a binary, byte for byte, with the prompt readable in it.
+func TestPublish_WithholdsACapturedPromptThatIsNotCleanUTF8(t *testing.T) {
+	utf16Text := func(order binary.AppendByteOrder, text string) string {
+		var encoded []byte
+		for _, unit := range utf16.Encode([]rune(text)) {
+			encoded = order.AppendUint16(encoded, unit)
+		}
+		return string(encoded)
+	}
+	captures := map[string]func(text string) string{
+		"utf-16 little endian with a byte-order mark": func(text string) string {
+			return "\xff\xfe" + utf16Text(binary.LittleEndian, text)
+		},
+		"utf-16 big endian without a byte-order mark": func(text string) string {
+			return utf16Text(binary.BigEndian, text)
+		},
+		"utf-8 with a stray invalid byte": func(text string) string {
+			return "console output cut mid-rune \xe2\x82\n" + text
+		},
+		"utf-8 with a stray nul": func(text string) string {
+			return "console output\x00\n" + text
+		},
+	}
+	for name, encode := range captures {
+		t.Run(name, func(t *testing.T) {
+			remote, work := newRepoWithRemote(t)
+			source := t.TempDir()
+			writeEvidence(t, source, map[string]string{
+				"agent-prompts.txt": encode("stub agent received:\n" + capturedPrompt(source)),
+				"logs/cli-run.txt":  "it works\n",
+			})
+
+			result, err := Publish(context.Background(), baseRequest(remote, work, source))
+			if err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			if got, want := strings.Join(result.Files, ","), "logs/cli-run.txt"; got != want {
+				t.Errorf("files = %q, want %q", got, want)
+			}
+			if got, want := strings.Join(result.Withheld, ","), "agent-prompts.txt"; got != want {
+				t.Errorf("withheld = %q, want %q", got, want)
+			}
+			if tree := runGit(t, remote, "ls-tree", "-r", "--name-only", result.CommitSHA); strings.Contains(tree, "agent-prompts.txt") {
+				t.Errorf("the captured prompt reached the evidence branch:\n%s", tree)
+			}
+		})
 	}
 }
 
