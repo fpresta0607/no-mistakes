@@ -732,7 +732,10 @@ func logRepairResult(sctx *pipeline.StepContext, result *agent.Result) {
 // files are staged, because the next turn would otherwise count them among the
 // files it found and its commit would leave them out (see stagePipelineChanges).
 // An unfinished rebase or merge stays as it is, since staging would mark its
-// conflicts resolved.
+// conflicts resolved. Commits the turn made itself get the commit settings
+// before they are recorded as the run head, the message the operator's fix
+// gives the rest of the work; a chain conformAgentCommits refuses stays in the
+// worktree unrecorded.
 func repairBudgetCut(sctx *pipeline.StepContext, stepName types.StepName, before []string, cut error) error {
 	startHead := sctx.Run.HeadSHA
 	if !rebaseInProgress(sctx.Ctx, sctx.WorkDir) && !mergeInProgress(sctx.Ctx, sctx.WorkDir) {
@@ -740,7 +743,10 @@ func repairBudgetCut(sctx *pipeline.StepContext, stepName types.StepName, before
 			return fmt.Errorf("%v; keep what it left: %w", cut, err)
 		}
 	}
-	return &pipeline.RepairBudgetCutError{Cut: cut, Left: unvalidatedWork(sctx, stepName, startHead, before)}
+	unshaped := conformAgentCommits(sctx, stepName, func() (string, error) {
+		return renderFixCommitMessage(sctx, stepName, keptRepairCutSummary, "", nil)
+	})
+	return &pipeline.RepairBudgetCutError{Cut: cut, Left: unvalidatedWork(sctx, stepName, startHead, before, unshaped)}
 }
 
 func updateNonSharedBranchRef(sctx *pipeline.StepContext, headSHA string) error {

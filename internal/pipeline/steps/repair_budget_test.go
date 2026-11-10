@@ -34,6 +34,7 @@ type repairCutLoop struct {
 	mu             sync.Mutex
 	isStreaming    bool
 	commitsWork    bool
+	mergesWork     bool
 	rereviewOutput string
 	reviews        []string
 	repairs        []string
@@ -74,7 +75,14 @@ func (l *repairCutLoop) cutTurn(ctx context.Context, t *testing.T, opts agent.Ru
 	}
 	if l.commitsWork {
 		gitCmd(t, opts.CWD, "add", "feature.txt", "helper.txt")
-		gitCmd(t, opts.CWD, "commit", "-m", "half a repair")
+		gitCmd(t, opts.CWD, "commit", "-m", "half a repair\n\nAgent-Note: unshaped")
+	}
+	if l.mergesWork {
+		start := gitCmd(t, opts.CWD, "rev-parse", "HEAD")
+		gitCmd(t, opts.CWD, "add", "helper.txt")
+		gitCmd(t, opts.CWD, "commit", "-m", "half a helper")
+		side := gitCmd(t, opts.CWD, "commit-tree", start+"^{tree}", "-p", start, "-m", "side")
+		gitCmd(t, opts.CWD, "merge", "--no-ff", "--no-edit", side)
 	}
 	if !l.isStreaming {
 		<-ctx.Done()
@@ -378,7 +386,10 @@ func TestReviewLoop_FixOfAFindingAtACutContinuesFromTheKeptWork(t *testing.T) {
 
 func TestReviewLoop_ACommitTheCutTurnMadeBecomesTheRunHead(t *testing.T) {
 	loop := &repairCutLoop{commitsWork: true}
-	r := startRepairCutRun(t, loop, &config.Config{ReviewAgentTimeout: 500 * time.Millisecond})
+	r := startRepairCutRun(t, loop, &config.Config{
+		ReviewAgentTimeout: 500 * time.Millisecond,
+		Commit:             config.Commit{FixMessage: "repair({{.Step}}): {{.Summary}}", Trailers: []string{"Assisted-by: {{.Agent}}"}},
+	})
 
 	notice := repairCutNotice(t, r.gateFindings(t))
 	stored, err := r.database.GetRun(r.run.ID)
@@ -399,6 +410,39 @@ func TestReviewLoop_ACommitTheCutTurnMadeBecomesTheRunHead(t *testing.T) {
 	}
 	if !strings.Contains(notice.Description, "log -p "+r.headSHA+".."+head) {
 		t.Fatalf("notice = %q, want the commits named with how to inspect them", notice.Description)
+	}
+	// No invocation reported which agent made the commit, so the documented
+	// trailer rule adds none rather than a guessed agent.
+	if got, want := gitCmd(t, r.workDir, "log", "--format=%B", r.headSHA+".."+head), "repair(review): keep repair work cut at its agent budget"; got != want {
+		t.Fatalf("cut turn's commit message = %q, want the commit settings' %q", got, want)
+	}
+}
+
+func TestReviewLoop_AMergeTheCutTurnMadeStaysUnrecorded(t *testing.T) {
+	loop := &repairCutLoop{mergesWork: true}
+	r := startRepairCutRun(t, loop, &config.Config{ReviewAgentTimeout: 500 * time.Millisecond})
+
+	notice := repairCutNotice(t, r.gateFindings(t))
+	stored, err := r.database.GetRun(r.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := gitCmd(t, r.workDir, "rev-parse", "HEAD")
+	parents := strings.Fields(gitCmd(t, r.workDir, "rev-list", "--parents", "-n", "1", "HEAD"))
+	abortErr := r.exec.Respond(types.StepReview, types.ActionAbort, nil)
+	<-r.done
+
+	if len(parents) != 3 {
+		t.Fatalf("HEAD parents = %v, want the cut turn's merge commit left in the worktree", parents)
+	}
+	if stored.HeadSHA != r.headSHA {
+		t.Fatalf("run head = %s, want the merge left unrecorded at %s", stored.HeadSHA, r.headSHA)
+	}
+	if !strings.Contains(notice.Description, "not recorded as the run head") || !strings.Contains(notice.Description, "log -p "+r.headSHA+".."+head) {
+		t.Fatalf("notice = %q, want the unrecorded commits named with how to inspect them", notice.Description)
+	}
+	if abortErr != nil {
+		t.Fatalf("abort: %v", abortErr)
 	}
 }
 

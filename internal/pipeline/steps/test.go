@@ -997,7 +997,7 @@ func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead st
 		validatedHead = startHead
 	}
 	park.UnvalidatedSinceSHA = validatedHead
-	if work := unvalidatedWork(sctx, types.StepTest, validatedHead, nil); work != "" {
+	if work := unvalidatedWork(sctx, types.StepTest, validatedHead, nil, nil); work != "" {
 		items = append(items, Finding{
 			ID:          types.FindingIDTestAgentUnvalidatedWork,
 			Severity:    types.FindingSeverityError,
@@ -1207,9 +1207,10 @@ func testRepairFindings(raw string) string {
 // with how to inspect it, or returns "" when there is nothing. held lists the
 // files the worktree already held, which are no part of that work. A commit the
 // timed-out agent made is recorded as the run head so custody sees it, unless
-// an unfinished rebase or merge makes HEAD a partial result. An unreadable HEAD
-// or status fails closed.
-func unvalidatedWork(sctx *pipeline.StepContext, stepName types.StepName, validatedHead string, held []string) string {
+// an unfinished rebase or merge makes HEAD a partial result or unrecorded says
+// why those commits may not become it. An unreadable HEAD or status fails
+// closed.
+func unvalidatedWork(sctx *pipeline.StepContext, stepName types.StepName, validatedHead string, held []string, unrecorded error) string {
 	dir := sctx.WorkDir
 	var parts []string
 	head, err := stepGitHeadSHA(sctx)
@@ -1220,7 +1221,10 @@ func unvalidatedWork(sctx *pipeline.StepContext, stepName types.StepName, valida
 		parts = append(parts, fmt.Sprintf("an unfinished rebase or merge at %s, not recorded as the run head (inspect with `git -C %s status`)", shortObjectID(head), dir))
 	case head != validatedHead:
 		where := "recorded locally as the run head and not pushed"
-		if head != sctx.Run.HeadSHA {
+		switch {
+		case unrecorded != nil:
+			where = fmt.Sprintf("left in the run worktree and not recorded as the run head (%v)", unrecorded)
+		case head != sctx.Run.HeadSHA:
 			if recErr := recordAgentFixHead(sctx, stepName, head); recErr != nil {
 				sctx.Log(fmt.Sprintf("warning: could not record timed-out %s agent head %s: %v", stepName, head, recErr))
 				where = "left in the run worktree"
