@@ -88,7 +88,10 @@ func (l *repairCutLoop) cutTurn(ctx context.Context, t *testing.T, opts agent.Ru
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	tick := time.NewTicker(5 * time.Millisecond)
+	// Each chunk ends a line, so the executor writes step activity to the
+	// database for every one. A paced stream keeps that synchronous path from
+	// stalling the turn on a slow runner past the idle window it must stay in.
+	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		select {
@@ -210,7 +213,7 @@ func TestReviewLoop_RepairAtItsBudgetParksWithItsWorkKept(t *testing.T) {
 		{
 			name:      "a repair still producing output",
 			loop:      &repairCutLoop{isStreaming: true},
-			cfg:       &config.Config{ReviewAgentTimeout: 2 * time.Second, ReviewAgentWorkingTimeout: 3 * time.Second},
+			cfg:       &config.Config{ReviewAgentTimeout: 4 * time.Second, ReviewAgentWorkingTimeout: 5 * time.Second},
 			wantBound: "still-working cap",
 		},
 	}
