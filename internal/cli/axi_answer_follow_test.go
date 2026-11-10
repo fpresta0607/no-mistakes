@@ -15,27 +15,47 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// answerPhase is one state the fake run holds for a while after the answer.
-// The last phase holds forever.
+// answerPhase is one state the fake run is served in for a number of run reads
+// after the answer. The last phase holds forever.
 type answerPhase struct {
-	until time.Duration
+	reads int
 	run   func() *ipc.RunInfo
 }
 
+// answerFollow records what the fake daemon saw of the answer and the follow.
+type answerFollow struct {
+	answeredAt atomic.Int64
+	getRuns    atomic.Int32
+}
+
+// sinceAnswer is the time since the daemon recorded the answer. A wait bound
+// is measured from there: what comes before it is the command's own setup (the
+// database, two git launches, the daemon connection), whose cost follows the
+// host's load and is not what any bound here is about.
+func (f *answerFollow) sinceAnswer(t *testing.T) time.Duration {
+	t.Helper()
+	at := f.answeredAt.Load()
+	if at == 0 {
+		t.Fatal("the answer never reached the daemon")
+	}
+	return time.Since(time.Unix(0, at))
+}
+
 // newAnswerFollowFixture serves an answer result and then walks the run
-// through phases timed from the moment the answer was recorded. A ticking event
-// stream stands in for the daemon's state events, so each phase change is
-// observed within a few ticks instead of the drive loop's slow heartbeat.
+// through phases, each served for its number of run reads after the answer. A
+// ticking event stream stands in for the daemon's state events, so the follow
+// keeps reading. Phases advance on what the follow has read, never on the
+// clock: a loaded host can space the follow's reads further apart than any
+// fixed window, and a phase it never read is a scenario the test never ran.
 //
 // gateReconcileTimeout, when set, is written to the fixture root's global
 // config, which is where axi answer reads the grace it gives a question park.
-func newAnswerFollowFixture(t *testing.T, gateReconcileTimeout string, result ipc.AnswerReviewQuestionResult, phases []answerPhase) (*axiTimeoutFixture, *atomic.Int32) {
+func newAnswerFollowFixture(t *testing.T, gateReconcileTimeout string, result ipc.AnswerReviewQuestionResult, phases []answerPhase) (*axiTimeoutFixture, *answerFollow) {
 	t.Helper()
-	var answeredAt atomic.Int64
-	var getRuns atomic.Int32
+	follow := &answerFollow{}
 	fx := newAxiTimeoutFixture(t, axiTimeoutOpts{
 		answer: func() *ipc.AnswerReviewQuestionResult {
-			answeredAt.CompareAndSwap(0, time.Now().UnixNano())
+			follow.answeredAt.CompareAndSwap(0, time.Now().UnixNano())
 			r := result
 			return &r
 		},
@@ -50,20 +70,23 @@ func newAnswerFollowFixture(t *testing.T, gateReconcileTimeout string, result ip
 			t.Fatal(err)
 		}
 	}
+	var readsAfterAnswer atomic.Int32
 	fx.setGetRun(func(context.Context, int) (*ipc.RunInfo, error) {
-		getRuns.Add(1)
-		since := time.Duration(0)
-		if at := answeredAt.Load(); at != 0 {
-			since = time.Since(time.Unix(0, at))
+		follow.getRuns.Add(1)
+		if follow.answeredAt.Load() == 0 {
+			return phases[0].run(), nil
 		}
-		for _, ph := range phases {
-			if since < ph.until {
+		read := int(readsAfterAnswer.Add(1))
+		served := 0
+		for _, ph := range phases[:len(phases)-1] {
+			served += ph.reads
+			if read <= served {
 				return ph.run(), nil
 			}
 		}
 		return phases[len(phases)-1].run(), nil
 	})
-	return fx, &getRuns
+	return fx, follow
 }
 
 func tickingSubscribe(ctx context.Context, _ json.RawMessage) (ipc.StreamFunc, error) {
@@ -134,8 +157,8 @@ func TestAxiAnswer_LastAnswerFollowsTheRunToItsNextGate(t *testing.T) {
 		next = reviewParkedOn(t, fx, types.StepStatusAwaitingApproval, reviewCodeFinding())
 	}
 	fx, _ = newAnswerFollowFixture(t, "", closedLastResumed, []answerPhase{
-		{until: 150 * time.Millisecond, run: func() *ipc.RunInfo { once.Do(build); return stale() }},
-		{until: 300 * time.Millisecond, run: func() *ipc.RunInfo { return reviewRunning(fx) }},
+		{reads: 2, run: func() *ipc.RunInfo { once.Do(build); return stale() }},
+		{reads: 2, run: func() *ipc.RunInfo { return reviewRunning(fx) }},
 		{run: func() *ipc.RunInfo { once.Do(build); return next() }},
 	})
 
@@ -159,30 +182,56 @@ func TestAxiAnswer_LastAnswerFollowsTheRunToItsNextGate(t *testing.T) {
 // An answer that lands before the park registers resumes nothing itself; the
 // park then appears still carrying the question it closed until the gate's
 // resumer releases it. That park is not the next decision point.
+//
+// The slow host spaces every run read further apart than the stale park's
+// former 300ms window, as an overloaded test host did (issue #84): served on
+// the clock, the follow never read that park, so the test ran no stale park
+// at all, and the command's own setup counted against the bound.
 func TestAxiAnswer_LastAnswerSkipsTheStalePreAnswerPark(t *testing.T) {
-	var fx *axiTimeoutFixture
-	var stale func() *ipc.RunInfo
-	var once sync.Once
-	fx, _ = newAnswerFollowFixture(t, "8s", ipc.AnswerReviewQuestionResult{OK: true, ClosedLast: true}, []answerPhase{
-		{until: 150 * time.Millisecond, run: func() *ipc.RunInfo { return reviewRunning(fx) }},
-		{until: 450 * time.Millisecond, run: func() *ipc.RunInfo {
-			once.Do(func() { stale = reviewParkedOn(t, fx, types.StepStatusAwaitingApproval, reviewQuestion("q1")) })
-			return stale()
-		}},
-		{until: 600 * time.Millisecond, run: func() *ipc.RunInfo { return reviewRunning(fx) }},
-		{run: func() *ipc.RunInfo { return fx.completed() }},
-	})
+	for _, host := range []struct {
+		name        string
+		readLatency time.Duration
+	}{
+		{name: "idle host"},
+		{name: "slow host", readLatency: 500 * time.Millisecond},
+	} {
+		t.Run(host.name, func(t *testing.T) {
+			var fx *axiTimeoutFixture
+			var stale func() *ipc.RunInfo
+			var once sync.Once
+			var staleServed atomic.Int32
+			served := func(run func() *ipc.RunInfo) func() *ipc.RunInfo {
+				return func() *ipc.RunInfo {
+					time.Sleep(host.readLatency)
+					return run()
+				}
+			}
+			fx, follow := newAnswerFollowFixture(t, "8s", ipc.AnswerReviewQuestionResult{OK: true, ClosedLast: true}, []answerPhase{
+				{reads: 1, run: served(func() *ipc.RunInfo { return reviewRunning(fx) })},
+				{reads: 2, run: served(func() *ipc.RunInfo {
+					once.Do(func() { stale = reviewParkedOn(t, fx, types.StepStatusAwaitingApproval, reviewQuestion("q1")) })
+					staleServed.Add(1)
+					return stale()
+				})},
+				{reads: 1, run: served(func() *ipc.RunInfo { return reviewRunning(fx) })},
+				{run: served(func() *ipc.RunInfo { return fx.completed() })},
+			})
 
-	started := time.Now()
-	out, err := executeCmd("axi", "answer", "--question", "q1", "--answer", "Keep it", "--wait", "10s")
-	if err != nil {
-		t.Fatalf("axi answer: %v\n%s", err, out)
-	}
-	if !strings.Contains(out, "outcome: passed") || !strings.Contains(out, "reviewer_resumed: false") {
-		t.Fatalf("answer did not follow past the stale park to the outcome:\n%s", out)
-	}
-	if elapsed := time.Since(started); elapsed > 6*time.Second {
-		t.Fatalf("stale park left after its release, yet the answer waited %s", elapsed)
+			out, err := executeCmd("axi", "answer", "--question", "q1", "--answer", "Keep it", "--wait", "10s")
+			if err != nil {
+				t.Fatalf("axi answer: %v\n%s", err, out)
+			}
+			waited := follow.sinceAnswer(t)
+			if !strings.Contains(out, "outcome: passed") || !strings.Contains(out, "reviewer_resumed: false") {
+				t.Fatalf("answer did not follow past the stale park to the outcome:\n%s", out)
+			}
+			if n := staleServed.Load(); n == 0 {
+				t.Fatal("the follow never read the stale park, so this run did not exercise it")
+			}
+			if waited > 6*time.Second {
+				t.Fatalf("stale park left after its release, yet the answer waited %s", waited)
+			}
+		})
 	}
 }
 
@@ -197,29 +246,28 @@ func TestAxiAnswer_GenuineReaskIsReturnedAfterTheGrace(t *testing.T) {
 		stale = reviewParkedOn(t, fx, types.StepStatusAwaitingApproval, reviewQuestion("q1"))
 		reask = reviewParkedOn(t, fx, types.StepStatusAwaitingApproval, reviewQuestion("q2"))
 	}
-	fx, _ = newAnswerFollowFixture(t, "1s", closedLastResumed, []answerPhase{
-		{until: 100 * time.Millisecond, run: func() *ipc.RunInfo { once.Do(build); return stale() }},
-		{until: 250 * time.Millisecond, run: func() *ipc.RunInfo { return reviewRunning(fx) }},
+	fx, follow := newAnswerFollowFixture(t, "1s", closedLastResumed, []answerPhase{
+		{reads: 2, run: func() *ipc.RunInfo { once.Do(build); return stale() }},
+		{reads: 2, run: func() *ipc.RunInfo { return reviewRunning(fx) }},
 		{run: func() *ipc.RunInfo { once.Do(build); return reask() }},
 	})
 
-	started := time.Now()
 	out, err := executeCmd("axi", "answer", "--question", "q1", "--answer", "Keep it", "--wait", "8s")
-	elapsed := time.Since(started)
 	if err != nil {
 		t.Fatalf("axi answer: %v\n%s", err, out)
 	}
+	waited := follow.sinceAnswer(t)
 	if !strings.Contains(out, "question-q2") || !strings.Contains(out, "gate:") {
 		t.Fatalf("genuine re-ask was not returned as the next gate:\n%s", out)
 	}
-	if elapsed < time.Second {
-		t.Fatalf("re-ask returned after %s, before its grace", elapsed)
+	if waited < time.Second {
+		t.Fatalf("re-ask returned %s after the answer, before its grace", waited)
 	}
 }
 
 func TestAxiAnswer_NonClosingAnswerReturnsAtOnce(t *testing.T) {
 	var fx *axiTimeoutFixture
-	fx, getRuns := newAnswerFollowFixture(t, "", ipc.AnswerReviewQuestionResult{OK: true, Open: 1, OpenIDs: []string{"q2"}}, []answerPhase{
+	fx, follow := newAnswerFollowFixture(t, "", ipc.AnswerReviewQuestionResult{OK: true, Open: 1, OpenIDs: []string{"q2"}}, []answerPhase{
 		{run: func() *ipc.RunInfo { return reviewRunning(fx) }},
 	})
 
@@ -230,7 +278,7 @@ func TestAxiAnswer_NonClosingAnswerReturnsAtOnce(t *testing.T) {
 	if !strings.Contains(out, "open_questions: 1") || !strings.Contains(out, "Answer the remaining questions") {
 		t.Fatalf("non-closing answer lost its unchanged output:\n%s", out)
 	}
-	if n := getRuns.Load(); n != 0 {
+	if n := follow.getRuns.Load(); n != 0 {
 		t.Fatalf("non-closing answer read the run %d times; it must return at once", n)
 	}
 }
@@ -264,8 +312,8 @@ func TestAxiAnswer_LastAnswerFollowsAFixReviewQuestionPark(t *testing.T) {
 		next = reviewParkedOn(t, fx, types.StepStatusFixReview, reviewCodeFinding())
 	}
 	fx, _ = newAnswerFollowFixture(t, "", closedLastResumed, []answerPhase{
-		{until: 150 * time.Millisecond, run: func() *ipc.RunInfo { once.Do(build); return stale() }},
-		{until: 300 * time.Millisecond, run: func() *ipc.RunInfo { return reviewRunning(fx) }},
+		{reads: 2, run: func() *ipc.RunInfo { once.Do(build); return stale() }},
+		{reads: 2, run: func() *ipc.RunInfo { return reviewRunning(fx) }},
 		{run: func() *ipc.RunInfo { once.Do(build); return next() }},
 	})
 
@@ -295,7 +343,7 @@ func TestAxiAnswer_ReparkAtTheSameStatusIsReturnedAsTheNextGate(t *testing.T) {
 		released = reviewParkedAtRound(t, fx, types.StepStatusAwaitingApproval, 1, reviewQuestion("q1"))
 		repark = reviewParkedAtRound(t, fx, types.StepStatusAwaitingApproval, 2, reviewCodeFinding())
 	}
-	fx, _ = newAnswerFollowFixture(t, "", closedLastResumed, []answerPhase{
+	fx, follow := newAnswerFollowFixture(t, "", closedLastResumed, []answerPhase{
 		{run: func() *ipc.RunInfo { once.Do(build); return repark() }},
 	})
 	// The park the answer releases is read before the answer is sent, so its
@@ -305,7 +353,6 @@ func TestAxiAnswer_ReparkAtTheSameStatusIsReturnedAsTheNextGate(t *testing.T) {
 		return released(), nil
 	})
 
-	started := time.Now()
 	out, err := executeCmd("axi", "answer", "--question", "q1", "--answer", "Keep it", "--wait", "6s")
 	if err != nil {
 		t.Fatalf("axi answer: %v\n%s", err, out)
@@ -315,8 +362,8 @@ func TestAxiAnswer_ReparkAtTheSameStatusIsReturnedAsTheNextGate(t *testing.T) {
 			t.Fatalf("re-park at the same status was not returned as the next gate (missing %q):\n%s", want, out)
 		}
 	}
-	if elapsed := time.Since(started); elapsed > 5*time.Second {
-		t.Fatalf("answer waited %s for a gate that was already parked", elapsed)
+	if waited := follow.sinceAnswer(t); waited > 5*time.Second {
+		t.Fatalf("answer waited %s for a gate that was already parked", waited)
 	}
 }
 
@@ -328,7 +375,7 @@ func TestAxiAnswer_ResumedWithoutClosedLastStillFollowsTheRun(t *testing.T) {
 	var once sync.Once
 	var next func() *ipc.RunInfo
 	fx, _ = newAnswerFollowFixture(t, "", ipc.AnswerReviewQuestionResult{OK: true, Resumed: true}, []answerPhase{
-		{until: 150 * time.Millisecond, run: func() *ipc.RunInfo { return reviewRunning(fx) }},
+		{reads: 2, run: func() *ipc.RunInfo { return reviewRunning(fx) }},
 		{run: func() *ipc.RunInfo {
 			once.Do(func() { next = reviewParkedOn(t, fx, types.StepStatusAwaitingApproval, reviewCodeFinding()) })
 			return next()
