@@ -121,7 +121,7 @@ $ no-mistakes
 ## 开发
 
 ```sh
-make build   # 构建 bin/no-mistakes（带版本信息）
+make build   # 构建 bin/no-mistakes（Windows 上为 bin/no-mistakes.exe；带版本信息）
 make test    # 运行 go test -race ./...（不含 e2e 套件）
 make e2e     # 运行打了标签的端到端 agent 旅程套件
 make e2e-record # agent 线格式变化时，重新录制 e2e fixtures

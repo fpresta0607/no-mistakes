@@ -124,7 +124,7 @@ See the [quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick
 ## Development
 
 ```sh
-make build   # Build bin/no-mistakes with version info
+make build   # Build bin/no-mistakes (bin/no-mistakes.exe on Windows) with version info
 make test    # Run go test -race ./... (excludes the e2e suite)
 make e2e     # Run the tagged end-to-end agent journey suite
 make e2e-record # Re-record e2e fixtures when agent wire formats change
