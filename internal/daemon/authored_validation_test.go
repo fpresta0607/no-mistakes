@@ -218,7 +218,7 @@ func TestAuthoredInfrastructureFailureRetriesOnlyThroughFreshTerminalValidation(
 			}
 			retried := waitForRunTerminalState(t, database, result.Receipt.RunID)
 			manager.wg.Wait()
-			if retried.Status != types.RunCompleted || retried.HeadSHA != child.Run.HeadSHA || calls.Load() != int32(len(steps.AllSteps())) || result.Family.HasChildRepairs || result.Family.Spending[types.StepReview].Remaining != 0 {
+			if retried.Status != types.RunCompleted || retried.HeadSHA != child.Run.HeadSHA || calls.Load() != int32(len(steps.AllSteps())) || result.Family.HasChildRepairs {
 				t.Fatalf("retry did not validate unchanged source fresh with zero repairs: %+v calls=%d family=%+v", retried, calls.Load(), result.Family)
 			}
 			after, err := database.ReadTerminalSnapshot(child.Run.ID)
@@ -449,7 +449,7 @@ func TestAuthoredAdmissionContinuesAnUnpublishedTerminalChild(t *testing.T) {
 				t.Fatalf("descendant was not freshly validated: %+v calls=%d", child, calls.Load())
 			}
 			spending := result.Family.Spending[types.StepReview]
-			if spending.Automatic != 1 || spending.Manual != 1 || spending.Remaining != 0 || result.Family.HasChildRepairs || result.Family.PolicyOrigin != "controller_assertion" || result.Family.HistoricalSourceCompleteness != "unknown" {
+			if spending.Automatic != 1 || spending.Manual != 1 || result.Family.HasChildRepairs || result.Family.PolicyOrigin != "controller_assertion" || result.Family.HistoricalSourceCompleteness != "unknown" {
 				t.Fatalf("descendant renewed spending or provenance: %+v", result.Family)
 			}
 			for _, before := range []*db.TerminalSnapshot{rootSnapshot, childSnapshot} {
@@ -547,7 +547,7 @@ func TestAuthoredAdmissionAcceptsATerminalAdoptionsOriginalSubmittedHead(t *test
 	if result.Family.HistoricalSourceCompleteness != "unknown" || result.Family.HasChildRepairs {
 		t.Fatalf("admission changed uncertainty or repair authority: %+v", result.Family)
 	}
-	if spending := result.Family.Spending[types.StepReview]; spending.Automatic != 0 || spending.Manual != 1 || spending.Remaining != 0 {
+	if spending := result.Family.Spending[types.StepReview]; spending.Automatic != 0 || spending.Manual != 1 {
 		t.Fatalf("admission lost or duplicated the linked root repair: %+v", spending)
 	}
 	after, err := database.ReadTerminalSnapshot(before.Run.ID)

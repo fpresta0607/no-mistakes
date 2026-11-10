@@ -440,7 +440,7 @@ func TestTerminalValidationPreservesAdoptedGateOwnershipAndEveryBoundAnchor(t *t
 				if err != nil || !result.Started {
 					t.Fatalf("retained adoption candidate refused: %+v %v", result, err)
 				}
-				if spending := result.Family.Spending[types.StepReview]; spending.Automatic != 1 || spending.Manual != 0 || spending.Remaining != 0 {
+				if spending := result.Family.Spending[types.StepReview]; spending.Automatic != 1 || spending.Manual != 0 {
 					t.Fatalf("adoption ancestry renewed spent repair capacity: %+v", spending)
 				}
 				child := waitForRunTerminalState(t, database, result.Receipt.RunID)

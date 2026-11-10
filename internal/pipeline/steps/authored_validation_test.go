@@ -124,6 +124,65 @@ func TestAuthoredHousekeepingReportsBothDutiesWithoutChangingSource(t *testing.T
 	}
 }
 
+func TestAuthoredDocumentAndLintPromptsKeepTheOrdinaryScope(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		step         pipeline.Step
+		commands     config.Commands
+		wantScope    []string
+		wantRefusals []string
+	}{
+		{
+			name:         "document",
+			step:         &DocumentStep{},
+			commands:     config.Commands{Lint: "echo checked"},
+			wantScope:    []string{"- base branch: main", "- ignore patterns: vendor/**", documentScopeDiscipline},
+			wantRefusals: []string{"- Do not edit, create, delete, stage, or commit any file."},
+		},
+		{
+			name:         "combined document lint",
+			step:         &DocumentStep{},
+			commands:     config.Commands{},
+			wantScope:    []string{"- base branch: main", "- ignore patterns: vendor/**", "- Run the relevant checks, preferring only the changed files when possible."},
+			wantRefusals: []string{"- Do not edit, create, delete, stage, or commit any file.", "- Do not apply fixes or edit files."},
+		},
+		{
+			name:         "fallback lint",
+			step:         &LintStep{},
+			commands:     config.Commands{},
+			wantScope:    []string{"- Only lint or format the relevant changed files when possible.", "- Focus on lint, format, and static-analysis issues only."},
+			wantRefusals: []string{"- Do not apply fixes or edit files."},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ag := &mockAgent{name: "reporting-agent", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"clean"}`)}, nil
+			}}
+			sctx := authoredStageContext(t, ag, test.commands)
+			sctx.Config.IgnorePatterns = []string{"vendor/**"}
+
+			if _, err := test.step.Execute(sctx); err != nil {
+				t.Fatal(err)
+			}
+
+			if len(ag.calls) != 1 {
+				t.Fatalf("agent calls = %d, want 1", len(ag.calls))
+			}
+			prompt := ag.calls[0].Prompt
+			for _, want := range append(test.wantScope, test.wantRefusals...) {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("validation-only prompt is missing %q:\n%s", want, prompt)
+				}
+			}
+			for _, fixInstruction := range []string{"Apply safe", "fix each stale fact", "Re-run the relevant checks after fixing", "Do not report issues you already fixed", "Do not report lint issues you already fixed"} {
+				if strings.Contains(prompt, fixInstruction) {
+					t.Errorf("validation-only prompt still carries the fix instruction %q", fixInstruction)
+				}
+			}
+		})
+	}
+}
+
 func TestAuthoredCommandsRejectSourceEdits(t *testing.T) {
 	for _, name := range []string{"test", "lint", "prepare", "custom", "wrapped test"} {
 		t.Run(name, func(t *testing.T) {

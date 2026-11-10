@@ -5,7 +5,6 @@ import "github.com/kunchenguid/no-mistakes/internal/types"
 type RepairSpending struct {
 	Automatic int `json:"automatic"`
 	Manual    int `json:"manual"`
-	Remaining int `json:"remaining"`
 }
 
 type Family struct {

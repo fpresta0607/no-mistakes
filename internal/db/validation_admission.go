@@ -284,15 +284,21 @@ func (d *DB) ValidatePendingAdmission(event *ValidationAdmission) error {
 }
 
 // RefuseUnlinkedValidation prevents ordinary run/rerun from dropping family authority.
+// The lineage ends once its newest authored child is terminal with a merged or
+// closed PR: authored admission requires an open PR, so nothing can continue it.
 func (d *DB) RefuseUnlinkedValidation(repoID, branch string) error {
-	var exists bool
-	if err := d.sql.QueryRow(`SELECT EXISTS(SELECT 1 FROM validation_admissions a JOIN runs r ON r.id = a.child_id WHERE r.repo_id = ? AND r.branch = ?)`, repoID, branch).Scan(&exists); err != nil {
+	var status, prState string
+	err := d.sql.QueryRow(`SELECT r.status, COALESCE(r.pr_state, '') FROM validation_admissions a JOIN runs r ON r.id = a.child_id WHERE r.repo_id = ? AND r.branch = ? ORDER BY r.id DESC LIMIT 1`, repoID, branch).Scan(&status, &prState)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
 		return err
 	}
-	if exists {
-		return fmt.Errorf("this branch has validation-only authored lineage; reattach its active child or use explicit authored admission for a terminal child")
+	if types.RunStatus(status).Terminal() && terminalPRState(prState) {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("this branch has validation-only authored lineage; reattach its active child or use explicit authored admission for a terminal child")
 }
 
 func (d *DB) PendingValidationAdmissions() ([]*ValidationAdmission, error) {
