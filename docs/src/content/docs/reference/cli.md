@@ -428,6 +428,7 @@ An untouched, unscheduled pending acceptance left by an interrupted admission or
 A progressed child is observed or recovered through its existing execution; a cancelled child is never restarted by replay.
 Later authored descendants must preserve the same controller policy assertion, historical uncertainty and zero repair authority.
 Continuing from a published predecessor requires a GitHub repository with the predecessor's PR open.
+The lineage therefore ends once its newest authored child is terminal with its PR merged or closed: ordinary launches and `rerun` on that branch are accepted again, since nothing can continue the lineage.
 The live PR's head and base repository names are compared case-insensitively with the registered repositories; head and base branch names must match exactly, including case.
 A predecessor that inherited an open PR URL through a same-head relaunch or `rerun`, but never recorded its own complete push binding, is ineligible even if that PR is still open.
 An inherited PR URL alone proves neither publication nor an unpublished predecessor, so admission fails closed rather than inferring a binding from the live PR.
@@ -835,7 +836,7 @@ On a `user_owned` branch, `--recover` is an idempotent no-op success: nothing pi
 The predecessor's status, source, steps, findings, rounds, decisions and launch receipt remain immutable while the repository stays registered; [`eject`](#no-mistakes-eject) removes that history with the repository record.
 Initial acceptance requires the latest run on the current repository and branch to be terminal, neither completed nor custody-returned.
 It requires the complete recorded pipeline with completed Intent and Rebase, no deliberately skipped required step, and the original bound launch selection and frozen policy.
-A branch with validation-only [authored lineage](#no-mistakes-axi-validate-authored) refuses, so that lineage never regains repair authority.
+A branch whose validation-only [authored lineage](#no-mistakes-axi-validate-authored) has not ended refuses, so that lineage never regains repair authority.
 Active parked CI adoption and conflict handback use their own operations.
 This command accepts no caller-selected run or candidate SHA.
 Use it without `--check`, `--keep-local`, `--adopt-published`, or `--bind-archive-ref`.
