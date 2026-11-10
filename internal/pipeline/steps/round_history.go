@@ -698,6 +698,9 @@ func parseRoundFindingLines(raw string) []roundFindingLine {
 	if err != nil {
 		return nil
 	}
+	// A budget notice asks the operator for a decision. It is no work for a turn,
+	// and a turn shown one could report it back as a finding of its own.
+	findings = types.ExcludeFindings(findings, []string{types.FindingIDRepairAgentBudget})
 	lines := make([]roundFindingLine, 0, len(findings.Items))
 	for _, item := range findings.Items {
 		payload := struct {
@@ -754,7 +757,7 @@ func partitionRoundFindings(findingsJSON *string, userFindingsJSON *string, sele
 	}
 	selectedSet := make(map[string]bool, len(parsed))
 	for _, id := range parsed {
-		if id == "" {
+		if id == "" || id == types.FindingIDRepairAgentBudget {
 			continue
 		}
 		selectedSet[id] = true

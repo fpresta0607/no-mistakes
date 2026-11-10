@@ -408,6 +408,7 @@ func TestDriveRun_YesLeavesRefusalGatesAwaitingResponse(t *testing.T) {
 		{ID: types.FindingIDTestAgentTimeout, Severity: "warning", Action: types.ActionAskUser, Description: "budget cut"},
 		{ID: types.FindingIDTestAgentUnvalidatedWork, Severity: "error", Action: types.ActionAskUser, Description: "uncommitted changes to fix_test.go"},
 	}, "Test agent exceeded its invocation budget")
+	repairCut := pipeline.RepairBudgetOutcome(&pipeline.RepairBudgetCutError{Cut: errors.New("agent fix reached its invocation budget"), Left: "uncommitted changes to fix.go"}).Findings
 	for _, refusal := range []struct {
 		step     types.StepName
 		findings string
@@ -415,6 +416,7 @@ func TestDriveRun_YesLeavesRefusalGatesAwaitingResponse(t *testing.T) {
 		want     string
 	}{
 		{types.StepCI, protectedPath, "1 awaiting", "package.lock"},
+		{types.StepReview, repairCut, "1 awaiting", "fix.go"},
 		{types.StepTest, unvalidatedWork, "2 awaiting", "fix_test.go"},
 		{types.StepReview, `{"findings":[{"id":"review-fix-rounds-exhausted","severity":"warning","action":"ask-user","description":"Review used 1/1 fix rounds"}]}`, "1 awaiting", "Review used 1/1 fix rounds"},
 	} {

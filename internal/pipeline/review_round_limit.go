@@ -51,6 +51,9 @@ func reviewFixRoundLimitRefusal(used, limit int, gateFindings string) *RespondRe
 	if HasProtectedPathRefusal(gateFindings) {
 		help = "Approve is also rejected because this gate holds a protected-path refusal: skip this step or abort the run. A new run gets a new budget; changing config does not extend this run."
 	}
+	if HasRepairBudgetCut(gateFindings) {
+		help = "Approve is also rejected because this gate holds a repair cut at its agent budget: skip this step or abort the run. A new run gets a new budget; changing config does not extend this run."
+	}
 	return &RespondRefusal{Message: reviewFixRoundLimitMessage(used, limit), Help: help}
 }
 

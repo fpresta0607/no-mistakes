@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ func TestModel_Yolo_RefusalGatesSendNoAutomaticResponse(t *testing.T) {
 	}{
 		{types.StepDocument, pipeline.ProtectedPathOutcome(&pipeline.ProtectedPathError{Path: "ledger.json", Rule: "ledger.json"}).Findings},
 		{types.StepTest, unvalidatedWork},
+		{types.StepReview, pipeline.RepairBudgetOutcome(&pipeline.RepairBudgetCutError{Cut: errors.New("agent fix reached its invocation budget")}).Findings},
 		{types.StepReview, `{"findings":[{"id":"agent-safety-refusal","severity":"error","description":"Native safety refusal","action":"ask-user"}]}`},
 		{types.StepReview, `{"findings":[{"id":"review-fix-rounds-exhausted","severity":"warning","action":"ask-user","description":"Review used 1/1 fix rounds"}]}`},
 	} {

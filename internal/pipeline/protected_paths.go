@@ -21,7 +21,7 @@ const ReviewQuestionsUnreadableFindingID = "review-questions-unreadable"
 // IsReservedFindingID reports whether an ID carries pipeline-owned semantics.
 func IsReservedFindingID(id string) bool {
 	switch id {
-	case protectedPathFindingID, types.FindingIDTestAgentTimeout, types.FindingIDTestAgentUnvalidatedWork, ReviewQuestionsUnreadableFindingID, types.FindingIDReviewFixRoundsExhausted:
+	case protectedPathFindingID, types.FindingIDTestAgentTimeout, types.FindingIDTestAgentUnvalidatedWork, ReviewQuestionsUnreadableFindingID, types.FindingIDReviewFixRoundsExhausted, types.FindingIDRepairAgentBudget:
 		return true
 	default:
 		return false
@@ -33,11 +33,12 @@ func HasProtectedPathRefusal(findingsJSON string) bool {
 	return hasFindingID(findingsJSON, protectedPathFindingID)
 }
 
-// HasUnvalidatedWorkRefusal identifies a Test budget-cut gate whose worktree
-// holds work no Test turn validated. Approve is refused there because the
-// steps after Test would commit and publish that work; fix validates it.
+// HasUnvalidatedWorkRefusal identifies a budget-cut gate nothing has checked:
+// a Test cut whose worktree holds work no Test turn validated, or a repair cut.
+// Approve is refused there because the steps after it would commit and publish
+// that work; fix checks it.
 func HasUnvalidatedWorkRefusal(findingsJSON string) bool {
-	return hasFindingID(findingsJSON, types.FindingIDTestAgentUnvalidatedWork)
+	return hasFindingID(findingsJSON, types.FindingIDTestAgentUnvalidatedWork) || HasRepairBudgetCut(findingsJSON)
 }
 
 func hasFindingID(findingsJSON, id string) bool {
@@ -107,6 +108,10 @@ func approvalRefusal(step types.StepName, findingsJSON string) string {
 		return fmt.Sprintf("cannot approve a protected-path refusal, and the Review fix-round budget is exhausted so fix cannot retry %s either; skip this step or abort the run", step)
 	case HasProtectedPathRefusal(findingsJSON):
 		return fmt.Sprintf("cannot approve a protected-path refusal: resolve the reported edit, then use fix to retry %s; approval would skip unfinished work", step)
+	case HasRepairBudgetCut(findingsJSON) && HasReviewFixRoundLimit(findingsJSON):
+		return fmt.Sprintf("cannot approve a repair cut at its agent budget, and the Review fix-round budget is exhausted so fix cannot check %s either; skip this step or abort the run", step)
+	case HasRepairBudgetCut(findingsJSON):
+		return fmt.Sprintf("cannot approve %s: a repair was cut at its agent budget, so this round checked nothing and approval would publish what it left; inspect it as the findings describe, then use fix to check it, or abort", step)
 	case HasUnvalidatedWorkRefusal(findingsJSON):
 		return fmt.Sprintf("cannot approve %s: the run worktree holds work no Test turn validated and approval would publish it; inspect it as the findings describe, then use fix to validate it, or abort", step)
 	}

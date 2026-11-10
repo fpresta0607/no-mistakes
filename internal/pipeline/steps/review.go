@@ -1068,6 +1068,8 @@ func sanitizedPreviousFindingsForPrompt(raw string) string {
 	if err != nil {
 		return sanitizePromptMultilineText(raw)
 	}
+	// A budget notice asks the operator for a decision. It is no work for a turn.
+	findings = types.ExcludeFindings(findings, []string{types.FindingIDRepairAgentBudget})
 	for i := range findings.Items {
 		findings.Items[i].ID = sanitizePromptText(findings.Items[i].ID)
 		findings.Items[i].Severity = sanitizePromptText(findings.Items[i].Severity)

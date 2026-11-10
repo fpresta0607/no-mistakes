@@ -713,9 +713,10 @@ It may then continue until it goes quiet with no live child process for 10 minut
 With the cap unset, the turn stops at this budget.
 There is no hidden multiple of this budget.
 When the invocation is cancelled, it returns a timeout diagnostic instead of remaining active indefinitely.
-Most agent-driven mutation steps fail the run, CI auto-fix parks for a user decision, and PR drafting follows its existing agent-error fallback and continues with deterministic content.
+Most agent-driven mutation steps fail the run, a configured-lint or gate repair turn and CI auto-fix park for a user decision, and PR drafting follows its existing agent-error fallback and continues with deterministic content.
 The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns the approval behavior.
 A late successful return after cancellation is rejected, so post-agent commits and PR content cannot use work from a timed-out turn.
+Work a parked repair turn left uncommitted enters a commit only on the operator's `fix`, and a round then checks it.
 
 The diagnostic names which bound cut the invocation and how long it ran, and separately reports what activity was actually measured.
 With no still-working cap set it reads `after 30m0s (silent budget; no still-working cap is set; ran 30m0s)`, which claims nothing about output or child processes because nothing checked them.
@@ -774,7 +775,7 @@ The optional fixer gets the full configured budget, and its fresh, session-free 
 Every later fixer and rereviewer does the same; no invocation inherits time spent by an earlier turn.
 A silent invocation is cancelled when this budget expires.
 A still-working invocation continues only when [`review_agent_working_timeout`](#review_agent_working_timeout) is set, under the same idle rule as [`agent_working_timeout`](#agent_working_timeout).
-When the invocation is cancelled, the review agent fails the run with a diagnostic naming the bound that cut it instead of remaining active indefinitely.
+When the invocation is cancelled, a reading turn fails the run with a diagnostic naming the bound that cut it instead of remaining active indefinitely, and a repair turn [parks for a decision](/no-mistakes/reference/pipeline-steps/#review) with its work kept.
 That diagnostic carries the same measured evidence and adapter report described under [`agent_timeout`](#agent_timeout).
 A repository can tighten this value for itself with the trusted [`review.agent_timeout`](/no-mistakes/reference/repo-config/#reviewagent_timeout) key; the smaller of the two applies, and a repository can never raise it.
 

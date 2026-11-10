@@ -278,7 +278,7 @@ func TestLintStep_HangingAgentFailsRunAfterTimeout(t *testing.T) {
 	}
 }
 
-func TestLintStep_FixAgentSuccessfulReturnAfterTimeoutFailsWithoutCommit(t *testing.T) {
+func TestLintStep_FixAgentSuccessfulReturnAfterTimeoutIsCutWithoutCommit(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
@@ -302,7 +302,7 @@ func TestLintStep_FixAgentSuccessfulReturnAfterTimeoutFailsWithoutCommit(t *test
 	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
 		t.Fatalf("HEAD = %s, want unchanged %s", got, headSHA)
 	}
-	if got := gitCmd(t, dir, "status", "--porcelain", "--", "lint-fix.txt"); got != "?? lint-fix.txt" {
-		t.Fatalf("lint-fix.txt status = %q, want uncommitted", got)
+	if got := gitCmd(t, dir, "status", "--porcelain", "--", "lint-fix.txt"); got != "A  lint-fix.txt" {
+		t.Fatalf("lint-fix.txt status = %q, want staged for the next commit and uncommitted", got)
 	}
 }

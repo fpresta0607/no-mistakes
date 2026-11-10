@@ -625,12 +625,28 @@ func extractCommitSummary(result *agent.Result) (string, error) {
 	return cleaned, nil
 }
 
+// keptRepairCutSummary is the commit subject of work a repair turn left at its
+// budget, committed on the operator's fix with no repair turn to describe it.
+const keptRepairCutSummary = "keep repair work cut at its agent budget"
+
 func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fixExecutionOptions) (string, error) {
 	if !sctx.Fixing {
 		return "", nil
 	}
 	if opts.RequirePreviousFindings && sctx.PreviousFindings == "" {
 		return "", errors.New(opts.MissingFindingsError)
+	}
+	before, err := untrackedFiles(sctx)
+	if err != nil {
+		return "", err
+	}
+	if pipeline.OnlyRepairBudgetCut(sctx.PreviousFindings) {
+		sctx.Log("fix selection holds only the repair budget cut; keeping what the cut turn left and checking it without a repair turn...")
+		committed, err := commitAgentFixesWithResult(sctx, stepName, keptRepairCutSummary, opts.FallbackSummary, nil, before)
+		if err != nil {
+			return "", err
+		}
+		return fixResultSummary(committed), nil
 	}
 	if opts.LogMessage != "" {
 		sctx.Log(opts.LogMessage)
@@ -651,10 +667,6 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		Purpose:    purpose,
 		Workload:   opts.Workload,
 	}
-	before, err := untrackedFiles(sctx)
-	if err != nil {
-		return "", err
-	}
 	// The fixer may commit its own work and leave a clean worktree, which
 	// commitAgentFixesWithResult reports as "not committed". HEAD movement is
 	// what tells that round apart from one that made no edits.
@@ -672,10 +684,13 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		result, err = sctx.RunAgentSessionContext(sctx.Ctx, opts.SessionRole, runOpts)
 	}
 	if err != nil {
-		if opts.ErrorPrefix == "" {
-			return "", err
+		if opts.ErrorPrefix != "" {
+			err = fmt.Errorf("%s: %w", opts.ErrorPrefix, err)
 		}
-		return "", fmt.Errorf("%s: %w", opts.ErrorPrefix, err)
+		if errors.Is(err, pipeline.ErrAgentTimeout) || errors.Is(err, errReviewAgentTimeout) {
+			return "", repairBudgetCut(sctx, stepName, before, err)
+		}
+		return "", err
 	}
 	logRepairResult(sctx, result)
 	if opts.AfterAgentRun != nil {
@@ -709,6 +724,29 @@ func logRepairResult(sctx *pipeline.StepContext, result *agent.Result) {
 		sctx.LogFile(result.Text)
 	}
 	sctx.LogFile(string(result.Output))
+}
+
+// repairBudgetCut keeps what a repair turn left when its budget stopped it. A
+// turn past its budget is no trusted result, so nothing is committed here: that
+// waits for the operator's fix, and a round then checks the work. The turn's new
+// files are staged, because the next turn would otherwise count them among the
+// files it found and its commit would leave them out (see stagePipelineChanges).
+// An unfinished rebase or merge stays as it is, since staging would mark its
+// conflicts resolved. Commits the turn made itself get the commit settings
+// before they are recorded as the run head, the message the operator's fix
+// gives the rest of the work; a chain conformAgentCommits refuses stays in the
+// worktree unrecorded.
+func repairBudgetCut(sctx *pipeline.StepContext, stepName types.StepName, before []string, cut error) error {
+	startHead := sctx.Run.HeadSHA
+	if !rebaseInProgress(sctx.Ctx, sctx.WorkDir) && !mergeInProgress(sctx.Ctx, sctx.WorkDir) {
+		if err := stagePipelineChanges(sctx, before); err != nil {
+			return fmt.Errorf("%v; keep what it left: %w", cut, err)
+		}
+	}
+	unshaped := conformAgentCommits(sctx, stepName, func() (string, error) {
+		return renderFixCommitMessage(sctx, stepName, keptRepairCutSummary, "", nil)
+	})
+	return &pipeline.RepairBudgetCutError{Cut: cut, Left: unvalidatedWork(sctx, stepName, startHead, before, unshaped)}
 }
 
 func updateNonSharedBranchRef(sctx *pipeline.StepContext, headSHA string) error {

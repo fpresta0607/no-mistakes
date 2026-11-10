@@ -154,6 +154,12 @@ const FindingIDTestCommandNoTurn = "test-command-no-turn"
 // records an operator's budget, not a code mistake.
 const FindingIDReviewFixRoundsExhausted = "review-fix-rounds-exhausted"
 
+// FindingIDRepairAgentBudget is the park when a Review, Lint or custom gate
+// repair turn reached its agent budget. Like the Test budget cuts it records a
+// budget, not a code mistake. The executor refuses Approve on that gate: the
+// round checked nothing, and what the turn left is not a finished result.
+const FindingIDRepairAgentBudget = "repair-agent-budget"
+
 // Test scenario result constants: the vocabulary the test step's evidence
 // prompt instructs the agent to use for each derived scenario.
 //

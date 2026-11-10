@@ -591,7 +591,7 @@ review:
 
 **Trust boundary.** Commit it to your **default branch**, the same copy the daemon reads `review.conversation` and `review.path_instructions` from. A pushed branch cannot set, change, or remove it, because the timeout gates that branch's own review. A value that is not a positive duration fails the config closed, on the pushed copy too, so an invalid block is caught before it merges.
 
-**What it does not change.** It sets the same per-invocation budget as `review_agent_timeout`: the reviewer, the fixer, and each fresh rereviewer get it independently, and an expiry fails the Review step exactly as before. It never skips Review or counts a timeout as a pass. It does not change [`review_agent_working_timeout`](/no-mistakes/reference/global-config/#review_agent_working_timeout), which stays global and still bounds how long a still-working invocation may continue past the budget. Because a tightened budget is a configured timeout, a Review invocation cut by it is not retried by `agent_crash_retries`, as with a configured global value. Only Review is affected: Document, Lint, and Test keep the crash retry their own, unchanged budgets earn. It is not an aggregate limit on the whole Review step.
+**What it does not change.** It sets the same per-invocation budget as `review_agent_timeout`: the reviewer, the fixer, and each fresh rereviewer get it independently, and an expiry ends the turn exactly as before. It never skips Review or counts a timeout as a pass. It does not change [`review_agent_working_timeout`](/no-mistakes/reference/global-config/#review_agent_working_timeout), which stays global and still bounds how long a still-working invocation may continue past the budget. Because a tightened budget is a configured timeout, a Review invocation cut by it is not retried by `agent_crash_retries`, as with a configured global value. Only Review is affected: Document, Lint, and Test keep the crash retry their own, unchanged budgets earn. It is not an aggregate limit on the whole Review step.
 
 ### review.path_instructions
 
@@ -723,7 +723,7 @@ A run resolves this list once when it starts. Adding or removing a gate on the d
 
 A failing gate parks by default. Trusted [`auto_fix.gates.<name>`](#auto_fix) can authorize bounded repairs of auto-fix-eligible findings. Any `ask-user` finding still parks the whole gate. The current exit-code-only failure is `ask-user`, so the budget has no effect until the [structured findings follow-up](https://github.com/kunchenguid/no-mistakes/issues/1027) supplies auto-fix-eligible findings.
 
-Answering that decision with `fix` is that authorization: the gate then runs a fix turn against the reported findings and the command that must exit `0` without reporting error findings, then re-runs its check. The next verdict describes the repaired worktree. Answering `approve` accepts the change as it stands.
+Answering that decision with `fix` is that authorization: the gate then runs a fix turn against the reported findings and the command that must exit `0` without reporting error findings, then re-runs its check. A fix turn cut at its agent budget parks the gate as a [Review repair turn](/no-mistakes/reference/pipeline-steps/#review) does. The next verdict describes the repaired worktree. Answering `approve` accepts the change as it stands.
 
 Each gate keeps its own step log under the step name `gate.<anchor>.<name>`, so a gate declared as `name: mutation-budget` with `after: test` is read with `no-mistakes axi logs --step gate.test.mutation-budget`.
 
