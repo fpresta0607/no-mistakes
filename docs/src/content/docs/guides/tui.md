@@ -219,7 +219,7 @@ Press `y` to toggle yolo mode when you want paused approval gates to resolve aut
 Yolo fixes gates with `auto-fix` and `ask-user` findings by selecting every finding, then approves the resulting fix-review gate.
 It approves gates with no findings or only `action: no-op` findings as-is, and fixes each step at most once so unresolved findings do not loop forever.
 The [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths) and [native safety refusals](/no-mistakes/reference/pipeline-steps/) are exceptions to this automatic handling.
-So is a Test budget-cut gate that reports `test-agent-unvalidated-work`: approval is refused there, so yolo stops at it and leaves the choice between fix and abort to you (see [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout)).
+So is a Test budget-cut gate that reports `test-agent-unvalidated-work`, or a repair turn cut at its budget that reports `repair-agent-budget`: approval is refused there, so yolo stops at it and leaves the choice between fix and abort to you (see [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout) and [Review](/no-mistakes/reference/pipeline-steps/#review)).
 So is every gate of an [authored validation child](/no-mistakes/reference/cli/#no-mistakes-axi-validate-authored): it has no repair authority, so yolo sends no response there.
 
 ## Outcome banner
