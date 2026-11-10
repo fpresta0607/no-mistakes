@@ -321,6 +321,29 @@ func TestBuildPipelineSummary_TestExceptionIsRedactedAtPublication(t *testing.T)
 	}
 }
 
+func TestTestExceptionRenderersRedactEncodedPrivateRoots(t *testing.T) {
+	t.Parallel()
+	for _, root := range []string{"D:/private/R&D/run", "D:/private/<task>/run", "D:/private/O'Brien/run", "D:/private/R&D task/run", "D:/private/a-->b/run"} {
+		for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderGitLab} {
+			t.Run(fmt.Sprintf("%s/%s", root, provider), func(t *testing.T) {
+				t.Parallel()
+				reason := "Retain checks under " + root + "/evidence and " + strings.ReplaceAll(root, "/", "\\") + "\\evidence"
+				findings := `{"verdict":"inconclusive","findings":[]}`
+				steps := []*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings, ApprovalReason: &reason}}
+				rendered := map[string]string{
+					"human section": renderTestExceptionSection(steps, provider, root, ""),
+					"attestation":   buildPipelineAttestationWithPolicy(steps, nil, testPipelineHeadSHA, pipelineAttestationPolicy{RunWorktree: root}),
+				}
+				for name, text := range rendered {
+					if strings.Count(text, "{run-worktree}") != 2 || strings.Contains(text, "private") {
+						t.Fatalf("%s kept an encoded spelling of the private root: %s", name, text)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestRestampOfALegacyCommandOverrideLeavesTheExceptionToRefresh(t *testing.T) {
 	t.Parallel()
 	oldHead := strings.Repeat("a", 40)
