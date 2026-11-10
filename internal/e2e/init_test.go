@@ -14,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 // TestInitIsIdempotent proves an existing user can re-run `init` to adopt new
@@ -233,7 +234,7 @@ func TestInitInSubmoduleRegistersSubmoduleOwnOrigin(t *testing.T) {
 	// and never created a row for the submodule, so the by-path lookup
 	// returns nil; the post-fix code stores the submodule path and the
 	// recorded upstream must match the submodule's origin.
-	resolvedSub, _ := filepath.EvalSymlinks(subWorktree)
+	resolvedSub, _ := realpath.Resolve(subWorktree)
 	repo, err := d.GetRepoByPath(resolvedSub)
 	if err != nil {
 		t.Fatalf("get repo by path: %v", err)

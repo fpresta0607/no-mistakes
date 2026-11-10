@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
@@ -306,7 +307,7 @@ func normalizeExpectedLogin(login string) string {
 
 func effectiveProfilePath(path string) string {
 	cleaned := filepath.Clean(path)
-	resolved, err := filepath.EvalSymlinks(cleaned)
+	resolved, err := realpath.Resolve(cleaned)
 	if err == nil {
 		return resolved
 	}

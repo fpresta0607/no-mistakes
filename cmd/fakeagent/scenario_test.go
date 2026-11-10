@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/testlink"
 )
 
 func TestApplyEditsCreatesParentDirectoriesForNewFiles(t *testing.T) {
@@ -139,6 +141,53 @@ func TestApplyEditsRejectsSymlinkPathsOutsideWorkingDirectory(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), strconv.Quote(filepath.Join("escape", "outside.txt"))) {
 		t.Fatalf("error = %q, want offending path", err)
+	}
+}
+
+// The e2e harness's scratch home can sit below a directory junction, as the
+// live gate's tmp folder does, and edits there must still land (issue #172).
+func TestApplyEditsInDirWritesBelowAJunctionedWorkingDirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		target func(t *testing.T, linkRoot string) string
+	}{
+		{"same volume", func(t *testing.T, _ string) string { return t.TempDir() }},
+		{"another volume", func(t *testing.T, linkRoot string) string { return testlink.OtherVolumeDir(t, linkRoot) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			linkRoot := t.TempDir()
+			target := tc.target(t, linkRoot)
+			if err := os.Mkdir(filepath.Join(target, "run"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(linkRoot, "tmp")
+			testlink.Junction(t, link, target)
+
+			err := applyEditsInDir(filepath.Join(link, "run"), []Edit{{Path: filepath.Join("nested", "file.txt"), New: "hello"}})
+
+			if err != nil {
+				t.Fatalf("applyEditsInDir below a junction: %v", err)
+			}
+			data, err := os.ReadFile(filepath.Join(target, "run", "nested", "file.txt"))
+			if err != nil || string(data) != "hello" {
+				t.Fatalf("file content = %q, %v; want %q", data, err, "hello")
+			}
+		})
+	}
+}
+
+func TestApplyEditsInDirRejectsAJunctionOutOfTheWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	outsideDir := t.TempDir()
+	testlink.Junction(t, filepath.Join(dir, "escape"), outsideDir)
+
+	err := applyEditsInDir(dir, []Edit{{Path: filepath.Join("escape", "outside.txt"), New: "hello"}})
+
+	if err == nil || !strings.Contains(err.Error(), "working directory") {
+		t.Fatalf("applyEditsInDir through an escaping junction: %v, want working directory violation", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(outsideDir, "outside.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("junction target file exists or unexpected error: %v", statErr)
 	}
 }
 

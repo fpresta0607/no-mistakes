@@ -17,6 +17,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -1001,7 +1002,7 @@ func TestUpdaterCachedLatestVersion(t *testing.T) {
 
 func fakeNixStoreBinary(t *testing.T) (storeBinary, profileLink string) {
 	t.Helper()
-	root, err := filepath.EvalSymlinks(t.TempDir())
+	root, err := realpath.Resolve(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -176,7 +176,7 @@ func TestReviewStep_AnswerRacingTheParkStillReachesTheReviewer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("execute: %v", err)
 		}
-	case <-time.After(30 * time.Second):
+	case <-time.After(reviewRunTimeout):
 		t.Fatal("the run never left the review gate; the answer that raced the park was lost")
 	}
 

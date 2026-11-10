@@ -511,7 +511,8 @@ func describePR(pr *scm.PR) string {
 // updates use composeOwnedPRContent, which calls the same redactPRContent owner
 // before stamping its integrity guard. This covers every source: agent-authored
 // prose, extracted user intent, findings, fix summaries, step errors, artifact
-// paths, artifact captions, and captured output embedded from evidence files.
+// paths, and agent-written artifact content. Evidence files never reach it: see
+// renderPrivateEvidenceReference.
 //
 // The scrub deliberately sits here rather than at each of those sources. A
 // per-source scrub is a set of guards that has to be complete to work, and the
@@ -536,7 +537,7 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		}
 		narrative := neutralizeAttestationMarkers(provider, content.Body)
 		appendix = appendIssuesSection(appendix, issuesSection(sctx, narrative))
-		return composeOwnedPRContent(prOwnedBody{before: narrative}, content.Title, appendix, bodyLimit, sctx.WorkDir, nmWorktreesRoot())
+		return composeOwnedPRContent(prOwnedBody{before: narrative}, content.Title, appendix, bodyLimit, sctx.WorkDir, nmWorktreesRoot(), testEvidenceDir(sctx))
 	}
 	content, err := s.draftPRContent(sctx, branch, baseBranch, baseSHA, provider, bodyLimit)
 	if err != nil {
@@ -547,22 +548,26 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 	if keepsPRUpdateText(sctx) {
 		return content, nil
 	}
-	redacted := redactPRContent(content, sctx.WorkDir, nmWorktreesRoot())
+	redacted := redactPRContent(content, sctx.WorkDir, nmWorktreesRoot(), testEvidenceDir(sctx))
 	if err := validateOwnedPRBudget(redacted.Body, bodyLimit); err != nil {
 		return prContent{}, err
 	}
 	return redacted, nil
 }
 
-// redactPRContent removes the run worktree paths, the operator's home
-// directory, and the control characters gh rewrites on read, from the content
-// about to be published.
+// redactPRContent removes the run worktree paths, the run's evidence directory,
+// the operator's home directory, and the control characters gh rewrites on read,
+// from the content about to be published.
 // Ordinary drafts call it after length caps; neither step grows the text. Owned
 // composition calls it before its integrity guard and non-truncating size check
 // so publication cannot invalidate that guard.
-func redactPRContent(content prContent, runWorktree, worktreesRoot string) prContent {
-	content.Title = safepath.RedactText(safepath.RedactWorktrees(neutralizePRControls(content.Title), runWorktree, worktreesRoot))
-	content.Body = safepath.RedactText(safepath.RedactWorktrees(neutralizePRControls(content.Body), runWorktree, worktreesRoot))
+func redactPRContent(content prContent, runWorktree, worktreesRoot, runEvidence string) prContent {
+	redact := func(text string) string {
+		text = safepath.RedactRunEvidence(neutralizePRControls(text), runEvidence)
+		return safepath.RedactText(safepath.RedactWorktrees(text, runWorktree, worktreesRoot))
+	}
+	content.Title = redact(content.Title)
+	content.Body = redact(content.Body)
 	return content
 }
 
@@ -970,9 +975,9 @@ func prBodyBudgetPromptSection(bodyLimit int) string {
 
 // assemblePRBody composes the final PR body from its sections and keeps it
 // within bodyLimit (0 = unlimited). When the full body overruns the cap it
-// first drops the Testing section - the only one that embeds artifact and log
-// file contents and is therefore effectively unbounded - so the body sheds
-// log dumps while keeping its Intent, What Changed, Risk, and Pipeline
+// first drops the Testing section - the only one that carries agent-written
+// artifact content and is therefore effectively unbounded - so the body sheds
+// that output while keeping its Intent, What Changed, Risk, and Pipeline
 // narrative intact. prependIntentSectionWithinLimit is the final backstop
 // when even that core overruns.
 func assemblePRBodyFull(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) string {
@@ -1080,12 +1085,12 @@ func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD st
 // decides which attestation comment a body consumer sees.
 //
 // pipelineMD carries the run's real attestation. Every other component -
-// what-changed, intent, risk, and above all the Testing section, which embeds
-// artifact captions, captured output, and whole files read from the evidence
-// directory - is agent-derived and can carry a foreign attestation comment. The
-// compliance check (.github/actions/require-no-mistakes/verify.py) scans the raw
-// body and binds the FIRST marker it finds to the PR head, so a foreign copy
-// placed before pipelineMD fails a PR the pipeline did produce.
+// what-changed, intent, risk, and above all the Testing section, which carries
+// agent-written artifact content - is agent-derived and can carry a foreign
+// attestation comment. The compliance check
+// (.github/actions/require-no-mistakes/verify.py) scans the raw body and binds
+// the FIRST marker it finds to the PR head, so a foreign copy placed before
+// pipelineMD fails a PR the pipeline did produce.
 //
 // The neutralization is applied HERE rather than at each render path on
 // purpose. The first attempt at this fix escaped the marker inside

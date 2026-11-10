@@ -10,6 +10,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -105,7 +106,7 @@ func (s *CustomGateStep) executeCommand(sctx *pipeline.StepContext, fixSummary s
 	command := strings.TrimSpace(s.Gate.Command)
 	workDir, err := filepath.Abs(sctx.WorkDir)
 	if err == nil {
-		workDir, err = filepath.EvalSymlinks(workDir)
+		workDir, err = realpath.Resolve(workDir)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve gate worktree: %w", err)

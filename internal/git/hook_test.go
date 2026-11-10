@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
 
 func TestPreReceiveHookScript(t *testing.T) {
@@ -392,11 +394,11 @@ func TestPostReceiveHook_ResolvesAbsoluteGateDir(t *testing.T) {
 	}
 	// The resolved gate dir must be the bare repo (compare physical paths to
 	// tolerate macOS /tmp -> /private/tmp symlink resolution).
-	wantAbs, err := filepath.EvalSymlinks(bare)
+	wantAbs, err := realpath.Resolve(bare)
 	if err != nil {
 		wantAbs = bare
 	}
-	gotAbs, err := filepath.EvalSymlinks(gate)
+	gotAbs, err := realpath.Resolve(gate)
 	if err != nil {
 		gotAbs = gate
 	}
@@ -463,11 +465,11 @@ func TestPostReceiveHook_FallsBackToHookLocationForGateDir(t *testing.T) {
 	if gate == "." || !filepath.IsAbs(gate) {
 		t.Fatalf("--gate must fall back to an absolute hook-derived path, got %q; argv:\n%s", gate, args)
 	}
-	wantAbs, err := filepath.EvalSymlinks(bare)
+	wantAbs, err := realpath.Resolve(bare)
 	if err != nil {
 		wantAbs = bare
 	}
-	gotAbs, err := filepath.EvalSymlinks(gate)
+	gotAbs, err := realpath.Resolve(gate)
 	if err != nil {
 		gotAbs = gate
 	}

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
@@ -285,7 +286,7 @@ func FindGitRoot(path string) (string, error) {
 		return "", fmt.Errorf("not a git repository: %s", abs)
 	}
 	root := strings.TrimSpace(string(out))
-	resolved, err := filepath.EvalSymlinks(root)
+	resolved, err := realpath.Resolve(root)
 	if err != nil {
 		return root, nil
 	}
@@ -307,7 +308,7 @@ func FindGitRoot(path string) (string, error) {
 //     `git rev-parse --show-toplevel` from the original path, the same
 //     answer FindGitRoot returns.
 //
-// In every branch the returned path is run through filepath.EvalSymlinks
+// In every branch the returned path is run through realpath.Resolve
 // when possible so callers can compare it against other symlink-resolved
 // paths (notably on macOS, where /tmp and /private/tmp refer to the same
 // directory). Symlink resolution failures fall back to the unresolved
@@ -366,10 +367,10 @@ func FindMainRepoRoot(path string) (string, error) {
 	return resolveMainRoot(strings.TrimSpace(string(topOut)))
 }
 
-// resolveMainRoot applies filepath.EvalSymlinks to path, falling back to
+// resolveMainRoot applies realpath.Resolve to path, falling back to
 // the unresolved path when symlink resolution fails.
 func resolveMainRoot(path string) (string, error) {
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := realpath.Resolve(path)
 	if err != nil {
 		return path, nil
 	}
