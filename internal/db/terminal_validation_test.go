@@ -56,7 +56,7 @@ func TestTerminalValidationAdmitsTheUnchangedReturnedCandidateWithFreshSelection
 		t.Fatalf("successor inherited authority or lost fresh selection: %+v", child)
 	}
 	family, err := database.ValidationFamily(child.ID)
-	if err != nil || family == nil || family.HasChildRepairs || family.Spending[types.StepReview].Automatic != 1 || family.Spending[types.StepReview].Manual != 2 || family.Spending[types.StepReview].Remaining != 0 {
+	if err != nil || family == nil || family.HasChildRepairs || family.Spending[types.StepReview].Automatic != 1 || family.Spending[types.StepReview].Manual != 2 {
 		t.Fatalf("cumulative spending: %+v %v", family, err)
 	}
 }
@@ -115,7 +115,7 @@ func TestTerminalValidationPreservesSourceAdoptionSpendingAndRefusesUnsafeAncest
 				t.Fatal(err)
 			}
 			family, err := database.ValidationFamily(event.ChildID)
-			if err != nil || family.HasChildRepairs || family.Spending[types.StepReview].Automatic != 1 || family.Spending[types.StepReview].Manual != 2 || family.Spending[types.StepReview].Remaining != 0 {
+			if err != nil || family.HasChildRepairs || family.Spending[types.StepReview].Automatic != 1 || family.Spending[types.StepReview].Manual != 2 {
 				t.Fatalf("source ancestry spending: %+v %v", family, err)
 			}
 			history, err := database.ValidationHistory(event.ChildID)

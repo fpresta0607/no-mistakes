@@ -759,13 +759,6 @@ func shouldSkipRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef
 		sctx.Log(fmt.Sprintf("already ahead of %s", targetRef))
 		return true, nil
 	}
-	isValidationOnly, err := sctx.IsValidationOnly()
-	if err != nil {
-		return false, err
-	}
-	if isValidationOnly {
-		return false, fmt.Errorf("validation-only authored admission cannot integrate %s", targetRef)
-	}
 	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", "HEAD", targetRef); err == nil {
 		sctx.Log(fmt.Sprintf("fast-forwarding to %s", targetRef))
 		if _, err := git.Run(ctx, sctx.WorkDir, "reset", "--hard", targetRef); err != nil {

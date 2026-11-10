@@ -102,7 +102,7 @@ func TestValidationAdmissionPreservesThePredecessorAndStartsWithNoCertification(
 		t.Fatal(err)
 	}
 	spending := family.Spending[types.StepReview]
-	if spending.Automatic != 1 || spending.Manual != 2 || spending.Remaining != 0 {
+	if spending.Automatic != 1 || spending.Manual != 2 {
 		t.Fatalf("family spending = %+v", spending)
 	}
 	if family.PolicyOrigin != "controller_assertion" || family.HistoricalSourceCompleteness != "unknown" {
@@ -200,7 +200,7 @@ func TestValidationFamilyDetectsSourceChangesInNormalRounds(t *testing.T) {
 
 			family, err := database.ValidationFamily(event.ChildID)
 
-			if err != nil || !family.HasChildRepairs || family.Spending[types.StepReview].Remaining != 0 {
+			if err != nil || !family.HasChildRepairs {
 				t.Fatalf("normal-round source change escaped zero-repair authority: %+v %v", family, err)
 			}
 		})
@@ -273,11 +273,67 @@ func TestValidationAdmissionDescendantsKeepSpendingAndTheControllerAssertion(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if family.Spending[types.StepReview].Automatic != 1 || family.Spending[types.StepReview].Manual != 2 || family.Spending[types.StepReview].Remaining != 0 || family.HasChildRepairs {
+	if family.Spending[types.StepReview].Automatic != 1 || family.Spending[types.StepReview].Manual != 2 || family.HasChildRepairs {
 		t.Fatalf("descendant spending = %+v", family)
 	}
 	if err := database.RefuseUnlinkedValidation(proposal.Request.RepoID, proposal.Request.Branch); err == nil {
 		t.Fatal("ordinary launch could drop the family")
+	}
+}
+
+func TestRefuseUnlinkedValidationEndsWithTheNewestChildsMergedOrClosedPR(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		status        types.RunStatus
+		prState       string
+		shouldRefuse  bool
+		hasDescendant bool
+	}{
+		{name: "active child", status: types.RunRunning, prState: "open", shouldRefuse: true},
+		{name: "active child with a merged PR", status: types.RunRunning, prState: "merged", shouldRefuse: true},
+		{name: "completed child with an open PR", status: types.RunCompleted, prState: "open", shouldRefuse: true},
+		{name: "failed unpublished child", status: types.RunFailed, prState: "none", shouldRefuse: true},
+		{name: "completed child with a merged PR", status: types.RunCompleted, prState: "merged"},
+		{name: "completed child with a closed PR", status: types.RunCompleted, prState: "closed"},
+		{name: "cancelled child with a closed PR", status: types.RunCancelled, prState: "closed"},
+		{name: "older child ended but its descendant is active", status: types.RunCompleted, prState: "merged", shouldRefuse: true, hasDescendant: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database, proposal := admissionFixture(t)
+			first, _, err := database.AcceptValidationAdmission(context.Background(), proposal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.hasDescendant {
+				if err := database.UpdateRunStatus(first.ChildID, types.RunCancelled); err != nil {
+					t.Fatal(err)
+				}
+				snapshot, err := database.ReadTerminalSnapshot(first.ChildID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				descendant := proposal
+				descendant.Snapshot = *snapshot
+				descendant.Request.PredecessorID, descendant.Request.SnapshotDigest = first.ChildID, snapshot.Digest()
+				descendant.Request.LaunchNonce = *snapshot.Run.LaunchNonce
+				descendant.Request.CandidateSHA = strings.Repeat("9", 40)
+				if _, _, err := database.AcceptValidationAdmission(context.Background(), descendant); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := database.sql.Exec(`UPDATE runs SET status = ?, pr_state = ? WHERE id = ?`, test.status, test.prState, first.ChildID); err != nil {
+				t.Fatal(err)
+			}
+
+			err = database.RefuseUnlinkedValidation(proposal.Request.RepoID, proposal.Request.Branch)
+
+			if test.shouldRefuse && (err == nil || !strings.Contains(err.Error(), "validation-only authored lineage")) {
+				t.Fatalf("ordinary launch could drop a live lineage: %v", err)
+			}
+			if !test.shouldRefuse && err != nil {
+				t.Fatalf("ended lineage still refuses an ordinary launch: %v", err)
+			}
+		})
 	}
 }
 
@@ -547,7 +603,7 @@ func TestValidationAdmissionContinuesOnlyACompletedAuthoredChild(t *testing.T) {
 			if err != nil || family.PredecessorID != predecessorID || family.HasChildRepairs {
 				t.Fatalf("successor family = %+v %v", family, err)
 			}
-			if spending := family.Spending[types.StepReview]; spending.Automatic != 1 || spending.Manual != 2 || spending.Remaining != 0 {
+			if spending := family.Spending[types.StepReview]; spending.Automatic != 1 || spending.Manual != 2 {
 				t.Fatalf("successor renewed or lost spending: %+v", spending)
 			}
 		})

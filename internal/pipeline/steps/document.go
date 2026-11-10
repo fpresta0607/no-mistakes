@@ -50,15 +50,15 @@ const documentScopeDiscipline = `Scope discipline:
 - Prefer consolidation, deletion, and pointers to the owner over addition and synchronization.`
 
 // housekeepingLintSection adds the agent-driven lint duty to the combined
-// document+lint pass.
+// document+lint pass; lintDutySection fills in its fix and report rules.
 const housekeepingLintSection = `
 
 Combined lint duty (same pass - no separate lint agent will run):
 - Discover the configured linters and formatters for this repository.
 - Run the relevant checks, preferring only the changed files when possible.
-- Apply safe formatter, linter, and static-analysis fixes yourself, then re-run the relevant checks.
+%s
 - Do not run tests or broader behavioral validation.
-- Report only unresolved lint, format, or static-analysis issues as findings with "category" set to "lint". Do not report lint issues you already fixed.
+%s
 
 Set "category" on every finding: "documentation" for documentation findings, "lint" for lint findings.`
 
@@ -136,18 +136,11 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		sctx.Log("updating documentation...")
 	}
 
-	prompt := s.buildPrompt(sctx, baseSHA, ignorePatterns, combinedLint)
 	isValidationOnly, err := sctx.IsValidationOnly()
 	if err != nil {
 		return nil, err
 	}
-	if isValidationOnly {
-		prompt = fmt.Sprintf("Validate documentation for %s..%s and report every stale or contradictory fact without editing files. Follow the documentation ownership and scope policies below. Return findings and a summary.\n\n%s\n\n%s%s%s",
-			baseSHA, sctx.Run.HeadSHA, documentPlacementPolicy, documentScopeDiscipline, trustedDocumentPolicySection(sctx), executionContextPromptSection(sctx.WorkDir)+roundHistoryPromptSection(sctx)+userIntentPromptSection(sctx))
-		if combinedLint {
-			prompt += "\nAlso discover and run lint and formatting checks without applying fixes. Categorize every finding as documentation or lint."
-		}
-	}
+	prompt := s.buildPrompt(sctx, baseSHA, ignorePatterns, combinedLint, isValidationOnly)
 	schema := findingsSchema
 	purpose := "document"
 	if combinedLint {
@@ -246,22 +239,46 @@ func validateDocumentAnalyzerFindings(raw []byte, findings *Findings, changesCom
 
 // buildPrompt assembles the document (or combined document+lint) prompt: the
 // placement policy, scope discipline, trusted repository-specific policy,
-// the task, and - in combined mode - the lint duty.
-func (s *DocumentStep) buildPrompt(sctx *pipeline.StepContext, baseSHA, ignorePatterns string, combinedLint bool) string {
+// the task, and - in combined mode - the lint duty. A validation-only pass
+// keeps the same scope and replaces only the edit and fix instructions.
+func (s *DocumentStep) buildPrompt(sctx *pipeline.StepContext, baseSHA, ignorePatterns string, combinedLint, isValidationOnly bool) string {
 	historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
 
 	intro := "Keep the project documentation accurate for this change."
 	if combinedLint {
 		intro = "Perform the combined documentation and lint housekeeping pass for this change."
 	}
+	analysis := "Analyze what the change made stale, fix each stale fact in its one authoritative location, and report only what you could not resolve."
+
+	resolution := `3. Fix in the authoritative location
+   - Update each altered fact in its owner document. Changed user-facing behavior must leave its authoritative user documentation accurate.
+   - Remove stale duplicates or reduce them to a short pointer to the owner; do not synchronize full copies.
+   - Re-read what you changed to verify it now reflects the code.
+
+4. Report only what remains
+   - Return a finding only for gaps you could not resolve, judgment calls (e.g. ambiguous intent or conflicting docs), or an out-of-scope consolidation worth a follow-up.
+   - Do not report gaps you already fixed.
+   - If nothing remains, return an empty findings array.`
 
 	editRule := "- Only edit documentation files or doc comments. Do not change executable behavior or tests."
 	if combinedLint {
 		editRule = "- Documentation edits must only touch documentation files or doc comments. Lint fixes must be safe, mechanical, and behavior-preserving. Never change functional behavior or tests."
 	}
 
+	if isValidationOnly {
+		intro = "Validate the project documentation for this change without editing files."
+		if combinedLint {
+			intro = "Perform the combined documentation and lint validation pass for this change without editing files."
+		}
+		analysis = "Analyze what the change made stale and report each stale or contradictory fact."
+		resolution = `3. Report what is stale
+   - Return a finding for each stale or contradictory fact, naming its authoritative owner document, and for each judgment call (e.g. ambiguous intent or conflicting docs) or out-of-scope consolidation worth a follow-up.
+   - If nothing is stale, return an empty findings array.`
+		editRule = "- Do not edit, create, delete, stage, or commit any file."
+	}
+
 	prompt := fmt.Sprintf(
-		`%s Analyze what the change made stale, fix each stale fact in its one authoritative location, and report only what you could not resolve.
+		`%s %s
 
 Context:
 - branch: %s
@@ -283,20 +300,13 @@ Task:
    - For each fact or contract the change altered, locate its one authoritative owner document (README, docs/, doc comments, config examples, etc.).
    - Locate existing duplicates of those facts that are now stale.
 
-3. Fix in the authoritative location
-   - Update each altered fact in its owner document. Changed user-facing behavior must leave its authoritative user documentation accurate.
-   - Remove stale duplicates or reduce them to a short pointer to the owner; do not synchronize full copies.
-   - Re-read what you changed to verify it now reflects the code.
-
-4. Report only what remains
-   - Return a finding only for gaps you could not resolve, judgment calls (e.g. ambiguous intent or conflicting docs), or an out-of-scope consolidation worth a follow-up.
-   - Do not report gaps you already fixed.
-   - If nothing remains, return an empty findings array.%s
+%s%s
 
 Rules:
 %s
 %s%s`,
 		intro,
+		analysis,
 		sctx.Run.Branch,
 		baseSHA,
 		sctx.Run.HeadSHA,
@@ -306,7 +316,8 @@ Rules:
 		documentScopeDiscipline,
 		repositoryDocumentPolicySection(sctx),
 		trustedDocumentPolicySection(sctx),
-		lintDutySection(combinedLint),
+		resolution,
+		lintDutySection(combinedLint, isValidationOnly),
 		editRule,
 		fixSummaryRules(sctx, s.Name()),
 		historySection,
@@ -352,11 +363,17 @@ func repositoryDocumentPolicySection(sctx *pipeline.StepContext) string {
 		sanitizePromptMultilineText(instructions)
 }
 
-func lintDutySection(combinedLint bool) string {
+func lintDutySection(combinedLint, isValidationOnly bool) string {
 	if !combinedLint {
 		return ""
 	}
-	return housekeepingLintSection
+	fixRule := "- Apply safe formatter, linter, and static-analysis fixes yourself, then re-run the relevant checks."
+	reportRule := `- Report only unresolved lint, format, or static-analysis issues as findings with "category" set to "lint". Do not report lint issues you already fixed.`
+	if isValidationOnly {
+		fixRule = "- Do not apply fixes or edit files."
+		reportRule = `- Report each lint, format, or static-analysis issue as a finding with "category" set to "lint".`
+	}
+	return fmt.Sprintf(housekeepingLintSection, fixRule, reportRule)
 }
 
 // splitHousekeepingFindings routes combined-pass findings to their owning

@@ -146,10 +146,12 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
   `internal/db/validation_snapshot.go` and `validation_family.go` own the one snapshot/family ledger; `validation_admissions` binds the immutable predecessor snapshot, exact declared source, fresh launch proof and controller-supplied policy assertion.
   The latter is labeled `controller_assertion`, never a native historical policy fact, and `historical_source_completeness` stays `unknown` throughout the lineage.
 - Native repair authority is zero for every child stage, including unseen phases, custom gates, pending selections, response, CI handback, dispatch, restart and descendants.
-  The executor and recovery re-read the family, ordinary fresh launches cannot shed it, and step limits persist explicit zero rather than inheriting defaults.
+  The executor and recovery re-read the family, ordinary fresh launches cannot shed it until its newest authored child is terminal and its CI step recorded the PR merged or closed (`RefuseUnlinkedValidation`, the one end condition, since admission needs an open PR), and step limits persist explicit zero rather than inheriting defaults.
+  Only the CI step records `runs.pr_state` as `merged` or `closed` (the PR step's `UpdateRunPRURL` writes only `open`), so any child that ended while its PR was still open (`ci_end_at_green`, `ci.release_after_checks_pass`, the CI idle timeout, or a failed or cancelled child) keeps refusing after a later forge merge or close (issue #194); the way out today is `no-mistakes eject` then `no-mistakes init`, which also deletes the repository's run history.
+  Validation-only Document and Lint prompts are the ordinary prompts with only the edit and fix instructions replaced, so they keep the ignore patterns, base branch and changed-file scope.
   Fresh children get every current trusted stage/gate with no copied certification; untouched pending acceptances stay idle across startup until exact explicit replay, and cancellation never restarts either row.
 - Public input/output and lifecycle semantics are owned by `docs/src/content/docs/reference/cli.md` (`axi validate-authored`).
-  Regressions: `internal/db/validation_admission_test.go`, `internal/pipeline/validation_only_test.go`, `internal/daemon/authored_validation_test.go`, and e2e `TestAxiAuthoredValidationHasFreshStagesAndNoRepairAuthorityAfterCrash`.
+  Regressions: `internal/db/validation_admission_test.go`, `internal/pipeline/validation_only_test.go`, `TestAuthoredDocumentAndLintPromptsKeepTheOrdinaryScope`, `TestRefuseUnlinkedValidationEndsWithTheNewestChildsMergedOrClosedPR`, `internal/daemon/authored_validation_test.go`, and e2e `TestAxiAuthoredValidationHasFreshStagesAndNoRepairAuthorityAfterCrash`.
 
 **Parked / Awaiting-Agent Signal**
 

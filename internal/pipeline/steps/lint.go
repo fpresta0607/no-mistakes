@@ -87,8 +87,27 @@ func (s *LintStep) executeRepositoryLint(sctx *pipeline.StepContext) (*pipeline.
 		}
 		sctx.Log("no lint command configured, asking agent to lint and fix...")
 		reassessHistory := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
+		isValidationOnly, err := sctx.IsValidationOnly()
+		if err != nil {
+			return nil, err
+		}
+		// A validation-only pass keeps the same scope and replaces only the
+		// fix instructions.
+		intro := "Detect the linting and formatting tools for this project, run the relevant checks yourself, apply safe fixes, and verify the result."
+		fixRules := `- Apply safe formatter, linter, and static-analysis fixes yourself.
+- Re-run the relevant checks after fixing.
+- Report only unresolved lint, format, or static-analysis issues as structured findings.
+- If everything is clean or fixed, return an empty findings array.`
+		fixedRule := "\n- Do not report issues you already fixed."
+		if isValidationOnly {
+			intro = "Detect the linting and formatting tools for this project and run the relevant checks yourself without applying fixes or editing files."
+			fixRules = `- Do not apply fixes or edit files.
+- Report each lint, format, or static-analysis issue as a structured finding.
+- If everything is clean, return an empty findings array.`
+			fixedRule = ""
+		}
 		prompt := fmt.Sprintf(
-			`Detect the linting and formatting tools for this project, run the relevant checks yourself, apply safe fixes, and verify the result.
+			`%s
 
 Context:
 - branch: %s
@@ -98,19 +117,18 @@ Context:
 Task:
 - Discover the configured linters and formatters for this repository.
 - Only lint or format the relevant changed files when possible.
-- Apply safe formatter, linter, and static-analysis fixes yourself.
-- Re-run the relevant checks after fixing.
-- Report only unresolved lint, format, or static-analysis issues as structured findings.
-- If everything is clean or fixed, return an empty findings array.
+%s
 
 Rules:
 - Do not run tests or broader behavioral validation.
-- Focus on lint, format, and static-analysis issues only.
-- Do not report issues you already fixed.
+- Focus on lint, format, and static-analysis issues only.%s
 %s%s`,
+			intro,
 			sctx.Run.Branch,
 			baseSHA,
 			sctx.Run.HeadSHA,
+			fixRules,
+			fixedRule,
 			fixSummaryRules(sctx, s.Name()),
 			reassessHistory,
 		)
@@ -119,13 +137,6 @@ Rules:
 
 Previous lint findings to address:
 ` + sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
-		}
-		isValidationOnly, err := sctx.IsValidationOnly()
-		if err != nil {
-			return nil, err
-		}
-		if isValidationOnly {
-			prompt = fmt.Sprintf("Validate lint and formatting for %s..%s. Discover and run the relevant checks without applying fixes or editing files. Report every issue as a finding and return a summary. Do not run tests.\n%s", baseSHA, sctx.Run.HeadSHA, reassessHistory)
 		}
 		before, err := untrackedFiles(sctx)
 		if err != nil {
