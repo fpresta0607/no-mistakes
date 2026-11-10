@@ -386,7 +386,7 @@ func (m *RunManager) proveAuthoredGateLineage(ctx context.Context, snapshot *db.
 			if adoption.SourceRef != "refs/no-mistakes/terminal-candidate/"+historical.Run.ID {
 				return fmt.Errorf("terminal adoption source anchor identity changed")
 			}
-			anchors := []struct{ ref, head string }{{adoption.SourceRef, adoption.CandidateSHA}, {"refs/no-mistakes/terminal-lane/" + historical.Run.ID, adoption.GateHead}}
+			anchors := []struct{ ref, head string }{{adoption.SourceRef, adoption.CandidateSHA}}
 			if adoption.RecoveryHead != "" {
 				anchors = append(anchors, struct{ ref, head string }{custody.RecoveryRef(adoption.Snapshot.Run.ID), adoption.RecoveryHead})
 			}

@@ -34,9 +34,6 @@ func runTerminalContinuation(cmd *cobra.Command, reason string) error {
 			return emitError(cmd, 1, err.Error())
 		}
 		event, err := env.d.GetTerminalPredecessor(run.ID)
-		if err == nil && event == nil {
-			event, err = env.d.GetTerminalAdoption(run.ID)
-		}
 		if err != nil {
 			return emitError(cmd, 1, err.Error())
 		}
@@ -48,7 +45,7 @@ func runTerminalContinuation(cmd *cobra.Command, reason string) error {
 			return emitError(cmd, 1, err.Error())
 		}
 		var result ipc.RecoverTerminalResult
-		request := ipc.RecoverTerminalParams{RepoID: env.repo.ID, RunID: snapshot.Run.ID, Branch: branch, CallerDir: directory, SnapshotDigest: snapshot.Digest(), Reason: reason}
+		request := ipc.RecoverTerminalParams{RepoID: env.repo.ID, Branch: branch, CallerDir: directory, SnapshotDigest: snapshot.Digest(), Reason: reason}
 		if err := env.client.CallWithContext(cmd.Context(), ipc.MethodRecoverTerminal, request, &result, 2*time.Minute); err != nil {
 			return emitError(cmd, 1, fmt.Sprintf("terminal recovery: %v", err))
 		}

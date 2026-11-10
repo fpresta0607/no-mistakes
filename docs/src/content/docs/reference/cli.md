@@ -408,7 +408,7 @@ The input is one operator-owned UTF-8 JSON object, at most 64 KiB, with these fi
 
 The daemon checks the authenticated caller, registered Git identity, exact clean source, immutable predecessor history, launch selection and publication facts before accepting the child.
 The gate branch may still name a head bound by an earlier immutable authored admission or terminal adoption, including the adopted root's original submitted head.
-Terminal-adoption links must retain their recorded source, lane and recovery anchors; unrelated Git ancestry supplies no ownership evidence.
+Terminal-adoption links must retain their recorded source and recovery anchors; unrelated Git ancestry supplies no ownership evidence.
 An unresolved native agent safety refusal or unreadable findings anywhere in that immutable lineage refuses admission.
 The declared authored candidate must differ from every head bound in the immutable validation family: submitted, terminal, published and approved review heads, starting and reviewed heads from every stage's rounds, linked terminal source-adoption candidate, retained, gate, recovery and caller heads, and every source-anchor value recorded by an admission.
 This checks recorded identities, never arbitrary Git ancestry.
@@ -843,7 +843,8 @@ A branch whose validation-only [authored lineage](#no-mistakes-axi-validate-auth
 The lineage ends only when its newest authored child's CI step recorded the PR merged or closed.
 Any child that ended while its PR was still open (`ci_end_at_green`, `ci.release_after_checks_pass`, the CI idle timeout, or a failed or cancelled child) keeps refusing after a later forge merge or close (issue #194), and the way out today is `eject` followed by `init`, which also deletes the repository's run history.
 Active parked CI adoption and conflict handback use their own operations.
-This command accepts no caller-selected run or candidate SHA.
+This command accepts no caller-selected run or candidate SHA: the daemon resolves the run from the repository and branch itself.
+A continuation successor is never adopted as a predecessor, so repair spending is counted across exactly one predecessor and its successor.
 Use it without `--check`, `--keep-local`, `--adopt-published`, or `--bind-archive-ref`.
 
 The source must be the run's clean managed checkout at the recorded head or a descendant, or the exact verified recovery anchor when the managed checkout is missing.
@@ -851,7 +852,7 @@ Initial acceptance of a missing checkout also requires a recorded clean-source o
 A clean caller correction may be selected when it descends from the retained reviewed or published output and contains the complete retained terminal history.
 Dirty, unreadable, contradictory, symbolic, or unbound source refuses; unavailable uncommitted files are never reconstructed from a commit.
 When the caller remains at an original recorded head, its tracked and untracked edits remain untouched and are not adopted.
-The exact candidate and tree, fresh clean retained-source observation, independent gate lane and source anchors are bound in the appended adoption record.
+The exact candidate and tree, fresh clean retained-source observation, gate head and source anchor are bound in the appended adoption record.
 An accepted clean observation is source provenance, not Review or terminal verification.
 
 For a published predecessor, the current target/ref, publication generation, open PR identity, branch and public head must still match its binding.

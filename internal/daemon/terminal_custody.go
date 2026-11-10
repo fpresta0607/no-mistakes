@@ -56,14 +56,20 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 				break
 			}
 		}
-		event, err := m.db.GetTerminalAdoption(request.RunID)
+		if selected == nil {
+			return "", fmt.Errorf("no run exists for this branch")
+		}
+		// The caller never selects the run. The branch's latest run is either a
+		// successor, whose acceptance is replayed, or the run to adopt.
+		event, err := m.db.GetTerminalPredecessor(selected.ID)
 		if err != nil {
 			return "", err
 		}
-		if selected == nil || selected.ID != request.RunID && (event == nil || selected.ID != event.Successor.ID) {
-			return "", fmt.Errorf("terminal request no longer identifies this branch's run")
+		targetID := selected.ID
+		if event != nil {
+			targetID = event.Snapshot.Run.ID
 		}
-		snapshot, err := m.db.ReadContinuationSnapshot(request.RunID)
+		snapshot, err := m.db.ReadContinuationSnapshot(targetID)
 		if err != nil {
 			return "", err
 		}
@@ -235,13 +241,11 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if err != nil || !reflect.DeepEqual(source, rechecked) {
 			return "", fmt.Errorf("candidate source changed during verification")
 		}
-		for _, anchor := range []struct{ ref, head string }{{candidateRef, source.Head}, {"refs/no-mistakes/terminal-lane/" + successorID, source.GateHead}} {
-			if err := custody.PreserveRecoveryAnchor(ctx, service.GateDir, anchor.ref, anchor.head); err != nil {
-				return "", err
-			}
+		if err := custody.PreserveRecoveryAnchor(ctx, service.GateDir, candidateRef, source.Head); err != nil {
+			return "", err
 		}
 		if event == nil {
-			event, _, err = m.db.AdoptTerminalCandidate(ctx, db.TerminalAdoption{Snapshot: *original, SuccessorID: successorID, WorktreeRoot: filepath.Dir(workDir), EvidenceRoot: evidenceRoot, Plan: plan, Gates: gates, StepNames: stepNames, CandidateSHA: source.Head, RetainedSHA: source.RetainedHead, CandidateTree: source.Tree, SourceRef: candidateRef, GateHead: source.GateHead, RecoveryHead: source.RecoveryHead, CallerDir: request.CallerDir, CallerHead: callerHead, ManagedDir: source.ManagedDir, Reason: request.Reason, Operator: strconv.Itoa(operator), Assertion: assertion, Proof: proof})
+			event, err = m.db.AdoptTerminalCandidate(ctx, db.TerminalAdoption{Snapshot: *original, SuccessorID: successorID, WorktreeRoot: filepath.Dir(workDir), EvidenceRoot: evidenceRoot, Plan: plan, Gates: gates, StepNames: stepNames, CandidateSHA: source.Head, RetainedSHA: source.RetainedHead, CandidateTree: source.Tree, SourceRef: candidateRef, GateHead: source.GateHead, RecoveryHead: source.RecoveryHead, CallerDir: request.CallerDir, CallerHead: callerHead, ManagedDir: source.ManagedDir, Reason: request.Reason, Operator: strconv.Itoa(operator), Assertion: assertion, Proof: proof})
 			if err != nil {
 				return "", err
 			}

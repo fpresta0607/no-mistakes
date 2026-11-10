@@ -170,7 +170,7 @@ func TestPreserveRunHeadAnchorsASuccessorUnmovedAtACandidateItsCallerNeverHad(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	adoption, _, err := d.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: preserved, CandidateTree: gitOutput(t, fixture.gate, "rev-parse", preserved+"^{tree}"), SourceRef: "refs/no-mistakes/terminal-candidate/successor", CallerDir: t.TempDir(), CallerHead: submitted, Reason: "validate preserved source", Operator: "fixture", Assertion: assertion, Proof: proof})
+	adoption, err := d.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: preserved, CandidateTree: gitOutput(t, fixture.gate, "rev-parse", preserved+"^{tree}"), SourceRef: "refs/no-mistakes/terminal-candidate/successor", CallerDir: t.TempDir(), CallerHead: submitted, Reason: "validate preserved source", Operator: "fixture", Assertion: assertion, Proof: proof})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -587,7 +587,7 @@ func TestAuthoredAdmissionAcceptsATerminalAdoptionsOriginalSubmittedHead(t *test
 }
 
 func TestAuthoredAdmissionRefusesBrokenTerminalAdoptionLineageWithoutMutation(t *testing.T) {
-	for _, change := range []string{"unrecorded gate head", "moved source anchor", "missing source anchor", "symbolic source anchor", "moved lane anchor", "wrong source identity", "wrong candidate tree", "missing link", "unreadable link", "contradictory link", "cycle", "changed predecessor", "changed successor", "native safety refusal", "unreadable findings", "ancestral safety refusal", "ancestral unreadable findings"} {
+	for _, change := range []string{"unrecorded gate head", "moved source anchor", "missing source anchor", "symbolic source anchor", "wrong source identity", "wrong candidate tree", "missing link", "unreadable link", "contradictory link", "cycle", "changed predecessor", "changed successor", "native safety refusal", "unreadable findings", "ancestral safety refusal", "ancestral unreadable findings"} {
 		t.Run(change, func(t *testing.T) {
 			manager, database, repo, request, gate, adoption := authoredTerminalAdoptionFixture(t, nil)
 			connection, err := sql.Open("sqlite", manager.paths.DB())
@@ -608,8 +608,6 @@ func TestAuthoredAdmissionRefusesBrokenTerminalAdoptionLineageWithoutMutation(t 
 				gitCmd(t, gate, "update-ref", "-d", adoption.SourceRef)
 			case "symbolic source anchor":
 				gitCmd(t, gate, "symbolic-ref", adoption.SourceRef, "refs/heads/main")
-			case "moved lane anchor":
-				gitCmd(t, gate, "update-ref", "refs/no-mistakes/terminal-lane/"+adoption.SuccessorID, adoption.CandidateSHA)
 			case "wrong source identity":
 				adoption.SourceRef = "refs/heads/feature"
 			case "wrong candidate tree":
@@ -758,8 +756,7 @@ func authoredTerminalAdoptionFixture(t *testing.T, factory StepFactory) (*RunMan
 	sourceRef := "refs/no-mistakes/terminal-candidate/" + successorID
 	gitCmd(t, gate, "fetch", "--no-tags", repo.WorkingPath, request.Request.CandidateSHA)
 	gitCmd(t, gate, "update-ref", sourceRef, request.Request.CandidateSHA)
-	gitCmd(t, gate, "update-ref", "refs/no-mistakes/terminal-lane/"+successorID, gateHead)
-	adoption, _, err := database.AdoptTerminalCandidate(t.Context(), db.TerminalAdoption{
+	adoption, err := database.AdoptTerminalCandidate(t.Context(), db.TerminalAdoption{
 		Snapshot: *snapshot, SuccessorID: successorID, CandidateSHA: request.Request.CandidateSHA, CandidateTree: request.Request.CandidateTree,
 		SourceRef: sourceRef, GateHead: gateHead, CallerDir: request.CallerDir, CallerHead: gateHead,
 		Reason: "validate the retained terminal source", Operator: "fixture", Assertion: request.Request.LaunchAssertion, Proof: proof,

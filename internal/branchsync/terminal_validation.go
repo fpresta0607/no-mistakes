@@ -33,10 +33,8 @@ func TerminalValidationAnchors(ctx context.Context, database *db.DB, gateDir, ca
 			if adoption.SourceRef != "refs/no-mistakes/terminal-candidate/"+adoption.SuccessorID {
 				return nil, fmt.Errorf("terminal source anchor identity changed")
 			}
-			for key, head := range map[string]string{"gate/" + adoption.SourceRef: adoption.CandidateSHA, "gate/refs/no-mistakes/terminal-lane/" + adoption.SuccessorID: adoption.GateHead} {
-				if err := bind(key, head); err != nil {
-					return nil, err
-				}
+			if err := bind("gate/"+adoption.SourceRef, adoption.CandidateSHA); err != nil {
+				return nil, err
 			}
 			if adoption.RecoveryHead != "" {
 				if err := bind("gate/"+custody.RecoveryRef(adoption.Snapshot.Run.ID), adoption.RecoveryHead); err != nil {
@@ -92,7 +90,6 @@ func TerminalValidationAnchors(ctx context.Context, database *db.DB, gateDir, ca
 			provenanceRefs := make(map[string]string)
 			if adoption := entry.Adoption; adoption != nil {
 				provenanceRefs[adoption.SourceRef] = adoption.CandidateSHA
-				provenanceRefs["refs/no-mistakes/terminal-lane/"+adoption.SuccessorID] = adoption.GateHead
 			}
 			if admission := entry.Admission; admission != nil {
 				provenanceRefs["refs/no-mistakes/authored-candidate/"+admission.ID] = admission.Request.CandidateSHA

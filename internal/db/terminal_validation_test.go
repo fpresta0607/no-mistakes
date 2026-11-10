@@ -74,7 +74,7 @@ func TestTerminalValidationPreservesSourceAdoptionSpendingAndRefusesUnsafeAncest
 			if err != nil {
 				t.Fatal(err)
 			}
-			adoption, _, err := database.AdoptTerminalCandidate(context.Background(), TerminalAdoption{Snapshot: *source, CandidateSHA: source.Run.HeadSHA, CandidateTree: proposal.Request.CandidateTree, SourceRef: "refs/no-mistakes/recover/" + source.Run.ID, WorktreeRoot: proposal.WorktreeRoot, Reason: "accept retained source", Operator: "fixture", Assertion: source.Run.LaunchAssertion, Proof: source.Run.LaunchAssertionProof})
+			adoption, err := database.AdoptTerminalCandidate(context.Background(), TerminalAdoption{Snapshot: *source, CandidateSHA: source.Run.HeadSHA, CandidateTree: proposal.Request.CandidateTree, SourceRef: "refs/no-mistakes/recover/" + source.Run.ID, WorktreeRoot: proposal.WorktreeRoot, Reason: "accept retained source", Operator: "fixture", Assertion: source.Run.LaunchAssertion, Proof: source.Run.LaunchAssertionProof})
 			if err != nil {
 				t.Fatal(err)
 			}
