@@ -27,7 +27,9 @@ import (
 // process capacity, stalling a child indefinitely on macOS and pushing a
 // repair past its retry bound on Windows (issue #40). newCIRepairFixture
 // enforces that by holding ciRepairFixtureSlot until the test ends, so a
-// caller may still call t.Parallel and overlap with the package's other tests.
+// caller may still call t.Parallel. The cost: a fixture test waiting for the
+// slot still holds one of the package's -parallel slots, so while fixture
+// tests queue up they can fill every slot and run the package serially.
 type ciRepairFixture struct {
 	sctx     *pipeline.StepContext
 	dir      string
@@ -166,7 +168,10 @@ func TestCIStep_RepairFixtureAdmitsOneTestAtATime(t *testing.T) {
 	})
 	t.Run("second", func(t *testing.T) {
 		t.Parallel()
-		<-firstBuilt
+		select {
+		case <-firstBuilt:
+		case <-time.After(10 * time.Second):
+		}
 		newCIRepairFixture(t, false, nil)
 		close(secondBuilt)
 		if isFirstRunning.Load() {
