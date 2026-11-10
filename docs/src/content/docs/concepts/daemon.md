@@ -157,7 +157,9 @@ When a push arrives via the post-receive hook:
 An unresolved [`protected_paths`](/no-mistakes/reference/repo-config/#protected_paths) refusal preserves the index and working files across daemon shutdown, cancellation by a newer push, and crash recovery, including when trusted-config loading fails and the run cannot resume. This retention does not weaken recovery validation or keep a terminal run active: orphan-process cleanup and test-evidence expiry still apply. Successful completion of the refused step releases this protection; deliberate operator skip and abort retain their existing cleanup behavior.
 
 An operator abort of an unresolved refusal still discards the checkout at the run's original submitted head, but never adopted or later committed source.
-Otherwise, terminal cleanup of a recorded run preserves staged or unstaged tracked changes, untracked files, and unreadable nonempty checkouts.
+Otherwise, terminal cleanup of a run that [terminal continuation](/no-mistakes/reference/cli/#continue-validation-of-preserved-terminal-source) could still accept preserves staged or unstaged tracked changes, untracked files, and unreadable nonempty checkouts.
+Source retention ends once continuation can never accept the run: a completed or custody-returned run, or one a newer run other than its own continuation successor superseded on its branch, follows ordinary cleanup and the [`worktree` retention bound](/no-mistakes/reference/global-config/#worktree) even when it left untracked pipeline artifacts.
+A directory without its own `.git`, such as the leftover of a partial `git worktree remove`, holds no checkout to retain and is reclaimed without running Git inside it, except that an interrupted CI monitor's directory is still preserved because its head cannot be read.
 The untracked check includes hidden files even when Git's status display settings hide them.
 Clean committed corrections are also retained unless an exact durable preservation anchor or a recorded successful push binding protects the checked-out head.
 This includes corrections committed after terminalization and before the first terminal continuation.

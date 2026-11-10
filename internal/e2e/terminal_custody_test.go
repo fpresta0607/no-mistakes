@@ -164,6 +164,21 @@ func TestAxiTerminalCustodyContinuation(t *testing.T) {
 	if err != nil || !ended.Status.Terminal() || ended.HeadSHA != repaired || ended.TerminalHeadVerifiedAt == nil {
 		t.Fatalf("aborted successor did not verify its later correction: %+v err=%v", ended, err)
 	}
+	// axi abort returns once the status is terminal, and the executor records
+	// the clean source state before that, so neither is a cleanup barrier.
+	// Cleanup removes a clean checkout only once an exact anchor protects its
+	// head, so its removal is the barrier the final check waits for.
+	_, statErr := os.Stat(managed)
+	for statErr == nil && time.Now().Before(abortDeadline) {
+		time.Sleep(50 * time.Millisecond)
+		_, statErr = os.Stat(managed)
+	}
+	if !os.IsNotExist(statErr) {
+		t.Fatalf("terminal cleanup did not release the anchored successor checkout: %v", statErr)
+	}
+	if ended, err = database.GetRun(childID); err != nil || ended.TerminalSourceState == nil || *ended.TerminalSourceState != "clean:"+repaired {
+		t.Fatalf("terminal cleanup did not observe the later correction as clean source: %+v err=%v", ended, err)
+	}
 	if preserved := gitIn(t, h, paths.WithRoot(h.NMHome).RepoDir(run.RepoID), "rev-parse", custody.RecoveryRef(childID)); preserved != repaired {
 		t.Fatal("later committed correction lost its exact recovery anchor during terminal cleanup")
 	}

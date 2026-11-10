@@ -1100,6 +1100,10 @@ func skipRunArtifactCleanup(ctx context.Context, run *db.Run, wtPath string) (bo
 			// "unreadable HEAD" ambiguity below - it is safe to proceed.
 			return false, ""
 		}
+		if !isCheckout(wtPath) {
+			// Git run here would read an enclosing work tree's HEAD instead.
+			return true, fmt.Sprintf("run %s ci monitor interrupted; worktree has no .git of its own; preserving", run.ID)
+		}
 		head, err := git.HeadSHA(ctx, wtPath)
 		if err != nil {
 			return true, fmt.Sprintf("run %s ci monitor interrupted; worktree head unreadable (%v); preserving", run.ID, err)
@@ -1111,11 +1115,30 @@ func skipRunArtifactCleanup(ctx context.Context, run *db.Run, wtPath string) (bo
 	return false, ""
 }
 
+// isCheckout reports whether dir still has its own .git. A missing or empty
+// directory has none, and neither has the leftover of a partial `git worktree
+// remove`, which deletes .git first on Windows. Git run from such a directory
+// would discover an enclosing work tree and inspect that instead.
+func isCheckout(dir string) bool {
+	_, err := os.Lstat(filepath.Join(dir, ".git"))
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+// terminalWorktreeSourceReason retains source only for a run terminal
+// continuation could still accept. Every other run's checkout, including a
+// completed run's untracked pipeline artifacts, follows ordinary cleanup and
+// the worktree retention bound.
 func terminalWorktreeSourceReason(ctx context.Context, database *db.DB, runID, workDir string) string {
-	if _, err := os.Stat(workDir); errors.Is(err, os.ErrNotExist) {
+	if !isCheckout(workDir) {
 		return ""
 	}
-	if entries, err := os.ReadDir(workDir); err == nil && len(entries) == 0 {
+	run, err := database.GetRun(runID)
+	if err != nil || run == nil {
+		return fmt.Sprintf("run %s publication provenance cannot be read; preserving", runID)
+	}
+	if mayContinue, err := database.SourceMayContinue(run); err != nil {
+		return fmt.Sprintf("run %s continuation eligibility cannot be read; preserving", runID)
+	} else if !mayContinue {
 		return ""
 	}
 	head, headErr := git.HeadSHA(ctx, workDir)
@@ -1132,10 +1155,6 @@ func terminalWorktreeSourceReason(ctx context.Context, database *db.DB, runID, w
 	adoption, err := database.GetTerminalAdoption(runID)
 	if err != nil {
 		return fmt.Sprintf("run %s source provenance cannot be read; preserving", runID)
-	}
-	run, err := database.GetRun(runID)
-	if err != nil || run == nil {
-		return fmt.Sprintf("run %s publication provenance cannot be read; preserving", runID)
 	}
 	// An original protected-path refusal can explicitly discard its working
 	// files. That permission never extends to adopted or later committed source.

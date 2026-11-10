@@ -212,7 +212,7 @@ func TestRefreshHandsAnAdoptedPredecessorsBranchToItsSuccessor(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			adoption, _, err := f.db.AdoptTerminalCandidate(f.ctx, db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: f.preserved, CandidateTree: mustRun(t, f.gate, "rev-parse", f.preserved+"^{tree}"), SourceRef: "refs/no-mistakes/terminal-candidate/successor", CallerDir: f.local, CallerHead: callerHead, Reason: "validate preserved source", Operator: "fixture", Assertion: assertion, Proof: proof})
+			adoption, err := f.db.AdoptTerminalCandidate(f.ctx, db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: f.preserved, CandidateTree: mustRun(t, f.gate, "rev-parse", f.preserved+"^{tree}"), SourceRef: "refs/no-mistakes/terminal-candidate/successor", CallerDir: f.local, CallerHead: callerHead, Reason: "validate preserved source", Operator: "fixture", Assertion: assertion, Proof: proof})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -65,7 +65,7 @@ func TestTerminalContinuationExcludesConcurrentWorktreeReaping(t *testing.T) {
 			gitCmd(t, managed, "update-ref", candidateRef, head)
 			event := db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: head, CandidateTree: gitOutput(t, managed, "rev-parse", "HEAD^{tree}"), SourceRef: candidateRef, GateHead: head, ManagedDir: managed, Reason: "validate preserved source", Operator: "fixture", Assertion: assertion, Proof: proof}
 			if isReplay {
-				accepted, _, err := database.AdoptTerminalCandidate(context.Background(), event)
+				accepted, err := database.AdoptTerminalCandidate(context.Background(), event)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -108,7 +108,7 @@ func TestTerminalContinuationExcludesConcurrentWorktreeReaping(t *testing.T) {
 					}
 				} else {
 					event.Snapshot = *current
-					if _, _, err := database.AdoptTerminalCandidate(context.Background(), event); err != nil {
+					if _, err := database.AdoptTerminalCandidate(context.Background(), event); err != nil {
 						return "", err
 					}
 				}
@@ -306,7 +306,7 @@ func TestTerminalCleanupPreservesCommittedCorrectionsBeforeAdoption(t *testing.T
 				if _, exists, err := git.ExactRefTarget(context.Background(), gateDir, custody.RecoveryRef(run.ID)); err != nil || exists {
 					t.Fatalf("cleanup manufactured a recovery anchor: exists=%v, %v", exists, err)
 				}
-				request := ipc.RecoverTerminalParams{RepoID: repo.ID, RunID: run.ID, Branch: run.Branch, CallerDir: repo.WorkingPath, SnapshotDigest: observed.Digest(), Reason: "validate committed terminal corrections"}
+				request := ipc.RecoverTerminalParams{RepoID: repo.ID, Branch: run.Branch, CallerDir: repo.WorkingPath, SnapshotDigest: observed.Digest(), Reason: "validate committed terminal corrections"}
 				accepted, err := manager.recoverTerminal(context.Background(), request, os.Getpid())
 				if err != nil || accepted.RunID == run.ID || accepted.PredecessorID != run.ID || accepted.CandidateSHA != candidate || !accepted.Started {
 					t.Fatalf("bound terminal recovery = %+v, %v", accepted, err)
@@ -400,6 +400,106 @@ func TestTerminalCleanupRequiresExactPreservationOrPushBeforeAdoption(t *testing
 	}
 }
 
+func TestTerminalCleanupReleasesSourceContinuationCanNeverAccept(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		status       types.RunStatus
+		arrange      func(*testing.T, *db.DB, *db.Run)
+		shouldRemove bool
+	}{
+		{name: "completed", status: types.RunCompleted, shouldRemove: true},
+		{name: "superseded", status: types.RunFailed, shouldRemove: true, arrange: func(t *testing.T, database *db.DB, run *db.Run) {
+			if _, err := database.InsertRun(run.RepoID, run.Branch, run.HeadSHA, run.BaseSHA); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "custody returned", status: types.RunFailed, shouldRemove: true, arrange: func(t *testing.T, database *db.DB, run *db.Run) {
+			if err := database.SetRunCustodyReturned(run.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "continuable", status: types.RunFailed, shouldRemove: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Arrange: the run left an untracked pipeline artifact at its head.
+			manager, p, database, repo, head, _, _ := launchAssertionFixture(t, nil)
+			run, err := database.InsertRun(repo.ID, "feature", head, head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			managed := p.WorktreeDir(repo.ID, run.ID)
+			gateDir := p.RepoDir(repo.ID)
+			if err := git.WorktreeAdd(context.Background(), gateDir, managed, head); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(managed, "test-output"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(managed, "test-output", "evidence.log"), []byte("pipeline artifact\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunErrorStatus(run.ID, "run ended", test.status); err != nil {
+				t.Fatal(err)
+			}
+			if test.arrange != nil {
+				test.arrange(t, database, run)
+			}
+
+			// Act
+			manager.removeRunWorktree(repo.ID, run.ID, gateDir, managed, "continuation eligibility regression")
+
+			// Assert
+			_, statErr := os.Stat(managed)
+			if os.IsNotExist(statErr) != test.shouldRemove || statErr != nil && !os.IsNotExist(statErr) {
+				t.Fatalf("cleanup removed=%v, want %v: %v", os.IsNotExist(statErr), test.shouldRemove, statErr)
+			}
+			current, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.shouldRemove && current.TerminalSourceState != nil {
+				t.Fatalf("cleanup scanned source no continuation can accept: %q", *current.TerminalSourceState)
+			}
+			if !test.shouldRemove && (current.TerminalSourceState == nil || *current.TerminalSourceState != "dirty:"+head) {
+				t.Fatalf("continuable source observation = %v, want dirty:%s", current.TerminalSourceState, head)
+			}
+		})
+	}
+}
+
+func TestWorktreeReapReclaimsALeftoverWithoutItsOwnGit(t *testing.T) {
+	// Arrange: a partial `git worktree remove` deleted .git first, and the
+	// home sits inside another work tree that Git discovery would reach.
+	manager, p, database, repo, head, _, _ := launchAssertionFixture(t, nil)
+	gitCmd(t, p.Root(), "init", "--quiet")
+	run, err := database.InsertRun(repo.ID, "feature", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leftover := p.WorktreeDir(repo.ID, run.ID)
+	if err := git.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), leftover, head); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(leftover, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunErrorStatus(run.ID, "run ended", types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+
+	// Act
+	manager.reapWorktrees(worktreeReapPolicy{Retention: time.Nanosecond}, time.Now().Add(time.Hour))
+
+	// Assert
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Fatalf("leftover without its own .git was kept: %v", err)
+	}
+	current, err := database.GetRun(run.ID)
+	if err != nil || current.TerminalSourceState != nil {
+		t.Fatalf("cleanup observed an enclosing work tree as the run's source: %+v, %v", current, err)
+	}
+}
+
 func TestTerminalAbortDoesNotExtendProtectedPathDisposal(t *testing.T) {
 	for _, test := range []struct {
 		name                 string
@@ -439,7 +539,7 @@ func TestTerminalAbortDoesNotExtendProtectedPathDisposal(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				adoption, _, err := f.db.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: head, CandidateTree: gitOutput(t, workDir, "rev-parse", "HEAD^{tree}"), SourceRef: custody.RecoveryRef(run.ID), Reason: "fixture source adoption", Operator: "fixture", Assertion: assertion, Proof: proof})
+				adoption, err := f.db.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: head, CandidateTree: gitOutput(t, workDir, "rev-parse", "HEAD^{tree}"), SourceRef: custody.RecoveryRef(run.ID), Reason: "fixture source adoption", Operator: "fixture", Assertion: assertion, Proof: proof})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -669,7 +769,7 @@ func TestTerminalRestart(t *testing.T) {
 		hasProvedBeforePlacement <- struct{}{}
 		return originalFetch(ctx, dir, remote, branch)
 	}
-	request := ipc.RecoverTerminalParams{RepoID: repo.ID, RunID: run.ID, Branch: "feature", CallerDir: repo.WorkingPath, SnapshotDigest: before.Digest(), Reason: "validate interrupted source"}
+	request := ipc.RecoverTerminalParams{RepoID: repo.ID, Branch: "feature", CallerDir: repo.WorkingPath, SnapshotDigest: before.Digest(), Reason: "validate interrupted source"}
 	var accepted ipc.RecoverTerminalResult
 	if err := client.CallWithTimeout(ipc.MethodRecoverTerminal, request, &accepted, 30*time.Second); err != nil {
 		t.Fatal(err)
@@ -916,7 +1016,7 @@ func TestTerminalRefusedPreflightDoesNotBindAnUnacceptedCandidate(t *testing.T) 
 	}
 	gitCmd(t, managed, "add", ".no-mistakes.yaml")
 	gitCmd(t, managed, "commit", "-m", "invalid candidate config")
-	request := ipc.RecoverTerminalParams{RepoID: repo.ID, RunID: run.ID, Branch: run.Branch, CallerDir: repo.WorkingPath, SnapshotDigest: before.Digest(), Reason: "validate corrected terminal source"}
+	request := ipc.RecoverTerminalParams{RepoID: repo.ID, Branch: run.Branch, CallerDir: repo.WorkingPath, SnapshotDigest: before.Digest(), Reason: "validate corrected terminal source"}
 	if _, err := manager.recoverTerminal(context.Background(), request, os.Getpid()); err == nil {
 		t.Fatal("invalid candidate config accepted")
 	}
@@ -999,14 +1099,14 @@ func TestTerminalContinuationRefusesAValidationOnlyAuthoredChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := ipc.RecoverTerminalParams{RepoID: repo.ID, RunID: child.ID, Branch: child.Branch, CallerDir: authored.CallerDir, SnapshotDigest: before.Digest(), Reason: "regain repairs for an authored child"}
+	request := ipc.RecoverTerminalParams{RepoID: repo.ID, Branch: child.Branch, CallerDir: authored.CallerDir, SnapshotDigest: before.Digest(), Reason: "regain repairs for an authored child"}
 
 	result, err := manager.recoverTerminal(context.Background(), request, os.Getpid())
 
 	if err == nil || !strings.Contains(err.Error(), "validation-only authored lineage") {
 		t.Fatalf("terminal continuation of an authored child = %+v, %v", result, err)
 	}
-	refs, err := git.Run(context.Background(), gate, "for-each-ref", "--format=%(refname)", "refs/no-mistakes/terminal-candidate/", "refs/no-mistakes/terminal-lane/")
+	refs, err := git.Run(context.Background(), gate, "for-each-ref", "--format=%(refname)", "refs/no-mistakes/terminal-candidate/")
 	if err != nil || refs != "" {
 		t.Fatalf("refused continuation pinned refs %q: %v", refs, err)
 	}
@@ -1033,7 +1133,7 @@ func TestTerminalPendingSuccessorSurvivesStartupWithoutAnExecutor(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	event, _, err := database.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, WorktreeRoot: filepath.Dir(p.WorktreeDir(repo.ID, parent.ID)), CandidateSHA: head, RetainedSHA: head, CandidateTree: gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD^{tree}"), Reason: "validate after restart", Operator: "fixture", Assertion: assertion, Proof: proof})
+	event, err := database.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, WorktreeRoot: filepath.Dir(p.WorktreeDir(repo.ID, parent.ID)), CandidateSHA: head, RetainedSHA: head, CandidateTree: gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD^{tree}"), Reason: "validate after restart", Operator: "fixture", Assertion: assertion, Proof: proof})
 	if err != nil {
 		t.Fatal(err)
 	}

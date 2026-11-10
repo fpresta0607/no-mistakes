@@ -78,7 +78,7 @@ func TestTerminalContinuationKeepsCancelledPredecessorImmutable(t *testing.T) {
 		t.Fatal(err)
 	}
 	event.Snapshot = *before
-	if _, _, err := database.AdoptTerminalCandidate(context.Background(), event); err != nil {
+	if _, err := database.AdoptTerminalCandidate(context.Background(), event); err != nil {
 		t.Fatal(err)
 	}
 	after, err := database.ReadContinuationSnapshot(before.Run.ID)
@@ -102,9 +102,9 @@ func TestTerminalAdoptionKeepsHistoryAndOriginalLaunchReceipt(t *testing.T) {
 	event.Gates = `[{"name":"fresh-required","after":"test","command":"exit 0"}]`
 	before := &event.Snapshot
 	run := &before.Run
-	accepted, created, err := database.AdoptTerminalCandidate(context.Background(), event)
-	if err != nil || !created {
-		t.Fatalf("adoption = %+v, %v, %v", accepted, created, err)
+	accepted, err := database.AdoptTerminalCandidate(context.Background(), event)
+	if err != nil {
+		t.Fatalf("adoption = %+v, %v", accepted, err)
 	}
 	after, err := database.ReadContinuationSnapshot(run.ID)
 	if err != nil {
@@ -126,16 +126,47 @@ func TestTerminalAdoptionKeepsHistoryAndOriginalLaunchReceipt(t *testing.T) {
 	if !reflect.DeepEqual(child.Run.LaunchAssertion, event.Assertion) || !reflect.DeepEqual(child.Run.LaunchAssertionProof, event.Proof) || !reflect.DeepEqual(child.Run.LaunchValidationGeneration, run.LaunchValidationGeneration) || child.Run.LaunchNonce == nil || *child.Run.LaunchNonce == *run.LaunchNonce {
 		t.Fatal("successor lacks fresh proof and nonce under frozen policy")
 	}
-	replayed, isNew, err := database.AdoptTerminalCandidate(context.Background(), event)
-	if err != nil || isNew || !reflect.DeepEqual(replayed, accepted) {
-		t.Fatalf("independent replay = %+v %v %v", replayed, isNew, err)
+	if repeated, err := database.AdoptTerminalCandidate(context.Background(), event); err == nil {
+		t.Fatalf("a repeated acceptance created another successor: %+v", repeated)
 	}
 	if _, err := database.sql.Exec(`UPDATE terminal_adoptions SET event_json = '{}' WHERE run_id = ?`, run.ID); err == nil {
 		t.Fatal("accepted provenance could be rewritten")
 	}
 	event.CandidateTree = strings.Repeat("f", 40)
-	if _, _, err := database.AdoptTerminalCandidate(context.Background(), event); err == nil {
+	if _, err := database.AdoptTerminalCandidate(context.Background(), event); err == nil {
 		t.Fatal("different recovery binding replaced the original")
+	}
+}
+
+func TestTerminalAdoptionRefusesASuccessorAsPredecessor(t *testing.T) {
+	// Arrange: a successor that failed after acceptance is the branch's latest
+	// terminal run, which is exactly what a raw caller could once name.
+	database, event := newTerminalAdoptionFixture(t)
+	accepted, err := database.AdoptTerminalCandidate(context.Background(), event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunErrorStatusWithVerifiedHead(accepted.Successor.ID, "interrupted", types.RunFailed, accepted.CandidateSHA); err != nil {
+		t.Fatal(err)
+	}
+	successor, err := database.ReadContinuationSnapshot(accepted.Successor.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chained := TerminalAdoption{Snapshot: *successor, CandidateSHA: accepted.CandidateSHA, CandidateTree: accepted.CandidateTree, SourceRef: event.SourceRef, Reason: "continue the continuation", Operator: "fixture", Assertion: event.Assertion, Proof: event.Proof}
+
+	// Act
+	adopted, err := database.AdoptTerminalCandidate(context.Background(), chained)
+
+	// Assert
+	if err == nil || !strings.Contains(err.Error(), "successor cannot be adopted") {
+		t.Fatalf("successor adopted as a predecessor: %+v, %v", adopted, err)
+	}
+	if record, err := database.GetTerminalAdoption(accepted.Successor.ID); err != nil || record != nil {
+		t.Fatalf("refusal recorded a chained acceptance: %+v, %v", record, err)
+	}
+	if runs, err := database.GetRunsByRepo(event.Snapshot.Repo.ID); err != nil || len(runs) != 2 {
+		t.Fatalf("refusal changed the run family: %d runs, %v", len(runs), err)
 	}
 }
 
@@ -184,7 +215,7 @@ func TestTerminalAdoptionRefusalIsAtomic(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, _, err := database.AdoptTerminalCandidate(context.Background(), event); err == nil {
+			if _, err := database.AdoptTerminalCandidate(context.Background(), event); err == nil {
 				t.Fatal("invalid adoption was accepted")
 			}
 			after, err := database.ReadContinuationSnapshot(runID)
@@ -204,10 +235,10 @@ func TestTerminalAdoptionRefusesChangedOrProgressedSuccessor(t *testing.T) {
 			database, event := newTerminalAdoptionFixture(t)
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
-			if _, _, err := database.AdoptTerminalCandidate(ctx, event); err == nil {
+			if _, err := database.AdoptTerminalCandidate(ctx, event); err == nil {
 				t.Fatal("cancelled transaction accepted")
 			}
-			accepted, _, err := database.AdoptTerminalCandidate(context.Background(), event)
+			accepted, err := database.AdoptTerminalCandidate(context.Background(), event)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -250,10 +281,10 @@ func TestTerminalAdoptionRefusesChangedOrProgressedSuccessor(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			repeated, isNew, err := database.AdoptTerminalCandidate(context.Background(), event)
+			err = database.ValidateTerminalSuccessor(accepted)
 			if state == "untouched" {
-				if err != nil || isNew || !reflect.DeepEqual(repeated, accepted) {
-					t.Fatalf("repeat: %+v %v %v", repeated, isNew, err)
+				if err != nil {
+					t.Fatalf("untouched successor refused: %v", err)
 				}
 			} else if err == nil {
 				t.Fatal("changed successor accepted")
@@ -292,9 +323,8 @@ func TestTerminalSuccessorSerializesIndependentAcceptances(t *testing.T) {
 	defer independent.Close()
 	start := make(chan struct{})
 	type result struct {
-		event   *TerminalAdoption
-		created bool
-		err     error
+		event *TerminalAdoption
+		err   error
 	}
 	results := make(chan result, 2)
 	var workers sync.WaitGroup
@@ -303,28 +333,21 @@ func TestTerminalSuccessorSerializesIndependentAcceptances(t *testing.T) {
 		go func() {
 			defer workers.Done()
 			<-start
-			accepted, created, err := handle.AdoptTerminalCandidate(context.Background(), event)
-			results <- result{accepted, created, err}
+			accepted, err := handle.AdoptTerminalCandidate(context.Background(), event)
+			results <- result{accepted, err}
 		}()
 	}
 	close(start)
 	workers.Wait()
 	close(results)
-	childID, createdCount := "", 0
+	createdCount := 0
 	for result := range results {
-		if result.err != nil {
-			t.Fatal(result.err)
-		}
-		if childID != "" && childID != result.event.Successor.ID {
-			t.Fatal("race created distinct successors")
-		}
-		childID = result.event.Successor.ID
-		if result.created {
+		if result.err == nil {
 			createdCount++
 		}
 	}
 	if createdCount != 1 {
-		t.Fatalf("created=%d", createdCount)
+		t.Fatalf("independent acceptances created %d successors, want exactly 1", createdCount)
 	}
 	runs, err := database.GetRunsByRepo(event.Snapshot.Repo.ID)
 	if err != nil || len(runs) != 2 {
@@ -362,7 +385,7 @@ func TestTerminalSuccessorCountsManualAndAutomaticFamilySpending(t *testing.T) {
 				t.Fatal(err)
 			}
 			event.Snapshot = *snapshot
-			accepted, _, err := database.AdoptTerminalCandidate(context.Background(), event)
+			accepted, err := database.AdoptTerminalCandidate(context.Background(), event)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -392,7 +415,7 @@ func TestTerminalSuccessorCountsManualAndAutomaticFamilySpending(t *testing.T) {
 
 func TestTerminalPredecessorRejectsHistoryMutation(t *testing.T) {
 	database, event := newTerminalAdoptionFixture(t)
-	if _, _, err := database.AdoptTerminalCandidate(context.Background(), event); err != nil {
+	if _, err := database.AdoptTerminalCandidate(context.Background(), event); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.UpdateRunStatus(event.Snapshot.Run.ID, types.RunRunning); err == nil {
@@ -436,7 +459,7 @@ func TestTerminalSuccessorInheritsPublicBindingWithoutValidationStamps(t *testin
 		t.Fatal(err)
 	}
 	event.Snapshot = *snapshot
-	accepted, _, err := database.AdoptTerminalCandidate(context.Background(), event)
+	accepted, err := database.AdoptTerminalCandidate(context.Background(), event)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +485,7 @@ func TestTerminalSuccessorInheritsPublicBindingWithoutValidationStamps(t *testin
 
 func TestTerminalHistoryLeavesOnlyWithItsRepository(t *testing.T) {
 	database, event := newTerminalAdoptionFixture(t)
-	adopted, _, err := database.AdoptTerminalCandidate(context.Background(), event)
+	adopted, err := database.AdoptTerminalCandidate(context.Background(), event)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -516,7 +539,7 @@ func TestTerminalSuccessorKeepsTheConfiguredAllowanceOfAnUnreachedPhase(t *testi
 		t.Fatal(err)
 	}
 	event.Snapshot = *snapshot
-	adopted, _, err := database.AdoptTerminalCandidate(context.Background(), event)
+	adopted, err := database.AdoptTerminalCandidate(context.Background(), event)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -534,7 +557,7 @@ func TestTerminalSuccessorKeepsTheConfiguredAllowanceOfAnUnreachedPhase(t *testi
 
 func TestTerminalSuccessorBudgetSurvivesARepositoryRegistrationChange(t *testing.T) {
 	database, event := newTerminalAdoptionFixture(t)
-	adopted, _, err := database.AdoptTerminalCandidate(context.Background(), event)
+	adopted, err := database.AdoptTerminalCandidate(context.Background(), event)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,7 +574,7 @@ func TestTerminalSuccessorBudgetSurvivesARepositoryRegistrationChange(t *testing
 
 func TestTerminalSuccessorGivesAnUnrecordedPhaseNoAutomaticAllowance(t *testing.T) {
 	database, event := newTerminalAdoptionFixture(t)
-	adopted, _, err := database.AdoptTerminalCandidate(context.Background(), event)
+	adopted, err := database.AdoptTerminalCandidate(context.Background(), event)
 	if err != nil {
 		t.Fatal(err)
 	}

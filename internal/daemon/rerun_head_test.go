@@ -189,7 +189,7 @@ func TestRerunOfAnUnmovedSuccessorSelectsTheCandidateItsCallerNeverHad(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			adoption, _, err := d.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: candidate, CandidateTree: gitOutput(t, gate, "rev-parse", candidate+"^{tree}"), SourceRef: "refs/no-mistakes/terminal-candidate/successor", CallerDir: repo.WorkingPath, CallerHead: submitted, Reason: "validate preserved source", Operator: "fixture", Assertion: assertion, Proof: proof})
+			adoption, err := d.AdoptTerminalCandidate(context.Background(), db.TerminalAdoption{Snapshot: *snapshot, CandidateSHA: candidate, CandidateTree: gitOutput(t, gate, "rev-parse", candidate+"^{tree}"), SourceRef: "refs/no-mistakes/terminal-candidate/successor", CallerDir: repo.WorkingPath, CallerHead: submitted, Reason: "validate preserved source", Operator: "fixture", Assertion: assertion, Proof: proof})
 			if err != nil {
 				t.Fatal(err)
 			}
