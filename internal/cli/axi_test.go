@@ -374,6 +374,51 @@ func TestGateHelpForUnvalidatedTestWorkDoesNotOfferSkip(t *testing.T) {
 	}
 }
 
+func TestGateHelpForARepairCutNeverOffersApproval(t *testing.T) {
+	cut, err := types.ParseFindingsJSON(pipeline.RepairBudgetOutcome(&pipeline.RepairBudgetCutError{Cut: errors.New("agent fix reached its invocation budget")}).Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exhausted := types.Finding{ID: types.FindingIDReviewFixRoundsExhausted, Severity: "warning", Action: types.ActionAskUser, Description: "Review used 1/1 fix rounds"}
+	cases := []struct {
+		name  string
+		items []types.Finding
+		want  []string
+		avoid []string
+	}{
+		{
+			name:  "with fix rounds left",
+			items: cut.Items,
+			want:  []string{"--action fix --findings " + types.FindingIDRepairAgentBudget, "Do not skip this step", "`no-mistakes axi abort`"},
+			avoid: []string{"--action approve", "--action skip"},
+		},
+		{
+			name:  "with the fix rounds spent",
+			items: append(append([]types.Finding(nil), cut.Items...), exhausted),
+			want:  []string{"--action skip", "fix-round budget is exhausted", "`no-mistakes axi abort`"},
+			avoid: []string{"--action approve", "--action fix"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gate := stepView{Name: "review", Status: "fix_review", FindingsJSON: findingsJSON(t, tc.items, cut.Summary)}
+
+			out := axiDoc(gateFields(gate)...)
+
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("gate help missing %q:\n%s", want, out)
+				}
+			}
+			for _, avoid := range tc.avoid {
+				if strings.Contains(out, avoid) {
+					t.Errorf("gate help offers %q, which the executor refuses or which would publish unchecked work:\n%s", avoid, out)
+				}
+			}
+		})
+	}
+}
+
 func TestGateHelpForProtectedPathRefusalWithExhaustedReviewBudget(t *testing.T) {
 	protected, err := types.ParseFindingsJSON(pipeline.ProtectedPathOutcome(&pipeline.ProtectedPathError{Path: "package.lock", Rule: "*.lock"}).Findings)
 	if err != nil {

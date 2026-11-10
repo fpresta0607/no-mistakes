@@ -466,7 +466,11 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 				return RespondDispositions{}, refusal
 			}
 		}
-		split, err := splitFixResponse(e.waitingFindings, rounds, findingIDs, ignoreFindingIDs)
+		accountedGate := e.waitingFindings
+		if isRepairCutRecheck(findingIDs, ignoreFindingIDs, addedFindings) {
+			accountedGate = filterFindingsJSON(accountedGate, findingIDs)
+		}
+		split, err := splitFixResponse(accountedGate, rounds, findingIDs, ignoreFindingIDs)
 		if err != nil {
 			e.mu.Unlock()
 			return RespondDispositions{}, err
@@ -1601,7 +1605,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	var pendingVerificationIDs []string
 	selectedOutstandingIDs := state.selectedOutstandingIDs
 	if carryFindings {
-		outstandingFindings = excludeFindingsJSON(state.outstandingFindings, []string{types.FindingIDReviewFixRoundsExhausted})
+		outstandingFindings = excludeFindingsJSON(state.outstandingFindings, reviewBudgetNoticeIDs)
 		pendingVerificationIDs = append([]string(nil), state.selectedOutstandingIDs...)
 		// An answer round is a round type the append-only set was not written
 		// for, and it does NOT earn pending-verification entries. A fix round
@@ -1819,6 +1823,10 @@ rounds:
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
+		if cut := RepairBudgetOutcome(err); cut != nil {
+			writeLog(safeurl.RedactText(err.Error()))
+			outcome, err = cut, nil
+		}
 		refusal := safetyRefusalOutcome(err)
 		if refusal != nil {
 			writeLog(safeurl.RedactText(err.Error()))
@@ -1897,9 +1905,9 @@ rounds:
 			// that has nothing to do with it.
 			verificationFindings := dropReviewQuestionFindingsJSON(roundFindings)
 			outstandingFindings = dropReviewQuestionFindingsJSON(outstandingFindings)
-			// The budget notice is re-derived, never a code finding whose
-			// absent file anchor can prevent positive verification.
-			outstandingFindings = excludeFindingsJSON(outstandingFindings, []string{types.FindingIDReviewFixRoundsExhausted})
+			// A budget notice is re-derived, never a code finding whose absent
+			// file anchor can prevent positive verification.
+			outstandingFindings = excludeFindingsJSON(outstandingFindings, reviewBudgetNoticeIDs)
 			// An answer round retracts by naming ids, never by silence - and
 			// ONLY an answer round. A fix round is held to the coverage rule,
 			// so a retraction it claimed would clear a selected finding no
@@ -2382,6 +2390,9 @@ func (e *Executor) approvalVerifier(step Step, sctx *StepContext) func() (string
 func (e *Executor) persistResponseDecision(step types.StepName, response approvalResponse, previous string) error {
 	if e.db == nil || e.waitingRoundID == "" {
 		return fmt.Errorf("record the response's decision: no round is in flight for step %s", step)
+	}
+	if isRepairCutRecheck(response.findingIDs, response.ignoreFindingIDs, response.addedFindings) {
+		return e.db.SetStepResponseOrigin(e.waitingStepResultID, response.origin)
 	}
 	_, _, _, persisted := normalizeFixSelection(e.waitingFindings, response, step == types.StepReview)
 	if previous != "" {
