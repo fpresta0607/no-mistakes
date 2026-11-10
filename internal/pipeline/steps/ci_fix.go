@@ -1114,7 +1114,7 @@ func restampPRAttestationWithSteps(ctx context.Context, host scm.Host, pr *scm.P
 			}
 			// Azure's adapter clamps ordinary descriptions. Owned writes must
 			// fail before that boundary can cut off author text or the digest.
-			if rebound {
+			if rebound && hasPRAppendixMarkers(updated) {
 				if err := validateOwnedPRBudget(updated, scm.HostMaxPRBodyChars(host)); err != nil {
 					return err
 				}

@@ -238,12 +238,16 @@ func buildPipelineAttestationWithPolicy(steps []*db.StepResult, rounds map[strin
 	if err != nil {
 		return ""
 	}
-	redacted := redactPRContent(prContent{Body: string(payload)}, policy.RunWorktree, nmWorktreesRoot(), policy.RunEvidence).Body
+	redacted := redactAttestationText(string(payload), policy)
 	return renderPipelineAttestation(redacted)
 }
 
 func renderPipelineAttestation(payload string) string {
 	return pipelineAttestationCommentPrefix + strings.ReplaceAll(payload, " ", `\u0020`) + pipelineAttestationCommentClosingToken
+}
+
+func redactAttestationText(text string, policy pipelineAttestationPolicy) string {
+	return redactPRContent(prContent{Body: text}, policy.RunWorktree, nmWorktreesRoot(), policy.RunEvidence).Body
 }
 
 func newPipelineAttestation(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, policy pipelineAttestationPolicy) pipelineAttestation {
@@ -260,12 +264,12 @@ func newPipelineAttestation(steps []*db.StepResult, rounds map[string][]*db.Step
 			Status: sr.Status,
 		}
 		if sr.StepName == types.StepTest {
-			item.TestException = neutralizePRControls(sr.TestOverrideReason())
+			item.TestException = redactAttestationText(sr.TestOverrideReason(), policy)
 		}
 		if sr.StepName == types.StepTest && sr.OverrideReason != nil {
 			// Free text: JSON would write a control byte as \u00XX, which the
 			// publication boundary rewrites into a form that is not valid JSON.
-			item.OverrideReason = neutralizePRControls(strings.TrimSpace(*sr.OverrideReason))
+			item.OverrideReason = redactAttestationText(strings.TrimSpace(*sr.OverrideReason), policy)
 			if item.OverrideReason != "" {
 				attestation.AllowTestCommandOverride = neutralizePRControls(strings.TrimSpace(policy.AllowTestCommandOverride))
 			}
@@ -413,7 +417,7 @@ func rebindPipelineAttestationWithSteps(body, newHeadSHA string, steps []*db.Ste
 		// first refresh adds both representations together.
 		for index := range rebound.Steps {
 			if rebound.Steps[index].Step == types.StepTest {
-				rebound.Steps[index].TestException = neutralizePRControls(retainedTestException)
+				rebound.Steps[index].TestException = redactAttestationText(retainedTestException, policy)
 			}
 		}
 	}
@@ -425,7 +429,7 @@ func rebindPipelineAttestationWithSteps(body, newHeadSHA string, steps []*db.Ste
 	if err != nil {
 		return body, false
 	}
-	redacted := redactPRContent(prContent{Body: string(payload)}, policy.RunWorktree, nmWorktreesRoot(), policy.RunEvidence).Body
+	redacted := redactAttestationText(string(payload), policy)
 	rebuilt := renderPipelineAttestation(redacted)
 	oldEnd := end + len(pipelineAttestationCommentClosingToken)
 	if body[start:oldEnd] == rebuilt {

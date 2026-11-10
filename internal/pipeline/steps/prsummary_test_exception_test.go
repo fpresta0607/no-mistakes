@@ -246,12 +246,12 @@ func TestRebindPipelineAttestation_PreservesTestException(t *testing.T) {
 				}
 			})
 		}
+		if !isOwned {
+			continue
+		}
 		for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderAzureDevOps} {
-			t.Run(fmt.Sprintf("budget/owned=%v/%s", isOwned, provider), func(t *testing.T) {
-				marker := buildPipelineAttestation([]*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted}}, nil, oldHead)
-				if isOwned {
-					marker = wrapPRAppendix(marker)
-				}
+			t.Run(fmt.Sprintf("budget/owned/%s", provider), func(t *testing.T) {
+				marker := wrapPRAppendix(buildPipelineAttestation([]*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted}}, nil, oldHead))
 				prefix, approval := "", strings.Repeat("x", 4000)
 				if provider == scm.ProviderGitHub {
 					prefix, approval = strings.Repeat("author-byte-contract\n", 2100), strings.Repeat("x", 33000)
@@ -432,5 +432,72 @@ func TestRestampRedactsTheRunEvidenceDirectoryFromTheTestException(t *testing.T)
 	published := parsePipelineAttestationForTest(t, host.body)
 	if published.Steps[0].TestException != "live validation verdict: inconclusive\nTest exception approved: Retained proof at {run-evidence}/report.txt" {
 		t.Fatalf("restamp did not redact the evidence directory to its placeholder: %+v", published)
+	}
+}
+
+func TestTestExceptionRoutesRedactPathsAfterJSONEscapedCharacters(t *testing.T) {
+	t.Parallel()
+	root := "D:/private/worktree/run"
+	for _, separator := range []string{"<", ">", "&"} {
+		t.Run(separator, func(t *testing.T) {
+			t.Parallel()
+			private := separator + "/home/private-person/out.log " + separator + root + "/out.log"
+			redacted := separator + "~/out.log " + separator + "{run-worktree}/out.log"
+			override, reason := "wrapper refused "+private, "go test ./... "+private
+			steps := []*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted, OverrideReason: &override, ApprovalReason: &reason}}
+			wantException := "wrapper refused " + redacted + "\nTest exception approved: go test ./... " + redacted
+			wantOverride := "wrapper refused " + redacted
+			policy := pipelineAttestationPolicy{RunWorktree: root}
+			assertPublished := func(route, body string) {
+				t.Helper()
+				if strings.Contains(body, "private") {
+					t.Fatalf("%s published a private path: %s", route, body)
+				}
+				published := parsePipelineAttestationForTest(t, body)
+				if len(published.Steps) != 1 || published.Steps[0].TestException != wantException || published.Steps[0].OverrideReason != wantOverride {
+					t.Fatalf("%s published an unexpected Test record: %+v", route, published)
+				}
+			}
+
+			markdown, _ := buildPipelineSummaryFor(steps, nil, testPipelineHeadSHA, scm.ProviderGitHub, policy)
+			prStepBody := redactPRContent(prContent{Body: markdown}, root, "", "").Body
+			assertPublished("PR step", prStepBody)
+
+			refreshed, err := refreshPRTestException(prStepBody, testPipelineHeadSHA, steps, root, "", scm.ProviderGitHub)
+			if err != nil {
+				t.Fatalf("refresh refused the body the PR step published: %v", err)
+			}
+			assertPublished("refresh", refreshed)
+
+			for _, restampSteps := range [][]*db.StepResult{nil, steps} {
+				host := &attestationTestHost{body: prStepBody, provider: scm.ProviderGitHub}
+				if err := restampPRAttestationWithSteps(context.Background(), host, &scm.PR{Number: "42"}, strings.Repeat("b", 40), restampSteps, nil, policy); err != nil {
+					t.Fatal(err)
+				}
+				assertPublished(fmt.Sprintf("restamp (steps=%v)", restampSteps != nil), host.body)
+			}
+		})
+	}
+}
+
+func TestRestampOfAnUnownedBodyNearTheInternalByteCapSucceeds(t *testing.T) {
+	t.Parallel()
+	attestation := buildPipelineAttestation([]*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted}}, nil, strings.Repeat("a", 40))
+	author := strings.Repeat("x", maxPullRequestBodyBytes-len(attestation)-2) + "\n\n"
+	host := &attestationTestHost{body: author + attestation, provider: scm.ProviderGitHub}
+	reason := "operator accepted the inconclusive live check"
+	findings := `{"verdict":"inconclusive","findings":[]}`
+	steps := []*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings, ApprovalReason: &reason}}
+
+	err := restampPRAttestationWithSteps(context.Background(), host, &scm.PR{Number: "42"}, strings.Repeat("b", 40), steps, nil, pipelineAttestationPolicy{})
+
+	if err != nil {
+		t.Fatalf("restamp of an unowned body within the host limit failed: %v", err)
+	}
+	if host.updates != 1 || !strings.HasPrefix(host.body, author) || len(host.body) <= maxPullRequestBodyBytes || len(host.body) > githubPullRequestBodyHardLimitChars {
+		t.Fatalf("restamp did not publish the grown attestation after the author text: updates=%d, bytes=%d", host.updates, len(host.body))
+	}
+	if published := parsePipelineAttestationForTest(t, host.body); published.HeadSHA != strings.Repeat("b", 40) || published.Steps[0].TestException == "" {
+		t.Fatalf("restamp did not attest the new head with the Test exception: %+v", published)
 	}
 }
