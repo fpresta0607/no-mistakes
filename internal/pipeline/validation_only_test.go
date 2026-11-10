@@ -73,6 +73,72 @@ func validationOnlyFixture(t *testing.T) (*db.DB, *paths.Paths, *db.Run, *db.Rep
 	return database, root, child, repo
 }
 
+// validationParkTimeout bounds the wait from Execute to the gate parking. That
+// span is the whole run start, including creating the managed worktree with
+// several Git commands, which took 5 to 18 seconds on a loaded Windows host
+// (issue #75), so it matches the daemon tests' one-minute terminal-state waits.
+const validationParkTimeout = time.Minute
+
+// startParkedValidation starts Execute and returns its context once the
+// executor parks at stepName, failing the test if it does not within
+// validationParkTimeout, or at once if the run ends first. The run's context
+// carries no deadline of its own: a shorter one cancelled the run mid-start on
+// a loaded host before it could park. Cleanup cancels the run and waits for
+// Execute to return, so a parked step releases its files before t.TempDir
+// removes them.
+func startParkedValidation(t *testing.T, executor *Executor, child *db.Run, repo *db.Repo, stepName types.StepName) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	var runErr error
+	finished := make(chan struct{})
+	go func() {
+		runErr = executor.Execute(ctx, child, repo, repo.WorkingPath)
+		close(finished)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-finished:
+		case <-time.After(6 * time.Second):
+			t.Error("executor did not stop")
+		}
+	})
+	for deadline := time.Now().Add(validationParkTimeout); time.Now().Before(deadline); {
+		executor.mu.Lock()
+		isParked := executor.waiting && executor.waitingStep == stepName
+		executor.mu.Unlock()
+		if isParked {
+			return ctx
+		}
+		select {
+		case <-finished:
+			t.Fatalf("fresh validation ended before parking at %s: %v", stepName, runErr)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	t.Fatalf("fresh validation did not park at %s within %s", stepName, validationParkTimeout)
+	return nil
+}
+
+func TestValidationOnlyParkWaitOutlastsASlowRunStart(t *testing.T) {
+	t.Parallel()
+	database, root, child, repo := validationOnlyFixture(t)
+	// Longer than the earlier 3 second park wait and 5 second run deadline,
+	// standing in for a cold worktree setup on a loaded Windows host.
+	const slowRunStart = 6 * time.Second
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+		time.Sleep(slowRunStart)
+		return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"r1","severity":"error","file":"file.go","description":"repair needed","action":"auto-fix"}]}`}, nil
+	}}
+	executor := NewExecutor(database, root, &config.Config{AutoFix: config.AutoFix{Review: 5}}, nil, []Step{step}, nil)
+
+	startParkedValidation(t, executor, child, repo, types.StepReview)
+
+	if err := executor.Respond(types.StepReview, types.ActionFix, []string{"r1"}); err == nil {
+		t.Error("accepted fix despite zero repair authority")
+	}
+}
+
 func TestValidationOnlyNeverDispatchesAutomaticOrManualRepairs(t *testing.T) {
 	for _, name := range []types.StepName{types.StepIntent, types.StepRebase, types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush, types.StepPR, types.StepCI, "gate.review.extra"} {
 		t.Run(string(name), func(t *testing.T) {
@@ -87,25 +153,7 @@ func TestValidationOnlyNeverDispatchesAutomaticOrManualRepairs(t *testing.T) {
 			}}
 			configuration := &config.Config{AutoFix: config.AutoFix{Review: 5, Test: 5, Document: 5, Lint: 5, Rebase: 5, CI: 5}}
 			executor := NewExecutor(database, root, configuration, nil, []Step{step}, nil)
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			done := make(chan error, 1)
-			go func() { done <- executor.Execute(ctx, child, repo, repo.WorkingPath) }()
-			isParked := false
-			for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
-				executor.mu.Lock()
-				isParked = executor.waiting
-				executor.mu.Unlock()
-				if isParked {
-					break
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			if !isParked {
-				cancel()
-				<-done
-				t.Fatal("fresh validation did not park")
-			}
+			startParkedValidation(t, executor, child, repo, name)
 			resultRows, err := database.GetStepsByRun(child.ID)
 			if err != nil || len(resultRows) != 1 || resultRows[0].AutoFixLimit == nil || *resultRows[0].AutoFixLimit != 0 {
 				t.Errorf("zero repair authority was not explicitly recorded: %+v %v", resultRows, err)
@@ -117,12 +165,6 @@ func TestValidationOnlyNeverDispatchesAutomaticOrManualRepairs(t *testing.T) {
 			}
 			if calls.Load() != 1 {
 				t.Errorf("dispatched %d turns instead of one fresh validation", calls.Load())
-			}
-			cancel()
-			select {
-			case <-done:
-			case <-time.After(6 * time.Second):
-				t.Fatal("executor did not stop")
 			}
 		})
 	}
@@ -150,25 +192,7 @@ func TestValidationOnlyRefusesCIHandbackBeforeRelease(t *testing.T) {
 			database, root, child, repo := validationOnlyFixture(t)
 			step := &handbackCountingCIStep{}
 			executor := NewExecutor(database, root, &config.Config{}, nil, []Step{step}, nil)
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			done := make(chan error, 1)
-			go func() { done <- executor.Execute(ctx, child, repo, repo.WorkingPath) }()
-			isParked := false
-			for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
-				executor.mu.Lock()
-				isParked = executor.waiting && executor.waitingStep == types.StepCI
-				executor.mu.Unlock()
-				if isParked {
-					break
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			if !isParked {
-				cancel()
-				<-done
-				t.Fatal("fresh validation did not park at CI")
-			}
+			ctx := startParkedValidation(t, executor, child, repo, types.StepCI)
 
 			_, err := executor.HandbackCI(ctx, ipc.CIHandbackParams{RunID: child.ID, RepoID: repo.ID, Branch: child.Branch, Resume: isResume})
 
@@ -183,12 +207,6 @@ func TestValidationOnlyRefusesCIHandbackBeforeRelease(t *testing.T) {
 			executor.mu.Unlock()
 			if !isStillParked || isReleased {
 				t.Errorf("refused handback changed the CI gate: parked=%t released=%t", isStillParked, isReleased)
-			}
-			cancel()
-			select {
-			case <-done:
-			case <-time.After(6 * time.Second):
-				t.Fatal("executor did not stop")
 			}
 		})
 	}
