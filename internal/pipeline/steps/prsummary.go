@@ -71,6 +71,8 @@ type pipelineAttestationStep struct {
 	// a failing configured commands.test. Omitted for every other step, ordinary
 	// Test completions, and attestations that predate the field.
 	OverrideReason string `json:"override_reason,omitempty"`
+	// TestException records broader Test approvals without granting a configured-command waiver.
+	TestException string `json:"test_exception,omitempty"`
 }
 
 // pipelineAttestationLiveValidation reports the run's verdict and how much of
@@ -131,6 +133,8 @@ func BuildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.Ste
 
 type pipelineAttestationPolicy struct {
 	AllowTestCommandOverride string
+	RunWorktree              string
+	RunEvidence              string
 }
 
 func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, provider scm.Provider, policy pipelineAttestationPolicy) (string, string) {
@@ -201,6 +205,10 @@ func buildPipelineSummaryWithVisibility(steps []*db.StepResult, rounds map[strin
 		b.WriteString(buildPipelineAttestationWithPolicy(steps, rounds, headSHA, policy))
 		b.WriteString("\n\n")
 	}
+	if exception := renderTestExceptionSection(steps, provider, policy.RunWorktree, policy.RunEvidence); exception != "" {
+		b.WriteString(exception)
+		b.WriteString("\n\n")
+	}
 	for i, detail := range detailBlocks {
 		if i > 0 {
 			b.WriteString("\n")
@@ -230,7 +238,16 @@ func buildPipelineAttestationWithPolicy(steps []*db.StepResult, rounds map[strin
 	if err != nil {
 		return ""
 	}
-	return pipelineAttestationCommentPrefix + string(payload) + pipelineAttestationCommentClosingToken
+	redacted := redactAttestationText(string(payload), policy)
+	return renderPipelineAttestation(redacted)
+}
+
+func renderPipelineAttestation(payload string) string {
+	return pipelineAttestationCommentPrefix + strings.ReplaceAll(payload, " ", `\u0020`) + pipelineAttestationCommentClosingToken
+}
+
+func redactAttestationText(text string, policy pipelineAttestationPolicy) string {
+	return redactPRContent(prContent{Body: text}, policy.RunWorktree, nmWorktreesRoot(), policy.RunEvidence).Body
 }
 
 func newPipelineAttestation(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, policy pipelineAttestationPolicy) pipelineAttestation {
@@ -246,10 +263,13 @@ func newPipelineAttestation(steps []*db.StepResult, rounds map[string][]*db.Step
 			Step:   sr.StepName,
 			Status: sr.Status,
 		}
+		if sr.StepName == types.StepTest {
+			item.TestException = redactAttestationText(sr.TestOverrideReason(), policy)
+		}
 		if sr.StepName == types.StepTest && sr.OverrideReason != nil {
 			// Free text: JSON would write a control byte as \u00XX, which the
 			// publication boundary rewrites into a form that is not valid JSON.
-			item.OverrideReason = neutralizePRControls(strings.TrimSpace(*sr.OverrideReason))
+			item.OverrideReason = redactAttestationText(strings.TrimSpace(*sr.OverrideReason), policy)
 			if item.OverrideReason != "" {
 				attestation.AllowTestCommandOverride = neutralizePRControls(strings.TrimSpace(policy.AllowTestCommandOverride))
 			}
@@ -371,7 +391,9 @@ func rebindPipelineAttestationWithSteps(body, newHeadSHA string, steps []*db.Ste
 	if err := json.Unmarshal([]byte(body[payloadStart:end]), &attestation); err != nil {
 		return body, false
 	}
-	if steps == nil {
+	var retainedTestException string
+	isRetainedRecord := steps == nil
+	if isRetainedRecord {
 		// A CI repair that did not re-run Test keeps the prior Test result,
 		// including an approved-over-failure override_reason. The caller's
 		// current trusted policy still owns allow_test_command_override, so a
@@ -380,6 +402,7 @@ func rebindPipelineAttestationWithSteps(body, newHeadSHA string, steps []*db.Ste
 		for _, s := range attestation.Steps {
 			sr := &db.StepResult{StepName: s.Step, Status: s.Status}
 			if s.Step == types.StepTest {
+				retainedTestException = s.TestException
 				if reason := strings.TrimSpace(s.OverrideReason); reason != "" {
 					sr.OverrideReason = &reason
 				}
@@ -388,6 +411,16 @@ func rebindPipelineAttestationWithSteps(body, newHeadSHA string, steps []*db.Ste
 		}
 	}
 	rebound := newPipelineAttestation(steps, nil, newHeadSHA, policy)
+	if isRetainedRecord {
+		// The retained record keeps its exception exactly as published,
+		// including its absence on a body older than test_exception, so the
+		// first refresh adds both representations together.
+		for index := range rebound.Steps {
+			if rebound.Steps[index].Step == types.StepTest {
+				rebound.Steps[index].TestException = redactAttestationText(retainedTestException, policy)
+			}
+		}
+	}
 	// Step statuses may be republished for a head the pipeline did not
 	// re-validate. Live validation is a factual claim about one commit's
 	// behavior, so it is derived only from current step findings and never
@@ -396,7 +429,8 @@ func rebindPipelineAttestationWithSteps(body, newHeadSHA string, steps []*db.Ste
 	if err != nil {
 		return body, false
 	}
-	rebuilt := pipelineAttestationCommentPrefix + string(payload) + pipelineAttestationCommentClosingToken
+	redacted := redactAttestationText(string(payload), policy)
+	rebuilt := renderPipelineAttestation(redacted)
 	oldEnd := end + len(pipelineAttestationCommentClosingToken)
 	if body[start:oldEnd] == rebuilt {
 		return body, true
@@ -1623,6 +1657,8 @@ func escapePipelineFoldMarkers(s string) string {
 // otherwise hide it from these escapes and become live once it is removed.
 func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 	s = neutralizePRControls(s)
+	s = strings.ReplaceAll(s, testExceptionStart, "<!-- no-mistakes-test-exception\\:v1 -->")
+	s = strings.ReplaceAll(s, testExceptionEnd, "<!-- /no-mistakes-test-exception\\:v1 -->")
 	escaped := escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix))
 	return closingGrammarFor(provider).neutralize(escaped)
 }

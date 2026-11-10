@@ -443,6 +443,7 @@ func TestMethodConstants(t *testing.T) {
 		MethodRespond,
 		MethodCancelRun,
 		MethodHandoffRun,
+		MethodRefreshPR,
 		MethodGateContext,
 		MethodAdmitPush,
 		MethodHealth,
