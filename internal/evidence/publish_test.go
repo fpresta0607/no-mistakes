@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 )
 
 // Ambient GIT_CONFIG_* injection from agent harnesses would leak into every
@@ -512,6 +514,90 @@ func TestPublish_RedactsRunWorktreePathsInTextEvidence(t *testing.T) {
 		"saw " + filepath.Join("{run-worktree}", "out.log") + "\n" +
 		"listed {worktrees} and {worktrees}\n" +
 		"kept {run-worktree}/x"
+	if got != want {
+		t.Errorf("published text = %q, want %q", got, want)
+	}
+	if local, err := os.ReadFile(filepath.Join(source, "logs", "run.txt")); err != nil || string(local) != text {
+		t.Errorf("local evidence = %q (%v), want it untouched", local, err)
+	}
+}
+
+// capturedPrompt is what a Test agent's product-level artifact holds when it
+// records the prompt a stub agent received: the steering and execution-context
+// blocks every pipeline prompt carries.
+func capturedPrompt(evidenceDir string) string {
+	return agent.WorktreeSteering(evidenceDir) + agent.ExecutionContextPromptSection(filepath.Join(evidenceDir, "stub-worktree"))
+}
+
+// Redaction trims path prefixes and decides nothing about publication, so a
+// text file carrying a pipeline prompt's fixed wording is withheld whole, the
+// same decision the PR body makes (issue #97). The evidence beside it still
+// publishes, and the local file stays as written.
+func TestPublish_WithholdsTextEvidenceCarryingACapturedPrompt(t *testing.T) {
+	remote, work := newRepoWithRemote(t)
+	source := t.TempDir()
+	prompt := capturedPrompt(source)
+	writeEvidence(t, source, map[string]string{
+		"agent-prompts.txt": "stub agent received:\n" + prompt,
+		"logs/cli-run.txt":  "it works\n",
+	})
+
+	result, err := Publish(context.Background(), baseRequest(remote, work, source))
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if got, want := strings.Join(result.Files, ","), "logs/cli-run.txt"; got != want {
+		t.Errorf("files = %q, want %q", got, want)
+	}
+	if got, want := strings.Join(result.Withheld, ","), "agent-prompts.txt"; got != want {
+		t.Errorf("withheld = %q, want %q", got, want)
+	}
+	if tree := runGit(t, remote, "ls-tree", "-r", "--name-only", result.CommitSHA); strings.Contains(tree, "agent-prompts.txt") {
+		t.Errorf("the captured prompt reached the evidence branch:\n%s", tree)
+	}
+	if local, err := os.ReadFile(filepath.Join(source, "agent-prompts.txt")); err != nil || !strings.Contains(string(local), prompt) {
+		t.Errorf("local evidence = %q (%v), want it untouched", local, err)
+	}
+}
+
+// With a captured prompt the only content there is nothing to publish, and
+// that must be "no publication" rather than a marker-only commit on the branch.
+func TestPublish_CapturedPromptAlonePublishesNothing(t *testing.T) {
+	remote, work := newRepoWithRemote(t)
+	source := t.TempDir()
+	writeEvidence(t, source, map[string]string{"agent-prompts.txt": capturedPrompt(source)})
+
+	result, err := Publish(context.Background(), baseRequest(remote, work, source))
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if result == nil || result.CommitSHA != "" || len(result.Files) != 0 {
+		t.Fatalf("a withheld-only source produced a publication: %+v", result)
+	}
+	if got, want := strings.Join(result.Withheld, ","), "agent-prompts.txt"; got != want {
+		t.Errorf("withheld = %q, want %q", got, want)
+	}
+	if refs := runGit(t, remote, "for-each-ref", "--format=%(refname)"); refs != "refs/heads/main" {
+		t.Fatalf("remote refs changed: %q", refs)
+	}
+}
+
+// The run's evidence directory names the run ID and the directory layout, which
+// home redaction leaves standing, so published text gets the PR boundary's
+// {run-evidence} rewrite too (issue #97).
+func TestPublish_RewritesTheRunEvidenceDirectoryInTextEvidence(t *testing.T) {
+	remote, work := newRepoWithRemote(t)
+	// An evidence root outside the home directory, which home redaction never sees.
+	source := filepath.Join(t.TempDir(), "nm-home", "evidence", "01RUN")
+	text := "saved " + filepath.Join(source, "shots", "checkout.png") + "\nlisted " + source + "\n"
+	writeEvidence(t, source, map[string]string{"logs/run.txt": text})
+
+	result, err := Publish(context.Background(), baseRequest(remote, work, source))
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	got := runGit(t, remote, "cat-file", "-p", result.CommitSHA+":.no-mistakes/evidence/fm/add-login/logs/run.txt")
+	want := "saved " + filepath.Join("{run-evidence}", "shots", "checkout.png") + "\nlisted {run-evidence}"
 	if got != want {
 		t.Errorf("published text = %q, want %q", got, want)
 	}

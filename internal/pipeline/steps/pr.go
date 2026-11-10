@@ -563,8 +563,7 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 // so publication cannot invalidate that guard.
 func redactPRContent(content prContent, runWorktree, worktreesRoot, runEvidence string) prContent {
 	redact := func(text string) string {
-		text = safepath.RedactRunEvidence(neutralizePRControls(text), runEvidence)
-		return safepath.RedactText(safepath.RedactWorktrees(text, runWorktree, worktreesRoot))
+		return safepath.RedactPublished(neutralizePRControls(text), runWorktree, worktreesRoot, runEvidence)
 	}
 	content.Title = redact(content.Title)
 	content.Body = redact(content.Body)
