@@ -173,8 +173,9 @@ func TestCIStep_RepairFixtureAdmitsOneTestAtATime(t *testing.T) {
 		case <-time.After(10 * time.Second):
 		}
 		newCIRepairFixture(t, false, nil)
+		wasFirstRunning := isFirstRunning.Load()
 		close(secondBuilt)
-		if isFirstRunning.Load() {
+		if wasFirstRunning {
 			t.Fatal("a second CI repair fixture was built while the first test still ran")
 		}
 	})
