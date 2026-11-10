@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -73,7 +74,9 @@ func TestHandleRefreshPR(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			evidenceDir := filepath.Join(t.TempDir(), "evidence", run.ID)
 			for _, err := range []error{
+				database.SetRunEvidenceDir(run.ID, evidenceDir),
 				database.UpdateRunStatus(run.ID, types.RunCompleted),
 				database.UpdateRunPRURL(run.ID, "https://github.com/owner/repo/pull/17"),
 				database.UpdateRunPushBinding(run.ID, db.PushBinding{HeadSHA: run.HeadSHA, Ref: "refs/heads/feature", TargetFingerprint: branchsync.TargetFingerprint(repo.PushURL())}),
@@ -118,6 +121,9 @@ func TestHandleRefreshPR(t *testing.T) {
 				deadline, hasDeadline := stepContext.Ctx.Deadline()
 				if stepContext.Run.ID != run.ID || stepContext.Run.HeadSHA != run.HeadSHA || stepContext.Repo.ID != repo.ID || stepContext.DB != database || stepContext.Agent != nil || stepContext.Fixing || !hasDeadline || time.Until(deadline) > 30*time.Second {
 					t.Error("publication context lost exact identity, bypassed the bound or launched validation")
+				}
+				if stepContext.EvidenceDir != evidenceDir {
+					t.Errorf("publication context lost the run evidence directory its redaction needs: %q", stepContext.EvidenceDir)
 				}
 				if testCase == "publish-error" {
 					return false, errors.New("uncertain publication outcome")

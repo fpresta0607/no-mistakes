@@ -13,10 +13,10 @@ const (
 	testExceptionEnd   = "<!-- /no-mistakes-test-exception:v1 -->"
 )
 
-func renderTestExceptionSection(steps []*db.StepResult, provider scm.Provider, workDir string) string {
+func renderTestExceptionSection(steps []*db.StepResult, provider scm.Provider, workDir, runEvidence string) string {
 	for _, step := range steps {
 		if exception := step.TestOverrideReason(); exception != "" {
-			exception = redactPRContent(prContent{Body: exception}, workDir, nmWorktreesRoot(), "").Body
+			exception = redactPRContent(prContent{Body: exception}, workDir, nmWorktreesRoot(), runEvidence).Body
 			quoted := strings.ReplaceAll(closingGrammarFor(provider).neutralize(html.EscapeString(exception)), "\n", "\n> ")
 			return testExceptionStart + "\n### Test approval exception\n\n> " + quoted + "\n" + testExceptionEnd
 		}

@@ -77,7 +77,7 @@ func refreshPublishedPRWithHost(sctx *pipeline.StepContext, host scm.Host, steps
 	if redactionRoot == "" {
 		redactionRoot = sctx.WorkDir
 	}
-	updated, err := refreshPRTestException(body, sctx.Run.HeadSHA, steps, redactionRoot, host.Provider())
+	updated, err := refreshPRTestException(body, sctx.Run.HeadSHA, steps, redactionRoot, testEvidenceDir(sctx), host.Provider())
 	if err != nil {
 		return false, err
 	}
@@ -112,7 +112,7 @@ func refreshPublishedPRWithHost(sctx *pipeline.StepContext, host scm.Host, steps
 	return true, nil
 }
 
-func refreshPRTestException(body, head string, steps []*db.StepResult, workDir string, provider scm.Provider) (string, error) {
+func refreshPRTestException(body, head string, steps []*db.StepResult, workDir, runEvidence string, provider scm.Provider) (string, error) {
 	var testStep *db.StepResult
 	for _, step := range steps {
 		if step.StepName == types.StepTest {
@@ -149,7 +149,7 @@ func refreshPRTestException(body, head string, steps []*db.StepResult, workDir s
 	if err := json.Unmarshal(attestation["steps"], &recordedSteps); err != nil {
 		return "", fmt.Errorf("PR refresh refused: malformed attested steps: %w", err)
 	}
-	exception := redactPRContent(prContent{Body: testStep.TestOverrideReason()}, workDir, nmWorktreesRoot(), "").Body
+	exception := redactPRContent(prContent{Body: testStep.TestOverrideReason()}, workDir, nmWorktreesRoot(), runEvidence).Body
 	var isTestRecorded, isExceptionPublished bool
 	for _, step := range recordedSteps {
 		var name types.StepName
@@ -170,7 +170,7 @@ func refreshPRTestException(body, head string, steps []*db.StepResult, workDir s
 		}
 		storedOverride := ""
 		if testStep.OverrideReason != nil {
-			storedOverride = redactPRContent(prContent{Body: strings.TrimSpace(*testStep.OverrideReason)}, workDir, nmWorktreesRoot(), "").Body
+			storedOverride = redactPRContent(prContent{Body: strings.TrimSpace(*testStep.OverrideReason)}, workDir, nmWorktreesRoot(), runEvidence).Body
 		}
 		if commandOverride != storedOverride {
 			return "", fmt.Errorf("PR refresh refused: command override differs from the stored record")
@@ -194,7 +194,7 @@ func refreshPRTestException(body, head string, steps []*db.StepResult, workDir s
 	}
 	oldEnd := payloadStart + len(payload) + len(pipelineAttestationCommentClosingToken)
 	updated := body[:start] + renderPipelineAttestation(string(rebuilt)) + body[oldEnd:]
-	section := renderTestExceptionSection(steps, provider, workDir)
+	section := renderTestExceptionSection(steps, provider, workDir, runEvidence)
 	starts, ends := strings.Count(updated, testExceptionStart), strings.Count(updated, testExceptionEnd)
 	if starts == 0 && ends == 0 {
 		if isExceptionPublished {

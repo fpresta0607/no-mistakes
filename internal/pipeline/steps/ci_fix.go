@@ -1068,6 +1068,7 @@ func attestationPolicyFrom(sctx *pipeline.StepContext) pipelineAttestationPolicy
 	policy := pipelineAttestationPolicy{}
 	if sctx != nil {
 		policy.RunWorktree = sctx.WorkDir
+		policy.RunEvidence = testEvidenceDir(sctx)
 		if sctx.Run != nil && sctx.Run.WorktreePath() != "" {
 			policy.RunWorktree = sctx.Run.WorktreePath()
 		}

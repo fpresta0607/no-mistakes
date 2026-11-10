@@ -384,3 +384,30 @@ func TestRestampOfALegacyCommandOverrideLeavesTheExceptionToRefresh(t *testing.T
 		}
 	}
 }
+
+func TestRestampRedactsTheRunEvidenceDirectoryFromTheTestException(t *testing.T) {
+	t.Parallel()
+	evidence := "D:/private/evidence/01RUN"
+	reason := "Retained proof at " + evidence + "/report.txt"
+	findings := `{"verdict":"inconclusive","findings":[]}`
+	steps := []*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings, ApprovalReason: &reason}}
+	record := pipelineAttestation{HeadSHA: strings.Repeat("a", 40), Steps: []pipelineAttestationStep{{Step: types.StepTest, Status: types.StepStatusCompleted}}}
+	payload, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := &attestationTestHost{body: pipelineAttestationCommentPrefix + string(payload) + pipelineAttestationCommentClosingToken, provider: scm.ProviderGitHub}
+	policy := attestationPolicyFrom(&pipeline.StepContext{WorkDir: "D:/private/worktree/run", EvidenceDir: evidence})
+
+	if err := restampPRAttestationWithSteps(context.Background(), host, &scm.PR{Number: "42"}, strings.Repeat("b", 40), steps, nil, policy); err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(host.body, "D:/private") {
+		t.Fatalf("restamp published the run evidence directory: %s", host.body)
+	}
+	published := parsePipelineAttestationForTest(t, host.body)
+	if published.Steps[0].TestException != "live validation verdict: inconclusive\nTest exception approved: Retained proof at {run-evidence}/report.txt" {
+		t.Fatalf("restamp did not redact the evidence directory to its placeholder: %+v", published)
+	}
+}

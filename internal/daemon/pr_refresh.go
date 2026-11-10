@@ -90,7 +90,7 @@ func (manager *RunManager) HandleRefreshPR(ctx context.Context, request ipc.Refr
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	isUpdated, err := manager.refreshPR(&pipeline.StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: repo.WorkingPath, GateDir: manager.paths.RepoDir(repo.ID), Config: cfg, ForgeContext: forge, DB: manager.db})
+	isUpdated, err := manager.refreshPR(&pipeline.StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: repo.WorkingPath, GateDir: manager.paths.RepoDir(repo.ID), EvidenceDir: manager.recordedRunEvidenceDir(cfg, run.ID), Config: cfg, ForgeContext: forge, DB: manager.db})
 	if err != nil {
 		return nil, err
 	}

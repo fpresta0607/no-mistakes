@@ -134,6 +134,7 @@ func BuildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.Ste
 type pipelineAttestationPolicy struct {
 	AllowTestCommandOverride string
 	RunWorktree              string
+	RunEvidence              string
 }
 
 func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, provider scm.Provider, policy pipelineAttestationPolicy) (string, string) {
@@ -204,7 +205,7 @@ func buildPipelineSummaryWithVisibility(steps []*db.StepResult, rounds map[strin
 		b.WriteString(buildPipelineAttestationWithPolicy(steps, rounds, headSHA, policy))
 		b.WriteString("\n\n")
 	}
-	if exception := renderTestExceptionSection(steps, provider, policy.RunWorktree); exception != "" {
+	if exception := renderTestExceptionSection(steps, provider, policy.RunWorktree, policy.RunEvidence); exception != "" {
 		b.WriteString(exception)
 		b.WriteString("\n\n")
 	}
@@ -237,7 +238,7 @@ func buildPipelineAttestationWithPolicy(steps []*db.StepResult, rounds map[strin
 	if err != nil {
 		return ""
 	}
-	redacted := redactPRContent(prContent{Body: string(payload)}, policy.RunWorktree, nmWorktreesRoot(), "").Body
+	redacted := redactPRContent(prContent{Body: string(payload)}, policy.RunWorktree, nmWorktreesRoot(), policy.RunEvidence).Body
 	return renderPipelineAttestation(redacted)
 }
 
@@ -424,7 +425,7 @@ func rebindPipelineAttestationWithSteps(body, newHeadSHA string, steps []*db.Ste
 	if err != nil {
 		return body, false
 	}
-	redacted := redactPRContent(prContent{Body: string(payload)}, policy.RunWorktree, nmWorktreesRoot(), "").Body
+	redacted := redactPRContent(prContent{Body: string(payload)}, policy.RunWorktree, nmWorktreesRoot(), policy.RunEvidence).Body
 	rebuilt := renderPipelineAttestation(redacted)
 	oldEnd := end + len(pipelineAttestationCommentClosingToken)
 	if body[start:oldEnd] == rebuilt {

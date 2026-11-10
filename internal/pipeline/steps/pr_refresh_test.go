@@ -193,7 +193,7 @@ func TestRefreshPublishedPR_RedactsStoredException(t *testing.T) {
 			findings := `{"verdict":"inconclusive","findings":[]}`
 			step := &db.StepResult{StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings, ApprovalReason: &reason}
 			body := buildPipelineAttestation([]*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted}}, nil, testPipelineHeadSHA)
-			updated, err := refreshPRTestException(body, testPipelineHeadSHA, []*db.StepResult{step}, root, scm.ProviderGitHub)
+			updated, err := refreshPRTestException(body, testPipelineHeadSHA, []*db.StepResult{step}, root, "", scm.ProviderGitHub)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -202,7 +202,7 @@ func TestRefreshPublishedPR_RedactsStoredException(t *testing.T) {
 					t.Fatalf("refresh published a private path: %s", updated)
 				}
 			}
-			if _, err := refreshPRTestException(updated, testPipelineHeadSHA, []*db.StepResult{step}, root, scm.ProviderGitHub); err != nil {
+			if _, err := refreshPRTestException(updated, testPipelineHeadSHA, []*db.StepResult{step}, root, "", scm.ProviderGitHub); err != nil {
 				t.Fatalf("redacted refresh is not repeatable: %v", err)
 			}
 		})
@@ -220,7 +220,7 @@ func TestRefreshPublishedPR_RedactsStoredException(t *testing.T) {
 			t.Fatal(err)
 		}
 		body = pipelineAttestationCommentPrefix + string(payloadBytes) + pipelineAttestationCommentClosingToken
-		updated, err := refreshPRTestException(body, testPipelineHeadSHA, []*db.StepResult{step}, root, scm.ProviderGitHub)
+		updated, err := refreshPRTestException(body, testPipelineHeadSHA, []*db.StepResult{step}, root, "", scm.ProviderGitHub)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -274,5 +274,26 @@ func TestRefreshPublishedPR_RedactsStoredException(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestRefreshRedactsTheRunEvidenceDirectoryFromTheTestException(t *testing.T) {
+	t.Parallel()
+	evidence := "D:/private/evidence/01RUN"
+	reason := "Retained proof at " + evidence + "/report.txt"
+	findings := `{"verdict":"inconclusive","findings":[]}`
+	step := &db.StepResult{StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings, ApprovalReason: &reason}
+	body := buildPipelineAttestation([]*db.StepResult{{StepName: types.StepTest, Status: types.StepStatusCompleted}}, nil, testPipelineHeadSHA)
+
+	updated, err := refreshPRTestException(body, testPipelineHeadSHA, []*db.StepResult{step}, "D:/private/worktree/run", evidence, scm.ProviderGitHub)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(updated, "D:/private") {
+		t.Fatalf("refresh published the run evidence directory: %s", updated)
+	}
+	if !strings.Contains(extractTestExceptionSection(updated), "{run-evidence}/report.txt") || parsePipelineAttestationForTest(t, updated).Steps[0].TestException != "live validation verdict: inconclusive\nTest exception approved: Retained proof at {run-evidence}/report.txt" {
+		t.Fatalf("refresh did not redact the evidence directory in both representations: %s", updated)
 	}
 }
