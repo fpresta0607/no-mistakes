@@ -792,9 +792,36 @@ func (s *notifyBlockStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOut
 	return nil, sctx.Ctx.Err()
 }
 
+func TestStartWaitBudgetStaysPositiveForAnyRemainingTime(t *testing.T) {
+	t.Parallel()
+	for _, remaining := range []time.Duration{10 * time.Minute, 30 * time.Second, 20 * time.Second, time.Second} {
+		budget := startWaitBudget(remaining)
+		if budget <= 0 || budget >= remaining {
+			t.Errorf("startWaitBudget(%s) = %s, want a positive wait shorter than the remaining time", remaining, budget)
+		}
+	}
+}
+
+func TestWaitForStartedBranchWaitsOutASlowHandoff(t *testing.T) {
+	t.Parallel()
+	started := make(chan string, 1)
+	go func() {
+		// A loaded runner can take seconds to hand a freed slot to the next run.
+		time.Sleep(3500 * time.Millisecond)
+		started <- "feature/slow"
+	}()
+	waitForStartedBranch(t, started, "feature/slow")
+}
+
 func waitForStartedBranch(t *testing.T, started <-chan string, branch string) {
 	t.Helper()
-	timeout := time.After(3 * time.Second)
+	// A start is an event: a loaded race-enabled runner can take seconds to
+	// hand a freed slot over, so wait until just before the test's own
+	// deadline rather than a fixed clock.
+	var timeout <-chan time.Time
+	if deadline, hasDeadline := t.Deadline(); hasDeadline {
+		timeout = time.After(startWaitBudget(time.Until(deadline)))
+	}
 	for {
 		select {
 		case got := <-started:
@@ -802,9 +829,16 @@ func waitForStartedBranch(t *testing.T, started <-chan string, branch string) {
 				return
 			}
 		case <-timeout:
-			t.Fatalf("run for branch %s did not start", branch)
+			t.Fatalf("run for branch %s did not start before the test deadline", branch)
 		}
 	}
+}
+
+// startWaitBudget keeps a tenth of the test's remaining time back, so the
+// helper reports its own failure before the binary's deadline panic and the
+// wait never turns negative under a short -timeout.
+func startWaitBudget(remaining time.Duration) time.Duration {
+	return remaining - remaining/10
 }
 
 // TestPushReceivedConcurrentDifferentBranchRunsAvoidSharedConfigLock fires two

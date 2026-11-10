@@ -47,7 +47,7 @@ func startTestDaemonWithMaxConcurrentRuns(t *testing.T, maxConcurrent int, sf St
 	}
 	t.Cleanup(func() { d.Close() })
 
-	runTestDaemon(t, p, d, sf, 15*time.Second)
+	runTestDaemon(t, p, d, sf)
 	return p, d
 }
 
