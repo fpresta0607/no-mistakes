@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path"
 	"strings"
 	"unicode/utf8"
@@ -354,6 +355,11 @@ func normalizeReviewedPath(value string) string {
 // (sibling) reset or a backward reset both trip this guard. On any failure the
 // step and the whole run abort (executor.failRun) before doing more work -
 // nothing is committed or shipped.
+//
+// A check git could not complete (HEAD unreadable, or an ancestry check that
+// failed without git answering "not an ancestor") still refuses, but carries
+// errHeadContinuityUnverified: it is no evidence of a rewrite, so a parked
+// gate's reconciliation keeps the gate instead of failing the run (issue #88).
 func assertPipelineHeadContinuity(sctx *pipeline.StepContext, stepName types.StepName) error {
 	if err := sctx.AssertValidationSource(); err != nil {
 		return err
@@ -364,21 +370,33 @@ func assertPipelineHeadContinuity(sctx *pipeline.StepContext, stepName types.Ste
 	}
 	currentHead, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
 	if err != nil {
-		return fmt.Errorf("resolve head before %s step: %w", stepName, err)
+		return fmt.Errorf("%w: resolve head before %s step: %w", errHeadContinuityUnverified, stepName, err)
 	}
 	if currentHead == recorded {
 		return nil
 	}
 	// Fail closed: refuse unless the recorded head is genuinely an ancestor of the
 	// live HEAD (a legitimate forward move). A non-ancestor result OR any git error
-	// (e.g. an unknown recorded object) aborts rather than proceeds.
-	if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", recorded, currentHead); err != nil {
+	// (e.g. an unknown recorded object) aborts rather than proceeds. Only exit
+	// status 1 is git's answer "no"; git.Run drops the exit status from the chain
+	// when the context ended, so a killed check never reads as that answer.
+	_, err = git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", recorded, currentHead)
+	if err == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
 		return fmt.Errorf("refusing to run %s step: worktree HEAD %s is not a descendant of the pipeline's recorded head %s; "+
 			"the reviewed change was rewritten out-of-band and would be lost - aborting to protect it",
 			stepName, currentHead, recorded)
 	}
-	return nil
+	return fmt.Errorf("%w: refusing to run %s step: cannot verify that worktree HEAD %s descends from the pipeline's recorded head %s: %w",
+		errHeadContinuityUnverified, stepName, currentHead, recorded, err)
 }
+
+// errHeadContinuityUnverified marks an assertPipelineHeadContinuity refusal
+// that comes from git failing, not from git proving the head diverged.
+var errHeadContinuityUnverified = errors.New("head continuity unverified")
 
 // commitPipelineCorrection creates a pipeline-authored correction commit with
 // hook verification bypassed, and is the single owner of that bypass.
