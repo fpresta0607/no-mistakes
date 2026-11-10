@@ -27,11 +27,14 @@ LDFLAGS := -X github.com/kunchenguid/no-mistakes/internal/buildinfo.Version=$(VE
 .PHONY: build dist install test e2e e2e-record lint fmt clean docs docs-build docs-preview demo skill skill-check winres winres-check
 
 DIST_DIR ?= dist
+# go build -o writes exactly the name it is given, and Windows shells only find
+# a command by its bare name when the file carries an executable suffix.
+BIN_NAME := no-mistakes$(shell go env GOEXE)
 # go env prints backslashes on Windows, which the shell would strip.
-INSTALL_BIN := $(subst \,/,$(shell go env GOPATH))/bin/no-mistakes
+INSTALL_BIN := $(subst \,/,$(shell go env GOPATH))/bin/$(BIN_NAME)
 
 build:
-	go build -ldflags "$(LDFLAGS)" -o bin/no-mistakes ./cmd/no-mistakes
+	go build -ldflags "$(LDFLAGS)" -o bin/$(BIN_NAME) ./cmd/no-mistakes
 
 dist:
 	rm -rf $(DIST_DIR)
@@ -56,7 +59,7 @@ dist:
 
 install: build
 	mkdir -p $(dir $(INSTALL_BIN))
-	install -m 755 bin/no-mistakes $(INSTALL_BIN)
+	install -m 755 bin/$(BIN_NAME) $(INSTALL_BIN)
 	$(INSTALL_BIN) daemon stop
 	$(INSTALL_BIN) daemon start
 

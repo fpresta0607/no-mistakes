@@ -224,9 +224,57 @@ func TestMakeInstallPathSurvivesThePosixShellOnWindows(t *testing.T) {
 
 	output := runMakeDry(t, makePath, writeTestMakeWorkspace(t), "install", nil)
 
-	want := "install -m 755 bin/no-mistakes " + filepath.ToSlash(strings.TrimSpace(string(gopath))) + "/bin/no-mistakes"
+	want := "install -m 755 bin/no-mistakes.exe " + filepath.ToSlash(strings.TrimSpace(string(gopath))) + "/bin/no-mistakes.exe"
 	if !strings.Contains(output, want) {
 		t.Fatalf("make install should target the real GOPATH bin directory %q, got:\n%s", want, output)
+	}
+}
+
+func TestMakeNamesTheBinaryWithTheTargetExecutableSuffix(t *testing.T) {
+	makePath, err := exec.LookPath("make")
+	if err != nil {
+		t.Skip("make not available")
+	}
+
+	for _, testCase := range []struct {
+		goos   string
+		binary string
+	}{
+		{goos: "windows", binary: "no-mistakes.exe"},
+		{goos: "linux", binary: "no-mistakes"},
+	} {
+		t.Run(testCase.goos, func(t *testing.T) {
+			output := runMakeDry(t, makePath, writeTestMakeWorkspace(t), "install", map[string]string{
+				"GOOS": testCase.goos,
+			})
+
+			var recipe []string
+			for _, line := range strings.Split(output, "\n") {
+				recipe = append(recipe, strings.TrimSpace(line))
+			}
+			installed := "/bin/" + testCase.binary
+			for name, isWanted := range map[string]func(line string) bool{
+				"build output": func(line string) bool {
+					return strings.HasSuffix(line, " -o bin/"+testCase.binary+" ./cmd/no-mistakes")
+				},
+				"install copy": func(line string) bool {
+					return strings.HasPrefix(line, "install -m 755 bin/"+testCase.binary+" ") && strings.HasSuffix(line, installed)
+				},
+				"daemon stop": func(line string) bool {
+					return strings.HasSuffix(line, installed+" daemon stop")
+				},
+				"daemon start": func(line string) bool {
+					return strings.HasSuffix(line, installed+" daemon start")
+				},
+			} {
+				if !slices.ContainsFunc(recipe, isWanted) {
+					t.Errorf("make install for GOOS=%s should name %s in its %s line", testCase.goos, testCase.binary, name)
+				}
+			}
+			if t.Failed() {
+				t.Logf("make -n install printed:\n%s", output)
+			}
+		})
 	}
 }
 
