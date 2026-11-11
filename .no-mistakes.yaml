@@ -72,3 +72,7 @@ test:
     If no existing journey covers behavior that requires end-to-end execution, identify the missing journey or prerequisite explicitly as untested; do not claim helper tests prove it live.
     Keep captured prompts and PR markdown in the Test scratch directory, never in the publishable evidence directory or returned artifacts.
     Never run outer pipeline-control commands, and never let the harness reach a remote other than its local bare repositories.
+  # Honored only from this trusted default-branch copy (repo-config.md,
+  # test.allow_approve_over_failure). Each such approval stays an operator's
+  # explicit decision; this only lets CI judge its result before merge.
+  allow_approve_over_failure: "Owner ruling 2026-11-11: outside PrecisionDocs the pull request's CI runs the whole suite on the head that merges, so a Test step approved over a configured test command that did not pass locally is still judged by CI before merge."
