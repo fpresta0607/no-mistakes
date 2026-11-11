@@ -2,10 +2,12 @@ package git
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/realpath"
 )
@@ -47,6 +49,80 @@ func TestWorktreeAddAndRemove(t *testing.T) {
 	// verify worktree directory is gone
 	if _, err := os.Stat(wtDir); !os.IsNotExist(err) {
 		t.Fatal("worktree directory should not exist after removal")
+	}
+}
+
+// Issue #130: git does not lock its worktree metadata, so a remove that runs
+// while an add is in flight on the same repository can delete the shared
+// worktrees parent or a sibling entry the add is using. The add here is held
+// open in its post-checkout hook, which records whether the other worktree
+// vanished while the add was still running.
+func TestWorktreeRemoveWaitsForAnInFlightAddOnTheSameRepo(t *testing.T) {
+	// Arrange
+	ctx := context.Background()
+	src := initTestRepo(t)
+	bare := filepath.Join(t.TempDir(), "bare.git")
+	if err := InitBare(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	run(t, src, "git", "remote", "add", "bare", bare)
+	run(t, src, "git", "push", "bare", "HEAD:refs/heads/main")
+	sha := run(t, src, "git", "rev-parse", "HEAD")
+	root := t.TempDir()
+	finishedDir := filepath.Join(root, "finished")
+	if err := WorktreeAdd(ctx, bare, finishedDir, sha); err != nil {
+		t.Fatal(err)
+	}
+	markers := t.TempDir()
+	addInFlight := filepath.Join(markers, "add-in-flight")
+	overlap := filepath.Join(markers, "overlap")
+	hook := fmt.Sprintf(`#!/bin/sh
+: > '%s'
+i=0
+while [ $i -lt 40 ]; do
+	if [ ! -e '%s' ]; then
+		: > '%s'
+		exit 0
+	fi
+	sleep 0.05
+	i=$((i+1))
+done
+`, filepath.ToSlash(addInFlight), filepath.ToSlash(filepath.Join(finishedDir, ".git")), filepath.ToSlash(overlap))
+	if err := os.WriteFile(filepath.Join(bare, "hooks", "post-checkout"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	admittedDir := filepath.Join(root, "admitted")
+
+	// Act
+	addErr := make(chan error, 1)
+	go func() { addErr <- WorktreeAdd(ctx, bare, admittedDir, sha) }()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if _, err := os.Stat(addInFlight); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worktree add never reached its post-checkout hook")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	removeErr := WorktreeRemove(ctx, bare, finishedDir)
+
+	// Assert
+	if err := <-addErr; err != nil {
+		t.Fatalf("WorktreeAdd: %v", err)
+	}
+	if removeErr != nil {
+		t.Fatalf("WorktreeRemove: %v", removeErr)
+	}
+	if _, err := os.Stat(overlap); err == nil {
+		t.Fatal("worktree remove ran while a worktree add on the same repository was still in flight")
+	}
+	if _, err := os.Stat(finishedDir); !os.IsNotExist(err) {
+		t.Fatalf("removed worktree still present: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(admittedDir, "README.md")); err != nil {
+		t.Fatalf("added worktree incomplete: %v", err)
 	}
 }
 
