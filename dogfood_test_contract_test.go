@@ -107,6 +107,27 @@ func TestDogfoodConfig_RunbookNamesTheIsolatedLaterPhaseLivePath(t *testing.T) {
 	goTestE2E("-count=1", "-run", "^"+hooksTest+"$")
 }
 
+// The owner ruled on 2026-11-11 that outside PrecisionDocs the pull request's
+// CI judges the whole suite, so this repository opts in to an operator's
+// approval over a configured test command that could not pass locally. The
+// require-no-mistakes check refuses that approval without a non-empty reason,
+// and a misspelled key would be ignored with no error, leaving it refused.
+func TestDogfoodConfig_RecordsTheReasonForApprovalsOverAFailedTestCommand(t *testing.T) {
+	t.Parallel()
+
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadRepo(root)
+	if err != nil {
+		t.Fatalf("LoadRepo: %v", err)
+	}
+	if strings.TrimSpace(cfg.Test.AllowApproveOverFailure) == "" {
+		t.Fatal("dogfood test.allow_approve_over_failure is empty; the require-no-mistakes check refuses every Test approved over a failed command")
+	}
+}
+
 // commands.test contract ownership lives in repo-config.md: targeted local
 // validation, not CI-parity complete-suite configuration, and no brittle
 // shell-heuristics claiming to detect "broad" commands.
