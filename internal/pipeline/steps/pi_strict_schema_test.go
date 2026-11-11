@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
@@ -56,24 +58,59 @@ cat "$0.events"
 	return bin
 }
 
-// strictPiDeclaration parses the tool parameters out of the extension Pi was
-// launched with, the generated declaration Pi sends to the provider.
-func strictPiDeclaration(t *testing.T, cwd string) map[string]any {
+// strictPiTurn is one turn of a fake Pi together with what the adapter said
+// about it.
+type strictPiTurn struct {
+	cwd    string
+	result *agent.Result
+	err    error
+
+	mu        sync.Mutex
+	lifecycle []string
+}
+
+func runStrictPiTurn(t *testing.T, bin, prompt string, schema json.RawMessage) *strictPiTurn {
 	t.Helper()
-	content, err := os.ReadFile(filepath.Join(cwd, "pi-extension.ts"))
+	pi, err := agent.New(types.AgentPi, bin, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	turn := &strictPiTurn{cwd: t.TempDir()}
+	turn.result, turn.err = pi.Run(context.Background(), agent.RunOpts{
+		Prompt:     prompt,
+		CWD:        turn.cwd,
+		JSONSchema: schema,
+		OnLifecycle: func(event agent.LifecycleEvent) {
+			turn.mu.Lock()
+			defer turn.mu.Unlock()
+			turn.lifecycle = append(turn.lifecycle, event.Message)
+		},
+	})
+	return turn
+}
+
+// declaration parses the tool parameters out of the extension Pi was launched
+// with, the generated declaration Pi sends to the provider. A turn that left no
+// extension never took the strict path, and only the run's error and the
+// adapter's lifecycle messages say why, so the error carries both.
+func (turn *strictPiTurn) declaration() (map[string]any, error) {
+	content, err := os.ReadFile(filepath.Join(turn.cwd, "pi-extension.ts"))
+	if err != nil {
+		turn.mu.Lock()
+		defer turn.mu.Unlock()
+		return nil, fmt.Errorf("pi was not launched with the output extension: %w\nrun error: %v\nlifecycle:\n%s",
+			err, turn.err, strings.Join(turn.lifecycle, "\n"))
+	}
 	_, tail, found := strings.Cut(string(content), "const parameters = ")
 	if !found {
-		t.Fatal("extension declares no tool parameters")
+		return nil, errors.New("extension declares no tool parameters")
 	}
 	line, _, _ := strings.Cut(tail, "\n")
 	var declaration map[string]any
 	if err := json.Unmarshal([]byte(strings.TrimSuffix(strings.TrimRight(line, "\r"), ";")), &declaration); err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
-	return declaration
+	return declaration, nil
 }
 
 // strictSchemaViolations walks a strict function schema declaration the way
@@ -156,15 +193,13 @@ func TestPiStrictDeclarationSatisfiesTheStrictFunctionContract(t *testing.T) {
 	}
 	for name, schema := range schemas {
 		t.Run(name, func(t *testing.T) {
-			cwd := t.TempDir()
-			pi, err := agent.New(types.AgentPi, writeStrictPi(t, `{}`), nil)
+			// The run's output validation is irrelevant here: the fake Pi has
+			// already copied the extension the adapter launched it with.
+			turn := runStrictPiTurn(t, writeStrictPi(t, `{}`), "review", schema)
+			declaration, err := turn.declaration()
 			if err != nil {
 				t.Fatal(err)
 			}
-			// The run's output validation is irrelevant here: the fake Pi has
-			// already copied the extension the adapter launched it with.
-			_, _ = pi.Run(context.Background(), agent.RunOpts{Prompt: "review", CWD: cwd, JSONSchema: schema})
-			declaration := strictPiDeclaration(t, cwd)
 			if violations := strictSchemaViolations(declaration, "/"); len(violations) > 0 {
 				t.Fatalf("strict declaration violates the function contract: %s", strings.Join(violations, "; "))
 			}
@@ -204,17 +239,15 @@ func TestPiStrictDeclarationLeavesSummaryLengthToPostValidation(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cwd := t.TempDir()
-			pi, err := agent.New(types.AgentPi, writeStrictPi(t, tc.output), nil)
+			turn := runStrictPiTurn(t, writeStrictPi(t, tc.output), "fix", tc.schema)
+			declaration, err := turn.declaration()
 			if err != nil {
 				t.Fatal(err)
 			}
-			result, err := pi.Run(context.Background(), agent.RunOpts{Prompt: "fix", CWD: cwd, JSONSchema: tc.schema})
-			if err != nil {
-				t.Fatal(err)
+			if turn.err != nil {
+				t.Fatal(turn.err)
 			}
 
-			declaration := strictPiDeclaration(t, cwd)
 			properties, _ := declaration["properties"].(map[string]any)
 			summary, _ := properties["summary"].(map[string]any)
 			if summary["type"] != "string" {
@@ -224,9 +257,50 @@ func TestPiStrictDeclarationLeavesSummaryLengthToPostValidation(t *testing.T) {
 				t.Fatalf("strict declaration still carries maxLength: %v", summary)
 			}
 
-			if err := tc.extract(result); !errors.Is(err, errRejectedCommitSummary) {
+			if err := tc.extract(turn.result); !errors.Is(err, errRejectedCommitSummary) {
 				t.Fatalf("over-long summary must still be rejected, got %v", err)
 			}
 		})
+	}
+}
+
+// Issue #99: a turn whose version probe fails takes the prompt-inlined path, so
+// Pi is never launched with the extension. The contract test then reported only
+// the missing file, with nothing to say why the strict path was not taken.
+func TestStrictPiTurnWithoutAnExtensionNamesTheProbeAndRunFailures(t *testing.T) {
+	t.Parallel()
+	name, script := "pi", `#!/bin/sh
+if [ "$1" = "--version" ]; then exit 7; fi
+cat > /dev/null
+exit 9
+`
+	if runtime.GOOS == "windows" {
+		name, script = "pi.cmd", strings.Join([]string{
+			"@echo off",
+			`if "%~1"=="--version" exit /b 7`,
+			"more > nul",
+			"exit /b 9",
+			"",
+		}, "\r\n")
+	}
+	bin := filepath.Join(t.TempDir(), name)
+	writeFakeExecutable(t, bin, script)
+
+	turn := runStrictPiTurn(t, bin, "review", prTitleSchema)
+	_, err := turn.declaration()
+
+	if err == nil {
+		t.Fatal("a turn that never launched Pi with the extension produced a declaration")
+	}
+	// The fake's own exit codes are the oracle: 7 from the probe, 9 from the run.
+	runError, lifecycle, found := strings.Cut(err.Error(), "\nlifecycle:\n")
+	if !found {
+		t.Fatalf("failure output does not separate the run error from the lifecycle messages:\n%v", err)
+	}
+	if !strings.Contains(runError, "exit status 9") {
+		t.Errorf("run error does not carry the run's exit status 9:\n%v", err)
+	}
+	if !strings.Contains(lifecycle, "exit status 7") {
+		t.Errorf("lifecycle messages do not carry the probe's exit status 7:\n%v", err)
 	}
 }
