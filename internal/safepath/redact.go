@@ -284,17 +284,20 @@ func insideURL(text string, i int) bool {
 	return scheme >= 0 && !strings.ContainsAny(prefix[scheme:], " \t\r\n")
 }
 
+// boundaryAfter reports whether position i in text ends a path segment rather
+// than the start of a longer name. Trailing dots stay out of the name, as in
+// pathSegment: they end a sentence or mark a length cap's cut.
 func boundaryAfter(text string, i int) bool {
-	if i >= len(text) {
-		return true
+	for i < len(text) && text[i] == '.' {
+		i++
 	}
-	c := text[i]
-	return c == '/' || c == '\\' || !isPathNameByte(c)
+	return i >= len(text) || !isPathNameByte(text[i])
 }
 
 // isPathNameByte reports whether c can appear inside a single path segment
 // name. A home directory followed by one of these is a different directory
-// whose name merely starts the same way.
+// whose name merely starts the same way, except for the trailing dots
+// boundaryAfter leaves out.
 func isPathNameByte(c byte) bool {
 	switch {
 	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
