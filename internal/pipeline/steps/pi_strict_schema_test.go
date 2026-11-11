@@ -240,14 +240,14 @@ func TestPiStrictDeclarationLeavesSummaryLengthToPostValidation(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			turn := runStrictPiTurn(t, writeStrictPi(t, tc.output), "fix", tc.schema)
-			if turn.err != nil {
-				t.Fatal(turn.err)
-			}
-
 			declaration, err := turn.declaration()
 			if err != nil {
 				t.Fatal(err)
 			}
+			if turn.err != nil {
+				t.Fatal(turn.err)
+			}
+
 			properties, _ := declaration["properties"].(map[string]any)
 			summary, _ := properties["summary"].(map[string]any)
 			if summary["type"] != "string" {
