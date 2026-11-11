@@ -296,7 +296,8 @@ func boundaryAfter(text string, i int) bool {
 
 // isPathNameByte reports whether c can appear inside a single path segment
 // name. A home directory followed by one of these is a different directory
-// whose name merely starts the same way.
+// whose name merely starts the same way, except for the trailing dots
+// boundaryAfter leaves out.
 func isPathNameByte(c byte) bool {
 	switch {
 	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
