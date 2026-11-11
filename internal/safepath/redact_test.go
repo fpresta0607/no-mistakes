@@ -303,6 +303,41 @@ func TestRedactText_UnconventionalHomeFromEnvironment(t *testing.T) {
 	}
 }
 
+// A period is a name byte, so the process's own home ending a sentence reads as
+// a longer directory name unless trailing periods stay out of the name, and
+// they have to survive for the sentence to read the same. Only the own-home
+// candidates can catch a home outside the conventional roots.
+func TestRedactText_OwnHomeEndingASentence(t *testing.T) {
+	const posix = "/srv/nm-operator"
+	const windows = `D:\profiles\operator`
+	tests := []struct {
+		name string
+		home string
+		in   string
+		want string
+	}{
+		{name: "at the end of the text", home: posix, in: "Logs are under /srv/nm-operator.", want: "Logs are under ~."},
+		{name: "before more prose", home: posix, in: "In /srv/nm-operator. Then done.", want: "In ~. Then done."},
+		{name: "inside parentheses", home: posix, in: "(see /srv/nm-operator.)", want: "(see ~.)"},
+		{name: "before the three dots of a length cap", home: posix, in: "cut at /srv/nm-operator...", want: "cut at ~..."},
+		{name: "before a json-escaped line break", home: posix, in: `{"log":"in /srv/nm-operator.\nnext"}`, want: `{"log":"in ~.\nnext"}`},
+		{name: "a path beneath it", home: posix, in: "Wrote /srv/nm-operator/out.log.", want: "Wrote ~/out.log."},
+		{name: "windows redirected profile", home: windows, in: `Kept in D:\profiles\operator.`, want: "Kept in ~."},
+		{name: "conventional root", home: "/home/testuser", in: "Home is /home/testuser.", want: "Home is ~."},
+		{name: "a longer name with an extension", home: posix, in: "/srv/nm-operator.old/x", want: "/srv/nm-operator.old/x"},
+		{name: "a longer name ending a sentence", home: posix, in: "Logs are under /srv/nm-operator2.", want: "Logs are under /srv/nm-operator2."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", tt.home)
+			t.Setenv("USERPROFILE", tt.home)
+			if got := RedactText(tt.in); got != tt.want {
+				t.Fatalf("RedactText(%q) with home %q = %q, want %q", tt.in, tt.home, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestUsableHomeCandidate_AcceptsBothPlatformSpellings pins the rule directly,
 // because it is the one place a platform-specific helper (filepath.IsAbs)
 // would silently disable redaction rather than fail loudly.

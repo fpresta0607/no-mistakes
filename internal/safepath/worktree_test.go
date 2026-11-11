@@ -223,4 +223,8 @@ func TestRedactors_RewriteADirectoryEndingASentence(t *testing.T) {
 	if got, want := RedactWorktrees(fallback, "", "/nm/worktrees"), "saw "+WorktreePlaceholder+"."; got != want {
 		t.Errorf("RedactWorktrees(%q) = %q, want %q", fallback, got, want)
 	}
+	const root = "all under /nm/worktrees."
+	if got, want := RedactWorktrees(root, "", "/nm/worktrees"), "all under "+WorktreesPlaceholder+"."; got != want {
+		t.Errorf("RedactWorktrees(%q) = %q, want %q", root, got, want)
+	}
 }
