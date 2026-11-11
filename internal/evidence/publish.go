@@ -1,7 +1,6 @@
 package evidence
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io/fs"
@@ -12,6 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/safepath"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
@@ -85,10 +85,15 @@ type Result struct {
 	Dir string
 	// Files are the published paths relative to Dir, slash separated.
 	Files []string
+	// Withheld are the source paths, slash separated, that were not published
+	// because the file carries a captured agent prompt. CommitSHA is empty
+	// when every file was withheld.
+	Withheld []string
 }
 
 // Publish copies every regular file under req.SourceDir onto the evidence
-// branch and pushes it.
+// branch and pushes it, except a file that carries a captured agent prompt,
+// which it withholds and names in the result (hashEvidenceFile).
 //
 // The commit is built with plumbing against a scratch index, so the caller's
 // worktree, index, and HEAD are never touched. The new commit's parent is the
@@ -168,16 +173,23 @@ func publishOnce(ctx context.Context, req Request, branch, dir string, files []c
 	}
 
 	published := make([]string, 0, len(files))
+	var withheld []string
 	for _, file := range files {
-		inBranch := path.Join(dir, file.Rel)
-		blob, err := hashEvidenceFile(ctx, req, env, file.Abs)
+		blob, isWithheld, err := hashEvidenceFile(ctx, req, env, file.Abs)
 		if err != nil {
 			return nil, fmt.Errorf("hash evidence file %s: %w", file.Rel, err)
 		}
-		if err := addToIndex(ctx, req.RepoDir, env, file.Mode, blob, inBranch); err != nil {
+		if isWithheld {
+			withheld = append(withheld, file.Rel)
+			continue
+		}
+		if err := addToIndex(ctx, req.RepoDir, env, file.Mode, blob, path.Join(dir, file.Rel)); err != nil {
 			return nil, err
 		}
 		published = append(published, file.Rel)
+	}
+	if len(published) == 0 {
+		return &Result{Branch: branch, Dir: dir, Withheld: withheld}, nil
 	}
 
 	tree, err := git.RunWithEnv(ctx, req.RepoDir, env, "write-tree")
@@ -191,7 +203,7 @@ func publishOnce(ctx context.Context, req Request, branch, dir string, files []c
 			// The branch already holds exactly these bytes (a re-run of the
 			// same step). Link against the existing commit instead of pushing
 			// an empty one.
-			return &Result{Branch: branch, CommitSHA: tip, Dir: dir, Files: published}, nil
+			return &Result{Branch: branch, CommitSHA: tip, Dir: dir, Files: published, Withheld: withheld}, nil
 		}
 	}
 
@@ -202,27 +214,44 @@ func publishOnce(ctx context.Context, req Request, branch, dir string, files []c
 	if _, err := git.Run(ctx, req.RepoDir, "push", req.PushURL, commit+":refs/heads/"+branch); err != nil {
 		return nil, fmt.Errorf("push evidence branch %s to %s: %w", branch, safeurl.Redact(req.PushURL), err)
 	}
-	return &Result{Branch: branch, CommitSHA: commit, Dir: dir, Files: published}, nil
+	return &Result{Branch: branch, CommitSHA: commit, Dir: dir, Files: published, Withheld: withheld}, nil
 }
 
 // hashEvidenceFile writes one evidence file into the object store and returns
-// its blob id. A readable UTF-8 text file first gets the same home-directory
-// redaction the PR title and body get, because captured command output carries
-// absolute paths under the operator's home, after the run worktree paths are
-// rewritten. Binary and visual artifacts, and the local file itself, are left
-// untouched.
-func hashEvidenceFile(ctx context.Context, req Request, env []string, abs string) (string, error) {
+// its blob id, or isWithheld with nothing written when the file must not be
+// published.
+//
+// An evidence file is a raw capture: a Test artifact can hold the prompt a stub
+// agent received. Path redaction only trims prefixes and decides nothing about
+// publication, so a file carrying a pipeline prompt's fixed wording is withheld
+// whole, the decision the PR body makes for the same capture. That decision is
+// made for every file, on its bytes with the NUL bytes removed: the wording is
+// ASCII, so it is still there in UTF-16 of either byte order, with or without
+// a byte-order mark, and beside a stray NUL or invalid byte, none of which is
+// clean UTF-8.
+//
+// Clean UTF-8 text that is published gets the path redaction the PR title and
+// body get (the run's evidence directory, which SourceDir is, the run worktree
+// paths, then the operator's home), because captured command output carries
+// those absolute paths. Every other published file, binary and visual
+// artifacts among them, and the local file itself, are left untouched.
+func hashEvidenceFile(ctx context.Context, req Request, env []string, abs string) (blob string, isWithheld bool, err error) {
 	content, err := os.ReadFile(abs)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	if utf8.Valid(content) && !bytes.Contains(content, []byte{0}) {
-		redacted := safepath.RedactText(safepath.RedactWorktrees(string(content), req.RunWorktree, req.WorktreesRoot))
-		if redacted != string(content) {
-			return git.RunWithInput(ctx, req.RepoDir, redacted, "hash-object", "-w", "--stdin")
+	text := string(content)
+	if agent.CarriesCapturedPrompt(strings.ReplaceAll(text, "\x00", "")) {
+		return "", true, nil
+	}
+	if utf8.ValidString(text) && !strings.Contains(text, "\x00") {
+		if redacted := safepath.RedactPublished(text, req.RunWorktree, req.WorktreesRoot, req.SourceDir); redacted != text {
+			blob, err = git.RunWithInput(ctx, req.RepoDir, redacted, "hash-object", "-w", "--stdin")
+			return blob, false, err
 		}
 	}
-	return git.RunWithEnv(ctx, req.RepoDir, env, "hash-object", "-w", "--", abs)
+	blob, err = git.RunWithEnv(ctx, req.RepoDir, env, "hash-object", "-w", "--", abs)
+	return blob, false, err
 }
 
 // remoteTip returns the remote evidence branch head, fetched into the local

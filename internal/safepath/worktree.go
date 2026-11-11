@@ -23,6 +23,15 @@ const (
 // home redaction alone leaves the run ID and the directory layout standing.
 const EvidencePlaceholder = "{run-evidence}"
 
+// RedactPublished applies every path rewrite this package owns to text that is
+// about to leave the machine: the run's evidence directory, the run worktree
+// paths, then the home directory. Both publication boundaries call it, so a
+// rewrite added here reaches the pull request and the evidence branch alike. Any
+// directory argument may be empty.
+func RedactPublished(text, runWorktree, worktreesRoot, runEvidence string) string {
+	return RedactText(RedactWorktrees(RedactRunEvidence(text, runEvidence), runWorktree, worktreesRoot))
+}
+
 // RedactWorktrees rewrites the run's worktree root, and as a fallback any path
 // into worktreesRoot, to the worktree placeholders. Either argument may be
 // empty.
