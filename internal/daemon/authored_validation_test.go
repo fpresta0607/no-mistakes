@@ -140,6 +140,40 @@ func TestAuthoredAdmissionTracksItsOwnTelemetryTrigger(t *testing.T) {
 	}
 }
 
+// An admission whose deadline passes while it waits for its branch lock used to
+// fail with only the next call's error ("git rev-parse --show-toplevel: context
+// deadline exceeded"), which pointed at a cheap git call instead of the wait
+// that spent the time (#167). The error names the stage the deadline passed in.
+func TestAuthoredAdmissionDeadlineNamesTheStageThatSpentIt(t *testing.T) {
+	// Arrange
+	manager, database, repo, request, _ := authoredAdmissionFixture(t, nil)
+	originalTimeout := authoredAdmissionTimeout
+	authoredAdmissionTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { authoredAdmissionTimeout = originalTimeout })
+	branchLock := manager.branchMutex(request.Request.RepoID, request.Request.Branch)
+	branchLock.Lock()
+	go func() {
+		time.Sleep(3 * authoredAdmissionTimeout)
+		branchLock.Unlock()
+	}()
+	before, err := database.GetRunsByRepo(repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Act
+	_, err = manager.validateAuthored(context.Background(), request, os.Getpid())
+
+	// Assert
+	if err == nil || !strings.Contains(err.Error(), "ran out of its 100ms deadline while waiting for the branch lock") || !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "deadline exceeded") {
+		t.Fatalf("admission deadline error = %v, want it to name the branch lock wait", err)
+	}
+	after, err := database.GetRunsByRepo(repo.ID)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("a timed-out admission changed runs: %v", err)
+	}
+}
+
 func TestAuthoredAdmissionRefusesAnInheritedPRWithoutPushBinding(t *testing.T) {
 	manager, database, repo, request, gate := authoredAdmissionFixture(t, nil)
 	if err := database.UpdateRunPRURL(request.Request.PredecessorID, "https://github.com/test/repo/pull/17"); err != nil {

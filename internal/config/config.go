@@ -57,7 +57,8 @@ const (
 	// Test-repair turn, so a silent agent cannot leave a run active forever.
 	DefaultTestAgentTimeout = 30 * time.Minute
 	// DefaultDaemonConnectTimeout bounds client IPC connection attempts to a
-	// daemon socket that exists but is not accepting connections.
+	// daemon socket that exists but is not accepting connections, and the
+	// health check answer over that connection.
 	DefaultDaemonConnectTimeout = 3 * time.Second
 	// DefaultBranchSyncRemoteTimeout bounds each remote Git operation (ls-remote, fetch) in internal/branchsync. Global-config-only; a pushed branch cannot change it. Timeout still fails closed.
 	DefaultBranchSyncRemoteTimeout = 60 * time.Second

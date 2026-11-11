@@ -1052,7 +1052,7 @@ It is global-only: whether the gate keeps watching a pull request is this machin
 
 ### daemon_connect_timeout
 
-Maximum time a CLI client waits for an existing daemon socket to accept a connection before failing instead of hanging. Guards against a daemon process that is alive but stuck or unresponsive.
+Maximum time a CLI client waits for an existing daemon socket to accept a connection, and then for that daemon to answer its health check, before failing instead of hanging. Guards against a daemon process that is alive but stuck or unresponsive, while a busy daemon that answers within the budget still counts as running.
 
 |         |                        |
 | ------- | ---------------------- |
