@@ -90,7 +90,13 @@ func publishRunEvidence(sctx *pipeline.StepContext) *evidenceLinks {
 		sctx.Log(fmt.Sprintf("test evidence not published, citing files by label and digest instead: %v", err))
 		return nil
 	}
-	if result == nil || result.CommitSHA == "" {
+	if result == nil {
+		return nil
+	}
+	if len(result.Withheld) > 0 {
+		sctx.Log(fmt.Sprintf("withheld %d test evidence file(s) that carry a captured agent prompt, citing them by label and digest instead", len(result.Withheld)))
+	}
+	if result.CommitSHA == "" {
 		return nil
 	}
 	sctx.Log(fmt.Sprintf("published %d test evidence file(s) to %s (%s)", len(result.Files), result.Branch, result.CommitSHA))

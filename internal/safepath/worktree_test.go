@@ -31,6 +31,18 @@ func TestRedactWorktrees_SingleBackslashRootKeepsBackslashSeparators(t *testing.
 	}
 }
 
+// Both publication boundaries call RedactPublished, so it has to apply every
+// rewrite the package owns: one left out reaches neither the pull request nor
+// the evidence branch.
+func TestRedactPublished_AppliesEveryPathRewrite(t *testing.T) {
+	text := "ran /nm/worktrees/ab12cd34ef56/run-1/bin/tool, kept /nm/evidence/01RUN/out.log, read /home/alice/notes.txt"
+	got := RedactPublished(text, "/nm/worktrees/ab12cd34ef56/run-1", "/nm/worktrees", "/nm/evidence/01RUN")
+	want := "ran " + WorktreePlaceholder + "/bin/tool, kept " + EvidencePlaceholder + "/out.log, read " + Placeholder + "/notes.txt"
+	if got != want {
+		t.Errorf("RedactPublished(%q) = %q, want %q", text, got, want)
+	}
+}
+
 func TestRedactRunEvidence_RewritesEverySpellingOfTheDirectory(t *testing.T) {
 	evidence := filepath.Join(t.TempDir(), "evidence", "01RUN")
 	slashed := filepath.ToSlash(evidence)

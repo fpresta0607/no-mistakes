@@ -1,16 +1,19 @@
 package steps
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
+	"github.com/kunchenguid/no-mistakes/internal/safepath"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -395,5 +398,70 @@ func TestPublishRunEvidence_RedactsRunWorktreePaths(t *testing.T) {
 	got := gitCmd(t, remote, "cat-file", "-p", "refs/heads/no-mistakes/evidence:.no-mistakes/evidence/feature/add-login/cli-run.txt")
 	if want := "ran " + filepath.Join("{run-worktree}", "bin", "tool") + "\nsaw " + filepath.Join("{run-worktree}", "out.log"); got != want {
 		t.Errorf("published text = %q, want %q", got, want)
+	}
+}
+
+// TestPublishRunEvidence_WithholdsCapturedPromptsAndRewritesTheRunDirectory
+// reproduces issue #97 on the bytes that reach the evidence branch: with
+// test.evidence.store_in_repo on, a Test artifact holding the prompt a stub
+// agent received used to be committed intact, and the run's evidence directory
+// stayed spelled out in the text beside it. The opt-in publishes evidence, not
+// what the PR body withholds: the capture stays on the machine and renders as
+// its label and digest, and the rest of the run's evidence still publishes.
+func TestPublishRunEvidence_WithholdsCapturedPromptsAndRewritesTheRunDirectory(t *testing.T) {
+	t.Parallel()
+	sctx, remote := newEvidencePublishContext(t, "feature/add-login")
+	evidenceDir := testEvidenceDir(sctx)
+	capturedPrompt := agent.WorktreeSteering(evidenceDir) + agent.ExecutionContextPromptSection(filepath.Join(evidenceDir, "stub-worktree"))
+	writeRunEvidence(t, sctx, map[string]string{
+		"agent-prompts.txt": capturedPrompt,
+		"cli-run.txt":       "saved " + filepath.Join(evidenceDir, "shot.png") + "\n",
+	})
+
+	links := publishRunEvidence(sctx)
+	if links == nil {
+		t.Fatal("the evidence beside the captured prompt must still publish")
+	}
+
+	tip := gitCmd(t, remote, "rev-parse", "refs/heads/no-mistakes/evidence")
+	tree := gitCmd(t, remote, "ls-tree", "-r", "--name-only", tip)
+	if strings.Contains(tree, "agent-prompts.txt") {
+		t.Errorf("the captured prompt reached the evidence branch:\n%s", tree)
+	}
+	got := gitCmd(t, remote, "cat-file", "-p", tip+":.no-mistakes/evidence/feature/add-login/cli-run.txt")
+	if want := "saved " + filepath.Join(safepath.EvidencePlaceholder, "shot.png"); got != want {
+		t.Errorf("published text = %q, want %q", got, want)
+	}
+
+	steps, rounds := testStepWithArtifacts(fmt.Sprintf(
+		`{"kind":"log","label":"Stub agent prompts","path":%q},{"kind":"log","label":"CLI run","path":%q}`,
+		filepath.Join(evidenceDir, "agent-prompts.txt"),
+		filepath.Join(evidenceDir, "cli-run.txt"),
+	))
+	md := BuildTestingSummaryForPR(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, evidenceDir, links)
+	for _, want := range []string{
+		fmt.Sprintf("- Evidence: Stub agent prompts (private run evidence, <code>sha256:%x</code>)", sha256.Sum256([]byte(capturedPrompt))),
+		"- Evidence: [CLI run](https://github.com/example/widgets/blob/" + tip + "/.no-mistakes/evidence/feature/add-login/cli-run.txt)",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("PR body missing %q:\n%s", want, md)
+		}
+	}
+}
+
+// With a captured prompt the only evidence, nothing is pushed and the PR body
+// gets no links, the same outcome as a run with no evidence at all.
+func TestPublishRunEvidence_CapturedPromptAlonePushesNothing(t *testing.T) {
+	t.Parallel()
+	sctx, remote := newEvidencePublishContext(t, "feature/add-login")
+	writeRunEvidence(t, sctx, map[string]string{
+		"agent-prompts.txt": agent.WorktreeSteering(testEvidenceDir(sctx)),
+	})
+
+	if links := publishRunEvidence(sctx); links != nil {
+		t.Fatalf("expected no publication for a withheld-only run, got %+v", links)
+	}
+	if refs := gitCmd(t, remote, "for-each-ref", "--format=%(refname)"); refs != "refs/heads/main" {
+		t.Errorf("remote refs changed: %q", refs)
 	}
 }
