@@ -23,7 +23,7 @@ func TestCIWorkflowRunsTestsOnAllSupportedDesktopPlatforms(t *testing.T) {
 	want := map[string]int{
 		"ubuntu-latest":  1,
 		"macos-latest":   2,
-		"windows-latest": 17,
+		"windows-latest": 18,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("test matrix operating systems = %v, want %v", got, want)
