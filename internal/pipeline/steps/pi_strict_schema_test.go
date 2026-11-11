@@ -293,9 +293,14 @@ exit 9
 		t.Fatal("a turn that never launched Pi with the extension produced a declaration")
 	}
 	// The fake's own exit codes are the oracle: 7 from the probe, 9 from the run.
-	for _, want := range []string{"exit status 7", "exit status 9"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("failure output does not carry %q:\n%v", want, err)
-		}
+	runError, lifecycle, found := strings.Cut(err.Error(), "\nlifecycle:\n")
+	if !found {
+		t.Fatalf("failure output does not separate the run error from the lifecycle messages:\n%v", err)
+	}
+	if !strings.Contains(runError, "exit status 9") {
+		t.Errorf("run error does not carry the run's exit status 9:\n%v", err)
+	}
+	if !strings.Contains(lifecycle, "exit status 7") {
+		t.Errorf("lifecycle messages do not carry the probe's exit status 7:\n%v", err)
 	}
 }
