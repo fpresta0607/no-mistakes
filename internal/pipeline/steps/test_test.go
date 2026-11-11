@@ -1429,6 +1429,7 @@ func TestTestStep_RequiredCheckRunsOnlyWhenTheOperatorAdmitsIt(t *testing.T) {
 				"is not admitted to this turn, whatever path, digest, approval, or output authorization comes with it",
 				"do not ask for wider write paths or a scratch-local binding for it",
 				`Report one warning finding with action "ask-user" that names each such check`,
+				"Linters, formatters, and static analysis are not such checks: the Lint step owns them",
 				"Running an existing test to drive one of your scenarios stays allowed",
 			} {
 				if !strings.Contains(prompt, want) {
