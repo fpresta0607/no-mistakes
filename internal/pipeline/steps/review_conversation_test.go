@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -200,6 +201,19 @@ func TestReviewStep_AnswersResumeTheSameSessionAndFinalize(t *testing.T) {
 
 	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}}, enableReviewConversation)
 	convDir = exec.ReviewConversationDir(run.ID)
+	// The gate's own resumer is a second releaser of this park: once the answer
+	// is on disk it resumes the gate itself, and an explicit Respond after that
+	// finds no gate (TestReviewStep_AnswerRacingTheParkStillReachesTheReviewer
+	// pins that path). This test pins the explicit Respond path, so it defers
+	// every automatic claim, as the daemon's claim guard does, and responds only
+	// after the resumer has seen the settled conversation.
+	resumerSawAnswer := make(chan struct{})
+	var closeOnce sync.Once
+	exec.SetGateClaimGuard(func() (func(), bool) {
+		closeOnce.Do(func() { close(resumerSawAnswer) })
+		return nil, false
+	})
+	exec.SetGateReconcileTimings(10*time.Millisecond, 0)
 
 	done := make(chan error, 1)
 	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
@@ -207,6 +221,11 @@ func TestReviewStep_AnswersResumeTheSameSessionAndFinalize(t *testing.T) {
 	waitForReviewStatus(t, database, run.ID, types.StepStatusAwaitingApproval)
 	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep", AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
 		t.Fatalf("append answer: %v", err)
+	}
+	select {
+	case <-resumerSawAnswer:
+	case <-time.After(reviewRunTimeout):
+		t.Fatal("the gate's resumer never saw the settled conversation")
 	}
 	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
 		t.Fatalf("respond with answers: %v", err)
