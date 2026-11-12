@@ -318,6 +318,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil || !maps.Equal(anchors, confirmedAnchors) {
 			return "", fmt.Errorf("terminal recovery anchors changed before acceptance: %v", err)
 		}
+		enterStage("accepting the admission and preparing its worktree")
 		if event == nil {
 			var plan *verificationplan.Snapshot
 			if snapshot.Run.VerificationPlan != nil {

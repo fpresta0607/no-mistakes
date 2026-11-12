@@ -174,6 +174,106 @@ func TestAuthoredAdmissionDeadlineNamesTheStageThatSpentIt(t *testing.T) {
 	}
 }
 
+// expirableContext is a parent context whose deadline passes when the test
+// says so. Its first deadline is earlier than authoredAdmissionTimeout, so the
+// admission's own WithTimeout keeps this deadline and its expiry.
+type expirableContext struct {
+	context.Context
+	deadline atomic.Pointer[time.Time]
+	done     chan struct{}
+}
+
+func newExpirableContext() *expirableContext {
+	ctx := &expirableContext{Context: context.Background(), done: make(chan struct{})}
+	first := time.Now().Add(time.Minute)
+	ctx.deadline.Store(&first)
+	return ctx
+}
+
+func (c *expirableContext) Deadline() (time.Time, bool) { return *c.deadline.Load(), true }
+
+func (c *expirableContext) Done() <-chan struct{} { return c.done }
+
+func (c *expirableContext) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return nil
+	}
+}
+
+func (c *expirableContext) expire() {
+	now := time.Now()
+	c.deadline.Store(&now)
+	close(c.done)
+}
+
+func TestAuthoredAdmissionDeadlineAfterAcceptanceIsNotBlamedOnTheChecksBeforeIt(t *testing.T) {
+	// Arrange
+	manager, database, repo, request, gate := authoredAdmissionFixture(t, nil)
+	markers := t.TempDir()
+	entered := filepath.Join(markers, "entered")
+	block := filepath.Join(markers, "block")
+	exited := filepath.Join(markers, "exited")
+	if err := os.WriteFile(block, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hooks := filepath.Join(gate, "hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	slash := filepath.ToSlash
+	hook := "#!/bin/sh\n: > '" + slash(entered) + "'\nwhile [ -e '" + slash(block) + "' ]; do sleep 0.05; done\n: > '" + slash(exited) + "'\n"
+	if err := os.WriteFile(filepath.Join(hooks, "post-checkout"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	isPresent := func(path string) bool {
+		_, err := os.Stat(path)
+		return err == nil
+	}
+	t.Cleanup(func() {
+		_ = os.Remove(block)
+		if !isPresent(entered) {
+			return
+		}
+		for wait := time.Now().Add(10 * time.Second); time.Now().Before(wait) && !isPresent(exited); {
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+	ctx := newExpirableContext()
+	go func() {
+		for wait := time.Now().Add(30 * time.Second); time.Now().Before(wait) && !isPresent(entered); {
+			time.Sleep(10 * time.Millisecond)
+		}
+		ctx.expire()
+	}()
+
+	// Act
+	_, err := manager.validateAuthored(ctx, request, os.Getpid())
+
+	// Assert
+	if !isPresent(entered) {
+		t.Fatalf("the gate's post-checkout hook never ran, so the deadline did not pass inside git worktree add: %v", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "deadline while accepting the admission and preparing its worktree") {
+		t.Fatalf("admission deadline error = %v, want it to name the accepted admission's worktree preparation", err)
+	}
+	runs, listErr := database.GetRunsByRepo(repo.ID)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	isAccepted := false
+	for _, run := range runs {
+		if run.ID != request.Request.PredecessorID {
+			isAccepted = true
+		}
+	}
+	if !isAccepted {
+		t.Fatal("the admission was not accepted before the deadline, so this does not exercise the stage after acceptance")
+	}
+}
+
 func TestAuthoredAdmissionRefusesAnInheritedPRWithoutPushBinding(t *testing.T) {
 	manager, database, repo, request, gate := authoredAdmissionFixture(t, nil)
 	if err := database.UpdateRunPRURL(request.Request.PredecessorID, "https://github.com/test/repo/pull/17"); err != nil {
