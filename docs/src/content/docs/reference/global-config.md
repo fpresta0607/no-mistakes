@@ -1648,6 +1648,9 @@ repository_overrides:
 
 Test runs the committed command first, then each added command in a separate shell, retaining a failure from either source even when another check succeeds.
 Test still performs its unconditional agent-driven end-user scenarios afterwards.
+`commands.test.additional` is the admitted binding for a required check the repository's `commands.test` does not cover: the Test baseline owns it and runs it before the evidence turn, outside the evidence agent's write boundary.
+Run intent, a verification plan, or an approval of a script by path or digest never admits a check, and the evidence agent reports such a request as an `ask-user` warning instead of running it.
+The evidence agent does not report linters, formatters, or static analysis as unadmitted; Lint and `commands.lint.additional` own those.
 Lint runs additional checks after the existing lint duty, including agent-driven lint when `commands.lint` is empty.
 An added check's failure parks the step rather than silently passing; existing explicit approval rules still apply.
 Its finding names that machine-local check and its exit code, and never attributes the failure to the committed command, including when the committed command is empty.
