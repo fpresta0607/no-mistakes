@@ -114,9 +114,7 @@ func TestRenderWindowsTaskXMLScopesLogonTriggerToInstallingUser(t *testing.T) {
 func TestRenderWindowsTaskXMLRunsTheDaemonAtNormalPriority(t *testing.T) {
 	t.Parallel()
 
-	task := parseWindowsTaskDefinition(t, renderWindowsTaskXML(`C:
-m.exe`, `C:
-m-home`, stubWindowsTaskAccount))
+	task := parseWindowsTaskDefinition(t, renderWindowsTaskXML(`C:\nm.exe`, `C:\nm-home`, stubWindowsTaskAccount))
 
 	if task.Priority != "4" {
 		t.Fatalf("task priority = %q, want 4 (normal processor, disk and memory priority)", task.Priority)

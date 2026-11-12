@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"golang.org/x/sys/windows"
@@ -87,6 +88,20 @@ func TestManagedDaemonTaskStartsChildrenAtNormalPriority(t *testing.T) {
 	}
 	if session == 0 {
 		t.Skip("an InteractiveToken task runs only in an interactive logon session; this process is in session 0")
+	}
+	var power struct {
+		acLineStatus        byte
+		batteryFlag         byte
+		batteryLifePercent  byte
+		systemStatusFlag    byte
+		batteryLifeTime     uint32
+		batteryFullLifeTime uint32
+	}
+	if r, _, err := modKernel32.NewProc("GetSystemPowerStatus").Call(uintptr(unsafe.Pointer(&power))); r == 0 {
+		t.Fatalf("system power status: %v", err)
+	}
+	if power.acLineStatus == 0 {
+		t.Skip("the task definition disallows starting on battery power and this host is on battery")
 	}
 
 	probe := filepath.Join(t.TempDir(), "priorityprobe.exe")
