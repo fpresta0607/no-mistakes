@@ -31,6 +31,13 @@ On macOS this is a per-user `launchd` agent, on Linux a per-user `systemd` servi
 
 On Windows the daemon runs without a console window. The Task Scheduler task starts `no-mistakes.exe daemon run` directly at logon, and `no-mistakes.exe` carries an application manifest that tells Windows not to create a console for it when there is none to share, while a terminal, git hook, or agent that runs `no-mistakes` still shares its console with it. Windows honors that setting from Windows 11 24H2 and Windows Server 2025 (build 26100). Older builds still create a console when the task starts, which the daemon releases as soon as it starts, so a console or Windows Terminal window can flash briefly at logon. Output the daemon writes before its logs are ready goes to the bootstrap log described under [Logging](#logging).
 
+The Windows task runs the daemon at Task Scheduler priority 4, so the daemon and every git, agent and test command it starts run with normal processor, disk and memory priority, like a command run from a terminal.
+Task Scheduler's default of 7 would start all of them below normal on the processor with low disk and memory priority, which starves the gate on a busy host.
+Every start of a stopped daemon, from `daemon start`, `daemon restart`, `no-mistakes update` or a command that starts a missing daemon on demand, registers the task again, so a task registered at another priority is corrected then.
+A daemon that is already running keeps the priority it was started with, and so does the version a `--when-idle` restart starts, so run `no-mistakes daemon restart` to move a running daemon to the new priority.
+The daemon sets no processor affinity, so on a host with efficiency cores Windows places its commands the way it places a terminal's.
+A mask that kept them off efficiency cores would be specific to each host, would be inherited by every command, and would leave those cores unused even when the performance cores are saturated.
+
 ## Starting and stopping
 
 Most people do not need to manage the daemon directly. The usual commands

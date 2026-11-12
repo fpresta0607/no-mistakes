@@ -21,7 +21,8 @@ import (
 // the LogonTrigger to the installing user and keeps the principal on that
 // user's limited interactive token; there is no fallback to the unscoped
 // trigger. Settings mirror what schtasks /Create writes by default so the
-// task's lifecycle is unchanged apart from the trigger scope.
+// task's lifecycle is unchanged apart from the trigger scope and the priority
+// (see renderWindowsTaskXML).
 //
 // Unlike the launchd and systemd paths, it deliberately does not forward proxy
 // environment variables (see serviceProxyEnv). A logon-triggered task runs
@@ -69,6 +70,15 @@ func installWindowsTask(p *paths.Paths, exe string) error {
 // daemon: a logon trigger scoped to account, run as account's limited
 // interactive token. The Arguments element keeps the "--root <root>" suffix
 // serviceDefinitionMatchesRoot keys on.
+//
+// Priority 4 is deliberate (issue #253). With no Priority element Task
+// Scheduler uses 7, which starts the daemon below normal on the processor with
+// low disk priority (1) and memory page priority 2, and every git, agent and
+// test command the daemon starts inherits all three. Measured on Windows 11,
+// only 4 gives normal on all three (class normal, disk 2, page 5): 5 and 6
+// keep a normal class and disk priority but lower the page priority to 4 and
+// 3. Every start of a stopped daemon re-registers the task, so an existing
+// task registered at 7 is corrected at its next start.
 func renderWindowsTaskXML(exe, root, account string) string {
 	arguments := "daemon run --root " + quoteWindowsTaskArg(root)
 	return `<?xml version="1.0" encoding="UTF-16"?>
@@ -90,6 +100,7 @@ func renderWindowsTaskXML(exe, root, account string) string {
     <DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <Priority>4</Priority>
     <IdleSettings>
       <Duration>PT10M</Duration>
       <WaitTimeout>PT1H</WaitTimeout>
