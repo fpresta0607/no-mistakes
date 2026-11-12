@@ -62,6 +62,7 @@ type windowsTaskDefinition struct {
 		LogonType string `xml:"LogonType"`
 		RunLevel  string `xml:"RunLevel"`
 	} `xml:"Principals>Principal"`
+	Priority  string `xml:"Settings>Priority"`
 	Command   string `xml:"Actions>Exec>Command"`
 	Arguments string `xml:"Actions>Exec>Arguments"`
 }
@@ -103,6 +104,22 @@ func TestRenderWindowsTaskXMLScopesLogonTriggerToInstallingUser(t *testing.T) {
 	}
 	if want := "daemon run --root " + strconv.Quote(root); task.Arguments != want {
 		t.Fatalf("arguments = %q, want %q", task.Arguments, want)
+	}
+}
+
+// Issue #253: without a Priority element Task Scheduler runs the task at 7,
+// which starts the daemon, and every git, agent and test command it starts,
+// below normal on the processor with low disk and memory page priority. 4 is
+// the one task priority measured to give normal on all three.
+func TestRenderWindowsTaskXMLRunsTheDaemonAtNormalPriority(t *testing.T) {
+	t.Parallel()
+
+	task := parseWindowsTaskDefinition(t, renderWindowsTaskXML(`C:
+m.exe`, `C:
+m-home`, stubWindowsTaskAccount))
+
+	if task.Priority != "4" {
+		t.Fatalf("task priority = %q, want 4 (normal processor, disk and memory priority)", task.Priority)
 	}
 }
 
