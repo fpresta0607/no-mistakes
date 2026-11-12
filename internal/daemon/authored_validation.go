@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -36,6 +37,10 @@ import (
 
 var authoredPRCommandOutput = (*exec.Cmd).Output
 
+// authoredAdmissionTimeout bounds one authored admission, branch lock wait
+// included. It is a variable so a test can spend it without waiting minutes.
+var authoredAdmissionTimeout = 2 * time.Minute
+
 func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAuthoredParams, operator int) (*ipc.ValidateAuthoredResult, error) {
 	request := params.Request
 	if len(request.SourceAnchors) == 0 {
@@ -47,10 +52,21 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 	if err := request.Validate(); err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, authoredAdmissionTimeout)
 	defer cancel()
+	// Each stage is named as it starts, so an admission that runs out of its
+	// deadline reports where the time went instead of naming whichever call
+	// happened to check the deadline next.
+	var stageNames []string
+	var stageStarts []time.Time
+	enterStage := func(name string) {
+		stageNames = append(stageNames, name)
+		stageStarts = append(stageStarts, time.Now())
+	}
+	enterStage("waiting for the branch lock")
 	var result *ipc.ValidateAuthoredResult
 	_, err := m.withBranchLock(request.RepoID, request.Branch, func() (string, error) {
+		enterStage("reading the predecessor")
 		if m.shuttingDown.Load() {
 			return "", fmt.Errorf("daemon is shutting down")
 		}
@@ -68,6 +84,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if repo == nil {
 			return "", fmt.Errorf("predecessor repository is no longer registered")
 		}
+		enterStage("proving the caller's checkout")
 		if err := proveAuthoredCheckout(ctx, params.CallerDir, &request, repo); err != nil {
 			return "", err
 		}
@@ -157,6 +174,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil {
 			return "", err
 		}
+		enterStage("checking the gate branch")
 		if symbolic, err := git.Run(ctx, gateDir, "symbolic-ref", "-q", "refs/heads/"+request.Branch); err == nil && symbolic != "" {
 			return "", fmt.Errorf("gate branch is symbolic")
 		}
@@ -198,6 +216,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		}
 		// Init records the gate's origin as the clone resolves it through
 		// url.*.insteadOf, while the registry keeps the clone's literal origin.
+		enterStage("fetching the trusted default branch")
 		sourceURLs, err := git.GetConfiguredRemoteURLs(ctx, gateDir, "origin")
 		if err != nil || len(sourceURLs) != 1 {
 			return "", fmt.Errorf("trusted source repository differs from the registered repository")
@@ -224,6 +243,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if request.TerminalGeneration != "" {
 			pin, storedQuota = nil, ""
 		}
+		enterStage("loading the run configuration and preparing the launch")
 		cfg, _, _, err := m.loadRunConfig(ctx, repo, global, candidateConfig, gateDir, trustedSHA, "", request.Branch, pin)
 		if err != nil {
 			return "", err
@@ -245,6 +265,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil {
 			return "", err
 		}
+		enterStage("proving the publication")
 		forge, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
 		if err != nil {
 			return "", err
@@ -259,6 +280,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		// Agent construction holds fail-closed launch checks, so it comes before
 		// acceptance and a refused launch records nothing. A new child has no
 		// directory yet, so its agent is steered to the root it will go under.
+		enterStage("constructing the agent")
 		var evidenceRoot string
 		if event != nil {
 			evidenceRoot = pipelineEvidenceRoot(m.paths, cfg, &event.InitialChild)
@@ -275,6 +297,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 				_ = ag.Close()
 			}
 		}()
+		enterStage("confirming the checkout and gate before acceptance")
 		if err := proveAuthoredCheckout(ctx, params.CallerDir, &request, repo); err != nil {
 			return "", err
 		}
@@ -295,6 +318,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil || !maps.Equal(anchors, confirmedAnchors) {
 			return "", fmt.Errorf("terminal recovery anchors changed before acceptance: %v", err)
 		}
+		enterStage("accepting the admission and preparing its worktree")
 		if event == nil {
 			var plan *verificationplan.Snapshot
 			if snapshot.Run.VerificationPlan != nil {
@@ -354,6 +378,13 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		isScheduled, result.Started = true, true
 		return child.ID, nil
 	})
+	if deadline, hasDeadline := ctx.Deadline(); err != nil && hasDeadline && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		stage := len(stageStarts) - 1
+		for stage > 0 && stageStarts[stage].After(deadline) {
+			stage--
+		}
+		return nil, fmt.Errorf("authored admission ran out of its %s deadline while %s (%s into that stage): %w", authoredAdmissionTimeout, stageNames[stage], deadline.Sub(stageStarts[stage]).Round(time.Millisecond), err)
+	}
 	return result, err
 }
 

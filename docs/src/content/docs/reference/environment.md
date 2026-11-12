@@ -47,7 +47,7 @@ Raise it separately when the complete suite needs more time, for example: `bash 
 
 ## `NM_DAEMON_CONNECT_TIMEOUT`
 
-Override how long a CLI client waits for an existing daemon socket to accept a connection before failing instead of hanging.
+Override how long a CLI client waits for an existing daemon socket to accept a connection, and then for that daemon to answer its health check, before failing instead of hanging.
 
 |         |                                                                                                   |
 | ------- | ------------------------------------------------------------------------------------------------- |
