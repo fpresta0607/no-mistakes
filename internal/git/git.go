@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/realpath"
@@ -772,14 +773,34 @@ func isWorktreeConfigWriteUnavailable(err error) bool {
 	return strings.Contains(err.Error(), "worktreeConfig")
 }
 
+// worktreeMetadataLocks serializes WorktreeAdd and WorktreeRemove per
+// repository, keyed by the cleaned repoDir. Git does not lock its worktree
+// metadata: `worktree remove` rmdirs the shared <common-dir>/worktrees parent
+// once it is empty and deletes the removed worktree's entry, while `worktree
+// add` recreates that parent and reads every sibling entry, so an add racing a
+// remove fails with exit 128 on a path the remove just deleted (issue #130).
+// The daemon admits runs on different branches of one gate concurrently and
+// removes finished or orphaned worktrees outside any branch lock, so the lock
+// lives here, where every gate caller passes.
+var worktreeMetadataLocks sync.Map // filepath.Clean(repoDir) -> *sync.Mutex
+
+func lockWorktreeMetadata(repoDir string) (unlock func()) {
+	value, _ := worktreeMetadataLocks.LoadOrStore(filepath.Clean(repoDir), &sync.Mutex{})
+	mu := value.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
 // WorktreeAdd creates a detached worktree at wtPath checked out to the given SHA.
 func WorktreeAdd(ctx context.Context, repoDir, wtPath, sha string) error {
+	defer lockWorktreeMetadata(repoDir)()
 	_, err := Run(ctx, repoDir, "worktree", "add", "--detach", wtPath, sha)
 	return err
 }
 
 // WorktreeRemove removes a worktree at the given path.
 func WorktreeRemove(ctx context.Context, repoDir, wtPath string) error {
+	defer lockWorktreeMetadata(repoDir)()
 	_, err := Run(ctx, repoDir, "worktree", "remove", "--force", wtPath)
 	return err
 }
