@@ -1425,7 +1425,7 @@ func TestTestStep_RequiredCheckRunsOnlyWhenTheOperatorAdmitsIt(t *testing.T) {
 				t.Fatal("the evidence turn's refusal of an unadmitted required check must park for a human")
 			}
 			for _, want := range []string{
-				"Deterministic checks run only in the baseline, from the repository's trusted commands.test and the operator's machine-local repository_overrides.<remote>.commands.test.additional",
+				"Deterministic checks run only in the baseline, from the repository's trusted commands.test and the operator's repository_overrides.<remote>.commands.test.additional",
 				"is not admitted to this turn, whatever path, digest, approval, or output authorization comes with it",
 				"do not ask for wider write paths or a scratch-local binding for it",
 				`Report one warning finding with action "ask-user" that names each such check`,
