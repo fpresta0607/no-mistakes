@@ -73,6 +73,54 @@ func TestStartInstallsWindowsTaskAndStartsManagedDaemon(t *testing.T) {
 	}
 }
 
+// Issue #253: a task registered before the definition named a priority runs
+// at Task Scheduler's default 7. The next start of a stopped daemon must
+// re-register it, so an existing install is corrected, not only a new one.
+func TestStartReregistersAnExistingWindowsTaskAtNormalPriority(t *testing.T) {
+	p := paths.WithRoot(filepath.Join(t.TempDir(), "nm home"))
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanup := stubServiceRuntime(t)
+	defer cleanup()
+	runtimeGOOS = "windows"
+	exe := `C:\Program Files\no-mistakes\no-mistakes.exe`
+	serviceExecutablePath = func() (string, error) { return exe, nil }
+	serviceCurrentUser = stubWindowsTaskUser
+
+	registered := `<Task><Settings><Priority>7</Priority></Settings><Actions><Exec><Command>` + exe + `</Command><Arguments>daemon run --root "` + p.Root() + `"</Arguments></Exec></Actions></Task>`
+	var definitions []string
+	serviceCommandRunner = func(name string, args ...string) ([]byte, error) {
+		if name == "schtasks" && len(args) > 0 && args[0] == "/Create" {
+			definitions = append(definitions, readWindowsTaskDefinition(t, args))
+		}
+		if name == "schtasks" && len(args) >= 3 && args[0] == "/Query" && args[2] == windowsTaskName(p) {
+			return []byte(registered), nil
+		}
+		if name == "schtasks" && len(args) >= 3 && args[0] == "/Query" && args[2] == legacyWindowsTaskName {
+			return nil, fmt.Errorf("task not found")
+		}
+		return nil, nil
+	}
+	checks := 0
+	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+		checks++
+		return checks >= 2, nil
+	}
+
+	if err := Start(p); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(definitions) != 1 {
+		t.Fatalf("start registered %d task definitions, want 1", len(definitions))
+	}
+	if got := parseWindowsTaskDefinition(t, definitions[0]).Priority; got != "4" {
+		t.Fatalf("re-registered task priority = %q, want 4", got)
+	}
+}
+
 func TestInstallWindowsTaskDoesNotRemoveLegacyTaskForDifferentRoot(t *testing.T) {
 	p := paths.WithRoot(filepath.Join(t.TempDir(), "nm-home"))
 	if err := p.EnsureDirs(); err != nil {
