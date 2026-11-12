@@ -1430,7 +1430,7 @@ func TestTestStep_RequiredCheckRunsOnlyWhenTheOperatorAdmitsIt(t *testing.T) {
 				"do not ask for wider write paths or a scratch-local binding for it",
 				`Report one warning finding with action "ask-user" that names each such check`,
 				"Linters, formatters, and static analysis are not such checks: the Lint step owns them",
-				"Running an existing test to drive one of your scenarios stays allowed",
+				"Running an existing test, or a focused test you write, to drive one of your scenarios stays allowed",
 			} {
 				if !strings.Contains(prompt, want) {
 					t.Errorf("evidence prompt lacks the required-check admission rule %q:\n%s", want, prompt)
