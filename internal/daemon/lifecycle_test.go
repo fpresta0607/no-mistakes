@@ -183,6 +183,7 @@ func TestIsRunningFailsFastWhenSocketAcceptsButDoesNotRespond(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix socket setup is platform-specific")
 	}
+	t.Setenv("NM_DAEMON_CONNECT_TIMEOUT", "250ms")
 
 	tmpDir, err := os.MkdirTemp("", "dtest")
 	if err != nil {

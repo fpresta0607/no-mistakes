@@ -89,12 +89,13 @@ func isReadTimeout(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
-// connectTimeout resolves the bounded connect timeout from the root that owns
-// socketPath, which always sits at <root>/socket. Reading the ambient NM_HOME
-// instead would mis-scope it: a receive hook resolves its root from the gate it
-// was handed and git sets no NM_HOME for a hook, so it would dial one root's
-// daemon under another root's timeout.
-func connectTimeout(socketPath string) time.Duration {
+// ConnectTimeout resolves the bound on reaching an existing daemon - accepting
+// the connection, and answering a health check over it - from the root that
+// owns socketPath, which always sits at <root>/socket. Reading the ambient
+// NM_HOME instead would mis-scope it: a receive hook resolves its root from the
+// gate it was handed and git sets no NM_HOME for a hook, so it would dial one
+// root's daemon under another root's timeout.
+func ConnectTimeout(socketPath string) time.Duration {
 	value := os.Getenv("NM_DAEMON_CONNECT_TIMEOUT")
 	if value == "" {
 		cfg, err := config.LoadGlobal(paths.WithRoot(filepath.Dir(socketPath)).ConfigFile())
@@ -118,12 +119,7 @@ type Client struct {
 	mu      sync.Mutex // serializes calls on a single connection
 }
 
-const (
-	// DefaultDialTimeout is the read deadline used for the daemon health check
-	// dial made by callers outside this package (see internal/daemon/selfexec.go).
-	DefaultDialTimeout = 250 * time.Millisecond
-	defaultCallTimeout = 30 * time.Second
-)
+const defaultCallTimeout = 30 * time.Second
 
 // Dial connects to the IPC server at the given endpoint path.
 func Dial(socketPath string) (*Client, error) {
@@ -141,7 +137,7 @@ func Dial(socketPath string) (*Client, error) {
 }
 
 func dialEndpoint(socketPath string) (net.Conn, error) {
-	timeout := connectTimeout(socketPath)
+	timeout := ConnectTimeout(socketPath)
 	conn, err := dial(socketPath, timeout)
 	if err != nil {
 		var netErr net.Error
