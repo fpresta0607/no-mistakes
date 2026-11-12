@@ -180,6 +180,44 @@ func TestCopyLocalUserIdentity(t *testing.T) {
 	}
 }
 
+// Issue #106: `git config --worktree` lists every worktree of the repository
+// and dies on a sibling whose commondir file exists but is still empty, which
+// is what a concurrent `git worktree add` leaves for a moment. A run's identity
+// write then failed its startup because another run on the same gate was
+// still being created. The sibling entry here is that half-written state, so
+// the case holds whatever the timing.
+func TestCopyLocalUserIdentityIgnoresASiblingWorktreeStillBeingAdded(t *testing.T) {
+	ctx := context.Background()
+	src := initTestRepo(t)
+	gate := filepath.Join(t.TempDir(), "gate.git")
+	run(t, src, "git", "clone", "--bare", src, gate)
+	if err := IsolateHooksPath(ctx, gate); err != nil {
+		t.Fatalf("isolate hooks path: %v", err)
+	}
+	worktree := filepath.Join(t.TempDir(), "run")
+	if err := WorktreeAdd(ctx, gate, worktree, run(t, src, "git", "rev-parse", "HEAD")); err != nil {
+		t.Fatalf("worktree add: %v", err)
+	}
+	sibling := filepath.Join(gate, "worktrees", "sibling")
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(sibling, "gitdir"), filepath.Join(t.TempDir(), "sibling", ".git")+"\n")
+	writeFile(t, filepath.Join(sibling, "commondir"), "")
+
+	err := CopyLocalUserIdentity(ctx, src, worktree)
+
+	if err != nil {
+		t.Fatalf("CopyLocalUserIdentity failed beside a sibling worktree still being added: %v", err)
+	}
+	if got := run(t, worktree, "git", "config", "--get", "user.name"); got != "Test" {
+		t.Fatalf("user.name in the run worktree = %q, want %q", got, "Test")
+	}
+	if out, err := exec.Command("git", "config", "--file", filepath.Join(gate, "config"), "--get", "user.name").CombinedOutput(); err == nil {
+		t.Fatalf("identity landed in the gate's shared config (%q), want the run worktree's own config", strings.TrimSpace(string(out)))
+	}
+}
+
 func TestGetRemoteURLNotFound(t *testing.T) {
 	dir := initTestRepo(t)
 	ctx := context.Background()

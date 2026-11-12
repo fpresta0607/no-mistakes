@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -724,16 +725,36 @@ func CommitAll(ctx context.Context, dir, message string) error {
 // CopyLocalUserIdentity copies local user.name and user.email from srcDir into
 // dstDir. Missing values in srcDir are ignored.
 //
-// The write into dstDir uses per-worktree scope (`git config --worktree`) when
-// the repository has worktree config enabled. dstDir is typically a linked
-// worktree of the shared gate bare repo, where an unscoped `git config --local`
-// write lands in the bare's shared config and takes <bare>/config.lock. Two
-// runs starting concurrently on different branches of the same repo then race
-// on that single lock and one fails with "could not lock config file ...
-// config: File exists". Writing per-worktree puts each run's identity in its own
-// <bare>/worktrees/<id>/config.worktree, so concurrent startups never contend.
-// Older Git without `--worktree` support falls back to `--local`.
+// dstDir is typically a linked worktree of the shared gate bare repo, where an
+// unscoped `git config --local` write lands in the bare's shared config and
+// takes <bare>/config.lock. Two runs starting concurrently on different
+// branches of the same repo then race on that single lock and one fails with
+// "could not lock config file ... config: File exists". When the repository
+// has extensions.worktreeConfig enabled, as every gate with per-worktree
+// support does, the identity goes into dstDir's own config.worktree instead,
+// so concurrent startups never contend. A repository without it keeps the
+// shared --local write, the legacy behavior.
+//
+// The per-worktree file is written with `git config --file`, not
+// `git config --worktree`, because --worktree lists every worktree of the
+// repository and dies on a sibling whose commondir is still empty, which is
+// what a concurrent `git worktree add` leaves for a moment (issue #106).
 func CopyLocalUserIdentity(ctx context.Context, srcDir, dstDir string) error {
+	target := []string{"--local"}
+	enabled, err := Run(ctx, dstDir, "config", "--type=bool", "--get", "--default", "false", "extensions.worktreeConfig")
+	if err != nil {
+		return err
+	}
+	if enabled == "true" {
+		path, err := Run(ctx, dstDir, "rev-parse", "--git-path", "config.worktree")
+		if err != nil {
+			return err
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(dstDir, path)
+		}
+		target = []string{"--file", path}
+	}
 	for _, key := range []string{"user.name", "user.email"} {
 		value, err := Run(ctx, srcDir, "config", "--local", "--get", "--default", "", key)
 		if err != nil {
@@ -742,35 +763,11 @@ func CopyLocalUserIdentity(ctx context.Context, srcDir, dstDir string) error {
 		if value == "" {
 			continue
 		}
-		if _, err := Run(ctx, dstDir, "config", "--worktree", key, value); err != nil {
-			if !isWorktreeConfigWriteUnavailable(err) {
-				return err
-			}
-			// Per-worktree config is not usable here (Git too old for the
-			// flag, or the repo has multiple worktrees without
-			// extensions.worktreeConfig enabled). Fall back to the shared
-			// local config. Such gates also lack per-worktree isolation, so
-			// this matches the legacy behavior.
-			if _, err := Run(ctx, dstDir, "config", "--local", key, value); err != nil {
-				return err
-			}
+		if _, err := Run(ctx, dstDir, slices.Concat([]string{"config"}, target, []string{key, value})...); err != nil {
+			return err
 		}
 	}
 	return nil
-}
-
-// isWorktreeConfigWriteUnavailable reports whether a `git config --worktree`
-// write failed because per-worktree config cannot be used on this repo: either
-// the installed Git is too old for the flag (isWorktreeConfigUnsupported), or
-// the repo has more than one worktree without extensions.worktreeConfig enabled
-// ("--worktree cannot be used with multiple working trees unless the config
-// extension worktreeConfig is enabled"). Both mean the caller should fall back
-// to the shared --local config.
-func isWorktreeConfigWriteUnavailable(err error) bool {
-	if isWorktreeConfigUnsupported(err) {
-		return true
-	}
-	return strings.Contains(err.Error(), "worktreeConfig")
 }
 
 // worktreeMetadataLocks serializes WorktreeAdd and WorktreeRemove per
