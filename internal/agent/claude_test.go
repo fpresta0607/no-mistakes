@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1020,11 +1021,11 @@ func TestClaudeAgent_NonzeroExitStillFailsWhenNativeChildrenMustComplete(t *test
 // budget while background work holds the session open. The 10s context stands
 // in for the step budget; the helper's background work outlasts it.
 func TestClaudeAgent_BackgroundWorkAfterResult(t *testing.T) {
-	t.Setenv("NM_CLAUDE_STDIN_HELPER", "result-background-result")
 	old := claudeResultGrace
 	claudeResultGrace = 200 * time.Millisecond
 	t.Cleanup(func() { claudeResultGrace = old })
-	run := func(requireCompletedChildren bool) (*Result, error, time.Duration) {
+	run := func(t *testing.T, mode string, requireCompletedChildren bool) (*Result, error, time.Duration) {
+		t.Setenv("NM_CLAUDE_STDIN_HELPER", mode)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		start := time.Now()
@@ -1037,17 +1038,35 @@ func TestClaudeAgent_BackgroundWorkAfterResult(t *testing.T) {
 		return res, err, time.Since(start)
 	}
 
-	t.Run("completed children required fails promptly", func(t *testing.T) {
-		_, err, took := run(true)
-		if err == nil || !strings.Contains(err.Error(), "background work outlived the result") {
-			t.Fatalf("err = %v, want the background-work refusal", err)
+	// Issue #111: the session stays open only on its own queued
+	// notifications, with nothing the agent started still running.
+	t.Run("completed children required keeps the result when nothing it started still runs", func(t *testing.T) {
+		res, err, took := run(t, "result-background-result", true)
+		if err != nil {
+			t.Fatalf("err = %v, want the finished result", err)
+		}
+		if string(res.Output) != `{"ok":true}` {
+			t.Fatalf("output = %s, want the first result", res.Output)
+		}
+		if took > 5*time.Second {
+			t.Fatalf("took %s, want the result after a short grace", took)
+		}
+	})
+	t.Run("completed children required fails promptly while owned work runs", func(t *testing.T) {
+		_, err, took := run(t, "result-with-background-child", true)
+		// The probe's last ps call gets only what is left of the settle
+		// window, so a slow runner can refuse on the member the last good
+		// probe saw instead of a finished final probe. Both name the child.
+		namesChild := regexp.MustCompile(`(active owned children: |last observed )pid \d+`)
+		if err == nil || !strings.Contains(err.Error(), "background work outlived the result") || !namesChild.MatchString(err.Error()) {
+			t.Fatalf("err = %v, want the background-work refusal naming the owned children", err)
 		}
 		if took > 5*time.Second {
 			t.Fatalf("took %s, want a prompt failure inside the budget", took)
 		}
 	})
 	t.Run("otherwise ends on the result", func(t *testing.T) {
-		res, err, took := run(false)
+		res, err, took := run(t, "result-background-result", false)
 		if err != nil {
 			t.Fatalf("err = %v, want the finished result", err)
 		}
@@ -1172,6 +1191,19 @@ func TestClaudeStdinHelper(t *testing.T) {
 		time.Sleep(30 * time.Second)
 		_, _ = io.WriteString(os.Stdout, `{"type":"system","subtype":"task_notification","session_id":"helper-session"}`+"\n")
 		_, _ = io.WriteString(os.Stdout, `{"type":"result","subtype":"success","session_id":"helper-session","structured_output":{"ok":false}}`+"\n")
+		return
+	case "result-with-background-child":
+		// A result while a background job the agent started still runs.
+		child := exec.Command(os.Args[0], "-test.run=^TestClaudeStdinHelper$")
+		child.Env = append(os.Environ(), "NM_CLAUDE_STDIN_HELPER=background-child")
+		if err := child.Start(); err != nil {
+			os.Exit(2)
+		}
+		emitClaudeHelperResult()
+		time.Sleep(30 * time.Second)
+		return
+	case "background-child":
+		time.Sleep(30 * time.Second)
 		return
 	case "result-then-fail":
 		emitClaudeHelperResult()

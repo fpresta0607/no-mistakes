@@ -29,7 +29,9 @@ const claudeScannerMaxTokenSize = 256 * 1024 * 1024
 
 // claudeResultGrace is how long a process may stay open after writing a
 // finished result. Print mode exits within a second of it unless background
-// work it started (a background shell, a Monitor watch) holds the session open.
+// work it started (a background shell, a Monitor watch) holds the session open,
+// or queued background-task notifications wake the session after that work
+// already ended (issue #111).
 var claudeResultGrace = 10 * time.Second
 
 // claudeAPIErrorMessageMaxRunes bounds the CLI's API error text in a step
@@ -168,6 +170,10 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	onResult := func(r *claudeResult) {
 		if graceTimer == nil && claudeFinishedWithOutput(r, opts.JSONSchema) {
 			graceTimer = time.AfterFunc(claudeResultGrace, func() {
+				if opts.RequireCompletedChildren {
+					started.stopLeader()
+					return
+				}
 				started.terminate()
 				started.closePipes()
 			})
@@ -176,13 +182,18 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	err = parseClaudeEvents(ctx, io.TeeReader(started.stdout, &stdoutTail), opts.OnChunk, &usage, &result, onResult)
 	if graceTimer != nil && !graceTimer.Stop() {
 		// RequireCompletedChildren never counts a result as success while
-		// work the agent started is still running (#1449), so it fails here.
+		// work the agent started is still running (#1449). The grace stopped
+		// only claude itself, so the owned-children probe sees that work if
+		// it is still running. A session kept open by nothing but queued
+		// notifications leaves none, and its result stands (issue #111). A
+		// cancellation can stop that work before the probe, so it never does.
 		if opts.RequireCompletedChildren {
-			_ = started.wait()
-			stderrWG.Wait()
-			retErr := fmt.Errorf("claude completion is unverified: background work outlived the result by %s", claudeResultGrace)
-			emitAgentExited(opts, "claude", pid, retErr)
-			return resultFromUsage(usage), retErr
+			if waitErr := started.waitKeepingResult(true); waitErr != nil || ctx.Err() != nil {
+				stderrWG.Wait()
+				retErr := fmt.Errorf("claude completion is unverified: background work outlived the result by %s: %w", claudeResultGrace, errors.Join(waitErr, ctx.Err()))
+				emitAgentExited(opts, "claude", pid, retErr)
+				return resultFromUsage(usage), retErr
+			}
 		}
 		if opts.OnChunk != nil {
 			opts.OnChunk(fmt.Sprintf("claude stayed open %s after completing its result; stopping it", claudeResultGrace))

@@ -55,6 +55,7 @@ func TestTestStep_PromptBoundsCompletionAndStatesBudget(t *testing.T) {
 				tc.wantBudget,
 				"no verdict, no scenarios, and no artifacts",
 				"Nothing you started may still be running in the background when you return your result",
+				"Wait inside a tool call, never by ending your message",
 			} {
 				if !strings.Contains(prompt, want) {
 					t.Errorf("expected evidence prompt to contain %q\nprompt:\n%s", want, prompt)
