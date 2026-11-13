@@ -1,9 +1,11 @@
 package steps
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestCarriesPrivateRuntimeDetail(t *testing.T) {
@@ -47,6 +49,11 @@ func TestCarriesPrivateRuntimeDetail(t *testing.T) {
 		"file URL to a posix path":        {text: "opened file:///opt/report/index.html", isPrivate: true},
 		"JSON-escaped UNC share":          {text: `{"out":"\\buildhost\share"}`, isPrivate: true},
 		"hyphenated relative directory":   {text: "see docs/part-a/intro/index.md"},
+		"Next.js dynamic segment":         {text: "app/[slug]/edit/page.tsx"},
+		"Next.js route group":             {text: "app/(marketing)/about/page.tsx"},
+		"glob":                            {text: "src/**/fixtures/case.json"},
+		"TS path alias":                   {text: "@/components/Button"},
+		"brace expansion":                 {text: "src/{a,b}/x/"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -104,5 +111,21 @@ func TestCollectTestingSummaryFallsBackWhenTheLatestHasNoSummary(t *testing.T) {
 
 	if got != "Checkout flow passed." {
 		t.Fatalf("collectTestingSummary() = %q, want the earlier round's summary", got)
+	}
+}
+
+func TestBuildTestingSummaryForPRCountsAWithheldSummaryOnce(t *testing.T) {
+	t.Parallel()
+	findings := `{"findings":[],"testing_summary":"All scenarios pass; log at /tmp/srv/out.log\n","tested":["go test ./internal/checkout/..."]}`
+	steps := []*db.StepResult{{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings}}
+	rounds := map[string][]*db.StepRound{"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}}}
+
+	md := BuildTestingSummaryForPR(steps, rounds, "git@github.com:example/widgets.git", "abc123", t.TempDir(), t.TempDir(), nil)
+
+	if !strings.Contains(md, "1 Test evidence entry withheld from this pull request") {
+		t.Fatalf("expected one withheld entry for the one private summary, got:\n%s", md)
+	}
+	if strings.Contains(md, "/tmp/srv") {
+		t.Fatalf("the private summary was published:\n%s", md)
 	}
 }
