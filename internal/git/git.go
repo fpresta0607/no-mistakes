@@ -111,8 +111,8 @@ func runInDirWithEnvRaw(ctx context.Context, dir string, extraEnv []string, args
 // another run on the same gate was being created (issues #106, #134).
 var siblingWorktreeBeingAddedRE = regexp.MustCompile(`failed to read \S*worktrees/[^/\s]+/commondir`)
 
-// fetchWorktreeListingRetryBudget bounds how long a fetch that died on
-// siblingWorktreeBeingAddedRE is retried. `worktree add` writes the file right
+// fetchWorktreeListingRetryBudget bounds how long a fetch is retried, counted
+// from its first failure on siblingWorktreeBeingAddedRE. `worktree add` writes the file right
 // after creating it, so the budget only matters for an entry a crashed add
 // left empty, which still fails once the budget is spent.
 const fetchWorktreeListingRetryBudget = 10 * time.Second
@@ -120,7 +120,7 @@ const fetchWorktreeListingRetryBudget = 10 * time.Second
 const fetchWorktreeListingRetryInterval = 50 * time.Millisecond
 
 func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []string, input string, args ...string) ([]byte, error) {
-	retryDeadline := time.Now().Add(fetchWorktreeListingRetryBudget)
+	var retryDeadline time.Time
 	for {
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = dir
@@ -141,11 +141,16 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 		}
 		// A fetch that died there has written only objects, which a retry
 		// reuses, and has not yet updated a ref, so it is safe to run again.
-		if gitSubcommand(args) == "fetch" && siblingWorktreeBeingAddedRE.MatchString(stderr.String()) && time.Now().Before(retryDeadline) {
-			select {
-			case <-ctx.Done():
-			case <-time.After(fetchWorktreeListingRetryInterval):
-				continue
+		if gitSubcommand(args) == "fetch" && siblingWorktreeBeingAddedRE.MatchString(stderr.String()) {
+			if retryDeadline.IsZero() {
+				retryDeadline = time.Now().Add(fetchWorktreeListingRetryBudget)
+			}
+			if time.Now().Before(retryDeadline) {
+				select {
+				case <-ctx.Done():
+				case <-time.After(fetchWorktreeListingRetryInterval):
+					continue
+				}
 			}
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
