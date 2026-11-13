@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
@@ -23,7 +24,7 @@ func TestApplyLaunchSelectionReplacesTheChainForEveryRole(t *testing.T) {
 	}
 	chain := []agentcfg.Selection{{Harness: types.AgentClaude, Model: "task-model", Effort: agentcfg.EffortHigh}}
 
-	if err := cfg.ApplyLaunchSelection(chain); err != nil {
+	if err := cfg.ApplyLaunchSelection(chain, chain, chain); err != nil {
 		t.Fatal(err)
 	}
 
@@ -51,7 +52,7 @@ func TestApplyLaunchSelectionKeepsANamedFallbackInOrder(t *testing.T) {
 		{Harness: types.AgentCodex, Model: "fallback-model", Effort: agentcfg.EffortXHigh, ServiceTier: "default"},
 	}
 
-	if err := cfg.ApplyLaunchSelection(chain); err != nil {
+	if err := cfg.ApplyLaunchSelection(chain, chain, chain); err != nil {
 		t.Fatal(err)
 	}
 
@@ -67,11 +68,64 @@ func TestApplyLaunchSelectionRefusesAnEmptyOrRepeatedChain(t *testing.T) {
 	claude := agentcfg.Selection{Harness: types.AgentClaude, Model: "task-model", Effort: agentcfg.EffortHigh}
 	for name, chain := range map[string][]agentcfg.Selection{"empty": nil, "repeated": {claude, claude}} {
 		cfg := &Config{Agent: types.AgentCodex}
-		if err := cfg.ApplyLaunchSelection(chain); err == nil {
+		if err := cfg.ApplyLaunchSelection(chain, chain, chain); err == nil {
 			t.Fatalf("%s chain was applied", name)
 		}
 		if cfg.Agent != types.AgentCodex || cfg.Agents != nil {
 			t.Fatalf("a refused %s chain changed the configuration: %s %v", name, cfg.Agent, cfg.Agents)
 		}
+	}
+}
+
+func TestApplyLaunchSelectionPinsTheReviewerAndFixerTheirOwnChains(t *testing.T) {
+	primary := agentcfg.Selection{Harness: types.AgentClaude, Model: "task-model", Effort: agentcfg.EffortHigh}
+	reviewer := agentcfg.Selection{Harness: types.AgentClaude, Model: "review-model", Effort: agentcfg.EffortXHigh}
+	reviewerFallback := agentcfg.Selection{Harness: types.AgentCodex, Model: "review-fallback", Effort: agentcfg.EffortHigh, ServiceTier: "default"}
+	fixer := agentcfg.Selection{Harness: types.AgentClaude, Model: "fix-model", Effort: agentcfg.EffortMedium}
+	cfg := &Config{
+		Agent:        types.AgentCodex,
+		ReviewAgents: map[string]ReviewAgent{RoleReviewerAfterRound: {Agent: types.AgentCodex}},
+		AgentConfig:  map[string]agentcfg.Profile{"claude": {Model: "operator-claude", Effort: agentcfg.EffortLow}},
+	}
+
+	if err := cfg.ApplyLaunchSelection([]agentcfg.Selection{primary}, []agentcfg.Selection{reviewer, reviewerFallback}, []agentcfg.Selection{fixer}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]ReviewAgent{
+		RoleReviewer: {Agent: types.AgentClaude, Model: "review-model", Effort: agentcfg.EffortXHigh, Fallback: []ReviewAgent{
+			{Agent: types.AgentCodex, Model: "review-fallback", Effort: agentcfg.EffortHigh},
+		}},
+		RoleFixer: {Agent: types.AgentClaude, Model: "fix-model", Effort: agentcfg.EffortMedium},
+	}
+	if !reflect.DeepEqual(cfg.ReviewAgents, want) {
+		t.Fatalf("review roles = %+v, want %+v", cfg.ReviewAgents, want)
+	}
+	if !reflect.DeepEqual(cfg.Agents, []types.AgentName{types.AgentClaude}) {
+		t.Fatalf("primary chain = %v, want Claude alone", cfg.Agents)
+	}
+	if want := (agentcfg.Profile{Model: "task-model", Effort: agentcfg.EffortHigh}); cfg.AgentProfileFor(types.AgentClaude) != want {
+		t.Fatalf("primary Claude profile = %+v, want %+v", cfg.AgentProfileFor(types.AgentClaude), want)
+	}
+	if got := cfg.ForReviewAgent(cfg.ReviewAgents[RoleFixer]).AgentProfile(); got != (agentcfg.Profile{Model: "fix-model", Effort: agentcfg.EffortMedium}) {
+		t.Fatalf("fixer profile = %+v", got)
+	}
+}
+
+func TestApplyLaunchSelectionRefusesAFixerWithAFallback(t *testing.T) {
+	primary := []agentcfg.Selection{{Harness: types.AgentClaude, Model: "task-model", Effort: agentcfg.EffortHigh}}
+	fixer := []agentcfg.Selection{
+		{Harness: types.AgentClaude, Model: "fix-model", Effort: agentcfg.EffortHigh},
+		{Harness: types.AgentCodex, Model: "fix-fallback", Effort: agentcfg.EffortHigh, ServiceTier: "default"},
+	}
+	cfg := &Config{Agent: types.AgentCodex}
+
+	err := cfg.ApplyLaunchSelection(primary, primary, fixer)
+
+	if err == nil || !strings.Contains(err.Error(), "fixer") {
+		t.Fatalf("a fixer chain with a fallback was applied: %v", err)
+	}
+	if cfg.Agent != types.AgentCodex || cfg.Agents != nil || cfg.ReviewAgents != nil {
+		t.Fatalf("a refused selection changed the configuration: %+v", cfg)
 	}
 }
