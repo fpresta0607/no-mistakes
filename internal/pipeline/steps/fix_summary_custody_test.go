@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -32,6 +33,7 @@ func TestReviewExecutor_FixSummaryPreservesSourceAndCustody(t *testing.T) {
 		shouldFailCommit bool
 		hasAgentCommit   bool
 		hasNoOutput      bool
+		namesNoNewFiles  bool
 		priorFixes       int
 	}{
 		{name: "normal", summary: "repair source"},
@@ -40,9 +42,9 @@ func TestReviewExecutor_FixSummaryPreservesSourceAndCustody(t *testing.T) {
 		{name: "ascii over input limit", summary: strings.Repeat("a", 4097), shouldRefuse: true},
 		{name: "multibyte over input limit", summary: strings.Repeat("界", 1366), shouldRefuse: true},
 		{name: "empty", summary: ""},
-		{name: "missing output", hasNoOutput: true},
-		{name: "missing summary", output: json.RawMessage(`{}`)},
-		{name: "invalid json", output: json.RawMessage(`{invalid`)},
+		{name: "missing output", hasNoOutput: true, namesNoNewFiles: true},
+		{name: "missing summary", output: json.RawMessage(`{"new_files":["staged.txt","untracked.txt"]}`)},
+		{name: "invalid json", output: json.RawMessage(`{invalid`), namesNoNewFiles: true},
 		{name: "invalid utf8", output: json.RawMessage("{\"summary\":\"\xff\"}"), shouldRefuse: true},
 		{name: "unsafe suffix", summary: strings.Repeat("a", 73) + "\u202e", shouldRefuse: true},
 		{name: "unrelated template expansion", summary: "repair source", shouldRefuse: true, commit: config.Commit{
@@ -61,7 +63,10 @@ func TestReviewExecutor_FixSummaryPreservesSourceAndCustody(t *testing.T) {
 			output := test.output
 			if output == nil && !test.hasNoOutput {
 				var err error
-				output, err = json.Marshal(commitSummary{Summary: test.summary})
+				output, err = json.Marshal(struct {
+					Summary  string   `json:"summary"`
+					NewFiles []string `json:"new_files"`
+				}{Summary: test.summary, NewFiles: []string{"staged.txt", "untracked.txt"}})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -84,7 +89,7 @@ func TestReviewExecutor_FixSummaryPreservesSourceAndCustody(t *testing.T) {
 					}
 					gitCmd(t, opts.CWD, "add", "staged.txt")
 					if fixes <= test.priorFixes {
-						return &agent.Result{Output: json.RawMessage(`{"summary":"first repair"}`)}, nil
+						return &agent.Result{Output: json.RawMessage(`{"summary":"first repair","new_files":["staged.txt","untracked.txt"]}`)}, nil
 					}
 					if test.shouldFailCommit {
 						if err := os.WriteFile(filepath.Join(opts.CWD, "untracked.txt"), []byte("completed second repair\n"), 0o600); err != nil {
@@ -238,7 +243,14 @@ func TestReviewExecutor_FixSummaryPreservesSourceAndCustody(t *testing.T) {
 			if snapshot.Run.Status != types.RunCompleted || gitCmd(t, workDir, "status", "--porcelain") != "" {
 				t.Fatal("bounded summary did not commit all repair source")
 			}
-			for _, name := range []string{"feature.txt", "staged.txt", "untracked.txt"} {
+			committed := []string{"feature.txt", "staged.txt", "untracked.txt"}
+			if test.namesNoNewFiles {
+				committed = committed[:1]
+				if tree := strings.Fields(gitCmd(t, workDir, "ls-tree", "--name-only", "HEAD")); slices.Contains(tree, "staged.txt") || slices.Contains(tree, "untracked.txt") {
+					t.Errorf("a repair that named no new file committed one: %v", tree)
+				}
+			}
+			for _, name := range committed {
 				if got := gitCmd(t, workDir, "show", "HEAD:"+name); got != "completed repair" {
 					t.Errorf("committed source %s = %q", name, got)
 				}
