@@ -180,16 +180,16 @@ Previous review findings to address:
 		// the step parent for synchronous preparation and commit work, so the
 		// independent rereviewer cannot inherit its spent deadline.
 		summary, err := s.executeReviewFixWithTimeout(sctx, s.Name(), fixExecutionOptions{
-			RequirePreviousFindings:   true,
-			MissingFindingsError:      "review fix requires previous review findings",
-			LogMessage:                "asking agent to fix identified issues...",
-			Prompt:                    fixPrompt,
-			ErrorPrefix:               "agent fix",
-			FallbackSummary:           "address review findings",
-			SessionRole:               pipeline.SessionRoleFixer,
-			Purpose:                   "review-fix",
-			Workload:                  workload,
-			ReportBlockedVerification: true,
+			RequirePreviousFindings: true,
+			MissingFindingsError:    "review fix requires previous review findings",
+			LogMessage:              "asking agent to fix identified issues...",
+			Prompt:                  fixPrompt,
+			ErrorPrefix:             "agent fix",
+			FallbackSummary:         "address review findings",
+			SessionRole:             pipeline.SessionRoleFixer,
+			Purpose:                 "review-fix",
+			Workload:                workload,
+			IsReviewRepair:          true,
 		})
 		if err != nil {
 			return nil, err

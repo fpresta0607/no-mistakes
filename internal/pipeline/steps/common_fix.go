@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"unicode/utf8"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -40,10 +43,14 @@ type fixExecutionOptions struct {
 	// Workload records the bounded size of the change under fix for local
 	// telemetry. Optional; nil leaves the invocation's workload unknown.
 	Workload *agent.InvocationWorkload
-	// ReportBlockedVerification asks the fixer for the optional
-	// verification_blocked result field and logs it. Only the Review fix turn
-	// sets it: it is the one fix prompt that orders edits before verification.
-	ReportBlockedVerification bool
+	// IsReviewRepair marks the Review fix turn. It asks the fixer for the
+	// optional verification_blocked result field and logs it, since this is
+	// the one fix prompt that orders edits before verification. It also runs
+	// the turn in an owned scratch directory and commits only the new files
+	// the fixer names in new_files: a Review repair once pointed pytest's
+	// basetemp into the checkout and its commit carried 20 test artifacts
+	// (issue #114).
+	IsReviewRepair bool
 }
 
 type commitSummary struct {
@@ -113,17 +120,71 @@ var commitSummarySchema = json.RawMessage(fmt.Sprintf(`{
 // of a fix result. The field only reaches the step log.
 const maxVerificationBlockedBytes = 300
 
-// fixSummarySchema is commitSummarySchema plus the optional verification_blocked
-// field a fixer fills when the tool that would verify its edits is missing. It
-// stays optional so a fixer with nothing to report omits it.
+// fixSummarySchema is the Review repair's result: commitSummarySchema plus the
+// optional verification_blocked field a fixer fills when the tool that would
+// verify its edits is missing, and the new_files list, the only new files its
+// commit may carry. Both stay optional: a fixer with nothing to report omits
+// verification_blocked, and an omitted new_files names no new file, which
+// fails safe, where a required one would fail every turn that edits only
+// tracked files and leaves it out.
 var fixSummarySchema = json.RawMessage(fmt.Sprintf(`{
 	"type": "object",
 	"properties": {
 		"summary": {"type": "string", "maxLength": %d},
-		"verification_blocked": {"type": "string", "maxLength": %d}
+		"verification_blocked": {"type": "string", "maxLength": %d},
+		"new_files": {"type": "array", "items": {"type": "string"}}
 	},
 	"required": ["summary"]
 }`, config.MaxFixMessageSummaryBytes, maxVerificationBlockedBytes))
+
+// reviewRepairFilesRule is the Review repair's rule for the files it creates.
+const reviewRepairFilesRule = `
+
+New files rule:
+- List in "new_files" every file this fix adds, by its path from the repository root. A new file you leave out of that list stays out of the commit, and so does every other file you create in the checkout.
+- Keep disposable output, such as a test base temp directory, caches, build output and logs, in %s, which TMP, TEMP, TMPDIR and GOTMPDIR already name, never in the checkout. Before you finish, delete every file you created in the checkout that is not part of the fix.`
+
+// splitUnnamedNewFiles reads the new files a Review repair named and sorts the
+// worktree's untracked files by them. A named file is committed even when it
+// was already in before, so a test file a fixer once forgot can still enter a
+// later round's commit; every other file created since before is unnamed and
+// stays out. Output that does not parse names nothing, which fails safe.
+func splitUnnamedNewFiles(sctx *pipeline.StepContext, result *agent.Result, before []string) (keptBefore, unnamed []string, err error) {
+	var parsed struct {
+		NewFiles []string `json:"new_files"`
+	}
+	if result.Output != nil {
+		if err := json.Unmarshal(result.Output, &parsed); err != nil {
+			sctx.Log(fmt.Sprintf("warning: could not read the repair's new_files, so it names no new file: %v", err))
+		}
+	}
+	named := make(map[string]bool, len(parsed.NewFiles))
+	for _, file := range parsed.NewFiles {
+		if filepath.IsAbs(file) {
+			if relative, err := filepath.Rel(sctx.WorkDir, file); err == nil {
+				file = relative
+			}
+		}
+		named[path.Clean(filepath.ToSlash(file))] = true
+	}
+	wasBefore := make(map[string]bool, len(before))
+	for _, file := range before {
+		wasBefore[file] = true
+		if !named[file] {
+			keptBefore = append(keptBefore, file)
+		}
+	}
+	untracked, err := untrackedFiles(sctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, file := range untracked {
+		if !wasBefore[file] && !named[file] {
+			unnamed = append(unnamed, file)
+		}
+	}
+	return keptBefore, unnamed, nil
+}
 
 // blockedVerification returns the bounded, single-line verification_blocked
 // text of a fix result, or "" when the agent reported none or its output does
@@ -495,15 +556,16 @@ func stagedChangesPresent(gitRun gitRunner) (bool, error) {
 }
 
 func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string) error {
-	_, err := commitAgentFixesWithResult(sctx, stepName, summary, fallbackSummary, nil, nil)
+	_, err := commitAgentFixesWithResult(sctx, stepName, summary, fallbackSummary, nil, nil, nil)
 	return err
 }
 
 // commitAgentFixesWithResult commits the worktree changes left by producer, the
 // agent invocation that made them. A nil producer commits without trailers.
 // before lists the untracked files the worktree held before producer started,
-// which stay out of the commit (see stagePipelineChanges).
-func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string, producer *agent.Result, before []string) (bool, error) {
+// and unnamed the new files a Review repair did not name; both stay out of the
+// commit (see stagePipelineChanges).
+func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string, producer *agent.Result, before, unnamed []string) (bool, error) {
 	ctx := sctx.Ctx
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
 		return false, err
@@ -530,7 +592,7 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	if err != nil {
 		return false, err
 	}
-	if err := stagePipelineChanges(sctx, before); err != nil {
+	if err := stagePipelineChanges(sctx, before, unnamed); err != nil {
 		return false, fmt.Errorf("stage %s changes: %w", stepName, err)
 	}
 	headBeforeCommit, err := git.HeadSHA(ctx, sctx.WorkDir)
@@ -660,7 +722,7 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	}
 	if pipeline.OnlyRepairBudgetCut(sctx.PreviousFindings) {
 		sctx.Log("fix selection holds only the repair budget cut; keeping what the cut turn left and checking it without a repair turn...")
-		committed, err := commitAgentFixesWithResult(sctx, stepName, keptRepairCutSummary, opts.FallbackSummary, nil, before)
+		committed, err := commitAgentFixesWithResult(sctx, stepName, keptRepairCutSummary, opts.FallbackSummary, nil, before, nil)
 		if err != nil {
 			return "", err
 		}
@@ -673,23 +735,33 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	if purpose == "" {
 		purpose = string(stepName) + "-fix"
 	}
-	schema := commitSummarySchema
-	if opts.ReportBlockedVerification {
-		schema = fixSummarySchema
-	}
 	runOpts := agent.RunOpts{
 		Prompt:     fixerPrompt(opts.Prompt),
 		CWD:        sctx.WorkDir,
-		JSONSchema: schema,
+		JSONSchema: commitSummarySchema,
 		OnChunk:    sctx.LogChunk,
 		Purpose:    purpose,
 		Workload:   opts.Workload,
+	}
+	if opts.IsReviewRepair {
+		scratch, err := newTestScratch("", runtime.GOOS)
+		if err != nil {
+			return "", err
+		}
+		defer func() {
+			if err := os.RemoveAll(scratch); err != nil {
+				sctx.Log(fmt.Sprintf("warning: failed to remove review repair scratch dir %s: %v", scratch, err))
+			}
+		}()
+		runOpts.Prompt = fixerPrompt(opts.Prompt + fmt.Sprintf(reviewRepairFilesRule, scratch))
+		runOpts.JSONSchema = fixSummarySchema
+		runOpts.Env = (runenv.Overlay{Set: map[string]string{"TMP": scratch, "TEMP": scratch, "TMPDIR": scratch, "GOTMPDIR": scratch}}).Apply(sctx.Env)
 	}
 	// The fixer may commit its own work and leave a clean worktree, which
 	// commitAgentFixesWithResult reports as "not committed". HEAD movement is
 	// what tells that round apart from one that made no edits.
 	headBeforeAgent := ""
-	if opts.ReportBlockedVerification {
+	if opts.IsReviewRepair {
 		headBeforeAgent, err = git.HeadSHA(sctx.Ctx, sctx.WorkDir)
 		if err != nil {
 			return "", fmt.Errorf("resolve head before %s fix: %w", stepName, err)
@@ -723,11 +795,17 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		}
 		sctx.Log(fmt.Sprintf("warning: could not parse fix summary: %v", err))
 	}
-	committed, err := commitAgentFixesWithResult(sctx, stepName, summary, opts.FallbackSummary, result, before)
+	var unnamed []string
+	if opts.IsReviewRepair {
+		if before, unnamed, err = splitUnnamedNewFiles(sctx, result, before); err != nil {
+			return "", err
+		}
+	}
+	committed, err := commitAgentFixesWithResult(sctx, stepName, summary, opts.FallbackSummary, result, before, unnamed)
 	if err != nil {
 		return "", err
 	}
-	if opts.ReportBlockedVerification {
+	if opts.IsReviewRepair {
 		headAfterAgent, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
 		if err != nil {
 			return "", fmt.Errorf("resolve head after %s fix: %w", stepName, err)
@@ -757,7 +835,7 @@ func logRepairResult(sctx *pipeline.StepContext, result *agent.Result) {
 func repairBudgetCut(sctx *pipeline.StepContext, stepName types.StepName, before []string, cut error) error {
 	startHead := sctx.Run.HeadSHA
 	if !rebaseInProgress(sctx.Ctx, sctx.WorkDir) && !mergeInProgress(sctx.Ctx, sctx.WorkDir) {
-		if err := stagePipelineChanges(sctx, before); err != nil {
+		if err := stagePipelineChanges(sctx, before, nil); err != nil {
 			return fmt.Errorf("%v; keep what it left: %w", cut, err)
 		}
 	}

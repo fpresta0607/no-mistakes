@@ -37,10 +37,10 @@ func newTestScratch(parent, goos string) (string, error) {
 	}
 	dir, err := os.MkdirTemp(parent, "nm-")
 	if err != nil {
-		return "", fmt.Errorf("create owned Test scratch: %w", err)
+		return "", fmt.Errorf("create owned agent scratch: %w", err)
 	}
 	if goos == "windows" && len(utf16.Encode([]rune(dir))) > testWindowsScratchMaxChars {
-		return "", errors.Join(fmt.Errorf("Test needs a short temporary root: scratch %q exceeds %d Windows characters; provide a shorter TEMP directory", dir, testWindowsScratchMaxChars), os.RemoveAll(dir))
+		return "", errors.Join(fmt.Errorf("an agent turn needs a short temporary root: scratch %q exceeds %d Windows characters; provide a shorter TEMP directory", dir, testWindowsScratchMaxChars), os.RemoveAll(dir))
 	}
 	return dir, nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -110,14 +111,14 @@ func TestReviewFixPromptKeepsEditsWhenVerificationToolIsMissing(t *testing.T) {
 	if err := json.Unmarshal(opts.JSONSchema, &schema); err != nil {
 		t.Fatal(err)
 	}
-	if len(schema.Required) != 1 || schema.Required[0] != "summary" {
+	if slices.Contains(schema.Required, "verification_blocked") {
 		t.Errorf("verification_blocked must stay optional, required = %v", schema.Required)
 	}
 }
 
 func TestReviewFixLogsUnverifiedCommit(t *testing.T) {
 	t.Parallel()
-	_, logs := runReviewFixRound(t, `{"summary":"address findings","verification_blocked":"pytest not found: tests need a project virtualenv"}`, true)
+	_, logs := runReviewFixRound(t, `{"summary":"address findings","verification_blocked":"pytest not found: tests need a project virtualenv","new_files":["review-fix.txt"]}`, true)
 	if !logsContain(logs, "fixes committed unverified, verification blocked: pytest not found: tests need a project virtualenv") {
 		t.Errorf("committed round did not log blocked verification: %q", logs)
 	}

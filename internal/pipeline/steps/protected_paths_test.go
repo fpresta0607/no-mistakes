@@ -598,7 +598,7 @@ func TestStagePipelineChanges_LeavesOutUntrackedFilesOverGitHubsLimit(t *testing
 				t.Fatal(err)
 			}
 
-			if err := stagePipelineChanges(sctx, nil); err != nil {
+			if err := stagePipelineChanges(sctx, nil, nil); err != nil {
 				t.Fatalf("stage: %v", err)
 			}
 
@@ -668,7 +668,7 @@ func TestStagePipelineChanges_LeavesOutUntrackedFilesTheWorktreeHeldBefore(t *te
 			writeTestFile(t, filepath.Join(dir, "fix.txt"), "agent fix\n")
 			writeTestFile(t, filepath.Join(dir, "feature.txt"), "repaired feature code\n")
 
-			if err := stagePipelineChanges(sctx, before); err != nil {
+			if err := stagePipelineChanges(sctx, before, nil); err != nil {
 				t.Fatalf("stage: %v", err)
 			}
 
@@ -718,7 +718,7 @@ func TestStagePipelineChanges_ChecksProtectedPathsOnlyOnWhatItStages(t *testing.
 			}
 			writeTestFile(t, filepath.Join(dir, "fix.txt"), "agent fix\n")
 
-			err = stagePipelineChanges(sctx, before)
+			err = stagePipelineChanges(sctx, before, nil)
 
 			var refusal *pipeline.ProtectedPathError
 			if got := errors.As(err, &refusal); got == tc.isLeftBehind {
@@ -825,7 +825,7 @@ func TestProtectedPaths_Staging(t *testing.T) {
 				gitCmd(t, dir, "mv", "feature.txt", tc.file)
 			}
 			before := gitCmd(t, dir, "diff", "--cached")
-			err := stagePipelineChanges(sctx, nil)
+			err := stagePipelineChanges(sctx, nil, nil)
 			if tc.blocked {
 				if err == nil || !strings.Contains(err.Error(), "protected") {
 					t.Fatalf("expected protected-path error, got %v", err)
@@ -894,7 +894,7 @@ func TestStagePipelineChanges_KeepsRecordedSubmodulePointer(t *testing.T) {
 			}
 
 			sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
-			committed, err := commitAgentFixesWithResult(sctx, types.StepLint, "fix lint", "", nil, nil)
+			committed, err := commitAgentFixesWithResult(sctx, types.StepLint, "fix lint", "", nil, nil, nil)
 			if err != nil {
 				t.Fatalf("commit agent fixes: %v", err)
 			}
@@ -945,7 +945,7 @@ func TestStagePipelineChanges_DoesNotReAddRemovedPopulatedSubmodule(t *testing.T
 	}
 
 	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
-	committed, err := commitAgentFixesWithResult(sctx, types.StepLint, "fix lint", "", nil, nil)
+	committed, err := commitAgentFixesWithResult(sctx, types.StepLint, "fix lint", "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("commit agent fixes: %v", err)
 	}
@@ -958,7 +958,7 @@ func TestStagePipelineChanges_DoesNotReAddRemovedPopulatedSubmodule(t *testing.T
 	}
 
 	gitCmd(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", "-b", "main", remote, "added")
-	if err := stagePipelineChanges(sctx, nil); err != nil {
+	if err := stagePipelineChanges(sctx, nil, nil); err != nil {
 		t.Fatalf("stage registered submodule: %v", err)
 	}
 	if got := gitCmd(t, dir, "ls-files", "--stage", "--", "added"); !strings.HasPrefix(got, "160000 ") {
@@ -970,7 +970,7 @@ func TestProtectedPaths_UnreadableStatusFailsClosed(t *testing.T) {
 	t.Parallel()
 	sctx := newTestContext(t, &mockAgent{}, t.TempDir(), "", "", config.Commands{})
 	sctx.Config.ProtectedPaths = []string{"*.lock"}
-	if err := stagePipelineChanges(sctx, nil); err == nil || !strings.Contains(err.Error(), "check protected_paths") {
+	if err := stagePipelineChanges(sctx, nil, nil); err == nil || !strings.Contains(err.Error(), "check protected_paths") {
 		t.Fatalf("unreadable git status did not fail closed: %v", err)
 	}
 }
