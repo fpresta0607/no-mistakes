@@ -919,7 +919,7 @@ What stands behind it:
 
 The Test agent's prompts name the same words, filled in the same way, as a JSON list.
 The agent is told to start every command of its own that installs dependencies, builds, compiles or runs tests behind them, so the heavy work it chooses by itself takes a turn too, most of all in a repository that names no `commands.test`.
-It is told that a refusal means the command never ran, to report each scenario that needed it as untested with the wrapper's line, and never to run the command another way.
+With a `refusal_prefix`, it is told that a refusal means the command never ran, to report each scenario that needed it as untested with the wrapper's line, and never to run the command another way.
 A wrapper that cannot be filled for the run, such as one naming `{test_comparison_sha}` with no resolved comparison, gives the agent no words, and the agent is told to start no build or test run at all.
 The step logs one line saying the agent was given the wrapper.
 These are instructions in the agent's prompt, not starts the step makes, so they hold as far as the agent follows them.
