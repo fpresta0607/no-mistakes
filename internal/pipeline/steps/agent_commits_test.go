@@ -48,7 +48,7 @@ func TestCommitAgentFixes_AgentOwnCommitFollowsFixMessageAndNoTrailers(t *testin
 	agentTree := gitCmd(t, dir, "rev-parse", "HEAD^{tree}")
 	agentAuthor := gitCmd(t, dir, "log", "-1", "--format=%an <%ae> %ad", "--date=raw")
 
-	committed, err := commitAgentFixesWithResult(sctx, types.StepCI, "repair widget", "fallback", &agent.Result{Provider: "claude"}, nil)
+	committed, err := commitAgentFixesWithResult(sctx, types.StepCI, "repair widget", "fallback", &agent.Result{Provider: "claude"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestCommitAgentFixes_AgentOwnCommitGetsConfiguredTrailersOnly(t *testing.T)
 	sctx, dir, _ := agentCommitContext(t, attributionTrailers[1:])
 	agentCommit(t, dir, "agent.txt", "fix: agent subject")
 
-	if _, err := commitAgentFixesWithResult(sctx, types.StepLint, "tidy", "fallback", &agent.Result{Provider: "codex", Model: "gpt-5.5"}, nil); err != nil {
+	if _, err := commitAgentFixesWithResult(sctx, types.StepLint, "tidy", "fallback", &agent.Result{Provider: "codex", Model: "gpt-5.5"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	want := "no-mistakes(lint): tidy\n\nAssisted-by: no-mistakes:codex:gpt-5.5"
@@ -100,7 +100,7 @@ func TestCommitAgentFixes_EveryAgentCommitInAChainIsRewrittenInOrder(t *testing.
 	wantTree := gitCmd(t, dir, "rev-parse", "HEAD^{tree}")
 	wantFirstTree := gitCmd(t, dir, "rev-parse", "HEAD~1^{tree}")
 
-	if _, err := commitAgentFixesWithResult(sctx, types.StepReview, "repair", "fallback", nil, nil); err != nil {
+	if _, err := commitAgentFixesWithResult(sctx, types.StepReview, "repair", "fallback", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	log := gitCmd(t, dir, "log", "--reverse", "--format=%s", headSHA+"..HEAD")
@@ -127,7 +127,7 @@ func TestCommitAgentFixes_AgentCommitPlusLeftoverEditsBothFollowSettings(t *test
 	agentCommit(t, dir, "committed.txt", "agent subject")
 	writeAgentChange(t, dir)
 
-	committed, err := commitAgentFixesWithResult(sctx, types.StepTest, "repair", "fallback", nil, nil)
+	committed, err := commitAgentFixesWithResult(sctx, types.StepTest, "repair", "fallback", nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestCommitAgentFixes_ConformingAgentCommitIsLeftAlone(t *testing.T) {
 	gitCmd(t, dir, "commit", "-m", "no-mistakes(review): repair")
 	before := gitCmd(t, dir, "rev-parse", "HEAD")
 
-	if _, err := commitAgentFixesWithResult(sctx, types.StepReview, "repair", "fallback", nil, nil); err != nil {
+	if _, err := commitAgentFixesWithResult(sctx, types.StepReview, "repair", "fallback", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != before {
@@ -173,7 +173,7 @@ func TestCommitAgentFixes_MergeCommitFromAgentIsRefusedUntouched(t *testing.T) {
 	gitCmd(t, dir, "merge", "--no-ff", "-m", "merge", left)
 	merged := gitCmd(t, dir, "rev-parse", "HEAD")
 
-	_, err := commitAgentFixesWithResult(sctx, types.StepReview, "repair", "fallback", nil, nil)
+	_, err := commitAgentFixesWithResult(sctx, types.StepReview, "repair", "fallback", nil, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "not a linear chain") {
 		t.Fatalf("err = %v, want a refusal of the non-linear chain", err)
 	}
@@ -192,7 +192,7 @@ func TestCommitAgentFixes_InvalidTemplateKeepsAgentCommit(t *testing.T) {
 	agentCommit(t, dir, "agent.txt", "agent subject")
 	before := gitCmd(t, dir, "rev-parse", "HEAD")
 
-	if _, err := commitAgentFixesWithResult(sctx, types.StepReview, "repair", "fallback", nil, nil); err == nil {
+	if _, err := commitAgentFixesWithResult(sctx, types.StepReview, "repair", "fallback", nil, nil, nil); err == nil {
 		t.Fatal("expected a template error")
 	}
 	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != before {
@@ -210,7 +210,7 @@ func TestCommitAgentFixes_CommitsAtOrBelowTheRecordedHeadAreNeverRewritten(t *te
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "claude"}, dir, baseSHA, authorHead, config.Commands{})
 	agentCommit(t, dir, "agent.txt", "agent subject")
 
-	if _, err := commitAgentFixesWithResult(sctx, types.StepReview, "repair", "fallback", nil, nil); err != nil {
+	if _, err := commitAgentFixesWithResult(sctx, types.StepReview, "repair", "fallback", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := gitCmd(t, dir, "rev-parse", "HEAD~1"); got != authorHead {
@@ -224,7 +224,7 @@ func TestCommitAgentFixes_CommitsAtOrBelowTheRecordedHeadAreNeverRewritten(t *te
 func TestCommitAgentFixes_NoAgentCommitLeavesTheHeadAlone(t *testing.T) {
 	t.Parallel()
 	sctx, dir, headSHA := agentCommitContext(t, nil)
-	if _, err := commitAgentFixesWithResult(sctx, types.StepReview, "repair", "fallback", nil, nil); err != nil {
+	if _, err := commitAgentFixesWithResult(sctx, types.StepReview, "repair", "fallback", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {

@@ -572,7 +572,7 @@ func TestReviewStep_FixMode(t *testing.T) {
 			callCount++
 			if callCount == 1 {
 				os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
-				return &agent.Result{Output: json.RawMessage(`{"summary":"  'address review findings.'  "}`)}, nil
+				return &agent.Result{Output: json.RawMessage(`{"summary":"  'address review findings.'  ","new_files":["review-fix.txt"]}`)}, nil
 			}
 			// Review call — return clean findings
 			findings := Findings{Items: []Finding{}, Summary: "all clear", RiskLevel: "low", RiskRationale: "all clear", RiskScope: types.FindingsRiskScopeSourceOrExternal, ReviewedPaths: fullReviewCoverage(t, dir, baseSHA)}

@@ -124,7 +124,7 @@ type ProtectedPathError struct {
 }
 
 func (e *ProtectedPathError) Error() string {
-	return fmt.Sprintf("refusing automatic commit: dirty protected path %q matches protected_paths rule %q; index and worktree preserved, inspect and resolve the edit before retrying", e.Path, e.Rule)
+	return fmt.Sprintf("refusing automatic commit: dirty protected path %q matches protected_paths rule %q; index and worktree preserved, except that a Review repair's new files it did not name in new_files are unstaged and moved to the run's evidence directory; inspect and resolve the edit before retrying", e.Path, e.Rule)
 }
 
 func ProtectedPathOutcome(err error) *StepOutcome {

@@ -623,6 +623,7 @@ func rebaseCustodyScenario(t *testing.T) string {
         new: "guard helper\n"
     structured:
       summary: "add a guard helper alongside the feature"
+      new_files: ["guard.txt"]
   - match: "Review the code changes and return structured findings"
     text: "review found a warning"
     structured:

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -198,6 +199,9 @@ func gitlabEvidenceImages(runDir string) (images []gitlabEvidenceImage, problems
 		}
 		if entry.IsDir() {
 			if entry.Name() == reviewqa.DirName && path != root {
+				return fs.SkipDir
+			}
+			if rel, err := filepath.Rel(root, path); err == nil && slices.Contains(evidencePublishExcludedDirs(), filepath.ToSlash(rel)) {
 				return fs.SkipDir
 			}
 			return nil

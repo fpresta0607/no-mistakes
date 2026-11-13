@@ -755,7 +755,7 @@ func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, produc
 	if err != nil {
 		return ciRepairResult{}, err
 	}
-	if err := stagePipelineChanges(sctx, before); err != nil {
+	if err := stagePipelineChanges(sctx, before, nil); err != nil {
 		return ciRepairResult{}, fmt.Errorf("stage CI changes: %w", err)
 	}
 	staged, err := stagedChangesPresent(func(args ...string) (string, error) {

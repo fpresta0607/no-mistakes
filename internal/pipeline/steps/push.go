@@ -85,7 +85,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 				return nil, fmt.Errorf("render push commit message: %w", err)
 			}
 		}
-		if err := stagePipelineChanges(sctx, before); err != nil {
+		if err := stagePipelineChanges(sctx, before, nil); err != nil {
 			return nil, fmt.Errorf("stage agent changes: %w", err)
 		}
 		if err := commitPipelineCorrection(ctx, sctx.WorkDir, message, sctx.Log); err != nil {
