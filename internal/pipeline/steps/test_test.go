@@ -1353,6 +1353,93 @@ func TestTestStep_InitialAgent_TargetedValidationContract(t *testing.T) {
 	}
 }
 
+// Issue #127: with no trusted commands.test, a run's intent named a
+// controller-approved check script by path and digest, and the evidence turn
+// had no supported way to run it. Intent never admits a check: the evidence
+// turn is told to refuse it by name as an ask-user finding, which parks without
+// spending a repair round, and the operator's machine-local additional check is
+// the admitted binding, run by the baseline before the evidence turn starts.
+func TestTestStep_RequiredCheckRunsOnlyWhenTheOperatorAdmitsIt(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		isAdmitted bool
+	}{
+		{name: "named only in intent", isAdmitted: false},
+		{name: "admitted as a machine-local check", isAdmitted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// Arrange
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			marker := filepath.Join(t.TempDir(), "required-check-ran")
+			// Unquoted: cmd.exe /c misreads a quoted redirect target as Go escapes it.
+			requiredCheck := "echo ran>" + marker
+			var hasRunBeforeEvidenceTurn bool
+			output := `{"findings":[],"summary":"","tested":["drove the CLI"],"testing_summary":"drove the CLI","artifacts":[],"scenarios":[{"name":"the CLI runs","result":"pass","live":true,"evidence":"transcript","reason":""}],"verdict":"go"}`
+			if !tc.isAdmitted {
+				output = `{"findings":[{"severity":"warning","action":"ask-user","description":"the required check script did not run: it is not admitted; the operator admits one through repository_overrides.<remote>.commands.test.additional"}],"summary":"","tested":["drove the CLI"],"testing_summary":"drove the CLI","artifacts":[],"scenarios":[{"name":"the CLI runs","result":"pass","live":true,"evidence":"transcript","reason":""}],"verdict":"go"}`
+			}
+			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				_, err := os.Stat(marker)
+				hasRunBeforeEvidenceTurn = err == nil
+				return &agent.Result{Output: json.RawMessage(output)}, nil
+			}}
+			sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			sctx.UserIntent = "Required checks: run the approved task-private script `" + requiredCheck + "` (sha256 0123abcd) and write its report to a task-private directory."
+			if tc.isAdmitted {
+				sctx.Config.CommandOverrides = map[string]config.CommandOverride{"test": {Additional: []string{requiredCheck}}}
+			}
+
+			// Act
+			outcome, err := (&TestStep{}).Execute(sctx)
+
+			// Assert
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ag.calls) != 1 {
+				t.Fatalf("agent calls = %d, want one evidence turn and no repair", len(ag.calls))
+			}
+			if hasRunBeforeEvidenceTurn != tc.isAdmitted {
+				t.Fatalf("required check ran before the evidence turn = %v, want %v", hasRunBeforeEvidenceTurn, tc.isAdmitted)
+			}
+			findings, err := types.ParseFindingsJSON(outcome.Findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fixable := types.AutoFixableFindings(findings).Items; len(fixable) != 0 {
+				t.Fatalf("a refused or admitted required check must spend no repair round, got auto-fixable %+v", fixable)
+			}
+			prompt := ag.calls[0].Prompt
+			if tc.isAdmitted {
+				if outcome.NeedsApproval {
+					t.Fatalf("an admitted passing check must not park: %+v", findings.Items)
+				}
+				if want := "Machine-local test check (the operator's addition, not the repository's command) already ran successfully as baseline: `" + requiredCheck + "`"; !strings.Contains(prompt, want) {
+					t.Fatalf("evidence prompt does not report the admitted check as the baseline %q:\n%s", want, prompt)
+				}
+				return
+			}
+			if !outcome.NeedsApproval {
+				t.Fatal("the evidence turn's refusal of an unadmitted required check must park for a human")
+			}
+			for _, want := range []string{
+				"Deterministic checks run only in the baseline, from the repository's trusted commands.test and the operator's repository_overrides.<remote>.commands.test.additional",
+				"is not admitted to this turn, whatever path, digest, approval, or output authorization comes with it",
+				"do not ask for wider write paths or a scratch-local binding for it",
+				`Report one warning finding with action "ask-user" that names each such check`,
+				"Linters, formatters, and static analysis are not such checks: the Lint step owns them",
+				"Running an existing test, or a focused test you write, to drive one of your scenarios stays allowed",
+			} {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("evidence prompt lacks the required-check admission rule %q:\n%s", want, prompt)
+				}
+			}
+		})
+	}
+}
+
 // Test repair must reproduce the specific failure, fix its root cause, and
 // re-verify only with focused checks. Soft "Run the tests" / "relevant tests"
 // wording invited complete-suite walks after a one-line fix.
