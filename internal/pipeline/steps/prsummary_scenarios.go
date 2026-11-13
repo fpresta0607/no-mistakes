@@ -24,7 +24,7 @@ import (
 // reading the same findings payload the rest of the Testing section reads so a
 // step whose final findings were cleared by a fix still renders the evidence
 // its last round captured.
-func collectTestingScenarios(sr *db.StepResult, rounds []*db.StepRound) []types.TestScenario {
+func collectTestingScenarios(sr *db.StepResult, rounds []*db.StepRound, withheld map[string]bool) []types.TestScenario {
 	for _, raw := range testingEvidenceFindingsJSON(sr, rounds) {
 		if raw == nil || strings.TrimSpace(*raw) == "" {
 			continue
@@ -34,7 +34,7 @@ func collectTestingScenarios(sr *db.StepResult, rounds []*db.StepRound) []types.
 			continue
 		}
 		if len(findings.Scenarios) > 0 {
-			return findings.Scenarios
+			return withholdPrivateRuntimeDetails(findings, withheld).Scenarios
 		}
 	}
 	return nil

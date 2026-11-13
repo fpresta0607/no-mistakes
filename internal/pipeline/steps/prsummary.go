@@ -477,12 +477,17 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 			return ""
 		}
 
-		testingSummary := collectTestingSummary(sr, stepRounds)
-		tested := collectTestingDetails(sr, stepRounds)
-		artifacts := collectTestingArtifacts(sr, stepRounds, opts)
-		scenarios := collectTestingScenarios(sr, stepRounds)
+		withheld := map[string]bool{}
+		testingSummary := collectTestingSummary(sr, stepRounds, withheld)
+		tested := collectTestingDetails(sr, stepRounds, withheld)
+		artifacts := collectTestingArtifacts(sr, stepRounds, opts, withheld)
+		scenarios := collectTestingScenarios(sr, stepRounds, withheld)
 		liveValidation := renderLiveValidationLine(scenarios, collectTestingVerdict(sr, stepRounds))
+		notice := withheldEntriesNotice(len(withheld))
 		if testingSummary == "" && len(tested) == 0 && len(artifacts) == 0 && liveValidation == "" {
+			if notice != "" {
+				return "## Testing\n\n- " + notice + "\n- " + line
+			}
 			return "## Testing\n\n- " + line
 		}
 
@@ -544,6 +549,16 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 			}
 			previousArtifact = rendered
 			previousAttachment = attachment
+		}
+		if notice != "" {
+			noticeLine := "- " + notice
+			if needsArtifactBlockSeparator(previousArtifact, noticeLine) || previousAttachment {
+				b.WriteString("\n")
+			}
+			b.WriteString(noticeLine)
+			b.WriteString("\n")
+			previousArtifact = noticeLine
+			previousAttachment = false
 		}
 		if outcome := buildTestingOutcomeLine(line, stepRounds); shouldRenderTestingOutcome(opts, wroteSummary, outcome) {
 			outcomeLine := "- " + outcome
@@ -632,19 +647,19 @@ func cleanGitHubRepoPath(repo string) string {
 	return url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1])
 }
 
-func collectTestingSummary(sr *db.StepResult, rounds []*db.StepRound) string {
-	if summary := testingSummaryFromFindings(sr.FindingsJSON); summary != "" {
+func collectTestingSummary(sr *db.StepResult, rounds []*db.StepRound, withheld map[string]bool) string {
+	if summary := testingSummaryFromFindings(sr.FindingsJSON, withheld); summary != "" {
 		return summary
 	}
 	for i := len(rounds) - 1; i >= 0; i-- {
-		if summary := testingSummaryFromFindings(rounds[i].FindingsJSON); summary != "" {
+		if summary := testingSummaryFromFindings(rounds[i].FindingsJSON, withheld); summary != "" {
 			return summary
 		}
 	}
 	return ""
 }
 
-func testingSummaryFromFindings(raw *string) string {
+func testingSummaryFromFindings(raw *string, withheld map[string]bool) string {
 	if raw == nil || strings.TrimSpace(*raw) == "" {
 		return ""
 	}
@@ -652,23 +667,23 @@ func testingSummaryFromFindings(raw *string) string {
 	if err != nil {
 		return ""
 	}
-	return sanitizePromptMultilineText(findings.TestingSummary)
+	return sanitizePromptMultilineText(withholdPrivateRuntimeDetails(findings, withheld).TestingSummary)
 }
 
-func collectTestingDetails(sr *db.StepResult, rounds []*db.StepRound) []string {
+func collectTestingDetails(sr *db.StepResult, rounds []*db.StepRound, withheld map[string]bool) []string {
 	seen := map[string]bool{}
 	var details []string
 	for _, raw := range testingEvidenceFindingsJSON(sr, rounds) {
-		details = appendTestingDetails(details, seen, raw)
+		details = appendTestingDetails(details, seen, raw, withheld)
 	}
 	return details
 }
 
-func collectTestingArtifacts(sr *db.StepResult, rounds []*db.StepRound, opts testingSummaryOptions) []types.TestArtifact {
+func collectTestingArtifacts(sr *db.StepResult, rounds []*db.StepRound, opts testingSummaryOptions, withheld map[string]bool) []types.TestArtifact {
 	seen := map[string]bool{}
 	var artifacts []types.TestArtifact
 	for _, raw := range testingEvidenceFindingsJSON(sr, rounds) {
-		artifacts = appendTestingArtifacts(artifacts, seen, raw, opts)
+		artifacts = appendTestingArtifacts(artifacts, seen, raw, opts, withheld)
 	}
 	return artifacts
 }
@@ -696,7 +711,7 @@ func hasTestingEvidenceMetadata(raw *string) bool {
 	return strings.TrimSpace(findings.TestingSummary) != "" || len(findings.Tested) > 0 || len(findings.Artifacts) > 0 || len(findings.Scenarios) > 0
 }
 
-func appendTestingArtifacts(artifacts []types.TestArtifact, seen map[string]bool, raw *string, opts testingSummaryOptions) []types.TestArtifact {
+func appendTestingArtifacts(artifacts []types.TestArtifact, seen map[string]bool, raw *string, opts testingSummaryOptions, withheld map[string]bool) []types.TestArtifact {
 	if raw == nil || strings.TrimSpace(*raw) == "" {
 		return artifacts
 	}
@@ -704,6 +719,7 @@ func appendTestingArtifacts(artifacts []types.TestArtifact, seen map[string]bool
 	if err != nil {
 		return artifacts
 	}
+	findings = withholdPrivateRuntimeDetails(findings, withheld)
 	for _, artifact := range findings.Artifacts {
 		artifact.Label = sanitizePromptText(artifact.Label)
 		artifact.Kind = strings.ToLower(sanitizePromptText(artifact.Kind))
@@ -726,7 +742,7 @@ func appendTestingArtifacts(artifacts []types.TestArtifact, seen map[string]bool
 	return artifacts
 }
 
-func appendTestingDetails(details []string, seen map[string]bool, raw *string) []string {
+func appendTestingDetails(details []string, seen map[string]bool, raw *string, withheld map[string]bool) []string {
 	if raw == nil || strings.TrimSpace(*raw) == "" {
 		return details
 	}
@@ -734,6 +750,7 @@ func appendTestingDetails(details []string, seen map[string]bool, raw *string) [
 	if err != nil {
 		return details
 	}
+	findings = withholdPrivateRuntimeDetails(findings, withheld)
 	for _, detail := range findings.Tested {
 		clean := sanitizePromptText(detail)
 		if clean == "" || seen[clean] {
@@ -1579,6 +1596,14 @@ func writeReviewFollowUps(b *strings.Builder, findings *types.Findings, flavor p
 func writeTestedDetails(b *strings.Builder, sr *db.StepResult, findings *types.Findings, flavor prBodyFlavor) {
 	if sr.StepName != types.StepTest {
 		return
+	}
+	withheld := map[string]bool{}
+	public := withholdPrivateRuntimeDetails(*findings, withheld)
+	findings = &public
+	if notice := withheldEntriesNotice(len(withheld)); notice != "" {
+		b.WriteString("- ")
+		b.WriteString(notice)
+		b.WriteString("\n")
 	}
 	if line := renderLiveValidationLine(findings.Scenarios, findings.Verdict); line != "" {
 		b.WriteString("- ")
