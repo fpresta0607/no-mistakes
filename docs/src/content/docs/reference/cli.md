@@ -222,7 +222,8 @@ Without it, the Test agent writes only to the worktree, the run's evidence direc
 Repeat the flag for each directory.
 Each Test agent prompt names every authorized directory; every other destination outside the worktree, the evidence directory and the scratch directory stays refused.
 
-Each value must be an absolute path to an existing directory that is not a filesystem or volume root, not inside the repository being validated, not inside the no-mistakes home (which holds run worktrees and the default evidence directory), and not a directory that holds either one, since that would authorize writes into all of it.
+Each value must be an absolute path to an existing directory that is not a filesystem or volume root, not inside the repository being validated or any of its linked git worktrees, the no-mistakes home, a configured `worktree_roots` directory, or the evidence root (`evidence_dir` or `test.evidence.local_root`), and not a directory that holds any of them, since that would authorize writes into all of it.
+The check reads the global config and lists the repository's worktrees, so it refuses every value while either cannot be read.
 Values are canonicalized, with symbolic links and Windows junctions resolved, before these checks, so a link into the repository counts as inside it, and duplicates are dropped.
 A refused value fails the launch before anything is pushed, with an error that names the value, the rule it broke and the correction, for example `--test-output-dir C:\x is inside the repository; choose a directory outside it`.
 The daemon checks the values again when it admits the run, because push options and IPC are a boundary a request can cross without the CLI.

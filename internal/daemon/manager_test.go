@@ -2064,16 +2064,23 @@ func TestStartRunHandsTheAdmittedTestOutputDirsToTheExecutor(t *testing.T) {
 func TestStartRunRefusesAnInadmissibleTestOutputDirWithoutARunRow(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
-		value    func(p *paths.Paths, repo *db.Repo) string
+		value    func(t *testing.T, p *paths.Paths, repo *db.Repo) string
 		wantRule string
 	}{
-		{"relative", func(*paths.Paths, *db.Repo) string { return "relative-out" }, "is not an absolute path"},
-		{"inside_repository", func(_ *paths.Paths, repo *db.Repo) string { return repo.WorkingPath }, "is inside the repository"},
-		{"inside_home", func(p *paths.Paths, _ *db.Repo) string { return p.Root() }, "is inside the no-mistakes home"},
+		{"relative", func(*testing.T, *paths.Paths, *db.Repo) string { return "relative-out" }, "is not an absolute path"},
+		{"inside_repository", func(_ *testing.T, _ *paths.Paths, repo *db.Repo) string { return repo.WorkingPath }, "is inside the repository"},
+		{"inside_home", func(_ *testing.T, p *paths.Paths, _ *db.Repo) string { return p.Root() }, "is inside the no-mistakes home"},
+		{"inside_configured_worktree_root", func(t *testing.T, p *paths.Paths, repo *db.Repo) string {
+			root := t.TempDir()
+			if err := os.WriteFile(p.ConfigFile(), []byte("worktree_roots:\n  '"+repo.WorkingPath+"': '"+root+"'\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return root
+		}, "is inside a run worktree root"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			manager, p, database, repo, head, _ := newTestOutputDirsManager(t)
-			value := tc.value(p, repo)
+			value := tc.value(t, p, repo)
 
 			_, err := manager.startRunWithPRText(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "refuse the destination", "", false, "", nil, []string{value}, db.RunPRText{})
 

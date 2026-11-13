@@ -1195,7 +1195,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 		return ipc.LaunchReceipt{}, err
 	}
 	requestPRTextDigest := db.PRTextDigest(prText.Title, prText.Body)
-	testOutputDirs, err = testoutputdirs.Validate(testOutputDirs, repo.WorkingPath, m.paths.Root())
+	testOutputDirs, err = testoutputdirs.Validate(ctx, testOutputDirs, repo.WorkingPath, m.paths)
 	if err != nil {
 		return ipc.LaunchReceipt{}, err
 	}
@@ -1871,7 +1871,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	}
 	// The CLI admitted these before its push, but the push options and IPC are
 	// a boundary a request can cross without that CLI.
-	testOutputDirs, testOutputDirsErr := testoutputdirs.Validate(testOutputDirs, repo.WorkingPath, m.paths.Root())
+	testOutputDirs, testOutputDirsErr := testoutputdirs.Validate(ctx, testOutputDirs, repo.WorkingPath, m.paths)
 	if testOutputDirsErr != nil {
 		trackStartFailure("invalid_test_output_dirs")
 		return "", testOutputDirsErr

@@ -382,7 +382,7 @@ func runAxiRunWithPRText(cmd *cobra.Command, autoYes bool, skipSteps []types.Ste
 	var testOutputDirs []string
 	if cmd.Flags().Lookup("test-output-dir") != nil {
 		requested, _ := cmd.Flags().GetStringArray("test-output-dir")
-		testOutputDirs, err = testoutputdirs.Validate(requested, env.repo.WorkingPath, env.p.Root())
+		testOutputDirs, err = testoutputdirs.Validate(ctx, requested, env.repo.WorkingPath, env.p)
 		if err != nil {
 			return emitError(cmd, 2, err.Error())
 		}

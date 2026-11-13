@@ -1,13 +1,16 @@
 package testoutputdirs
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/testlink"
 )
@@ -19,6 +22,8 @@ type admissionFixture struct {
 func newAdmissionFixture(t *testing.T) admissionFixture {
 	t.Helper()
 	fixture := admissionFixture{repo: t.TempDir(), home: t.TempDir(), outside: t.TempDir()}
+	runGit(t, fixture.repo, "init")
+	runGit(t, fixture.repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "initial")
 	for _, dir := range []string{filepath.Join(fixture.repo, "out"), filepath.Join(fixture.home, "worktrees")} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
@@ -28,6 +33,26 @@ func newAdmissionFixture(t *testing.T) admissionFixture {
 		t.Fatal(err)
 	}
 	return fixture
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func writeGlobalConfig(t *testing.T, home, yaml string) {
+	t.Helper()
+	if err := os.WriteFile(paths.WithRoot(home).ConfigFile(), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f admissionFixture) validate(values ...string) ([]string, error) {
+	return Validate(context.Background(), values, f.repo, paths.WithRoot(f.home))
 }
 
 func canonical(t *testing.T, path string) string {
@@ -42,7 +67,7 @@ func canonical(t *testing.T, path string) string {
 func TestValidateAcceptsAnExistingAbsoluteDirectoryOutsideTheRepositoryAndHome(t *testing.T) {
 	fixture := newAdmissionFixture(t)
 
-	got, err := Validate([]string{fixture.outside}, fixture.repo, fixture.home)
+	got, err := fixture.validate(fixture.outside)
 
 	if err != nil {
 		t.Fatalf("Validate refused an admissible directory: %v", err)
@@ -60,7 +85,7 @@ func TestValidateDeduplicatesSpellingsOfOneDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := Validate([]string{fixture.outside, other, spelled, fixture.outside}, fixture.repo, fixture.home)
+	got, err := fixture.validate(fixture.outside, other, spelled, fixture.outside)
 
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
@@ -89,7 +114,7 @@ func TestValidateRefusesWithTheValueTheRuleAndTheCorrection(t *testing.T) {
 		{"holds_repository", filepath.Dir(fixture.repo), "holds the repository", "choose a directory that does not contain it"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := Validate([]string{fixture.outside, tc.value}, fixture.repo, fixture.home)
+			got, err := fixture.validate(fixture.outside, tc.value)
 
 			if err == nil {
 				t.Fatalf("Validate admitted %q: %q", tc.value, got)
@@ -104,16 +129,85 @@ func TestValidateRefusesWithTheValueTheRuleAndTheCorrection(t *testing.T) {
 
 func TestValidateRefusesADirectoryHoldingTheHome(t *testing.T) {
 	fixture := newAdmissionFixture(t)
-	home := filepath.Join(fixture.outside, "home")
-	if err := os.MkdirAll(home, 0o755); err != nil {
+	fixture.home = filepath.Join(fixture.outside, "home")
+	if err := os.MkdirAll(fixture.home, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := Validate([]string{fixture.outside}, fixture.repo, home)
+	_, err := fixture.validate(fixture.outside)
 
 	want := "--test-output-dir " + fixture.outside + " holds the no-mistakes home; choose a directory that does not contain it"
 	if err == nil || err.Error() != want {
 		t.Fatalf("error = %v, want %q", err, want)
+	}
+}
+
+func TestValidateRefusesARunWorktreeRootOutsideTheHome(t *testing.T) {
+	fixture := newAdmissionFixture(t)
+	root := t.TempDir()
+	writeGlobalConfig(t, fixture.home, "worktree_roots:\n  '"+fixture.repo+"': '"+root+"'\n")
+
+	_, err := fixture.validate(root)
+
+	want := "--test-output-dir " + root + " is inside a run worktree root; choose a directory outside it"
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+}
+
+func TestValidateRefusesAnEvidenceRootOutsideTheHome(t *testing.T) {
+	fixture := newAdmissionFixture(t)
+	evidence := t.TempDir()
+	writeGlobalConfig(t, fixture.home, "evidence_dir: '"+evidence+"'\n")
+
+	_, err := fixture.validate(evidence)
+
+	want := "--test-output-dir " + evidence + " is inside the evidence root; choose a directory outside it"
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+}
+
+func TestValidateRefusesADirectoryInsideALinkedWorktreeOfTheRepository(t *testing.T) {
+	fixture := newAdmissionFixture(t)
+	linked := filepath.Join(t.TempDir(), "linked")
+	runGit(t, fixture.repo, "worktree", "add", "-b", "linked", linked)
+	value := filepath.Join(linked, "out")
+	if err := os.MkdirAll(value, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := fixture.validate(value)
+
+	want := "--test-output-dir " + value + " is inside a worktree of the repository; choose a directory outside it"
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+}
+
+func TestValidateFailsClosedWhenTheProtectedLocationsCannotBeRead(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		arrange func(t *testing.T, fixture *admissionFixture)
+	}{
+		{"unreadable_global_config", func(t *testing.T, fixture *admissionFixture) {
+			writeGlobalConfig(t, fixture.home, "not_a_known_key: true\n")
+		}},
+		{"checkout_is_not_a_git_repository", func(t *testing.T, fixture *admissionFixture) {
+			fixture.repo = t.TempDir()
+			t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(fixture.repo))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newAdmissionFixture(t)
+			tc.arrange(t, &fixture)
+
+			got, err := fixture.validate(fixture.outside)
+
+			if err == nil || !strings.HasPrefix(err.Error(), "--test-output-dir cannot be checked: ") {
+				t.Fatalf("Validate = %q, %v; want refused as uncheckable", got, err)
+			}
+		})
 	}
 }
 
@@ -128,7 +222,7 @@ func TestValidateResolvesALinkIntoTheRepositoryAsInside(t *testing.T) {
 		testlink.Junction(t, link, target)
 	}
 
-	_, err := Validate([]string{link}, fixture.repo, fixture.home)
+	_, err := fixture.validate(link)
 
 	if err == nil || !strings.Contains(err.Error(), "is inside the repository") {
 		t.Fatalf("a link into the repository = %v, want refused as inside it", err)
@@ -138,7 +232,7 @@ func TestValidateResolvesALinkIntoTheRepositoryAsInside(t *testing.T) {
 func TestValidateWithNothingRequestedAdmitsNothing(t *testing.T) {
 	fixture := newAdmissionFixture(t)
 
-	got, err := Validate(nil, fixture.repo, fixture.home)
+	got, err := fixture.validate()
 
 	if err != nil || got != nil {
 		t.Fatalf("Validate(nil) = %q, %v; want nil, nil", got, err)
