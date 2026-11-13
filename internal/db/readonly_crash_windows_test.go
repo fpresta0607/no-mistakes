@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -15,12 +16,46 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
+// helperProcessContext bounds a helper process this test starts by the test's
+// own deadline, keeping a tenth of the remaining time back so the test reports
+// the helper's failure before the binary's deadline panic. A fixed 15s bound
+// cut the crash writer off on a slow runner, and Windows reported the kill
+// only as "exit status 1" (issue #251).
+func helperProcessContext(t *testing.T) context.Context {
+	t.Helper()
+	deadline, hasDeadline := t.Deadline()
+	if !hasDeadline {
+		return t.Context()
+	}
+	ctx, cancel := context.WithDeadline(t.Context(), deadline.Add(-time.Until(deadline)/10))
+	t.Cleanup(cancel)
+	return ctx
+}
+
+// runHelperProcess runs helper to completion and fails t with the helper's own
+// output, naming a helper its context cut off apart from one that failed.
+func runHelperProcess(t *testing.T, ctx context.Context, name string, helper *exec.Cmd) {
+	t.Helper()
+	output, err := helper.CombinedOutput()
+	if err == nil {
+		return
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("%s did not finish before the test's deadline (%v): %v\n%s", name, ctx.Err(), err, output)
+	}
+	t.Fatalf("%s failed: %v\n%s", name, err, output)
+}
+
 // crashWithMappedSharedMemory leaves a registry the way a Windows crash can:
 // a writer that exited without closing SQLite, its committed rows only in the
-// WAL, and its -shm section still mapped with no SQLite owner.
-func crashWithMappedSharedMemory(t *testing.T) string {
+// WAL, and its -shm section still mapped with no SQLite owner. writerDelay
+// holds the writer back before it writes, standing in for a slow runner.
+func crashWithMappedSharedMemory(t *testing.T, writerDelay time.Duration) string {
 	t.Helper()
 	if root := os.Getenv("NM_DB_CRASH_WRITER"); root != "" {
+		if delay, err := strconv.Atoi(os.Getenv("NM_DB_CRASH_WRITER_DELAY_MS")); err == nil {
+			time.Sleep(time.Duration(delay) * time.Millisecond)
+		}
 		database, err := Open(filepath.Join(root, "state.sqlite"))
 		if err != nil {
 			t.Fatal(err)
@@ -39,14 +74,11 @@ func crashWithMappedSharedMemory(t *testing.T) string {
 
 	root := t.TempDir()
 	path := filepath.Join(root, "state.sqlite")
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
+	ctx := helperProcessContext(t)
 	writer := exec.CommandContext(ctx, os.Args[0], "-test.run=^"+t.Name()+"$")
-	writer.Env = append(os.Environ(), "NM_DB_CRASH_WRITER="+root)
+	writer.Env = append(os.Environ(), "NM_DB_CRASH_WRITER="+root, "NM_DB_CRASH_WRITER_DELAY_MS="+strconv.Itoa(int(writerDelay.Milliseconds())))
 	winproc.Harden(writer)
-	if output, err := writer.CombinedOutput(); err != nil {
-		t.Fatalf("crash writer: %v\n%s", err, output)
-	}
+	runHelperProcess(t, ctx, "crash writer", writer)
 
 	// Windows can retain a mapped section after releasing a dead process's
 	// locks. Keep that section alive deterministically, without a SQLite owner.
@@ -80,7 +112,7 @@ func requireCrashWriterRun(t *testing.T, database *DB) {
 }
 
 func TestOpenAfterCrashWithMappedSharedMemory(t *testing.T) {
-	path := crashWithMappedSharedMemory(t)
+	path := crashWithMappedSharedMemory(t, 0)
 
 	database, err := Open(path)
 	if err != nil {
@@ -98,8 +130,22 @@ func TestOpenAfterCrashWithMappedSharedMemory(t *testing.T) {
 	}
 }
 
+// Issue #251: on a slow runner the crash writer needed longer than the fixed
+// 15s it was given, was killed, and the test failed on a bare exit status
+// before it checked anything. The delay holds this writer past that bound.
+func TestCrashWriterSlowerThanFifteenSecondsStillCompletes(t *testing.T) {
+	path := crashWithMappedSharedMemory(t, 16*time.Second)
+
+	database, err := Open(path)
+	if err != nil {
+		t.Fatalf("writable registry after a slow crash writer: %v", err)
+	}
+	defer database.Close()
+	requireCrashWriterRun(t, database)
+}
+
 func TestOpenReadOnlyAfterCrashWithMappedSharedMemory(t *testing.T) {
-	path := crashWithMappedSharedMemory(t)
+	path := crashWithMappedSharedMemory(t, 0)
 
 	before := make(map[string][]byte)
 	for _, filename := range []string{path, path + "-wal", path + "-shm"} {
@@ -171,21 +217,16 @@ func TestOpenReadOnlyWhileAnotherProcessWrites(t *testing.T) {
 	if _, err := transaction.Exec("UPDATE repos SET working_path = ? WHERE id = ?", "updated", "committed"); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
+	ctx := helperProcessContext(t)
 	reader := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestOpenReadOnlyWhileAnotherProcessWrites$")
 	reader.Env = append(os.Environ(), "NM_DB_LIVE_READER="+path, "NM_DB_LIVE_READER_EXPECTED_PATH=committed")
 	winproc.Harden(reader)
-	if output, err := reader.CombinedOutput(); err != nil {
-		t.Fatalf("concurrent reader: %v\n%s", err, output)
-	}
+	runHelperProcess(t, ctx, "concurrent reader", reader)
 	if err := transaction.Commit(); err != nil {
 		t.Fatal(err)
 	}
 	reader = exec.CommandContext(ctx, os.Args[0], "-test.run=^TestOpenReadOnlyWhileAnotherProcessWrites$")
 	reader.Env = append(os.Environ(), "NM_DB_LIVE_READER="+path, "NM_DB_LIVE_READER_EXPECTED_PATH=updated")
 	winproc.Harden(reader)
-	if output, err := reader.CombinedOutput(); err != nil {
-		t.Fatalf("reader after writer commits: %v\n%s", err, output)
-	}
+	runHelperProcess(t, ctx, "reader after writer commits", reader)
 }
