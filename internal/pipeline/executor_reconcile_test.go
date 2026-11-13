@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -501,16 +502,41 @@ func TestExecutor_ShutdownDuringFatalReconcileKeepsRunParked(t *testing.T) {
 	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
 	exec.SetGateReconcileTimings(10*time.Millisecond, 100*time.Millisecond)
 
+	// The test owns shutdown on every exit path: a failed wait that left the
+	// executor blocked in the mock kept ci.log open through TempDir cleanup
+	// and logged against a closed database (issue #121). Cleanups run in
+	// reverse, so this join runs before setupTest closes the database.
+	workDir := t.TempDir()
 	ctx, cancel := context.WithCancelCause(context.Background())
+	var releaseOnce sync.Once
+	shutDown := func() {
+		cancel(ErrDaemonShutdown)
+		releaseOnce.Do(func() { close(step.release) })
+	}
 	done := make(chan error, 1)
-	go func() { done <- exec.Execute(ctx, run, repo, t.TempDir()) }()
+	exited := make(chan struct{})
+	t.Cleanup(func() {
+		shutDown()
+		select {
+		case <-exited:
+		case <-time.After(10 * time.Second):
+			t.Error("executor did not return after shutdown")
+		}
+	})
+	go func() {
+		defer close(exited)
+		done <- exec.Execute(ctx, run, repo, workDir)
+	}()
+	// Executor setup and parking are not under test, so wait for the park
+	// the way the package's other gate tests do; the bound below then
+	// covers only the gate watcher's first reconcile.
+	waitForStepStatus(t, database, run.ID, types.StepCI, types.StepStatusAwaitingApproval)
 	select {
 	case <-step.started:
 	case <-time.After(3 * time.Second):
 		t.Fatal("gate reconciliation did not start")
 	}
-	cancel(ErrDaemonShutdown)
-	close(step.release)
+	shutDown()
 
 	select {
 	case err := <-done:
