@@ -635,6 +635,38 @@ func TestCIWorkflow_WindowsCIMonitorTestsDoNotShareARunner(t *testing.T) {
 	}
 }
 
+// The admission tests (^Test[A-K], 321-370s) and the manager and launch tests
+// (^Test[L-O], 373-414s) shared windows-daemon-1, which took 735-744s of
+// internal/daemon's 15m budget on a normal runner and timed out on a slower
+// one with no test hung (issue #120). They run on separate rows.
+func TestCIWorkflow_WindowsDaemonAdmissionAndManagerTestsDoNotShareARunner(t *testing.T) {
+	t.Parallel()
+	names := declaredTestNames(t, filepath.Join("internal", "daemon"))
+	for _, row := range ciTestJob(t).Strategy.Matrix.Include {
+		if row["os"] != "windows-latest" || row["shard"] != "daemon" {
+			continue
+		}
+		shard := namedTestShard{
+			name: row["name"],
+			run:  namedShardPattern(t, row, "daemon_run"),
+			skip: namedShardPattern(t, row, "daemon_skip"),
+		}
+		var admission, manager string
+		for _, name := range names {
+			switch {
+			case !shard.selects(name):
+			case strings.HasPrefix(name, "TestAuthoredAdmission"):
+				admission = name
+			case strings.HasPrefix(name, "TestManager"):
+				manager = name
+			}
+		}
+		if admission != "" && manager != "" {
+			t.Errorf("%s runs %s beside %s; together they fill a Windows runner's package budget", shard.name, admission, manager)
+		}
+	}
+}
+
 func TestCIWorkflow_WindowsDaemonShardsRunEveryTestExactlyOnce(t *testing.T) {
 	t.Parallel()
 	assertWindowsNamedShardsCoverEveryTest(t, windowsNamedShardSpec{
