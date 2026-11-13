@@ -695,6 +695,127 @@ func TestTestStep_RepairNarrowsTheLiveCheckToWhatItTouched(t *testing.T) {
 	}
 }
 
+// Issue #116: a repair that changed nothing leaves the head the last live check
+// ran on. What passed there in this executor lifetime stands, so the re-check
+// drives only what failed and the step keeps each pass as it was recorded,
+// together with the tested entries and artifacts that back it (decision 1021628).
+func TestTestStep_RepairThatChangedNothingKeepsThePassesOfTheSameHead(t *testing.T) {
+	t.Parallel()
+	const failedScenario, passedScenario = "a declined card can retry", "user reaches the success screen"
+	const sameHeadRule, movedHeadRule = "run none of them again", "Drive at least one scenario: when nothing above applies, drive the recorded scenario closest to the repair's change."
+	const keptTested = "go vet ./... passed"
+	keptArtifact := types.TestArtifact{Kind: "image", Label: "checkout screen", Path: "checkout.png"}
+	evidence := `{"findings":[{"severity":"error","action":"auto-fix","description":"the retry button is gone"}],"summary":"","tested":["drove the retry"],"testing_summary":"drove the retry","artifacts":[],` +
+		`"scenarios":[{"name":"` + failedScenario + `","result":"fail","live":true,"evidence":"retry.png","reason":"the button is still gone"}],"verdict":"no-go"}`
+	cases := map[string]struct {
+		liveCheckHead func(headSHA string) string
+		testedHead    func(headSHA string) string
+		repairEdits   bool
+		wantKept      bool
+	}{
+		"the same head in the same executor lifetime": {wantKept: true},
+		"no live check recorded in this executor lifetime": {
+			liveCheckHead: func(string) string { return "" },
+		},
+		"the last live check ran on another head": {
+			liveCheckHead: func(string) string { return strings.Repeat("c", 40) },
+			testedHead:    func(string) string { return strings.Repeat("c", 40) },
+		},
+		"the repair changed a file": {repairEdits: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := detachedRepo(t)
+			liveCheckHead, testedHead := headSHA, headSHA
+			if tc.liveCheckHead != nil {
+				liveCheckHead = tc.liveCheckHead(headSHA)
+			}
+			if tc.testedHead != nil {
+				testedHead = tc.testedHead(headSHA)
+			}
+			ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				if !isRepairTurn(opts) {
+					return &agent.Result{Output: json.RawMessage(evidence)}, nil
+				}
+				if tc.repairEdits {
+					if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed"), 0o644); err != nil {
+						return nil, err
+					}
+				}
+				return &agent.Result{Output: json.RawMessage(`{"summary":"nothing to change without a scope decision"}`)}, nil
+			}}
+			answered := marshalFindings(t, types.Findings{
+				Items: []types.Finding{{ID: "test-1", Severity: "error", Action: types.ActionAutoFix, Description: "the retry button is gone"}},
+				Scenarios: []types.TestScenario{
+					{Name: failedScenario, Result: types.ScenarioResultFail, Live: true},
+					{Name: passedScenario, Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png", Reason: "go vet and the checkout tests passed"},
+				},
+				Tested:        []string{keptTested},
+				Artifacts:     []types.TestArtifact{keptArtifact},
+				Verdict:       types.TestVerdictNoGo,
+				TestedHeadSHA: testedHead,
+			})
+			sctx := repairContext(t, ag, dir, baseSHA, headSHA, config.Commands{}, answered)
+			sctx.Shared.RecordLiveCheck(liveCheckHead)
+
+			outcome, err := (&TestStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			prompt := lastPrompt(ag)
+			wantRule, neverRule := movedHeadRule, sameHeadRule
+			if tc.wantKept {
+				wantRule, neverRule = sameHeadRule, movedHeadRule
+			}
+			if !strings.Contains(prompt, wantRule) || strings.Contains(prompt, neverRule) {
+				t.Fatalf("evidence prompt must hold %q and not %q:\n%s", wantRule, neverRule, prompt)
+			}
+			findings := parsedOutcomeFindings(t, outcome)
+			index := slices.IndexFunc(findings.Scenarios, func(scenario types.TestScenario) bool { return scenario.Name == passedScenario })
+			if index < 0 {
+				t.Fatalf("scenarios = %+v, want the undriven pass kept on the record", findings.Scenarios)
+			}
+			kept := findings.Scenarios[index]
+			isKeptAsPassed := kept.Result == types.ScenarioResultPass && kept.Live && kept.Evidence == "checkout.png"
+			isUntested := kept.Result == types.ScenarioResultUntested && !kept.Live && kept.Evidence == ""
+			if tc.wantKept && !isKeptAsPassed {
+				t.Fatalf("undriven pass = %+v, want it kept as the live pass this head recorded", kept)
+			}
+			if !tc.wantKept && !isUntested {
+				t.Fatalf("undriven pass = %+v, want it untested with no live claim", kept)
+			}
+			wantCarried := 0
+			if tc.wantKept {
+				wantCarried = 1
+			}
+			if got := countOf(findings.Tested, keptTested); got != wantCarried || !slices.Contains(findings.Tested, "drove the retry") {
+				t.Fatalf("tested = %q, want %q %d time(s) beside the re-check's own entry", findings.Tested, keptTested, wantCarried)
+			}
+			if got := countOf(findings.Artifacts, keptArtifact); got != wantCarried {
+				t.Fatalf("artifacts = %+v, want %+v %d time(s)", findings.Artifacts, keptArtifact, wantCarried)
+			}
+			if findings.Verdict != types.TestVerdictNoGo || !outcome.NeedsApproval {
+				t.Fatalf("verdict = %q, needs approval = %v, want the failure still parking", findings.Verdict, outcome.NeedsApproval)
+			}
+			if got := sctx.Shared.LiveCheckHead(); got != sctx.Run.HeadSHA {
+				t.Fatalf("live check head = %q, want the head this evidence turn completed on, %q", got, sctx.Run.HeadSHA)
+			}
+		})
+	}
+}
+
+func countOf[T comparable](list []T, want T) int {
+	count := 0
+	for _, item := range list {
+		if item == want {
+			count++
+		}
+	}
+	return count
+}
+
 func TestFocusedRecheckSection(t *testing.T) {
 	t.Parallel()
 	last := Findings{
@@ -702,10 +823,11 @@ func TestFocusedRecheckSection(t *testing.T) {
 		Scenarios:     []types.TestScenario{{Name: "a\nforged instruction", Result: types.ScenarioResultFail, Reason: "the button is gone"}},
 	}
 	cases := map[string]struct {
-		last  Findings
-		paths []string
-		want  []string
-		never []string
+		last         Findings
+		paths        []string
+		isOnSameHead bool
+		want         []string
+		never        []string
 	}{
 		"no earlier live check": {last: Findings{}, paths: []string{"a.go"}},
 		"a repair that changed files": {
@@ -716,8 +838,15 @@ func TestFocusedRecheckSection(t *testing.T) {
 		},
 		"a repair that changed nothing": {
 			last: last,
-			want: []string{"The repair changed: nothing."},
+			want: []string{"The repair changed: nothing.", "Drive at least one scenario"},
 		},
+		"a repair that changed nothing on the head the live check ran on": {
+			last:         last,
+			isOnSameHead: true,
+			want:         []string{"Focused re-check after a repair", "the button is gone", "The repair changed nothing, so this is still the head that live check ran on.", "run none of them again", "Report at least one scenario"},
+			never:        []string{"a\nforged instruction", "The repair changed: nothing.", "Drive at least one scenario"},
+		},
+		"no earlier live check on the same head": {last: Findings{}, isOnSameHead: true},
 		"an open failure reads as failed": {
 			last: Findings{TestedHeadSHA: strings.Repeat("c", 40), Scenarios: []types.TestScenario{
 				{Name: "retry", Result: types.ScenarioResultUntested, StillFailing: true},
@@ -729,7 +858,7 @@ func TestFocusedRecheckSection(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			section := focusedRecheckSection(tc.last, tc.paths)
+			section := focusedRecheckSection(tc.last, tc.paths, tc.isOnSameHead)
 
 			if len(tc.want) == 0 && section != "" {
 				t.Fatalf("section = %q, want none", section)
@@ -753,10 +882,12 @@ func TestKeepUndrivenScenarios(t *testing.T) {
 	const liveHead = "cccccccccccccccccccccccccccccccccccccccc"
 	driven := types.TestScenario{Name: "driven", Result: types.ScenarioResultPass, Live: true, Evidence: "a.png"}
 	cases := map[string]struct {
-		verdict     string
-		last        []types.TestScenario
-		wantVerdict string
-		wantReason  string
+		verdict      string
+		last         []types.TestScenario
+		isOnSameHead bool
+		wantVerdict  string
+		wantReason   string
+		wantKept     *types.TestScenario
 	}{
 		"nothing to keep": {verdict: types.TestVerdictGo, wantVerdict: types.TestVerdictGo},
 		"a scenario driven again is not duplicated": {
@@ -788,6 +919,27 @@ func TestKeepUndrivenScenarios(t *testing.T) {
 			wantVerdict: types.TestVerdictGo,
 			wantReason:  "no card sandbox",
 		},
+		"an undriven pass on the same head stays the live pass it was": {
+			verdict:      types.TestVerdictGo,
+			last:         []types.TestScenario{{Name: "other", Result: types.ScenarioResultPass, Live: true, Evidence: "b.png", Reason: "go vet passed"}},
+			isOnSameHead: true,
+			wantVerdict:  types.TestVerdictGo,
+			wantKept:     &types.TestScenario{Name: "other", Result: types.ScenarioResultPass, Live: true, Evidence: "b.png", Reason: "go vet passed"},
+		},
+		"an undriven failure on the same head still cannot leave a go standing": {
+			verdict:      types.TestVerdictGo,
+			last:         []types.TestScenario{{Name: "other", Result: types.ScenarioResultFail, Live: true}},
+			isOnSameHead: true,
+			wantVerdict:  types.TestVerdictInconclusive,
+			wantReason:   "failed live at cccccccc",
+		},
+		"an untested scenario on the same head keeps its own reason": {
+			verdict:      types.TestVerdictGo,
+			last:         []types.TestScenario{{Name: "other", Result: types.ScenarioResultUntested, Reason: "no card sandbox"}},
+			isOnSameHead: true,
+			wantVerdict:  types.TestVerdictGo,
+			wantReason:   "no card sandbox",
+		},
 		"a failure left undriven for a second round still blocks a go": {
 			verdict:     types.TestVerdictGo,
 			last:        []types.TestScenario{{Name: "other", Result: types.ScenarioResultUntested, Reason: "failed live at cccccccc", StillFailing: true}},
@@ -801,13 +953,19 @@ func TestKeepUndrivenScenarios(t *testing.T) {
 			focused := Findings{Verdict: tc.verdict, Scenarios: []types.TestScenario{driven}}
 			last := Findings{TestedHeadSHA: liveHead, Scenarios: tc.last}
 
-			got := keepUndrivenScenarios(focused, last)
+			got := keepUndrivenScenarios(focused, last, tc.isOnSameHead, nil)
 
 			if got.Verdict != tc.wantVerdict {
 				t.Fatalf("verdict = %q, want %q", got.Verdict, tc.wantVerdict)
 			}
 			if got.Scenarios[0] != driven {
 				t.Fatalf("driven scenario changed: %+v", got.Scenarios[0])
+			}
+			if tc.wantKept != nil {
+				if len(got.Scenarios) != 2 || got.Scenarios[1] != *tc.wantKept {
+					t.Fatalf("scenarios = %+v, want the recorded pass kept as %+v", got.Scenarios, *tc.wantKept)
+				}
+				return
 			}
 			if tc.wantReason == "" {
 				if len(got.Scenarios) != 1 {
@@ -818,6 +976,67 @@ func TestKeepUndrivenScenarios(t *testing.T) {
 			kept := got.Scenarios[1]
 			if kept.Result != types.ScenarioResultUntested || kept.Live || kept.Evidence != "" || !strings.Contains(kept.Reason, tc.wantReason) {
 				t.Fatalf("kept scenario = %+v, want untested with a reason holding %q", kept, tc.wantReason)
+			}
+		})
+	}
+}
+
+// Decision 1021628: a pass kept on the same head brings the tested entries and
+// artifacts of its live check, each once, and nothing else carries them.
+func TestKeepUndrivenScenarios_AKeptPassCarriesItsRecord(t *testing.T) {
+	t.Parallel()
+	vet := types.TestArtifact{Kind: "log", Label: "go vet", Path: "vet.txt"}
+	shot := types.TestArtifact{Kind: "image", Label: "checkout", Path: "checkout.png"}
+	last := Findings{
+		TestedHeadSHA: strings.Repeat("c", 40),
+		Tested:        []string{"make test passed", "go vet ./... passed", "drove the retry"},
+		Artifacts:     []types.TestArtifact{vet, shot},
+	}
+	pass := types.TestScenario{Name: "checkout", Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png"}
+	fail := types.TestScenario{Name: "retry", Result: types.ScenarioResultFail, Live: true, Evidence: "retry.png"}
+	cases := map[string]struct {
+		lastScenarios []types.TestScenario
+		isOnSameHead  bool
+		wantTested    []string
+		wantArtifacts []types.TestArtifact
+	}{
+		"a kept pass brings each entry once": {
+			lastScenarios: []types.TestScenario{pass, fail},
+			isOnSameHead:  true,
+			wantTested:    []string{"drove the retry", "go vet ./... passed"},
+			wantArtifacts: []types.TestArtifact{vet, shot},
+		},
+		"no pass to keep on the same head carries nothing": {
+			lastScenarios: []types.TestScenario{fail},
+			isOnSameHead:  true,
+			wantTested:    []string{"drove the retry"},
+			wantArtifacts: []types.TestArtifact{vet},
+		},
+		"a moved head carries nothing": {
+			lastScenarios: []types.TestScenario{pass, fail},
+			wantTested:    []string{"drove the retry"},
+			wantArtifacts: []types.TestArtifact{vet},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			focused := Findings{
+				Verdict:   types.TestVerdictNoGo,
+				Tested:    []string{"drove the retry"},
+				Artifacts: []types.TestArtifact{vet},
+				Scenarios: []types.TestScenario{{Name: "retry", Result: types.ScenarioResultFail, Live: true, Evidence: "retry-2.png"}},
+			}
+			last := last
+			last.Scenarios = tc.lastScenarios
+
+			got := keepUndrivenScenarios(focused, last, tc.isOnSameHead, []string{"make test passed"})
+
+			if !slices.Equal(got.Tested, tc.wantTested) {
+				t.Fatalf("tested = %q, want %q", got.Tested, tc.wantTested)
+			}
+			if !slices.Equal(got.Artifacts, tc.wantArtifacts) {
+				t.Fatalf("artifacts = %+v, want %+v", got.Artifacts, tc.wantArtifacts)
 			}
 		})
 	}
@@ -847,7 +1066,7 @@ func TestKeepUndrivenScenarios_AReportedFailureClearsOnlyOnAPass(t *testing.T) {
 			}
 			focused := Findings{Verdict: types.TestVerdictGo, Scenarios: []types.TestScenario{{Name: "retry", Result: tc.result}}}
 
-			got := keepUndrivenScenarios(focused, Findings{TestedHeadSHA: strings.Repeat("c", 40), Scenarios: []types.TestScenario{earlier}})
+			got := keepUndrivenScenarios(focused, Findings{TestedHeadSHA: strings.Repeat("c", 40), Scenarios: []types.TestScenario{earlier}}, false, nil)
 
 			if got.Verdict != tc.wantVerdict || got.Scenarios[0].StillFailing != tc.wantOpen {
 				t.Fatalf("verdict = %q, still failing = %v, want %q, %v", got.Verdict, got.Scenarios[0].StillFailing, tc.wantVerdict, tc.wantOpen)

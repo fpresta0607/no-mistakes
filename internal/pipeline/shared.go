@@ -39,6 +39,9 @@ type RunShared struct {
 	baselineComparison string
 	baselinePassed     bool
 	baselineRecorded   bool
+	// liveCheckHead is the commit the Test step's last completed live check
+	// ran on in this executor lifetime.
+	liveCheckHead string
 	// pushGuardRestarts counts how often the Push step sent the run back to
 	// Test because the baseline failed on the head to push.
 	pushGuardRestarts int
@@ -144,6 +147,29 @@ func (s *RunShared) Baseline() (headSHA, comparisonSHA string, passed, recorded 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.baselineHead, s.baselineComparison, s.baselinePassed, s.baselineRecorded
+}
+
+// RecordLiveCheck records the commit a Test evidence turn just completed on.
+func (s *RunShared) RecordLiveCheck(headSHA string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.liveCheckHead = headSHA
+}
+
+// LiveCheckHead returns the commit RecordLiveCheck last recorded. It is empty
+// when this executor lifetime completed no live check, as after a daemon
+// restart, and a caller must then treat every earlier live result as one a
+// different process produced.
+func (s *RunShared) LiveCheckHead() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.liveCheckHead
 }
 
 // CountPushGuardRestart counts one more return from Push to Test and returns
