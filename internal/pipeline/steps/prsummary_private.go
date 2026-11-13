@@ -18,13 +18,19 @@ import (
 // fail closed: a false positive withholds one entry the notice still counts.
 var privateRuntimeDetailPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?:^|[^A-Za-z0-9])[A-Za-z]:[\\/]`),
-	regexp.MustCompile(`(?:^|[\s"'=(\[,;:])/[A-Za-z0-9._~-]+/`),
-	regexp.MustCompile(`(?:^|[\s"'=(\[,;:])\\\\[A-Za-z0-9]`),
-	regexp.MustCompile(`(?:^|[\s"'=(\[,;:])~[\\/]`),
+	regexp.MustCompile(privatePathBoundary + `(?i:file://)?/[A-Za-z0-9._~-]+/`),
+	regexp.MustCompile(privatePathBoundary + `\\\\(?:\\\\)?[A-Za-z0-9]`),
+	regexp.MustCompile(privatePathBoundary + `~[\\/]`),
 	regexp.MustCompile(`(?i)\$\{?(?:HOME|TMPDIR|USERPROFILE)\b|%(?:USERPROFILE|HOMEPATH|LOCALAPPDATA|APPDATA|TEMP|TMP)%`),
 	regexp.MustCompile(`\b[0-9A-Z]{26}\b`),
 	regexp.MustCompile(`(?i)\b(?:pid|process[ _-]?id)s?\b\W{0,3}\d+`),
 }
+
+// privatePathBoundary is what may precede a local path, the deny-set boundary
+// safepath's home redactor uses: anything that does not continue a relative
+// path or URL, a JSON-escaped control character, or an attached short flag
+// ("-I/opt/include/").
+const privatePathBoundary = `(?:^|\\[nrt]|[^A-Za-z0-9_./\\-])(?:-[A-Za-z])?`
 
 // httpRequestTarget is an HTTP request line's method and target, as a dev
 // server logs it ("POST /api/jobs 200"): a URL path, not a filesystem one, so

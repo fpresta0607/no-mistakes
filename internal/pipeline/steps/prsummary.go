@@ -648,18 +648,14 @@ func cleanGitHubRepoPath(repo string) string {
 }
 
 func collectTestingSummary(sr *db.StepResult, rounds []*db.StepRound, withheld map[string]bool) string {
-	if summary := testingSummaryFromFindings(sr.FindingsJSON, withheld); summary != "" {
-		return summary
+	summary := testingSummaryFromFindings(sr.FindingsJSON)
+	for i := len(rounds) - 1; summary == "" && i >= 0; i-- {
+		summary = testingSummaryFromFindings(rounds[i].FindingsJSON)
 	}
-	for i := len(rounds) - 1; i >= 0; i-- {
-		if summary := testingSummaryFromFindings(rounds[i].FindingsJSON, withheld); summary != "" {
-			return summary
-		}
-	}
-	return ""
+	return withholdPrivateRuntimeDetails(types.Findings{TestingSummary: summary}, withheld).TestingSummary
 }
 
-func testingSummaryFromFindings(raw *string, withheld map[string]bool) string {
+func testingSummaryFromFindings(raw *string) string {
 	if raw == nil || strings.TrimSpace(*raw) == "" {
 		return ""
 	}
@@ -667,7 +663,7 @@ func testingSummaryFromFindings(raw *string, withheld map[string]bool) string {
 	if err != nil {
 		return ""
 	}
-	return sanitizePromptMultilineText(withholdPrivateRuntimeDetails(findings, withheld).TestingSummary)
+	return sanitizePromptMultilineText(findings.TestingSummary)
 }
 
 func collectTestingDetails(sr *db.StepResult, rounds []*db.StepRound, withheld map[string]bool) []string {

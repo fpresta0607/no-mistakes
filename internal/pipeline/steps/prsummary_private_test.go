@@ -1,6 +1,10 @@
 package steps
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/db"
+)
 
 func TestCarriesPrivateRuntimeDetail(t *testing.T) {
 	t.Parallel()
@@ -32,6 +36,17 @@ func TestCarriesPrivateRuntimeDetail(t *testing.T) {
 		"pid field":                       {text: `{"pid":4711}`, isPrivate: true},
 		"process ID in prose":             {text: "server started as process ID 4711", isPrivate: true},
 		"conventional home root":          {text: "file:///Users/someone/report.html", isPrivate: true},
+		"backtick-wrapped interpreter":    {text: "`/opt/toolchain/bin/python3 -m pytest`", isPrivate: true},
+		"backtick-wrapped home shorthand": {text: "`~/.cache/checkout`", isPrivate: true},
+		"stderr redirection":              {text: "go test ./... 2>/tmp/run/err.log", isPrivate: true},
+		"stdout redirection":              {text: "echo ok >/var/tmp/x/out", isPrivate: true},
+		"attached short flag":             {text: "cc -I/opt/include/ main.c", isPrivate: true},
+		"path after JSON-escaped newline": {text: `{"log":"started\n/opt/toolchain/bin/python3"}`, isPrivate: true},
+		"path after a brace":              {text: "{/opt/toolchain/bin/python3}", isPrivate: true},
+		"path after a pipe":               {text: "cat x|/usr/local/bin/jq .", isPrivate: true},
+		"file URL to a posix path":        {text: "opened file:///opt/report/index.html", isPrivate: true},
+		"JSON-escaped UNC share":          {text: `{"out":"\\buildhost\share"}`, isPrivate: true},
+		"hyphenated relative directory":   {text: "see docs/part-a/intro/index.md"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -57,5 +72,37 @@ func TestWithheldEntriesNoticeCountsTheEntries(t *testing.T) {
 		if got := withheldEntriesNotice(count); got != want {
 			t.Errorf("withheldEntriesNotice(%d) = %q, want %q", count, got, want)
 		}
+	}
+}
+
+func TestCollectTestingSummaryDoesNotFallBackPastAWithheldSummary(t *testing.T) {
+	t.Parallel()
+	earlier := `{"findings":[],"testing_summary":"Baseline go test failed: TestCheckout panics.","tested":["ran /opt/toolchain/bin/python3"]}`
+	latest := `{"findings":[],"testing_summary":"All scenarios pass; server log at /tmp/srv/out.log"}`
+	sr := &db.StepResult{FindingsJSON: &latest}
+	rounds := []*db.StepRound{{Round: 1, FindingsJSON: &earlier}, {Round: 2, FindingsJSON: &latest}}
+	withheld := map[string]bool{}
+
+	got := collectTestingSummary(sr, rounds, withheld)
+
+	if got != "" {
+		t.Fatalf("collectTestingSummary() = %q, want the withheld latest summary to publish nothing", got)
+	}
+	if len(withheld) != 1 {
+		t.Fatalf("withheld %d entries, want only the latest summary: %v", len(withheld), withheld)
+	}
+}
+
+func TestCollectTestingSummaryFallsBackWhenTheLatestHasNoSummary(t *testing.T) {
+	t.Parallel()
+	earlier := `{"findings":[],"testing_summary":"Checkout flow passed."}`
+	latest := `{"findings":[]}`
+	sr := &db.StepResult{FindingsJSON: &latest}
+	rounds := []*db.StepRound{{Round: 1, FindingsJSON: &earlier}, {Round: 2, FindingsJSON: &latest}}
+
+	got := collectTestingSummary(sr, rounds, map[string]bool{})
+
+	if got != "Checkout flow passed." {
+		t.Fatalf("collectTestingSummary() = %q, want the earlier round's summary", got)
 	}
 }
