@@ -275,12 +275,16 @@ func focusedRecheckSection(last Findings, repairedPaths []string, isOnSameHead b
 // live check derives its list again, so it has no names to match this against.
 //
 // isOnSameHead (see focusedRecheckSection) is the one case where a pass left out
-// was driven on this head: it stays the live pass it was recorded as.
-func keepUndrivenScenarios(focused, last Findings, isOnSameHead bool) Findings {
+// was driven on this head: it stays the live pass it was recorded as, and the
+// tested entries and artifacts of that live check come onto the record with it,
+// less what the focused turn already reported and what baselineTested, this
+// execution's own baseline, already lists.
+func keepUndrivenScenarios(focused, last Findings, isOnSameHead bool, baselineTested []string) Findings {
 	reported := make(map[string]int, len(focused.Scenarios))
 	for i, scenario := range focused.Scenarios {
 		reported[strings.TrimSpace(scenario.Name)] = i
 	}
+	hasKeptPass := false
 	for _, scenario := range last.Scenarios {
 		wasFailing := scenario.Result == types.ScenarioResultFail || scenario.StillFailing
 		if i, ok := reported[strings.TrimSpace(scenario.Name)]; ok {
@@ -289,6 +293,7 @@ func keepUndrivenScenarios(focused, last Findings, isOnSameHead bool) Findings {
 		}
 		if isOnSameHead && scenario.Result == types.ScenarioResultPass {
 			focused.Scenarios = append(focused.Scenarios, scenario)
+			hasKeptPass = true
 			continue
 		}
 		switch scenario.Result {
@@ -299,6 +304,18 @@ func keepUndrivenScenarios(focused, last Findings, isOnSameHead bool) Findings {
 		}
 		scenario.Result, scenario.Live, scenario.Evidence, scenario.StillFailing = types.ScenarioResultUntested, false, "", wasFailing
 		focused.Scenarios = append(focused.Scenarios, scenario)
+	}
+	if hasKeptPass {
+		for _, entry := range last.Tested {
+			if !slices.Contains(baselineTested, entry) && !slices.Contains(focused.Tested, entry) {
+				focused.Tested = append(focused.Tested, entry)
+			}
+		}
+		for _, artifact := range last.Artifacts {
+			if !slices.Contains(focused.Artifacts, artifact) {
+				focused.Artifacts = append(focused.Artifacts, artifact)
+			}
+		}
 	}
 	if focused.Verdict == types.TestVerdictGo && slices.ContainsFunc(focused.Scenarios, func(scenario types.TestScenario) bool { return scenario.StillFailing }) {
 		focused.Verdict = types.TestVerdictInconclusive

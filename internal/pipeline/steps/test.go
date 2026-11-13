@@ -488,7 +488,7 @@ Rules:
 		}
 		return nil, err
 	}
-	findings = keepUndrivenScenarios(findings, lastCheck, isOnSameHead)
+	findings = keepUndrivenScenarios(findings, lastCheck, isOnSameHead, baseline.tested)
 	return testStepOutcome(sctx, findings, baseline, fixSummary, newTestsFromFix), nil
 }
 
@@ -615,7 +615,7 @@ func testStepOutcome(sctx *pipeline.StepContext, findings Findings, baseline tes
 func failedBaselineOutcome(sctx *pipeline.StepContext, baseline testBaseline, fixSummary string, newTestsFromFix []string) *pipeline.StepOutcome {
 	findings := answeredTestGate(sctx)
 	findings.Verdict = ""
-	findings.Scenarios = keepUndrivenScenarios(Findings{}, lastLiveCheck(sctx), false).Scenarios
+	findings.Scenarios = keepUndrivenScenarios(Findings{}, lastLiveCheck(sctx), false, nil).Scenarios
 	findings.Tested = baseline.tested
 	findings.Items = append(baseline.findings, findings.Items...)
 	findings.Summary = baseline.summary
