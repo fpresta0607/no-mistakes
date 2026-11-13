@@ -3,6 +3,7 @@ package db
 import (
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -533,6 +534,40 @@ func TestOmitIntentRoundTripAndClaimMatching(t *testing.T) {
 	folded, claimed, err := d.ClaimLaunchReceipt(repo.ID, "feature", "nonce-publish", "head", generation, intentDigest, "", false)
 	if err != nil || !claimed || folded == nil || folded.ID != publishing.ID {
 		t.Fatalf("folded-tolerance claim = %#v, claimed=%v, err=%v", folded, claimed, err)
+	}
+}
+
+func TestInsertLaunchedRunPersistsTestOutputDirs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		dirs []string
+	}{
+		{"none", nil},
+		{"two_directories", []string{"/operator/logs", "/operator/provenance"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := openTestDB(t)
+			repo, err := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			run, err := d.InsertLaunchedRun(repo.ID, "feature", "head", "base", nil, "", "", "", "", false, nil, RunPRText{}, tc.dirs, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored, err := d.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if !reflect.DeepEqual(run.TestOutputDirs, tc.dirs) {
+				t.Errorf("inserted run carries %q, want %q", run.TestOutputDirs, tc.dirs)
+			}
+			if !reflect.DeepEqual(stored.TestOutputDirs, tc.dirs) {
+				t.Errorf("stored run carries %q, want %q", stored.TestOutputDirs, tc.dirs)
+			}
+		})
 	}
 }
 

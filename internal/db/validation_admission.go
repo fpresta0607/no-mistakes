@@ -234,12 +234,12 @@ func (d *DB) AcceptValidationAdmission(ctx context.Context, proposal ValidationA
 		intent, intent_source, intent_session_id, intent_score, intent_check_json, launch_nonce, launch_validation_generation, launch_intent_digest,
 		launch_assertion, launch_assertion_proof, pr_base_branch, omit_intent, pi_profile, quota_routing, pr_title, pr_body, verification_plan, gates_json,
 		pr_url, pr_state, pr_state_observed_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation,
-		closing_issue_refs, closing_issue_refs_locked_at, evidence_dir, created_at, updated_at)
+		closing_issue_refs, closing_issue_refs_locked_at, test_output_dirs, evidence_dir, created_at, updated_at)
 		SELECT ?, repo_id, branch, ?, base_sha, ?, ?, ?, ?, 'pending',
 		intent, intent_source, intent_session_id, intent_score, intent_check_json, ?, ?, launch_intent_digest,
 		?, ?, pr_base_branch, omit_intent, ?, ?, pr_title, pr_body, ?, ?,
 		pr_url, pr_state, pr_state_observed_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation,
-		closing_issue_refs, closing_issue_refs_locked_at, ?, ?, ? FROM runs WHERE id = ?`,
+		closing_issue_refs, closing_issue_refs_locked_at, test_output_dirs, ?, ?, ? FROM runs WHERE id = ?`,
 		childID, proposal.Request.CandidateSHA, proposal.Request.CandidateSHA, workDir, buildinfo.CurrentVersion(), buildinfo.Commit, nonce, generation,
 		proposal.Request.LaunchAssertion, proposal.AssertionProof, piProfile, quotaRouting, proposal.Plan, proposal.Gates, evidenceDir, timestamp, timestamp, current.Run.ID); err != nil {
 		return nil, false, err

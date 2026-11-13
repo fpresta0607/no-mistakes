@@ -243,7 +243,7 @@ func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
 		}
 		launchNonce, validationGeneration = "retry-launch-nonce", "retry-generation"
 	}
-	source, err := d.InsertLaunchedRun(repo.ID, "main", submitted, submitted, &db.RunIntent{Summary: "keep it", Source: db.RunIntentSourceAgent, Score: 1}, launchNonce, validationGeneration, "", "", false, opts.plan, opts.prText, opts.assertion, proof, profiles...)
+	source, err := d.InsertLaunchedRun(repo.ID, "main", submitted, submitted, &db.RunIntent{Summary: "keep it", Source: db.RunIntentSourceAgent, Score: 1}, launchNonce, validationGeneration, "", "", false, opts.plan, opts.prText, nil, opts.assertion, proof, profiles...)
 	if err != nil {
 		t.Fatal(err)
 	}

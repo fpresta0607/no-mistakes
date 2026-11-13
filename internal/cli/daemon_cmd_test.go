@@ -179,3 +179,23 @@ func TestParseClosingIssueRefsPushOptionsRejectsInvalidValue(t *testing.T) {
 		t.Fatal("expected invalid closing issue references push option to fail")
 	}
 }
+
+func TestTestOutputDirsPushOptionsRoundTrip(t *testing.T) {
+	dirs := []string{`C:\operator\logs`, "/operator/provenance dir"}
+	options := formatTestOutputDirsPushOptions(dirs)
+
+	got, err := parseTestOutputDirsPushOptions(append([]string{"ci.skip", "no-mistakes.closes=42"}, options...))
+
+	if err != nil {
+		t.Fatalf("parseTestOutputDirsPushOptions() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, dirs) {
+		t.Fatalf("parseTestOutputDirsPushOptions() = %q, want %q", got, dirs)
+	}
+}
+
+func TestParseTestOutputDirsPushOptionsRejectsAnEmptyValue(t *testing.T) {
+	if _, err := parseTestOutputDirsPushOptions([]string{"no-mistakes.test-output-dir= "}); err == nil {
+		t.Fatal("an empty test output directory push option was accepted")
+	}
+}
