@@ -253,12 +253,12 @@ func (d *DB) AdoptTerminalCandidate(ctx context.Context, event TerminalAdoption)
 		intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest,
 		launch_assertion, launch_assertion_proof, pr_base_branch, omit_intent, pi_profile, quota_routing, pr_title, pr_body, verification_plan, gates_json,
 		pr_url, pr_state, pr_state_observed_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation,
-		closing_issue_refs, closing_issue_refs_locked_at, evidence_dir, created_at, updated_at)
+		closing_issue_refs, closing_issue_refs_locked_at, test_output_dirs, evidence_dir, created_at, updated_at)
 		SELECT ?, repo_id, branch, ?, base_sha, ?, ?, ?, ?, 'pending',
 		intent, intent_source, intent_session_id, intent_score, ?, launch_validation_generation, launch_intent_digest,
 		?, ?, pr_base_branch, omit_intent, pi_profile, quota_routing, pr_title, pr_body, ?, ?,
 		pr_url, pr_state, pr_state_observed_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation,
-		closing_issue_refs, closing_issue_refs_locked_at, ?, ?, ? FROM runs WHERE id = ?`,
+		closing_issue_refs, closing_issue_refs_locked_at, test_output_dirs, ?, ?, ? FROM runs WHERE id = ?`,
 		childID, event.CandidateSHA, event.CandidateSHA, workDir, buildinfo.CurrentVersion(), buildinfo.Commit, nonce,
 		event.Assertion, event.Proof, event.Plan, event.Gates, evidenceDir, ts, ts, run.ID); err != nil {
 		return nil, err

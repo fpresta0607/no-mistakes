@@ -48,6 +48,9 @@ func newTestScratch(parent, goos string) (string, error) {
 func prepareTestHost(sctx *pipeline.StepContext, scratch string) string {
 	settings := map[string]string{"TMP": scratch, "TEMP": scratch, "TMPDIR": scratch, "GOTMPDIR": scratch}
 	guidance := testScratchGuidance(scratch) + "\n- TMP, TEMP, TMPDIR and GOTMPDIR already name that owned scratch directory. Keep disposable Git repositories and build trees there; keep evidence artifacts in the recorded evidence directory."
+	if dirs := sctx.Run.TestOutputDirs; len(dirs) > 0 {
+		guidance += fmt.Sprintf("\n- The operator authorized these directories as output destinations for the commands this step runs (logs, PID files, temporary build files, provenance): %s. Writes there are allowed; every other destination outside the worktree, the evidence directory and the scratch directory stays refused.", strings.Join(dirs, ", "))
+	}
 	if runtime.GOOS == "windows" {
 		env := runenv.Overlay{}.Apply(mergeEnv(sctx.Env))
 		bash, err := resolveNativeTestBash(nativeTestBashCandidates(sctx.WorkDir, env), os.Getenv("SystemRoot"), func(path string) error {

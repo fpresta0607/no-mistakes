@@ -179,3 +179,65 @@ func TestTestHostDeepEvidenceUsesShortScratchForAnActualGitPush(t *testing.T) {
 	}
 	t.Logf("source=%s deep_incoming_chars=%d owned_scratch=%s real_git=%s push=passed", head, len(deepIncoming), scratch, testGitExecutable)
 }
+
+// An operator-approved Test command writes its private outputs outside the
+// worktree, so every Test agent prompt names the operator's directories as the
+// one extra destination, and names nothing it was not given (issue #123).
+func TestTestStep_PromptNamesOnlyTheOperatorAuthorizedOutputDirs(t *testing.T) {
+	t.Parallel()
+	const authorizedLine = "The operator authorized these directories as output destinations"
+	for _, tc := range []struct {
+		name          string
+		isFixing      bool
+		hasOutputDirs bool
+		wantCalls     int
+	}{
+		{"evidence_turn_without_dirs", false, false, 1},
+		{"evidence_turn_with_dirs", false, true, 1},
+		{"fix_round_without_dirs", true, false, 2},
+		{"fix_round_with_dirs", true, true, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			authorized, unlisted := t.TempDir(), t.TempDir()
+			ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("test repair\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return &agent.Result{Output: json.RawMessage(`{"summary":"repair test failure","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			if tc.hasOutputDirs {
+				sctx.Run.TestOutputDirs = []string{authorized}
+			}
+			if tc.isFixing {
+				sctx.Fixing = true
+				sctx.PreviousFindings = `{"items":[{"id":"test-1","severity":"error","file":"fix.txt","description":"test failed"}]}`
+			}
+
+			if _, err := (&TestStep{}).Execute(sctx); err != nil {
+				t.Fatalf("test step failed: %v", err)
+			}
+
+			if len(ag.calls) != tc.wantCalls {
+				t.Fatalf("agent calls = %d, want %d", len(ag.calls), tc.wantCalls)
+			}
+			for index, call := range ag.calls {
+				if strings.Contains(call.Prompt, unlisted) {
+					t.Errorf("prompt %d names the unlisted directory %s", index, unlisted)
+				}
+				wantLines, wantNamed := 0, 0
+				if tc.hasOutputDirs {
+					wantLines, wantNamed = 1, 1
+				}
+				if got := strings.Count(call.Prompt, authorizedLine); got != wantLines {
+					t.Errorf("prompt %d carries the authorized-destination line %d times, want %d:\n%s", index, got, wantLines, call.Prompt)
+				}
+				if got := strings.Count(call.Prompt, authorized); got != wantNamed {
+					t.Errorf("prompt %d names %s %d times, want %d", index, authorized, got, wantNamed)
+				}
+			}
+		})
+	}
+}

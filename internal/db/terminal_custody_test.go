@@ -13,6 +13,17 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+// fixtureTestOutputDirs are the operator's Test output directories a
+// predecessor run carries into its successor or admitted child.
+var fixtureTestOutputDirs = []string{"/operator/logs", "/operator/provenance"}
+
+func setFixtureTestOutputDirs(t *testing.T, database *DB, runID string) {
+	t.Helper()
+	if _, err := database.sql.Exec(`UPDATE runs SET test_output_dirs = ? WHERE id = ?`, `["/operator/logs","/operator/provenance"]`, runID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newTerminalAdoptionFixture(t *testing.T) (*DB, TerminalAdoption) {
 	t.Helper()
 	database := openTestDB(t)
@@ -54,6 +65,7 @@ func newTerminalAdoptionFixture(t *testing.T) (*DB, TerminalAdoption) {
 	if err := database.UpdateRunErrorStatusWithVerifiedHead(run.ID, "interrupted", types.RunFailed, run.HeadSHA); err != nil {
 		t.Fatal(err)
 	}
+	setFixtureTestOutputDirs(t, database, run.ID)
 	before, err := database.ReadContinuationSnapshot(run.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -524,6 +536,9 @@ func TestTerminalSuccessorInheritsPublicBindingWithoutValidationStamps(t *testin
 	child := accepted.Successor
 	if !reflect.DeepEqual(child.PushGeneration, snapshot.Run.PushGeneration) || !reflect.DeepEqual(child.LastPushedSHA, snapshot.Run.LastPushedSHA) || !reflect.DeepEqual(child.LastPushedAt, snapshot.Run.LastPushedAt) || !reflect.DeepEqual(child.PRURL, snapshot.Run.PRURL) || child.ReviewApprovedHeadSHA != nil || child.CIReadyAt != nil || child.TerminalHeadVerifiedAt != nil {
 		t.Fatalf("inherited binding invented authority: %+v", child)
+	}
+	if !reflect.DeepEqual(child.TestOutputDirs, fixtureTestOutputDirs) {
+		t.Fatalf("successor test output dirs = %q, want the predecessor's %q", child.TestOutputDirs, fixtureTestOutputDirs)
 	}
 	if err := database.UpdateRunPublication(child.ID, PushBinding{HeadSHA: strings.Repeat("f", 40), TargetKind: "fork", TargetFingerprint: "fixture-target", Ref: "refs/heads/feature"}); err != nil {
 		t.Fatal(err)

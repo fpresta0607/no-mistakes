@@ -63,6 +63,7 @@ func admissionFixture(t *testing.T) (*DB, ValidationAdmission) {
 	if err := database.UpdateRunErrorStatus(parent.ID, types.RunCancelReasonAbortedByUser, types.RunCancelled); err != nil {
 		t.Fatal(err)
 	}
+	setFixtureTestOutputDirs(t, database, parent.ID)
 	snapshot, err := database.ReadTerminalSnapshot(parent.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +93,9 @@ func TestValidationAdmissionPreservesThePredecessorAndStartsWithNoCertification(
 	}
 	if child.LaunchNonce == nil || *child.LaunchNonce == proposal.Request.LaunchNonce {
 		t.Fatal("child copied the original receipt")
+	}
+	if !reflect.DeepEqual(child.TestOutputDirs, fixtureTestOutputDirs) {
+		t.Fatalf("admitted child test output dirs = %q, want the predecessor's %q", child.TestOutputDirs, fixtureTestOutputDirs)
 	}
 	steps, err := database.GetStepsByRun(child.ID)
 	if err != nil || len(steps) != 0 {

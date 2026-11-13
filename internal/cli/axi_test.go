@@ -1567,3 +1567,69 @@ func TestAxiHomeLeadsWithAnsweringWhenTheGateHasAnOpenQuestion(t *testing.T) {
 		})
 	}
 }
+
+func TestAxiRunRefusesTestOutputDirOnReattach(t *testing.T) {
+	fx := newAxiTimeoutFixture(t, axiTimeoutOpts{})
+	fx.setGetActive(func(context.Context) (*ipc.RunInfo, error) { return fx.running(), nil })
+	cmd := newAxiRunCmd()
+	cmd.SetArgs([]string{"--test-output-dir", t.TempDir()})
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+
+	err := cmd.Execute()
+
+	if err == nil || !strings.Contains(out.String(), "--test-output-dir is accepted only when starting a new run; omit it to reattach") {
+		t.Fatalf("reattach with --test-output-dir = %v\n%s", err, out.String())
+	}
+}
+
+func TestRequireRunRecordedTestOutputDirs(t *testing.T) {
+	requested := []string{`C:\operator\logs`}
+	for _, tc := range []struct {
+		name      string
+		recorded  []string
+		isRefused bool
+	}{
+		{"recorded_exactly", []string{`C:\operator\logs`}, false},
+		{"dropped_by_an_older_daemon", nil, true},
+		{"recorded_differently", []string{`C:\operator\other`}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := requireRunRecordedTestOutputDirs(&ipc.RunInfo{ID: "run", TestOutputDirs: tc.recorded}, requested)
+
+			if tc.isRefused != (err != nil) {
+				t.Fatalf("requireRunRecordedTestOutputDirs() = %v, want refused=%v", err, tc.isRefused)
+			}
+			if err != nil && err.Error() != "the daemon did not record --test-output-dir; restart it on this build" {
+				t.Fatalf("refusal = %q", err)
+			}
+		})
+	}
+}
+
+func TestAxiStatusRunBlockShowsTestOutputDirs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		dirs    []string
+		isShown bool
+	}{
+		{"with_dirs", []string{"/operator/logs"}, true},
+		{"without_dirs", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&out)
+
+			emitDoc(cmd, runObjectField(runViewFromIPC(&ipc.RunInfo{ID: "run", TestOutputDirs: tc.dirs})))
+
+			if got := strings.Contains(out.String(), "test_output_dirs"); got != tc.isShown {
+				t.Fatalf("test_output_dirs shown = %v, want %v:\n%s", got, tc.isShown, out.String())
+			}
+			if tc.isShown && !strings.Contains(out.String(), "/operator/logs") {
+				t.Fatalf("run block does not name the directory:\n%s", out.String())
+			}
+		})
+	}
+}
