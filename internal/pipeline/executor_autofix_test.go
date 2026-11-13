@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -338,6 +339,57 @@ func TestExecutor_DoesNotAutoFixManualApprovalOutcome(t *testing.T) {
 
 	if callCount != 1 {
 		t.Fatalf("expected 1 call for manual approval outcome, got %d", callCount)
+	}
+
+	if err := exec.Respond(types.StepTest, types.ActionApprove, nil); err != nil {
+		t.Fatalf("respond error: %v", err)
+	}
+	waitExecutorDone(t, done)
+}
+
+// TestExecutor_TestParkAfterANoOpRepairKeepsTheSpentRoundAndStartsNoRepair pins
+// the executor half of issue #124: when the Test step parks a same-head no-go
+// right after a repair that changed nothing (AutoFixable false), the run waits
+// for the operator with budget left, starts no further automatic repair, and
+// the auto-fix round it already spent stays spent.
+func TestExecutor_TestParkAfterANoOpRepairKeepsTheSpentRoundAndStartsNoRepair(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	const findings = `{"findings":[{"id":"test-1","severity":"error","description":"the guard still stops the run","action":"auto-fix"}],"summary":"1 failure"}`
+
+	callCount := 0
+	step := &adaptiveCallStep{
+		name: types.StepTest,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			callCount++
+			return &StepOutcome{NeedsApproval: true, AutoFixable: !sctx.Fixing, Findings: findings}, nil
+		},
+	}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Test: 3}}, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+
+	waitForStepStatus(t, database, run.ID, types.StepTest, types.StepStatusFixReview)
+
+	if callCount != 2 {
+		t.Fatalf("step executions = %d, want 2 (the failure and its one automatic repair), with two automatic repairs left unspent", callCount)
+	}
+	results, err := database.GetStepsByRun(run.ID)
+	if err != nil || len(results) != 1 {
+		t.Fatalf("GetStepsByRun() = %v, %v, want the Test step", results, err)
+	}
+	rounds, err := database.GetRoundsByStep(results[0].ID)
+	if err != nil {
+		t.Fatalf("GetRoundsByStep() error = %v", err)
+	}
+	if len(rounds) != 2 || rounds[1].Trigger != "auto_fix" || rounds[0].SelectionSource == nil || *rounds[0].SelectionSource != db.RoundSelectionSourceAutoFix || rounds[1].SelectionSource != nil {
+		t.Fatalf("rounds = %+v, want the spent auto-fix selection on round 1 and the park on round 2 with no selection", rounds)
+	}
+	state, err := exec.durableExecutionState(results[0].ID)
+	if err != nil {
+		t.Fatalf("durableExecutionState() error = %v", err)
+	}
+	if state.autoFixAttempts != 1 {
+		t.Fatalf("durable auto-fix attempts = %d, want the one spent repair still spent", state.autoFixAttempts)
 	}
 
 	if err := exec.Respond(types.StepTest, types.ActionApprove, nil); err != nil {
