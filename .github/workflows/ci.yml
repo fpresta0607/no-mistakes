@@ -41,15 +41,19 @@ jobs:
         include:
           - os: ubuntu-latest
             name: test (ubuntu-latest)
-          # The macOS leg is split across two runners by unix_part (see the
-          # Unix step): the go list remainder on one, the pipeline/steps and
-          # daemon shards on the other. ubuntu-latest runs both parts.
+          # The macOS leg is split across three runners by unix_part (see the
+          # Unix step): the go list remainder on one, the pipeline/steps shards
+          # on another and the daemon shards on the third. ubuntu-latest runs
+          # every part.
           - os: macos-latest
             name: test (macos-latest)
             unix_part: rest
           - os: macos-latest
-            name: test (macos-shards)
-            unix_part: shards
+            name: test (macos-steps)
+            unix_part: steps
+          - os: macos-latest
+            name: test (macos-daemon)
+            unix_part: daemon
           - os: windows-latest
             name: test (windows-core)
             shard: core
@@ -200,13 +204,18 @@ jobs:
       # macOS leg no sooner: its step took 25-33m unsharded and 26-39m sharded,
       # within minutes of the 40m job cap, while ^Test[A-K] of pipeline/steps
       # and both daemon shards still reached 20m on a slower runner (issue
-      # #170). The leg is capacity-bound, so macos-latest runs its two parts on
-      # two runners (matrix unix_part): rest is the go list remainder at -p=2,
-      # and shards is pipeline/steps in four shards (^TestCIStep, the rest of
-      # ^Test[A-K], ^Test[L-Q], the rest) and daemon in four (^Test[A-L],
-      # ^Test[M-O], ^Test[P-R], the rest), cut by the Windows rows' -v
-      # timings. A row with no unix_part runs both parts on one runner, as
-      # ubuntu-latest does, and an unknown part fails the step.
+      # #170). The leg is capacity-bound, so macos-latest runs its parts on
+      # separate runners (matrix unix_part): rest is the go list remainder at
+      # -p=2, steps is pipeline/steps in four shards (^TestCIStep, the rest of
+      # ^Test[A-K], ^Test[L-Q], the rest) and daemon is daemon in four
+      # (^Test[A-L], ^Test[M-O], ^Test[P-R], the rest), cut by the Windows
+      # rows' -v timings. The steps and daemon shards first shared one runner,
+      # and on a slow one all eight binaries ran long together: a steps and a
+      # daemon shard hit the 20m budget with the tests then running a second
+      # old or less while the other six passed at 689-1184s, and the job could
+      # run into its 40m cap (issues #237 and #218). A row with no unix_part
+      # runs every part on one runner, as ubuntu-latest does, and an unknown
+      # part fails the step.
       # The remainder package set is computed once from go list filtered by
       # NM_CI_UNIX_SHARD_EXCLUDE, and the step fails closed when that listing
       # fails or leaves nothing, so a resolution failure cannot quietly run the
@@ -220,9 +229,10 @@ jobs:
           NM_CI_UNIX_PART: ${{ matrix.unix_part }}
         run: |
           case "$NM_CI_UNIX_PART" in
-            '') run_rest=1 run_shards=1 ;;
-            rest) run_rest=1 run_shards= ;;
-            shards) run_rest= run_shards=1 ;;
+            '') run_rest=1 run_steps=1 run_daemon=1 ;;
+            rest) run_rest=1 run_steps= run_daemon= ;;
+            steps) run_rest= run_steps=1 run_daemon= ;;
+            daemon) run_rest= run_steps= run_daemon=1 ;;
             *)
               echo "::error::unknown NM_CI_UNIX_PART '$NM_CI_UNIX_PART'; refusing to guess which tests to run" >&2
               exit 1
@@ -242,7 +252,7 @@ jobs:
             go test -race -timeout=20m -p=2 $rest &
             pids=$!
           fi
-          if [ -n "$run_shards" ]; then
+          if [ -n "$run_steps" ]; then
             go test -race -timeout=20m -run '^TestCIStep' ./internal/pipeline/steps &
             pids="$pids $!"
             go test -race -timeout=20m -run '^Test[A-K]' -skip '^TestCIStep' ./internal/pipeline/steps &
@@ -251,6 +261,8 @@ jobs:
             pids="$pids $!"
             go test -race -timeout=20m -skip '^Test[A-Q]' ./internal/pipeline/steps &
             pids="$pids $!"
+          fi
+          if [ -n "$run_daemon" ]; then
             go test -race -timeout=20m -run '^Test[A-L]' ./internal/daemon &
             pids="$pids $!"
             go test -race -timeout=20m -run '^Test[M-O]' ./internal/daemon &

@@ -22,7 +22,7 @@ func TestCIWorkflowRunsTestsOnAllSupportedDesktopPlatforms(t *testing.T) {
 
 	want := map[string]int{
 		"ubuntu-latest":  1,
-		"macos-latest":   2,
+		"macos-latest":   3,
 		"windows-latest": 18,
 	}
 	if len(got) != len(want) {
@@ -308,21 +308,29 @@ const unixResolvedGoList = "github.com/kunchenguid/no-mistakes\ngithub.com/kunch
 
 const unixRemainderInvocation = "test -race -timeout=20m -p=2 github.com/kunchenguid/no-mistakes github.com/kunchenguid/no-mistakes/internal/git"
 
-var unixShardInvocations = []string{
+var unixStepsShardInvocations = []string{
 	"test -race -timeout=20m -run ^TestCIStep ./internal/pipeline/steps",
 	"test -race -timeout=20m -run ^Test[A-K] -skip ^TestCIStep ./internal/pipeline/steps",
 	"test -race -timeout=20m -run ^Test[L-Q] ./internal/pipeline/steps",
 	"test -race -timeout=20m -skip ^Test[A-Q] ./internal/pipeline/steps",
+}
+
+var unixDaemonShardInvocations = []string{
 	"test -race -timeout=20m -run ^Test[A-L] ./internal/daemon",
 	"test -race -timeout=20m -run ^Test[M-O] ./internal/daemon",
 	"test -race -timeout=20m -run ^Test[P-R] ./internal/daemon",
 	"test -race -timeout=20m -skip ^Test[A-R] ./internal/daemon",
 }
 
+var unixShardInvocations = slices.Concat(unixStepsShardInvocations, unixDaemonShardInvocations)
+
 // The macOS leg is capacity-bound: splitting its binaries on one runner moved
 // work between them but finished the step no sooner, within minutes of the job
-// cap (issue #170). So each Unix OS runs the whole step on one row, or splits it
-// into exactly one remainder row and one shards row, and macos-latest splits it.
+// cap (issue #170), and with all eight shard binaries on one runner the shards
+// row still took up to 1200s per shard on a slow runner (issue #237). So each
+// Unix OS runs the whole step on one row, or splits it into exactly one
+// remainder row, one pipeline/steps shards row and one daemon shards row, and
+// macos-latest splits it.
 func TestCIWorkflow_UnixRowsRunEachPartExactlyOnce(t *testing.T) {
 	t.Parallel()
 
@@ -338,7 +346,7 @@ func TestCIWorkflow_UnixRowsRunEachPartExactlyOnce(t *testing.T) {
 	}
 	want := map[string][]string{
 		"ubuntu-latest": {""},
-		"macos-latest":  {"rest", "shards"},
+		"macos-latest":  {"daemon", "rest", "steps"},
 	}
 	if len(parts) != len(want) {
 		t.Fatalf("Unix matrix rows = %v, want %v", parts, want)
@@ -386,10 +394,16 @@ func TestCIWorkflow_UnixStepRunsOnlyItsRowsPart(t *testing.T) {
 			wantFailure: true,
 		},
 		{
-			name:       "shards runs only the named shards and needs no listing",
-			part:       "shards",
+			name:       "steps runs only the steps package shards and needs no listing",
+			part:       "steps",
 			goListExit: "1",
-			wantTests:  unixShardInvocations,
+			wantTests:  unixStepsShardInvocations,
+		},
+		{
+			name:       "daemon runs only the daemon shards and needs no listing",
+			part:       "daemon",
+			goListExit: "1",
+			wantTests:  unixDaemonShardInvocations,
 		},
 		{
 			name:        "an unknown part runs nothing",
