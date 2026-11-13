@@ -223,13 +223,14 @@ Rules:
 %s
 - Before finishing, remove any transient artifacts your testing created in the working tree (downloaded models, caches, build outputs, large binaries, or generated data directories) so they are not committed and pushed. Do not remove intentional source or test-file changes. Do not remove dependencies materialized by commands.prepare; later configured commands share them.
 - Return JSON with a "summary" field when you are done, plus a "needs_decision" array with one entry for each failure that needs a human decision. Leave that array out when none does.
-- List every command you ran in a "commands_run" array, each with its "command" and its "exit_code".
+- List the commands you ran in a "commands_run" array, each with its "command" and its "exit_code": at most %d, putting first every command the operator's or driver's instructions limit.
 %s%s`,
 			sctx.Run.Branch,
 			baseSHA,
 			sctx.Run.HeadSHA,
 			testRunbookSections(sctx),
 			hostGuidance+testDesktopGuidance(desktop),
+			maxRepairCommands,
 			fixSummaryRules(sctx, s.Name()),
 			historySection,
 		) + testRepairScopeRules

@@ -861,6 +861,64 @@ func TestTestStep_RepairThatChangedNothingKeepsThePassesOfTheSameHead(t *testing
 	}
 }
 
+// The repair is told the same commands_run bound its schema enforces and to put
+// the commands its instructions limit first, so a repair that ran more than the
+// bound still hands the same-head evidence turn the one it may not run again.
+func TestTestStep_RepairReportsTheLimitedCommandWithinTheBound(t *testing.T) {
+	t.Parallel()
+	const limitedCommand = "./guard.sh --pinned"
+	dir, baseSHA, headSHA := detachedRepo(t)
+	reported := []map[string]any{{"command": limitedCommand, "exit_code": 1}}
+	for index := range maxRepairCommands + 5 {
+		reported = append(reported, map[string]any{"command": fmt.Sprintf("git status --short # %d", index), "exit_code": 0})
+	}
+	repairOutput, err := json.Marshal(map[string]any{"summary": "no change; the guard failure needs a scope decision", "commands_run": reported})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repairOpts agent.RunOpts
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if !isRepairTurn(opts) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["drove the retry"],"testing_summary":"drove the retry","artifacts":[],"scenarios":[{"name":"a declined card can retry","result":"fail","live":true,"evidence":"retry.png","reason":"the button is still gone"}],"verdict":"no-go"}`)}, nil
+		}
+		repairOpts = opts
+		return &agent.Result{Output: repairOutput}, nil
+	}}
+	answered := marshalFindings(t, types.Findings{
+		Items:         []types.Finding{{ID: "test-1", Severity: "error", Action: types.ActionAutoFix, Description: "the retry button is gone", UserInstructions: "Run the pinned guard.sh exactly once."}},
+		Scenarios:     []types.TestScenario{{Name: "a declined card can retry", Result: types.ScenarioResultFail, Live: true}},
+		Verdict:       types.TestVerdictNoGo,
+		TestedHeadSHA: headSHA,
+	})
+	sctx := repairContext(t, ag, dir, baseSHA, headSHA, config.Commands{}, answered)
+	sctx.Shared.RecordLiveCheck(headSHA)
+
+	if _, err := (&TestStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var schema struct {
+		Properties struct {
+			CommandsRun struct {
+				MaxItems int `json:"maxItems"`
+			} `json:"commands_run"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(repairOpts.JSONSchema, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if bound := schema.Properties.CommandsRun.MaxItems; bound == 0 || !strings.Contains(repairOpts.Prompt, fmt.Sprintf("at most %d, putting first every command the operator's or driver's instructions limit", bound)) {
+		t.Fatalf("repair prompt must state the schema's commands_run bound %d and to put limited commands first:\n%s", bound, repairOpts.Prompt)
+	}
+	prompt := lastPrompt(ag)
+	if !strings.Contains(prompt, "- "+limitedCommand+" (exit 1)") {
+		t.Fatalf("evidence prompt must carry the limited command the repair listed first:\n%s", prompt)
+	}
+	if got := strings.Count(prompt, "git status --short # "); got != maxRepairCommands-1 {
+		t.Fatalf("evidence prompt carries %d further commands, want the bound's remaining %d", got, maxRepairCommands-1)
+	}
+}
+
 func countOf[T comparable](list []T, want T) int {
 	count := 0
 	for _, item := range list {
