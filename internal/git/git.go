@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -101,28 +102,77 @@ func runInDirWithEnvRaw(ctx context.Context, dir string, extraEnv []string, args
 	return runInDirWithEnvAndInputRaw(ctx, dir, extraEnv, "", args...)
 }
 
+// siblingWorktreeBeingAddedRE matches Git dying while it lists a repository's
+// worktrees on an entry whose commondir file a concurrent `git worktree add`
+// has created but not yet written. Git reads that empty file as a fatal error
+// ("No error" on Windows, "Undefined error: 0" on macOS) instead of skipping
+// the entry, and every fetch lists the worktrees in its connectivity check
+// (`rev-list --all`), so a run fetching the default branch failed whenever
+// another run on the same gate was being created (issues #106, #134).
+var siblingWorktreeBeingAddedRE = regexp.MustCompile(`failed to read \S*worktrees/[^/\s]+/commondir`)
+
+// fetchWorktreeListingRetryBudget bounds how long a fetch is retried, counted
+// from its first failure on siblingWorktreeBeingAddedRE. `worktree add` writes the file right
+// after creating it, so the budget only matters for an entry a crashed add
+// left empty, which still fails once the budget is spent.
+const fetchWorktreeListingRetryBudget = 10 * time.Second
+
+const fetchWorktreeListingRetryInterval = 50 * time.Millisecond
+
 func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []string, input string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(nonInteractiveEnvForContext(ctx, dir), extraEnv...)
-	if input != "" {
-		cmd.Stdin = strings.NewReader(input)
-	}
-	winproc.Harden(cmd)
-	// OutputShellCommand captures stdout only, so unlike cmd.Output it never
-	// fills ExitError.Stderr. Capture stderr explicitly or the git error text
-	// below silently becomes empty.
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	shellenv.ConfigureShellCommand(cmd)
-	out, err := shellenv.OutputShellCommand(cmd)
-	if err != nil {
+	var retryDeadline time.Time
+	for {
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(nonInteractiveEnvForContext(ctx, dir), extraEnv...)
+		if input != "" {
+			cmd.Stdin = strings.NewReader(input)
+		}
+		winproc.Harden(cmd)
+		// OutputShellCommand captures stdout only, so unlike cmd.Output it never
+		// fills ExitError.Stderr. Capture stderr explicitly or the git error text
+		// below silently becomes empty.
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		shellenv.ConfigureShellCommand(cmd)
+		out, err := shellenv.OutputShellCommand(cmd)
+		if err == nil {
+			return out, nil
+		}
+		// A fetch that died there has written only objects, which a retry
+		// reuses, and has not yet updated a ref, so it is safe to run again.
+		if gitSubcommand(args) == "fetch" && siblingWorktreeBeingAddedRE.MatchString(stderr.String()) {
+			if retryDeadline.IsZero() {
+				retryDeadline = time.Now().Add(fetchWorktreeListingRetryBudget)
+			}
+			if time.Now().Before(retryDeadline) {
+				select {
+				case <-ctx.Done():
+				case <-time.After(fetchWorktreeListingRetryInterval):
+					continue
+				}
+			}
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			err = fmt.Errorf("%w (%v)", ctxErr, err)
 		}
 		return nil, fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(strings.TrimSpace(stderr.String())))
 	}
-	return out, nil
+}
+
+// gitSubcommand returns the Git command args runs, skipping the global options
+// before it, or "" when there is none.
+func gitSubcommand(args []string) string {
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "-c" || args[i] == "-C":
+			i++
+		case strings.HasPrefix(args[i], "-"):
+		default:
+			return args[i]
+		}
+	}
+	return ""
 }
 
 // StablePatchID returns Git's stable patch identity for one file between two
