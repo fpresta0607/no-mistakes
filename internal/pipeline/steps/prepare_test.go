@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/testlink"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -295,11 +296,12 @@ func TestEnsurePrepared_RestoresDirtyInitializedSubmodule(t *testing.T) {
 // restore's git apply failed with "No valid patches in input".
 func TestEnsurePrepared_RestoresDirtySubmoduleUnderHostileDiffConfig(t *testing.T) {
 	globalConfig := filepath.Join(t.TempDir(), "gitconfig")
-	hostile := "[diff]\n\tsubmodule = log\n\tnoprefix = true\n\tmnemonicprefix = true\n[color]\n\tui = always\n"
+	hostile := "[diff]\n\tsubmodule = log\n\tnoprefix = true\n\tmnemonicprefix = true\n[color]\n\tui = always\n" + testgit.NoBackgroundMaintenanceConfig
 	if err := os.WriteFile(globalConfig, []byte(hostile), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	testgit.RequireNoBackgroundMaintenance(t)
 	assertPreparationRestoresDirtyInitializedSubmodule(t)
 }
 

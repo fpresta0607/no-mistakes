@@ -107,6 +107,7 @@ func ensureGitRepoTemplate(t *testing.T) {
 		run("init")
 		run("config", "user.name", "test")
 		run("config", "user.email", "test@test.com")
+		run("config", "maintenance.auto", "false")
 		run("checkout", "-b", "main")
 
 		os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base content"), 0o644)

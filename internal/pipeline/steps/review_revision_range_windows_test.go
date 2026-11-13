@@ -11,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 func windowsReviewRevisionRepo(t *testing.T) (string, string, string) {
@@ -20,9 +21,14 @@ func windowsReviewRevisionRepo(t *testing.T) (string, string, string) {
 	}
 	t.Setenv("PATH", filepath.Dir(testGitExecutable)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+	globalConfig := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(globalConfig, []byte(testgit.NoBackgroundMaintenanceConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
 	t.Setenv("GIT_CONFIG_COUNT", "0")
 	t.Setenv("GIT_CONFIG_PARAMETERS", "")
+	testgit.RequireNoBackgroundMaintenance(t)
 	source, baseSHA, headSHA := setupGitRepo(t)
 	parent := t.TempDir()
 	padding := 180 - len(parent) - 1

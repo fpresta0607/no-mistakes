@@ -20,6 +20,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/realpath"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 func init() {
@@ -93,7 +94,13 @@ func TestMain(m *testing.M) {
 	}
 	_ = os.Setenv("NM_HOME", root)
 	_ = os.Setenv("HOME", home)
-	_ = os.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, "gitconfig"))
+	globalConfig := filepath.Join(home, "gitconfig")
+	if err := os.WriteFile(globalConfig, []byte(testgit.NoBackgroundMaintenanceConfig), 0o644); err != nil {
+		_ = os.RemoveAll(root)
+		fmt.Fprintf(os.Stderr, "write test git config: %v\n", err)
+		os.Exit(1)
+	}
+	_ = os.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
 	_ = os.Setenv("NO_MISTAKES_TELEMETRY", "off")
 	_ = os.Setenv("NO_MISTAKES_NO_UPDATE_CHECK", "1")
 
@@ -421,4 +428,11 @@ func startTestDaemon(t *testing.T, p *paths.Paths, d *db.DB) {
 			t.Error("daemon did not stop within 3s")
 		}
 	})
+}
+
+// Issue #109: this package walks or copies repositories its tests just ran git
+// in, so a detached automatic maintenance holding objects/maintenance.lock
+// there could make that walk fail when the lock vanished before the open.
+func TestFixtureGitStartsNoBackgroundMaintenance(t *testing.T) {
+	testgit.RequireNoBackgroundMaintenance(t)
 }
