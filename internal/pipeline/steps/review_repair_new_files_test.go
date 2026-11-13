@@ -36,14 +36,19 @@ type reviewRepairRun struct {
 var scratchInPrompt = regexp.MustCompile(`logs, in (.+), never in the checkout\.`)
 
 // runReviewRepair drives one Review fix round. Each of untrackedBefore exists
-// in the worktree before the round starts; the fixer writes each of created,
-// runs `git add` on each of staged, and returns fixOutput.
-func runReviewRepair(t *testing.T, untrackedBefore, created, staged []string, fixOutput string) reviewRepairRun {
+// in the worktree before the round starts, and each of stagedBefore is staged,
+// as a turn cut at its budget leaves its new files; the fixer writes each of
+// created, runs `git add` on each of staged, and returns fixOutput.
+func runReviewRepair(t *testing.T, untrackedBefore, stagedBefore, created, staged []string, fixOutput string) reviewRepairRun {
 	t.Helper()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 	for _, file := range untrackedBefore {
 		writeTestFile(t, filepath.Join(dir, filepath.FromSlash(file)), "left before the round\n")
+	}
+	for _, file := range stagedBefore {
+		writeTestFile(t, filepath.Join(dir, filepath.FromSlash(file)), "kept from the cut turn\n")
+		gitCmd(t, dir, "add", "--", file)
 	}
 	run := reviewRepairRun{dir: dir, headBeforeRepair: headSHA}
 	calls := 0
@@ -137,6 +142,7 @@ func TestReviewRepairCommitsOnlyTheNewFilesItNames(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		untrackedBefore []string
+		stagedBefore    []string
 		created         []string
 		staged          []string
 		fixOutput       string
@@ -157,6 +163,13 @@ func TestReviewRepairCommitsOnlyTheNewFilesItNames(t *testing.T) {
 			fixOutput: `{"summary":"address findings","new_files":["review-fix.txt"]}`,
 			wantAdded: []string{"review-fix.txt"},
 			wantMoved: artifacts,
+		},
+		{
+			name:         "a_file_staged_before_the_turn_is_committed_unnamed",
+			stagedBefore: []string{"helper.txt"},
+			created:      []string{"review-fix.txt"},
+			fixOutput:    `{"summary":"address findings","new_files":["review-fix.txt"]}`,
+			wantAdded:    []string{"helper.txt", "review-fix.txt"},
 		},
 		{
 			name:      "a_named_path_is_matched_however_it_is_spelled",
@@ -186,7 +199,7 @@ func TestReviewRepairCommitsOnlyTheNewFilesItNames(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			run := runReviewRepair(t, tc.untrackedBefore, tc.created, tc.staged, tc.fixOutput)
+			run := runReviewRepair(t, tc.untrackedBefore, tc.stagedBefore, tc.created, tc.staged, tc.fixOutput)
 
 			if added := filesAddedByRepair(t, run); !slices.Equal(added, tc.wantAdded) {
 				t.Errorf("repair commit added %q, want %q", added, tc.wantAdded)
@@ -249,7 +262,7 @@ func TestReviewRepairCommitsOnlyTheNewFilesItNames(t *testing.T) {
 // GitLab's image uploads may ever carry it.
 func TestReviewRepairSetAsideIsNeverPublished(t *testing.T) {
 	t.Parallel()
-	run := runReviewRepair(t, nil, []string{"review-fix.txt", "playwright-report/shot.png"}, nil, `{"summary":"address findings","new_files":["review-fix.txt"]}`)
+	run := runReviewRepair(t, nil, nil, []string{"review-fix.txt", "playwright-report/shot.png"}, nil, `{"summary":"address findings","new_files":["review-fix.txt"]}`)
 	kept := filesUnder(t, run.evidenceDir)
 	if !slices.ContainsFunc(kept, func(file string) bool { return strings.HasSuffix(file, "playwright-report/shot.png") }) {
 		t.Fatalf("the repair set nothing aside in %s: %q", run.evidenceDir, kept)
@@ -288,7 +301,7 @@ func TestReviewRepairSetAsideIsNeverPublished(t *testing.T) {
 // so a later turn would inherit the deleted directory.
 func TestReviewRepairNamesAnOwnedScratchDirectory(t *testing.T) {
 	t.Parallel()
-	run := runReviewRepair(t, nil, []string{"review-fix.txt"}, nil, `{"summary":"address findings","new_files":["review-fix.txt"]}`)
+	run := runReviewRepair(t, nil, nil, []string{"review-fix.txt"}, nil, `{"summary":"address findings","new_files":["review-fix.txt"]}`)
 
 	if run.scratch == "" || !run.isScratchPresent {
 		t.Fatalf("repair prompt names scratch %q (present %v), want an existing owned scratch directory:\n%s", run.scratch, run.isScratchPresent, run.fixOpts.Prompt)

@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -141,15 +142,16 @@ var fixSummarySchema = json.RawMessage(fmt.Sprintf(`{
 const reviewRepairFilesRule = `
 
 New files rule:
-- List in "new_files" every file this fix adds, by its path from the repository root. Every other new file in the checkout, staged or not, stays out of the commit and is moved out of the checkout after it.
+- List in "new_files" every file this fix adds, by its path from the repository root. Every other file you add to the checkout, staged or not, stays out of the commit and is moved out of the checkout after it.
 - Keep disposable output, such as a test base temp directory, caches, build output and logs, in %s, never in the checkout. Before you finish, delete every file you created in the checkout that is not part of the fix.`
 
 // unnamedNewFiles reads the new files a Review repair named and returns every
 // other file it created since before. A new file the repair staged without
 // committing counts too: it is unstaged first, so `git add` cannot carry an
-// unnamed file past the rule. Output that does not parse names nothing, which
-// fails safe.
-func unnamedNewFiles(sctx *pipeline.StepContext, result *agent.Result, before []string) ([]string, error) {
+// unnamed file past the rule. A file in stagedBefore, staged before the turn
+// began, such as the new file of a turn cut at its budget, stays staged.
+// Output that does not parse names nothing, which fails safe.
+func unnamedNewFiles(sctx *pipeline.StepContext, result *agent.Result, before, stagedBefore []string) ([]string, error) {
 	var parsed struct {
 		NewFiles []string `json:"new_files"`
 	}
@@ -167,13 +169,13 @@ func unnamedNewFiles(sctx *pipeline.StepContext, result *agent.Result, before []
 		}
 		named[path.Clean(filepath.ToSlash(file))] = true
 	}
-	staged, err := stepGitRunRaw(sctx, "diff", "--cached", "--name-only", "--diff-filter=A", "--no-renames", "-z", "HEAD")
+	staged, err := stagedNewFiles(sctx)
 	if err != nil {
-		return nil, fmt.Errorf("list staged new files: %w", err)
+		return nil, err
 	}
 	var unstage []string
-	for _, file := range strings.Split(strings.TrimSuffix(staged, "\x00"), "\x00") {
-		if file != "" && !named[file] {
+	for _, file := range staged {
+		if !named[file] && !slices.Contains(stagedBefore, file) {
 			unstage = append(unstage, ":(literal)"+file)
 		}
 	}
@@ -197,6 +199,21 @@ func unnamedNewFiles(sctx *pipeline.StepContext, result *agent.Result, before []
 		}
 	}
 	return unnamed, nil
+}
+
+// stagedNewFiles lists the files the index adds to HEAD.
+func stagedNewFiles(sctx *pipeline.StepContext) ([]string, error) {
+	out, err := stepGitRunRaw(sctx, "diff", "--cached", "--name-only", "--diff-filter=A", "--no-renames", "-z", "HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("list staged new files: %w", err)
+	}
+	var files []string
+	for _, file := range strings.Split(strings.TrimSuffix(out, "\x00"), "\x00") {
+		if file != "" {
+			files = append(files, file)
+		}
+	}
+	return files, nil
 }
 
 // reviewRepairDirName is the folder in a run's evidence directory that holds
@@ -819,10 +836,14 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	// commitAgentFixesWithResult reports as "not committed". HEAD movement is
 	// what tells that round apart from one that made no edits.
 	headBeforeAgent := ""
+	var stagedBefore []string
 	if opts.IsReviewRepair {
 		headBeforeAgent, err = git.HeadSHA(sctx.Ctx, sctx.WorkDir)
 		if err != nil {
 			return "", fmt.Errorf("resolve head before %s fix: %w", stepName, err)
+		}
+		if stagedBefore, err = stagedNewFiles(sctx); err != nil {
+			return "", err
 		}
 	}
 	var result *agent.Result
@@ -855,7 +876,7 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	}
 	var unnamed []string
 	if opts.IsReviewRepair {
-		if unnamed, err = unnamedNewFiles(sctx, result, before); err != nil {
+		if unnamed, err = unnamedNewFiles(sctx, result, before, stagedBefore); err != nil {
 			return "", err
 		}
 	}
