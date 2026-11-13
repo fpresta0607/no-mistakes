@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/realpath"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
@@ -215,6 +216,67 @@ func TestCopyLocalUserIdentityIgnoresASiblingWorktreeStillBeingAdded(t *testing.
 	}
 	if out, err := exec.Command("git", "config", "--file", filepath.Join(gate, "config"), "--get", "user.name").CombinedOutput(); err == nil {
 		t.Fatalf("identity landed in the gate's shared config (%q), want the run worktree's own config", strings.TrimSpace(string(out)))
+	}
+}
+
+// Issue #134: every fetch lists the repository's worktrees in its
+// connectivity check, and Git dies on a sibling whose commondir a concurrent
+// `git worktree add` has created but not yet written. A run fetching its
+// trusted default branch then failed whenever another run on the same gate
+// was being created. The sibling here is that half-written entry, and the add
+// finishes a second later.
+func TestFetchWaitsForASiblingWorktreeStillBeingAdded(t *testing.T) {
+	ctx := context.Background()
+	src := initTestRepo(t)
+	branch := run(t, src, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	gate := filepath.Join(t.TempDir(), "gate.git")
+	run(t, src, "git", "clone", "--bare", src, gate)
+	worktree := filepath.Join(t.TempDir(), "run")
+	if err := WorktreeAdd(ctx, gate, worktree, run(t, src, "git", "rev-parse", "HEAD")); err != nil {
+		t.Fatalf("worktree add: %v", err)
+	}
+	writeFile(t, filepath.Join(src, "next.txt"), "next\n")
+	run(t, src, "git", "add", "next.txt")
+	run(t, src, "git", "commit", "-m", "next")
+	want := run(t, src, "git", "rev-parse", "HEAD")
+	sibling := filepath.Join(gate, "worktrees", "sibling")
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(sibling, "gitdir"), filepath.Join(t.TempDir(), "sibling", ".git")+"\n")
+	writeFile(t, filepath.Join(sibling, "commondir"), "")
+	if out, err := exec.Command("git", "-C", worktree, "fetch", "--no-tags", "origin", "+refs/heads/"+branch+":refs/remotes/probe/"+branch).CombinedOutput(); err == nil || !siblingWorktreeBeingAddedRE.Match(out) {
+		t.Fatalf("plain fetch beside the half-written sibling: err = %v, output = %s; want Git's commondir failure", err, out)
+	}
+	added := time.AfterFunc(time.Second, func() {
+		_ = os.WriteFile(filepath.Join(sibling, "commondir"), []byte("../..\n"), 0o644)
+	})
+	defer added.Stop()
+
+	err := FetchRemoteBranch(ctx, worktree, "origin", branch)
+
+	if err != nil {
+		t.Fatalf("FetchRemoteBranch failed beside a sibling worktree still being added: %v", err)
+	}
+	if got := run(t, worktree, "git", "rev-parse", "refs/remotes/origin/"+branch); got != want {
+		t.Fatalf("fetched ref = %s, want %s", got, want)
+	}
+}
+
+func TestGitSubcommand(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"fetch", "--no-tags", "origin"}, want: "fetch"},
+		{args: []string{"--git-dir=/gate.git", "fetch", "origin"}, want: "fetch"},
+		{args: []string{"-c", "fetch.prune=true", "rev-parse", "HEAD"}, want: "rev-parse"},
+		{args: []string{"-C", "fetch", "status"}, want: "status"},
+		{args: []string{"--version"}, want: ""},
+	} {
+		if got := gitSubcommand(tc.args); got != tc.want {
+			t.Errorf("gitSubcommand(%q) = %q, want %q", tc.args, got, tc.want)
+		}
 	}
 }
 
