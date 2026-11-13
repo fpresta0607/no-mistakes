@@ -704,6 +704,9 @@ func TestTestStep_RepairThatChangedNothingKeepsThePassesOfTheSameHead(t *testing
 	const failedScenario, passedScenario = "a declined card can retry", "user reaches the success screen"
 	const sameHeadRule, movedHeadRule = "run none of them again", "Drive at least one scenario: when nothing above applies, drive the recorded scenario closest to the repair's change."
 	const keptTested = "go vet ./... passed"
+	const repairReport = "ran guard.sh once; it stopped at its first guard with exit 1"
+	const operatorInstruction = "Run the pinned guard.sh exactly once and never retry it."
+	const receiptHeader = "Execution receipt from the repair turn"
 	keptArtifact := types.TestArtifact{Kind: "image", Label: "checkout screen", Path: "checkout.png"}
 	evidence := `{"findings":[{"severity":"error","action":"auto-fix","description":"the retry button is gone"}],"summary":"","tested":["drove the retry"],"testing_summary":"drove the retry","artifacts":[],` +
 		`"scenarios":[{"name":"` + failedScenario + `","result":"fail","live":true,"evidence":"retry.png","reason":"the button is still gone"}],"verdict":"no-go"}`
@@ -743,10 +746,10 @@ func TestTestStep_RepairThatChangedNothingKeepsThePassesOfTheSameHead(t *testing
 						return nil, err
 					}
 				}
-				return &agent.Result{Output: json.RawMessage(`{"summary":"nothing to change without a scope decision"}`)}, nil
+				return &agent.Result{Output: json.RawMessage(`{"summary":"` + repairReport + `"}`)}, nil
 			}}
 			answered := marshalFindings(t, types.Findings{
-				Items: []types.Finding{{ID: "test-1", Severity: "error", Action: types.ActionAutoFix, Description: "the retry button is gone"}},
+				Items: []types.Finding{{ID: "test-1", Severity: "error", Action: types.ActionAutoFix, Description: "the retry button is gone", UserInstructions: operatorInstruction}},
 				Scenarios: []types.TestScenario{
 					{Name: failedScenario, Result: types.ScenarioResultFail, Live: true},
 					{Name: passedScenario, Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png", Reason: "go vet and the checkout tests passed"},
@@ -771,6 +774,11 @@ func TestTestStep_RepairThatChangedNothingKeepsThePassesOfTheSameHead(t *testing
 			}
 			if !strings.Contains(prompt, wantRule) || strings.Contains(prompt, neverRule) {
 				t.Fatalf("evidence prompt must hold %q and not %q:\n%s", wantRule, neverRule, prompt)
+			}
+			for _, part := range []string{receiptHeader, repairReport, operatorInstruction} {
+				if strings.Contains(prompt, part) != tc.wantKept {
+					t.Fatalf("evidence prompt holds %q = %v, want %v (the repair's receipt rides only on the head it ran on):\n%s", part, !tc.wantKept, tc.wantKept, prompt)
+				}
 			}
 			findings := parsedOutcomeFindings(t, outcome)
 			index := slices.IndexFunc(findings.Scenarios, func(scenario types.TestScenario) bool { return scenario.Name == passedScenario })
@@ -798,6 +806,9 @@ func TestTestStep_RepairThatChangedNothingKeepsThePassesOfTheSameHead(t *testing
 			}
 			if findings.Verdict != types.TestVerdictNoGo || !outcome.NeedsApproval {
 				t.Fatalf("verdict = %q, needs approval = %v, want the failure still parking", findings.Verdict, outcome.NeedsApproval)
+			}
+			if outcome.AutoFixable == tc.wantKept {
+				t.Fatalf("auto-fixable = %v, want %v: a no-go right after a repair that changed nothing on this head parks for the operator", outcome.AutoFixable, !tc.wantKept)
 			}
 			if got := sctx.Shared.LiveCheckHead(); got != sctx.Run.HeadSHA {
 				t.Fatalf("live check head = %q, want the head this evidence turn completed on, %q", got, sctx.Run.HeadSHA)

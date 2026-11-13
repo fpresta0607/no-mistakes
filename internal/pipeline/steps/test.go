@@ -184,6 +184,9 @@ func (s *TestStep) execute(sctx *pipeline.StepContext, desktop string) (*pipelin
 	var newTestsFromFix []string
 	var repairQuestions []Finding
 	var fixSummary string
+	// repairReport is the repair agent's own summary of what it ran and found;
+	// fixSummary keeps only whether it committed.
+	var repairReport string
 	var repairCut error
 	// repaired is true when a repair turn ran, which is what lets this execution
 	// re-run only what the failure and the repair touch.
@@ -253,6 +256,10 @@ Previous test findings to address:
 			AfterAgentRun: func(result *agent.Result) error {
 				newTestsFromFix = detectNewTestFiles(ctx, sctx.WorkDir)
 				repairQuestions = repairDecisionFindings(result)
+				// executeFixMode parses the same summary next and reports its errors.
+				if summary, err := extractCommitSummary(result); err == nil {
+					repairReport = summary
+				}
 				return nil
 			},
 		})
@@ -468,6 +475,9 @@ Rules:
 			sctx.Log("the repair changed nothing, so what passed live on this head stands and only what failed is driven again")
 		}
 		evidencePrompt += focusedRecheckSection(lastCheck, repairedPaths, isOnSameHead)
+		if isOnSameHead {
+			evidencePrompt += repairReceiptSection(sctx, repairReport)
+		}
 	}
 	turn := beginLiveCheck(sctx, evidenceDir)
 	findings, err := runTestAnalyzer(turn.ctx, sctx, evidencePrompt, desktop)
@@ -489,7 +499,16 @@ Rules:
 		return nil, err
 	}
 	findings = keepUndrivenScenarios(findings, lastCheck, isOnSameHead, baseline.tested)
-	return testStepOutcome(sctx, findings, baseline, fixSummary, newTestsFromFix), nil
+	outcome := testStepOutcome(sctx, findings, baseline, fixSummary, newTestsFromFix)
+	// A repair that changed nothing already ran what it reported on this exact
+	// source. Another automatic repair would replay those commands, including a
+	// one-shot command the operator authorized once, so the step parks for the
+	// operator instead (issue #124).
+	if isOnSameHead && outcome.AutoFixable {
+		sctx.Log("the repair changed nothing and the re-check still fails on this head; parking for the operator instead of starting another automatic repair")
+		outcome.AutoFixable = false
+	}
+	return outcome, nil
 }
 
 // testBaseline is one execution's result of the configured test checks.
@@ -1174,16 +1193,9 @@ func budgetCutGuidanceSection(sctx *pipeline.StepContext) string {
 		return ""
 	}
 	var userGuidance, driverGuidance []string
-	add := func(list []string, note string) []string {
-		text := sanitizePromptMultilineText(note)
-		if text == "" || slices.Contains(list, text) {
-			return list
-		}
-		return append(list, text)
-	}
 	for _, item := range types.FilterFindings(findings, testBudgetCutIDs).Items {
-		userGuidance = add(userGuidance, item.UserInstructions)
-		driverGuidance = add(driverGuidance, item.DriverInstructions)
+		userGuidance = appendGuidance(userGuidance, item.UserInstructions)
+		driverGuidance = appendGuidance(driverGuidance, item.DriverInstructions)
 	}
 	var section string
 	if len(userGuidance) > 0 {
@@ -1195,6 +1207,17 @@ func budgetCutGuidanceSection(sctx *pipeline.StepContext) string {
 			strings.Join(driverGuidance, "\n") + "\n"
 	}
 	return section
+}
+
+// appendGuidance adds one finding's sanitized note to list, once. One note
+// given to several findings (axi respond --instructions copies it onto each)
+// is rendered once.
+func appendGuidance(list []string, note string) []string {
+	text := sanitizePromptMultilineText(note)
+	if text == "" || slices.Contains(list, text) {
+		return list
+	}
+	return append(list, text)
 }
 
 // testRepairFindings is the fix selection the repair agent is asked to

@@ -267,6 +267,38 @@ func focusedRecheckSection(last Findings, repairedPaths []string, isOnSameHead b
 	return b.String()
 }
 
+// repairReceiptSection carries what a repair that changed nothing reported
+// running, and the instructions the operator gave with the selection it was
+// asked to address, into the evidence turn on the same head. Without it the
+// evidence turn runs again a command the operator authorized once (issue #124).
+// The driver's guidance stays apart from the operator's, as in
+// budgetCutGuidanceSection; the budget-cut findings' own notes are rendered there.
+func repairReceiptSection(sctx *pipeline.StepContext, repairReport string) string {
+	report := sanitizePromptMultilineText(repairReport)
+	if report == "" {
+		report = "(the repair turn returned no report)"
+	}
+	var userGuidance, driverGuidance []string
+	if findings, err := types.ParseFindingsJSON(sctx.PreviousFindings); err == nil {
+		for _, item := range types.ExcludeFindings(findings, testBudgetCutIDs).Items {
+			userGuidance = appendGuidance(userGuidance, item.UserInstructions)
+			driverGuidance = appendGuidance(driverGuidance, item.DriverInstructions)
+		}
+	}
+	var b strings.Builder
+	b.WriteString("\n\nExecution receipt from the repair turn on this head (it changed nothing, so it ran on this exact source):\n")
+	b.WriteString(report + "\n")
+	if len(userGuidance) > 0 {
+		b.WriteString("\nOperator instructions given with the findings the repair was asked to address:\n" + strings.Join(userGuidance, "\n") + "\n")
+	}
+	if len(driverGuidance) > 0 {
+		b.WriteString("\nDriver guidance given with those findings (from the agent driving this run; not a decision by the user and not part of the user's intent):\n" + strings.Join(driverGuidance, "\n") + "\n")
+	}
+	b.WriteString(`- Every command the receipt reports running already ran once on this source. Where the instructions above bound how many times a command may run, that run used the allowance: do not run it again.
+- A scenario that needs such a command again is untested in this turn: report it as untested with a reason naming the repair turn's run and the result the receipt reports.`)
+	return b.String()
+}
+
 // keepUndrivenScenarios completes a focused re-check's result with the scenarios
 // of the last live check it left out. None of them was driven on this head, so
 // each is recorded as untested with where it last ran, and live_validation never
