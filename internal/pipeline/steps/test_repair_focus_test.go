@@ -223,6 +223,48 @@ func TestRepairDecisionFindings(t *testing.T) {
 	}
 }
 
+func TestRepairCommandsRun(t *testing.T) {
+	t.Parallel()
+	commandsRun := func(entries ...map[string]any) *agent.Result {
+		raw, err := json.Marshal(map[string]any{"commands_run": entries})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &agent.Result{Output: raw}
+	}
+	ran := func(command string) map[string]any { return map[string]any{"command": command, "exit_code": 1} }
+	cases := map[string]struct {
+		result *agent.Result
+		want   int
+	}{
+		"no result":            {nil, 0},
+		"no output":            {&agent.Result{}, 0},
+		"unreadable output":    {&agent.Result{Output: json.RawMessage(`{"commands_run":"not a list"}`)}, 0},
+		"nothing run":          {&agent.Result{Output: json.RawMessage(repairResultJSON)}, 0},
+		"blank commands":       {commandsRun(ran("  "), ran("./guard.sh"), ran("")), 1},
+		"no exit status":       {commandsRun(map[string]any{"command": "./guard.sh"}), 1},
+		"at the count bound":   {commandsRun(slices.Repeat([]map[string]any{ran("go test ./...")}, maxRepairCommands)...), maxRepairCommands},
+		"past the count bound": {commandsRun(slices.Repeat([]map[string]any{ran("go test ./...")}, maxRepairCommands+3)...), maxRepairCommands},
+		"past the byte size":   {commandsRun(ran(strings.Repeat("é", maxRepairCommandBytes))), 1},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got := repairCommandsRun(tc.result)
+
+			if len(got) != tc.want {
+				t.Fatalf("commands = %d, want %d", len(got), tc.want)
+			}
+			for _, command := range got {
+				if command.Command == "" || len(command.Command) > maxRepairCommandBytes || !utf8.ValidString(command.Command) {
+					t.Fatalf("command %q is %d bytes, valid UTF-8 %v", command.Command, len(command.Command), utf8.ValidString(command.Command))
+				}
+			}
+		})
+	}
+}
+
 // Whether the rest of the repair worked or not, a question for a human stops
 // the automatic loop: another round would meet it with nobody having answered.
 func TestTestStep_RepairQuestionStopsTheAutomaticFixLoop(t *testing.T) {
@@ -704,7 +746,9 @@ func TestTestStep_RepairThatChangedNothingKeepsThePassesOfTheSameHead(t *testing
 	const failedScenario, passedScenario = "a declined card can retry", "user reaches the success screen"
 	const sameHeadRule, movedHeadRule = "run none of them again", "Drive at least one scenario: when nothing above applies, drive the recorded scenario closest to the repair's change."
 	const keptTested = "go vet ./... passed"
-	const repairReport = "ran guard.sh once; it stopped at its first guard with exit 1"
+	const repairReport = "no change; the guard failure needs a scope decision"
+	const repairCommandsJSON = `[{"command":"./guard.sh --pinned","exit_code":1}]`
+	const reportedCommand = "- ./guard.sh --pinned (exit 1)"
 	const operatorInstruction = "Run the pinned guard.sh exactly once and never retry it."
 	const receiptHeader = "Execution receipt from the repair turn"
 	keptArtifact := types.TestArtifact{Kind: "image", Label: "checkout screen", Path: "checkout.png"}
@@ -746,7 +790,7 @@ func TestTestStep_RepairThatChangedNothingKeepsThePassesOfTheSameHead(t *testing
 						return nil, err
 					}
 				}
-				return &agent.Result{Output: json.RawMessage(`{"summary":"` + repairReport + `"}`)}, nil
+				return &agent.Result{Output: json.RawMessage(`{"summary":"` + repairReport + `","commands_run":` + repairCommandsJSON + `}`)}, nil
 			}}
 			answered := marshalFindings(t, types.Findings{
 				Items: []types.Finding{{ID: "test-1", Severity: "error", Action: types.ActionAutoFix, Description: "the retry button is gone", UserInstructions: operatorInstruction}},
@@ -775,7 +819,7 @@ func TestTestStep_RepairThatChangedNothingKeepsThePassesOfTheSameHead(t *testing
 			if !strings.Contains(prompt, wantRule) || strings.Contains(prompt, neverRule) {
 				t.Fatalf("evidence prompt must hold %q and not %q:\n%s", wantRule, neverRule, prompt)
 			}
-			for _, part := range []string{receiptHeader, repairReport, operatorInstruction} {
+			for _, part := range []string{receiptHeader, repairReport, reportedCommand, operatorInstruction} {
 				if strings.Contains(prompt, part) != tc.wantKept {
 					t.Fatalf("evidence prompt holds %q = %v, want %v (the repair's receipt rides only on the head it ran on):\n%s", part, !tc.wantKept, tc.wantKept, prompt)
 				}

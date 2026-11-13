@@ -32,6 +32,10 @@ const (
 	// put on the gate, since findings ride the IPC event stream.
 	maxRepairDecisions     = 10
 	maxRepairDecisionBytes = 2000
+	// maxRepairCommands and maxRepairCommandBytes bound the commands a repair
+	// turn reports running, since they ride into the evidence turn's prompt.
+	maxRepairCommands     = 20
+	maxRepairCommandBytes = 500
 )
 
 // unnamedFailureLine matches a failure the attribution parser lists nothing for:
@@ -41,8 +45,10 @@ const (
 var unnamedFailureLine = regexp.MustCompile(`(?m)^\s*(?:ERROR\s|.*Test suite failed to run)`)
 
 // testFixSchema is the Test repair turn's result: commitSummarySchema plus the
-// failures it left for a human. A failed baseline has no evidence turn after
-// its repair, so this is where a test whose failure may be wanted is asked about.
+// failures it left for a human and the commands it ran. A failed baseline has no
+// evidence turn after its repair, so this is where a test whose failure may be
+// wanted is asked about. The commands reach the evidence turn on the same head
+// (repairReceiptSection), since the summary is a commit subject.
 var testFixSchema = json.RawMessage(fmt.Sprintf(`{
 	"type": "object",
 	"properties": {
@@ -51,10 +57,58 @@ var testFixSchema = json.RawMessage(fmt.Sprintf(`{
 			"type": "array",
 			"maxItems": %d,
 			"items": {"type": "string", "maxLength": %d}
+		},
+		"commands_run": {
+			"type": "array",
+			"maxItems": %d,
+			"items": {
+				"type": "object",
+				"properties": {
+					"command": {"type": "string", "maxLength": %d},
+					"exit_code": {"type": "integer"}
+				},
+				"required": ["command", "exit_code"]
+			}
 		}
 	},
 	"required": ["summary"]
-}`, config.MaxFixMessageSummaryBytes, maxRepairDecisions, maxRepairDecisionBytes))
+}`, config.MaxFixMessageSummaryBytes, maxRepairDecisions, maxRepairDecisionBytes, maxRepairCommands, maxRepairCommandBytes))
+
+// repairCommand is one command a Test repair turn reported running.
+type repairCommand struct {
+	Command  string `json:"command"`
+	ExitCode *int   `json:"exit_code"`
+}
+
+// repairCommandsRun reads a repair turn's commands_run entries. Not every
+// adapter enforces the schema's bounds, so they are applied again here, and an
+// entry without an exit status is kept as one whose status was not reported.
+func repairCommandsRun(result *agent.Result) []repairCommand {
+	if result == nil || result.Output == nil {
+		return nil
+	}
+	var parsed struct {
+		CommandsRun []repairCommand `json:"commands_run"`
+	}
+	if err := json.Unmarshal(result.Output, &parsed); err != nil {
+		return nil
+	}
+	var commands []repairCommand
+	for _, entry := range parsed.CommandsRun {
+		entry.Command = sanitizePromptText(entry.Command)
+		if entry.Command == "" {
+			continue
+		}
+		if len(commands) == maxRepairCommands {
+			break
+		}
+		if len(entry.Command) > maxRepairCommandBytes {
+			entry.Command = strings.ToValidUTF8(entry.Command[:maxRepairCommandBytes], "")
+		}
+		commands = append(commands, entry)
+	}
+	return commands
+}
 
 // repairDecisionFindings turns a repair turn's needs_decision entries into
 // ask-user findings. Not every adapter enforces the schema's bounds, so they are
@@ -273,7 +327,7 @@ func focusedRecheckSection(last Findings, repairedPaths []string, isOnSameHead b
 // evidence turn runs again a command the operator authorized once (issue #124).
 // The driver's guidance stays apart from the operator's, as in
 // budgetCutGuidanceSection; the budget-cut findings' own notes are rendered there.
-func repairReceiptSection(sctx *pipeline.StepContext, repairReport string) string {
+func repairReceiptSection(sctx *pipeline.StepContext, repairReport string, commands []repairCommand) string {
 	report := sanitizePromptMultilineText(repairReport)
 	if report == "" {
 		report = "(the repair turn returned no report)"
@@ -288,6 +342,16 @@ func repairReceiptSection(sctx *pipeline.StepContext, repairReport string) strin
 	var b strings.Builder
 	b.WriteString("\n\nExecution receipt from the repair turn on this head (it changed nothing, so it ran on this exact source):\n")
 	b.WriteString(report + "\n")
+	if len(commands) > 0 {
+		b.WriteString("\nCommands the repair turn reported running, with their exit status:\n")
+		for _, command := range commands {
+			status := "exit status not reported"
+			if command.ExitCode != nil {
+				status = fmt.Sprintf("exit %d", *command.ExitCode)
+			}
+			fmt.Fprintf(&b, "- %s (%s)\n", command.Command, status)
+		}
+	}
 	if len(userGuidance) > 0 {
 		b.WriteString("\nOperator instructions given with the findings the repair was asked to address:\n" + strings.Join(userGuidance, "\n") + "\n")
 	}
