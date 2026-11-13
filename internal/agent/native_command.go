@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
@@ -32,6 +33,9 @@ type nativeAgentCommand struct {
 	pipeMu         sync.Mutex
 	remainingPipes int
 	pipesDone      chan struct{}
+	// isLeaderStopped records that stopLeader ended the agent process itself,
+	// so its exit is judged by what it left running, like a clean exit.
+	isLeaderStopped atomic.Bool
 }
 
 func writeNativeAgentStdin(stdin io.WriteCloser, prompt string) <-chan error {
@@ -118,7 +122,8 @@ func startNativeAgentCommand(cmd *exec.Cmd, desktop string, activity func(), req
 	started.stderr = &nativeAgentPipe{file: stderrR, done: started.markPipeDone, activity: activity}
 	go func() {
 		err := shellenv.AttributeOOMKill(oomBase, oomOK, cmd.Wait())
-		if err == nil && requireCompletedChildren {
+		if requireCompletedChildren && (err == nil || started.isLeaderStopped.Load()) {
+			err = nil
 			active, members, probeErr := shellenv.ShellCommandGroupActive(cmd, ownedChildrenSettleWindow)
 			if probeErr != nil {
 				err = fmt.Errorf("native check completion is unverified: %w", probeErr)
@@ -172,6 +177,14 @@ func (c *nativeAgentCommand) waitForPipes(waitErr error) error {
 		}
 		return waitErr
 	}
+}
+
+// stopLeader kills the agent process alone and leaves the work it started in
+// its process group or job, so the owned-children probe decides whether that
+// work is still running, as it does for an agent that exited by itself.
+func (c *nativeAgentCommand) stopLeader() {
+	c.isLeaderStopped.Store(true)
+	_ = c.cmd.Process.Kill()
 }
 
 func (c *nativeAgentCommand) terminate() {
