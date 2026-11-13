@@ -32,7 +32,13 @@ if [[ -z "${NM_E2E_DAEMON_INVENTORY:-}" ]]; then
   export NM_E2E_DAEMON_INVENTORY
   export NM_E2E_DAEMON_INVENTORY_PARENT
   chmod 700 "$NM_E2E_DAEMON_INVENTORY" || exit 1
-  printf '%s\n' "$$" >"$NM_E2E_DAEMON_INVENTORY/owner.pid" || exit 1
+  # The reaper probes this PID natively, and Git Bash's $$ is its own numbering:
+  # recorded as is, a sibling wrapper's pre-reap reads this suite as dead.
+  owner_pid="$$"
+  if [[ -r "/proc/$$/winpid" ]]; then
+    owner_pid="$(<"/proc/$$/winpid")"
+  fi
+  printf '%s\n' "$owner_pid" >"$NM_E2E_DAEMON_INVENTORY/owner.pid" || exit 1
   chmod 600 "$NM_E2E_DAEMON_INVENTORY/owner.pid" || exit 1
   OWNED_INVENTORY=1
 else
