@@ -454,13 +454,27 @@ Rules:
 	) + testRepairScopeRules
 	evidencePrompt += liveCheckPromptSections(sctx, evidenceDir)
 	var lastCheck Findings
+	// isOnSameHead is true when the repair changed nothing and the last live check
+	// ran on this head in this executor lifetime: the same source, run
+	// configuration and daemon environment, so what passed there stands and a
+	// second run of it proves nothing new (issue #116). After a daemon restart
+	// nothing is recorded and the re-check narrows as for a moved head.
+	var isOnSameHead bool
 	if repaired {
 		lastCheck = lastLiveCheck(sctx)
-		evidencePrompt += focusedRecheckSection(lastCheck, repairedPaths)
+		isOnSameHead = len(repairedPaths) == 0 && sctx.Run.HeadSHA == startHead &&
+			lastCheck.TestedHeadSHA == startHead && sctx.Shared.LiveCheckHead() == startHead
+		if isOnSameHead {
+			sctx.Log("the repair changed nothing, so what passed live on this head stands and only what failed is driven again")
+		}
+		evidencePrompt += focusedRecheckSection(lastCheck, repairedPaths, isOnSameHead)
 	}
 	turn := beginLiveCheck(sctx, evidenceDir)
 	findings, err := runTestAnalyzer(turn.ctx, sctx, evidencePrompt, desktop)
 	turn.cancel()
+	if err == nil {
+		sctx.Shared.RecordLiveCheck(sctx.Run.HeadSHA)
+	}
 	if errors.Is(err, errTestLiveCheckBudget) {
 		if cut, ok := turn.completeAtBudget(sctx, evidenceDir); ok {
 			findings, err = cut, nil
@@ -474,7 +488,7 @@ Rules:
 		}
 		return nil, err
 	}
-	findings = keepUndrivenScenarios(findings, lastCheck)
+	findings = keepUndrivenScenarios(findings, lastCheck, isOnSameHead)
 	return testStepOutcome(sctx, findings, baseline, fixSummary, newTestsFromFix), nil
 }
 
@@ -601,7 +615,7 @@ func testStepOutcome(sctx *pipeline.StepContext, findings Findings, baseline tes
 func failedBaselineOutcome(sctx *pipeline.StepContext, baseline testBaseline, fixSummary string, newTestsFromFix []string) *pipeline.StepOutcome {
 	findings := answeredTestGate(sctx)
 	findings.Verdict = ""
-	findings.Scenarios = keepUndrivenScenarios(Findings{}, lastLiveCheck(sctx)).Scenarios
+	findings.Scenarios = keepUndrivenScenarios(Findings{}, lastLiveCheck(sctx), false).Scenarios
 	findings.Tested = baseline.tested
 	findings.Items = append(baseline.findings, findings.Items...)
 	findings.Summary = baseline.summary

@@ -220,8 +220,12 @@ func lastLiveCheck(sctx *pipeline.StepContext) Findings {
 
 // focusedRecheckSection narrows the evidence turn after a repair to what the
 // failure and the repair touch. It is empty when there is no earlier live check,
-// so the first live check of a change is always a whole one.
-func focusedRecheckSection(last Findings, repairedPaths []string) string {
+// so the first live check of a change is always a whole one. isOnSameHead says
+// the repair changed nothing and that live check ran on this head in this
+// executor lifetime: then nothing that passed is run again, not even a check
+// the runbook requires, because the turn would only repeat it on the same
+// source (issue #116).
+func focusedRecheckSection(last Findings, repairedPaths []string, isOnSameHead bool) string {
 	if len(last.Scenarios) == 0 {
 		return ""
 	}
@@ -237,6 +241,15 @@ func focusedRecheckSection(last Findings, repairedPaths []string) string {
 			line += " (" + reason + ")"
 		}
 		b.WriteString(line + "\n")
+	}
+	if isOnSameHead {
+		b.WriteString(`The repair changed nothing, so this is still the head that live check ran on.
+- Every scenario recorded as passed stands as recorded, and so does every check, guard, build and static analysis that passed for it, including any the instructions above require: run none of them again.
+- Drive again only: every scenario recorded as failed, to see whether its failure still shows.
+- Report at least one scenario: when none was recorded as failed, drive only the recorded scenario closest to the findings the repair was asked to address.
+- Drive nothing else and do not widen the list. Leave every other scenario out of your result: the step keeps each recorded pass as it stands.
+- Report only the scenarios you drove or tried to drive in this turn, and base the verdict on those.`)
+		return b.String()
 	}
 	changed := "nothing"
 	if len(repairedPaths) > 0 {
@@ -260,7 +273,10 @@ func focusedRecheckSection(last Findings, repairedPaths []string) string {
 // counts it. A failure stays marked until a live pass shows it gone, however many
 // focused re-checks that takes, and a "go" cannot stand while one is open. A whole
 // live check derives its list again, so it has no names to match this against.
-func keepUndrivenScenarios(focused, last Findings) Findings {
+//
+// isOnSameHead (see focusedRecheckSection) is the one case where a pass left out
+// was driven on this head: it stays the live pass it was recorded as.
+func keepUndrivenScenarios(focused, last Findings, isOnSameHead bool) Findings {
 	reported := make(map[string]int, len(focused.Scenarios))
 	for i, scenario := range focused.Scenarios {
 		reported[strings.TrimSpace(scenario.Name)] = i
@@ -269,6 +285,10 @@ func keepUndrivenScenarios(focused, last Findings) Findings {
 		wasFailing := scenario.Result == types.ScenarioResultFail || scenario.StillFailing
 		if i, ok := reported[strings.TrimSpace(scenario.Name)]; ok {
 			focused.Scenarios[i].StillFailing = wasFailing && focused.Scenarios[i].Result == types.ScenarioResultUntested
+			continue
+		}
+		if isOnSameHead && scenario.Result == types.ScenarioResultPass {
+			focused.Scenarios = append(focused.Scenarios, scenario)
 			continue
 		}
 		switch scenario.Result {
