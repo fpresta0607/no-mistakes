@@ -14,7 +14,9 @@ import (
 const githubMaxFileBytes = 100 << 20
 
 // stagePipelineChanges guards every pipeline-owned catch-all staging path,
-// including Push's leftover commit. Refusal preserves the index and worktree.
+// including Push's leftover commit. Its refusal preserves the index and
+// worktree; only a Review repair's unnamed new files change after it (see
+// unnamed below).
 //
 // before lists the untracked files the worktree held when the work being
 // committed began, as untrackedFiles read them. Those files are left out,
