@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
@@ -145,6 +146,9 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	globalConfig := filepath.Join(globalConfigDir, "gitconfig")
+	if err := os.WriteFile(globalConfig, []byte(testgit.NoBackgroundMaintenanceConfig), 0o644); err != nil {
+		panic(err)
+	}
 	os.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
 	code := m.Run()
 	os.RemoveAll(globalConfigDir)
@@ -633,4 +637,11 @@ func shutdownTestDaemonAndWaitForCleanup(t *testing.T, p *paths.Paths) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("daemon did not finish cleanup within 15s")
+}
+
+// Issue #109: this package walks or copies repositories its tests just ran git
+// in, so a detached automatic maintenance holding objects/maintenance.lock
+// there could make that walk fail when the lock vanished before the open.
+func TestFixtureGitStartsNoBackgroundMaintenance(t *testing.T) {
+	testgit.RequireNoBackgroundMaintenance(t)
 }
