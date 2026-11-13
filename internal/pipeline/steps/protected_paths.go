@@ -27,9 +27,10 @@ const githubMaxFileBytes = 100 << 20
 // reason.
 //
 // unnamed lists the new files a Review repair created but did not name in its
-// new_files (see splitUnnamedNewFiles). They are left out the same way and
-// named in the step log under their own line: a repair that pointed pytest's
-// basetemp into the checkout once committed 20 test artifacts (issue #114).
+// new_files (see unnamedNewFiles). They are left out the same way and named in
+// the step log under their own line, and the repair then moves them out of the
+// checkout (setAsideUnnamedNewFiles): a repair that pointed pytest's basetemp
+// into the checkout once committed 20 test artifacts (issue #114).
 //
 // An untracked file larger than githubMaxFileBytes is left out too, unstaged
 // and unhashed, and named in the step log. Such a file is an agent's disposable

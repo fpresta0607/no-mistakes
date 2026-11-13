@@ -18,7 +18,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
-	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -45,9 +44,10 @@ type fixExecutionOptions struct {
 	Workload *agent.InvocationWorkload
 	// IsReviewRepair marks the Review fix turn. It asks the fixer for the
 	// optional verification_blocked result field and logs it, since this is
-	// the one fix prompt that orders edits before verification. It also runs
-	// the turn in an owned scratch directory and commits only the new files
-	// the fixer names in new_files: a Review repair once pointed pytest's
+	// the one fix prompt that orders edits before verification. It also names
+	// an owned scratch directory in the prompt for disposable output, commits
+	// only the new files the fixer names in new_files, and moves every other
+	// new file out of the checkout: a Review repair once pointed pytest's
 	// basetemp into the checkout and its commit carried 20 test artifacts
 	// (issue #114).
 	IsReviewRepair bool
@@ -141,15 +141,15 @@ var fixSummarySchema = json.RawMessage(fmt.Sprintf(`{
 const reviewRepairFilesRule = `
 
 New files rule:
-- List in "new_files" every file this fix adds, by its path from the repository root. A new file you leave out of that list stays out of the commit, and so does every other file you create in the checkout.
-- Keep disposable output, such as a test base temp directory, caches, build output and logs, in %s, which TMP, TEMP, TMPDIR and GOTMPDIR already name, never in the checkout. Before you finish, delete every file you created in the checkout that is not part of the fix.`
+- List in "new_files" every file this fix adds, by its path from the repository root. Every other new file in the checkout, staged or not, stays out of the commit and is moved out of the checkout after it.
+- Keep disposable output, such as a test base temp directory, caches, build output and logs, in %s, never in the checkout. Before you finish, delete every file you created in the checkout that is not part of the fix.`
 
-// splitUnnamedNewFiles reads the new files a Review repair named and sorts the
-// worktree's untracked files by them. A named file is committed even when it
-// was already in before, so a test file a fixer once forgot can still enter a
-// later round's commit; every other file created since before is unnamed and
-// stays out. Output that does not parse names nothing, which fails safe.
-func splitUnnamedNewFiles(sctx *pipeline.StepContext, result *agent.Result, before []string) (keptBefore, unnamed []string, err error) {
+// unnamedNewFiles reads the new files a Review repair named and returns every
+// other file it created since before. A new file the repair staged without
+// committing counts too: it is unstaged first, so `git add` cannot carry an
+// unnamed file past the rule. Output that does not parse names nothing, which
+// fails safe.
+func unnamedNewFiles(sctx *pipeline.StepContext, result *agent.Result, before []string) ([]string, error) {
 	var parsed struct {
 		NewFiles []string `json:"new_files"`
 	}
@@ -167,23 +167,82 @@ func splitUnnamedNewFiles(sctx *pipeline.StepContext, result *agent.Result, befo
 		}
 		named[path.Clean(filepath.ToSlash(file))] = true
 	}
+	staged, err := stepGitRunRaw(sctx, "diff", "--cached", "--name-only", "--diff-filter=A", "--no-renames", "-z", "HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("list staged new files: %w", err)
+	}
+	var unstage []string
+	for _, file := range strings.Split(strings.TrimSuffix(staged, "\x00"), "\x00") {
+		if file != "" && !named[file] {
+			unstage = append(unstage, ":(literal)"+file)
+		}
+	}
+	if len(unstage) > 0 {
+		if _, err := stepGitRunInput(sctx, strings.Join(unstage, "\x00"), "reset", "-q", "HEAD", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
+			return nil, fmt.Errorf("unstage the new files the repair did not name: %w", err)
+		}
+	}
 	wasBefore := make(map[string]bool, len(before))
 	for _, file := range before {
 		wasBefore[file] = true
-		if !named[file] {
-			keptBefore = append(keptBefore, file)
-		}
 	}
 	untracked, err := untrackedFiles(sctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
+	var unnamed []string
 	for _, file := range untracked {
 		if !wasBefore[file] && !named[file] {
 			unnamed = append(unnamed, file)
 		}
 	}
-	return keptBefore, unnamed, nil
+	return unnamed, nil
+}
+
+// reviewRepairDirName is the folder in a run's evidence directory that holds
+// the new files a Review repair did not name. It is not evidence.
+const reviewRepairDirName = "review-repair"
+
+// setAsideUnnamedNewFiles moves the new files a Review repair did not name,
+// already left out of its commit, out of the checkout into the run's evidence
+// directory, under a folder publication never reads, so every later step
+// checks exactly the committed tree. Nothing is deleted.
+func setAsideUnnamedNewFiles(sctx *pipeline.StepContext, unnamed []string) error {
+	if len(unnamed) == 0 {
+		return nil
+	}
+	if sctx.EvidenceDir == "" {
+		return errors.New("set aside the new files the repair did not name: the run has no evidence directory")
+	}
+	parent := filepath.Join(sctx.EvidenceDir, reviewRepairDirName)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return fmt.Errorf("create review repair set-aside folder: %w", err)
+	}
+	dir, err := os.MkdirTemp(parent, "set-aside-")
+	if err != nil {
+		return fmt.Errorf("create review repair set-aside folder: %w", err)
+	}
+	for _, file := range unnamed {
+		rel := filepath.FromSlash(file)
+		if !filepath.IsLocal(rel) {
+			return fmt.Errorf("untracked path %q is outside the worktree", file)
+		}
+		source := filepath.Join(sctx.WorkDir, rel)
+		target := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return fmt.Errorf("create set-aside folder for %s: %w", file, err)
+		}
+		if err := os.Rename(source, target); err != nil {
+			if err := copyPath(source, target); err != nil {
+				return fmt.Errorf("move %s to %s: %w", file, dir, err)
+			}
+			if err := os.Remove(source); err != nil {
+				return fmt.Errorf("move %s to %s: %w", file, dir, err)
+			}
+		}
+	}
+	sctx.Log(fmt.Sprintf("moved the new files the repair did not name in new_files out of the checkout to %s (%d): %s", dir, len(unnamed), namedPaths(unnamed)))
+	return nil
 }
 
 // blockedVerification returns the bounded, single-line verification_blocked
@@ -755,7 +814,6 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		}()
 		runOpts.Prompt = fixerPrompt(opts.Prompt + fmt.Sprintf(reviewRepairFilesRule, scratch))
 		runOpts.JSONSchema = fixSummarySchema
-		runOpts.Env = (runenv.Overlay{Set: map[string]string{"TMP": scratch, "TEMP": scratch, "TMPDIR": scratch, "GOTMPDIR": scratch}}).Apply(sctx.Env)
 	}
 	// The fixer may commit its own work and leave a clean worktree, which
 	// commitAgentFixesWithResult reports as "not committed". HEAD movement is
@@ -797,12 +855,15 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	}
 	var unnamed []string
 	if opts.IsReviewRepair {
-		if before, unnamed, err = splitUnnamedNewFiles(sctx, result, before); err != nil {
+		if unnamed, err = unnamedNewFiles(sctx, result, before); err != nil {
 			return "", err
 		}
 	}
 	committed, err := commitAgentFixesWithResult(sctx, stepName, summary, opts.FallbackSummary, result, before, unnamed)
 	if err != nil {
+		return "", err
+	}
+	if err := setAsideUnnamedNewFiles(sctx, unnamed); err != nil {
 		return "", err
 	}
 	if opts.IsReviewRepair {
