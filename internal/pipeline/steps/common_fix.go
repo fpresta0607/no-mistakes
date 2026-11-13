@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -212,6 +213,34 @@ func stagedNewFiles(sctx *pipeline.StepContext) ([]string, error) {
 	return files, nil
 }
 
+// unstageUnnamedNewFiles unstages each of unnamed that the index adds to HEAD.
+func unstageUnnamedNewFiles(sctx *pipeline.StepContext, unnamed []string) error {
+	if len(unnamed) == 0 {
+		return nil
+	}
+	isUnnamed := make(map[string]bool, len(unnamed))
+	for _, file := range unnamed {
+		isUnnamed[file] = true
+	}
+	staged, err := stagedNewFiles(sctx)
+	if err != nil {
+		return err
+	}
+	var unstage []string
+	for _, file := range staged {
+		if isUnnamed[file] {
+			unstage = append(unstage, ":(literal)"+file)
+		}
+	}
+	if len(unstage) == 0 {
+		return nil
+	}
+	if _, err := stepGitRunInput(sctx, strings.Join(unstage, "\x00"), "reset", "-q", "HEAD", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
+		return fmt.Errorf("unstage the new files the repair did not name: %w", err)
+	}
+	return nil
+}
+
 // reviewRepairDirName is the folder in a run's evidence directory that holds
 // the new files a Review repair did not name. It is not evidence.
 const reviewRepairDirName = "review-repair"
@@ -219,9 +248,30 @@ const reviewRepairDirName = "review-repair"
 // setAsideUnnamedNewFiles moves the new files a Review repair did not name,
 // already left out of its commit, out of the checkout into the run's evidence
 // directory, under a folder publication never reads, so every later step
-// checks exactly the committed tree. Nothing is deleted.
-func setAsideUnnamedNewFiles(sctx *pipeline.StepContext, unnamed []string) error {
-	if len(unnamed) == 0 {
+// checks exactly the committed tree. Nothing is deleted. A file in before, held
+// before the turn and only staged by it, stays in the worktree, and one the
+// repair staged and then removed from disk has nothing to move.
+func setAsideUnnamedNewFiles(sctx *pipeline.StepContext, unnamed, before []string) error {
+	wasBefore := make(map[string]bool, len(before))
+	for _, file := range before {
+		wasBefore[file] = true
+	}
+	var present []string
+	for _, file := range unnamed {
+		if wasBefore[file] {
+			continue
+		}
+		rel := filepath.FromSlash(file)
+		if !filepath.IsLocal(rel) {
+			return fmt.Errorf("untracked path %q is outside the worktree", file)
+		}
+		if _, err := os.Lstat(filepath.Join(sctx.WorkDir, rel)); err == nil {
+			present = append(present, file)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("check %s before setting it aside: %w", file, err)
+		}
+	}
+	if len(present) == 0 {
 		return nil
 	}
 	if sctx.EvidenceDir == "" {
@@ -235,11 +285,8 @@ func setAsideUnnamedNewFiles(sctx *pipeline.StepContext, unnamed []string) error
 	if err != nil {
 		return fmt.Errorf("create review repair set-aside folder: %w", err)
 	}
-	for _, file := range unnamed {
+	for _, file := range present {
 		rel := filepath.FromSlash(file)
-		if !filepath.IsLocal(rel) {
-			return fmt.Errorf("untracked path %q is outside the worktree", file)
-		}
 		source := filepath.Join(sctx.WorkDir, rel)
 		target := filepath.Join(dir, rel)
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
@@ -249,12 +296,12 @@ func setAsideUnnamedNewFiles(sctx *pipeline.StepContext, unnamed []string) error
 			if err := copyPath(source, target); err != nil {
 				return fmt.Errorf("move %s to %s: %w", file, dir, err)
 			}
-			if err := os.Remove(source); err != nil {
+			if err := os.RemoveAll(source); err != nil {
 				return fmt.Errorf("move %s to %s: %w", file, dir, err)
 			}
 		}
 	}
-	sctx.Log(fmt.Sprintf("moved the new files the repair did not name in new_files out of the checkout to %s (%d): %s", dir, len(unnamed), namedPaths(unnamed)))
+	sctx.Log(fmt.Sprintf("moved the new files the repair did not name in new_files out of the checkout to %s (%d): %s", dir, len(present), namedPaths(present)))
 	return nil
 }
 
@@ -878,9 +925,19 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	}
 	committed, err := commitAgentFixesWithResult(sctx, stepName, summary, opts.FallbackSummary, result, before, unnamed)
 	if err != nil {
+		var refusal *pipeline.ProtectedPathError
+		if !errors.As(err, &refusal) {
+			return "", err
+		}
+		if moveErr := unstageUnnamedNewFiles(sctx, unnamed); moveErr != nil {
+			return "", fmt.Errorf("%v; %w", err, moveErr)
+		}
+		if moveErr := setAsideUnnamedNewFiles(sctx, unnamed, before); moveErr != nil {
+			return "", fmt.Errorf("%v; %w", err, moveErr)
+		}
 		return "", err
 	}
-	if err := setAsideUnnamedNewFiles(sctx, unnamed); err != nil {
+	if err := setAsideUnnamedNewFiles(sctx, unnamed, before); err != nil {
 		return "", err
 	}
 	if opts.IsReviewRepair {

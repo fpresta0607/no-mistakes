@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -38,8 +40,9 @@ var scratchInPrompt = regexp.MustCompile(`logs, in (.+), never in the checkout\.
 // runReviewRepair drives one Review fix round. Each of untrackedBefore exists
 // in the worktree before the round starts, and each of stagedBefore is staged,
 // as a turn cut at its budget leaves its new files; the fixer writes each of
-// created, runs `git add` on each of staged, and returns fixOutput.
-func runReviewRepair(t *testing.T, untrackedBefore, stagedBefore, created, staged []string, fixOutput string) reviewRepairRun {
+// created, runs `git add` on each of staged, then removes each of removed from
+// disk, and returns fixOutput.
+func runReviewRepair(t *testing.T, untrackedBefore, stagedBefore, created, staged, removed []string, fixOutput string) reviewRepairRun {
 	t.Helper()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
@@ -69,6 +72,11 @@ func runReviewRepair(t *testing.T, untrackedBefore, stagedBefore, created, stage
 				}
 				for _, file := range staged {
 					gitCmd(t, dir, "add", "--", file)
+				}
+				for _, file := range removed {
+					if err := os.Remove(filepath.Join(dir, filepath.FromSlash(file))); err != nil {
+						t.Fatal(err)
+					}
 				}
 				return &agent.Result{Output: json.RawMessage(fixOutput)}, nil
 			}
@@ -145,6 +153,7 @@ func TestReviewRepairCommitsOnlyTheNewFilesItNames(t *testing.T) {
 		stagedBefore    []string
 		created         []string
 		staged          []string
+		removed         []string
 		fixOutput       string
 		wantAdded       []string
 		wantMoved       []string
@@ -185,6 +194,22 @@ func TestReviewRepairCommitsOnlyTheNewFilesItNames(t *testing.T) {
 			wantAdded:       []string{"review-fix.txt"},
 		},
 		{
+			name:            "a_file_held_before_the_round_stays_in_the_worktree_when_the_repair_stages_it",
+			untrackedBefore: []string{"tests/held_test.go"},
+			created:         []string{"review-fix.txt"},
+			staged:          []string{"review-fix.txt", "tests/held_test.go"},
+			fixOutput:       `{"summary":"address findings","new_files":["review-fix.txt"]}`,
+			wantAdded:       []string{"review-fix.txt"},
+		},
+		{
+			name:      "a_staged_artifact_the_repair_then_deleted_has_nothing_to_move",
+			created:   append([]string{"review-fix.txt"}, artifacts...),
+			staged:    append([]string{"review-fix.txt"}, artifacts...),
+			removed:   artifacts,
+			fixOutput: `{"summary":"address findings","new_files":["review-fix.txt"]}`,
+			wantAdded: []string{"review-fix.txt"},
+		},
+		{
 			name:      "omitted_new_files_names_nothing",
 			created:   []string{"review-fix.txt"},
 			fixOutput: `{"summary":"address findings"}`,
@@ -199,7 +224,7 @@ func TestReviewRepairCommitsOnlyTheNewFilesItNames(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			run := runReviewRepair(t, tc.untrackedBefore, tc.stagedBefore, tc.created, tc.staged, tc.fixOutput)
+			run := runReviewRepair(t, tc.untrackedBefore, tc.stagedBefore, tc.created, tc.staged, tc.removed, tc.fixOutput)
 
 			if added := filesAddedByRepair(t, run); !slices.Equal(added, tc.wantAdded) {
 				t.Errorf("repair commit added %q, want %q", added, tc.wantAdded)
@@ -257,12 +282,80 @@ func TestReviewRepairCommitsOnlyTheNewFilesItNames(t *testing.T) {
 	}
 }
 
+// A Review repair refused at the protected_paths check parks for a retry. Its
+// unnamed new files, staged or not, are unstaged and moved out of the checkout
+// before it parks, so the retry cannot commit them as files staged before its
+// turn (issue #114). The protected edit and the file the repair named stay as
+// it left them.
+func TestReviewRepairRefusedForAProtectedPathSetsItsUnnamedFilesAside(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	const stagedArtifact, untrackedArtifact = ".pytest-mirror-review/checkout-1/out.txt", "pytest-debug.log"
+	calls := 0
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			calls++
+			switch calls {
+			case 1:
+				writeTestFile(t, filepath.Join(dir, "feature.txt"), "protected edit\n")
+				writeTestFile(t, filepath.Join(dir, "review-fix.txt"), "written by the repair\n")
+				writeTestFile(t, filepath.Join(dir, filepath.FromSlash(stagedArtifact)), "written by the repair\n")
+				gitCmd(t, dir, "add", "-A")
+				writeTestFile(t, filepath.Join(dir, untrackedArtifact), "written by the repair\n")
+				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings","new_files":["review-fix.txt"]}`)}, nil
+			case 2:
+				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
+			}
+			findings := Findings{Items: []Finding{}, Summary: "all clear", RiskLevel: "low", RiskRationale: "all clear", RiskScope: types.FindingsRiskScopeSourceOrExternal, ReviewedPaths: fullReviewCoverage(t, dir, baseSHA)}
+			j, _ := json.Marshal(findings)
+			return &agent.Result{Output: j}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.ProtectedPaths = []string{"feature.txt"}
+	sctx.Fixing = true
+	sctx.PreviousFindings = `{"findings":[{"id":"review-1","severity":"warning","file":"main.go","description":"possible nil deref"}],"summary":"1 issue"}`
+
+	_, err := (&ReviewStep{}).Execute(sctx)
+
+	var refusal *pipeline.ProtectedPathError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("round = %v, want a protected_paths refusal", err)
+	}
+	status := gitCmd(t, dir, "-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=all")
+	if want := "M  feature.txt\nA  review-fix.txt"; status != want {
+		t.Errorf("worktree after the refusal =\n%s\nwant the protected edit and the named file as the repair staged them:\n%s", status, want)
+	}
+	setAside := filepath.Join(sctx.EvidenceDir, reviewRepairDirName)
+	var moved []string
+	for _, file := range filesUnder(t, setAside) {
+		_, relative, _ := strings.Cut(file, "/")
+		moved = append(moved, relative)
+		if content, err := os.ReadFile(filepath.Join(setAside, filepath.FromSlash(file))); err != nil || string(content) != "written by the repair\n" {
+			t.Errorf("%s was not kept whole: %q, %v", file, content, err)
+		}
+	}
+	if want := []string{stagedArtifact, untrackedArtifact}; !slices.Equal(moved, want) {
+		t.Errorf("set aside %q, want %q", moved, want)
+	}
+
+	gitCmd(t, dir, "checkout", "HEAD", "--", "feature.txt")
+	if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if added := gitCmd(t, dir, "-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=A", headSHA, "HEAD"); added != "review-fix.txt" {
+		t.Errorf("retry commit added %q, want only review-fix.txt", added)
+	}
+}
+
 // What a Review repair moves out of the checkout is kept in the run's
 // evidence directory but is not evidence: neither the evidence branch nor
 // GitLab's image uploads may ever carry it.
 func TestReviewRepairSetAsideIsNeverPublished(t *testing.T) {
 	t.Parallel()
-	run := runReviewRepair(t, nil, nil, []string{"review-fix.txt", "playwright-report/shot.png"}, nil, `{"summary":"address findings","new_files":["review-fix.txt"]}`)
+	run := runReviewRepair(t, nil, nil, []string{"review-fix.txt", "playwright-report/shot.png"}, nil, nil, `{"summary":"address findings","new_files":["review-fix.txt"]}`)
 	kept := filesUnder(t, run.evidenceDir)
 	if !slices.ContainsFunc(kept, func(file string) bool { return strings.HasSuffix(file, "playwright-report/shot.png") }) {
 		t.Fatalf("the repair set nothing aside in %s: %q", run.evidenceDir, kept)
@@ -301,7 +394,7 @@ func TestReviewRepairSetAsideIsNeverPublished(t *testing.T) {
 // so a later turn would inherit the deleted directory.
 func TestReviewRepairNamesAnOwnedScratchDirectory(t *testing.T) {
 	t.Parallel()
-	run := runReviewRepair(t, nil, nil, []string{"review-fix.txt"}, nil, `{"summary":"address findings","new_files":["review-fix.txt"]}`)
+	run := runReviewRepair(t, nil, nil, []string{"review-fix.txt"}, nil, nil, `{"summary":"address findings","new_files":["review-fix.txt"]}`)
 
 	if run.scratch == "" || !run.isScratchPresent {
 		t.Fatalf("repair prompt names scratch %q (present %v), want an existing owned scratch directory:\n%s", run.scratch, run.isScratchPresent, run.fixOpts.Prompt)

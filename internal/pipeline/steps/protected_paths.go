@@ -32,7 +32,9 @@ const githubMaxFileBytes = 100 << 20
 // checkout (setAsideUnnamedNewFiles): a repair that pointed pytest's basetemp
 // into the checkout once committed 20 test artifacts (issue #114). One the
 // repair staged is unstaged here, after the protected_paths check, so every
-// refusal before staging leaves the index as the repair left it.
+// refusal before staging leaves the index as the repair left it. A Review
+// repair refused at that check parks for a retry, so executeFixMode then
+// unstages and moves them out as well.
 //
 // An untracked file larger than githubMaxFileBytes is left out too, unstaged
 // and unhashed, and named in the step log. Such a file is an agent's disposable
@@ -74,22 +76,8 @@ func stagePipelineChanges(sctx *pipeline.StepContext, before, unnamed []string) 
 			}
 		}
 	}
-	if len(unnamed) > 0 {
-		staged, err := stagedNewFiles(sctx)
-		if err != nil {
-			return err
-		}
-		var unstage []string
-		for _, file := range staged {
-			if isUnnamed[file] {
-				unstage = append(unstage, ":(literal)"+file)
-			}
-		}
-		if len(unstage) > 0 {
-			if _, err := stepGitRunInput(sctx, strings.Join(unstage, "\x00"), "reset", "-q", "HEAD", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
-				return fmt.Errorf("unstage the new files the repair did not name: %w", err)
-			}
-		}
+	if err := unstageUnnamedNewFiles(sctx, unnamed); err != nil {
+		return err
 	}
 	untracked, err := untrackedFiles(sctx)
 	if err != nil {
