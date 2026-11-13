@@ -56,17 +56,26 @@ func TestReviewExecutor_FixSummaryPreservesSourceAndCustody(t *testing.T) {
 			FixMessage: strings.Repeat("{{.Branch}}", 15) + "{{.Summary}}", BranchPattern: "(feature)", BranchReplacement: strings.Repeat("b", 300) + "${1}",
 		}},
 		{name: "commit refusal after conforming agent commit", summary: "repair source", shouldRefuse: true, shouldFailCommit: true, hasAgentCommit: true},
+		// Issue #114: an unnamed new file the repair staged is unstaged only by
+		// staging, so a round refused when its message renders keeps it staged.
+		{name: "render refusal keeps an unnamed staged file staged", summary: "repair source", shouldRefuse: true, namesNoNewFiles: true, commit: config.Commit{
+			FixMessage: strings.Repeat("{{.Branch}}", 15) + "{{.Summary}}", BranchPattern: "(feature)", BranchReplacement: strings.Repeat("b", 300) + "${1}",
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			workDir, base, head := setupGitRepo(t)
 			output := test.output
 			if output == nil && !test.hasNoOutput {
+				newFiles := []string{"staged.txt", "untracked.txt"}
+				if test.namesNoNewFiles {
+					newFiles = nil
+				}
 				var err error
 				output, err = json.Marshal(struct {
 					Summary  string   `json:"summary"`
 					NewFiles []string `json:"new_files"`
-				}{Summary: test.summary, NewFiles: []string{"staged.txt", "untracked.txt"}})
+				}{Summary: test.summary, NewFiles: newFiles})
 				if err != nil {
 					t.Fatal(err)
 				}

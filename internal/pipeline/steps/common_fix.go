@@ -146,11 +146,13 @@ New files rule:
 - Keep disposable output, such as a test base temp directory, caches, build output and logs, in %s, never in the checkout. Before you finish, delete every file you created in the checkout that is not part of the fix.`
 
 // unnamedNewFiles reads the new files a Review repair named and returns every
-// other file it created since before. A new file the repair staged without
-// committing counts too: it is unstaged first, so `git add` cannot carry an
-// unnamed file past the rule. A file in stagedBefore, staged before the turn
-// began, such as the new file of a turn cut at its budget, stays staged.
-// Output that does not parse names nothing, which fails safe.
+// other file it added since before, without touching the index. A new file
+// the repair staged without committing counts too, so `git add` cannot carry
+// an unnamed file past the rule; stagePipelineChanges unstages it only once
+// the commit message has rendered, so a round refused before staging leaves
+// the index as the repair left it. A file in stagedBefore, staged before the
+// turn began, such as the new file of a turn cut at its budget, is not
+// counted. Output that does not parse names nothing, which fails safe.
 func unnamedNewFiles(sctx *pipeline.StepContext, result *agent.Result, before, stagedBefore []string) ([]string, error) {
 	var parsed struct {
 		NewFiles []string `json:"new_files"`
@@ -173,15 +175,10 @@ func unnamedNewFiles(sctx *pipeline.StepContext, result *agent.Result, before, s
 	if err != nil {
 		return nil, err
 	}
-	var unstage []string
+	var unnamed []string
 	for _, file := range staged {
 		if !named[file] && !slices.Contains(stagedBefore, file) {
-			unstage = append(unstage, ":(literal)"+file)
-		}
-	}
-	if len(unstage) > 0 {
-		if _, err := stepGitRunInput(sctx, strings.Join(unstage, "\x00"), "reset", "-q", "HEAD", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
-			return nil, fmt.Errorf("unstage the new files the repair did not name: %w", err)
+			unnamed = append(unnamed, file)
 		}
 	}
 	wasBefore := make(map[string]bool, len(before))
@@ -192,7 +189,6 @@ func unnamedNewFiles(sctx *pipeline.StepContext, result *agent.Result, before, s
 	if err != nil {
 		return nil, err
 	}
-	var unnamed []string
 	for _, file := range untracked {
 		if !wasBefore[file] && !named[file] {
 			unnamed = append(unnamed, file)
