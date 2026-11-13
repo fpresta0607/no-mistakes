@@ -3,6 +3,7 @@ package db
 import (
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -124,6 +125,10 @@ type Run struct {
 	// ClosingIssueRefsLockedAt is non-nil once a PR body composition has sampled
 	// ClosingIssueRefs, after which a reattach can no longer add to them.
 	ClosingIssueRefsLockedAt *int64
+	// TestOutputDirs are the operator-authorized Test output directories
+	// (axi run --test-output-dir), already admitted by internal/testoutputdirs.
+	// They belong to this run alone: retry and rerun never carry them.
+	TestOutputDirs []string
 	// PRTitle and PRBody are the caller-supplied PR title and description
 	// (axi run --pr-title / --pr-body-file), already validated. They are
 	// written only when the run is inserted, so a launch receipt can compare
@@ -135,7 +140,7 @@ type Run struct {
 	UpdatedAt int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), ci_released_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, %s, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, launch_assertion, launch_assertion_proof, pr_base_branch, COALESCE(omit_intent, 0), pi_profile, COALESCE(quota_routing, ''), verification_plan, closing_issue_refs, closing_issue_refs_locked_at, pr_title, pr_body, %s, created_at, updated_at, terminal_source_state`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), ci_released_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, %s, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, launch_assertion, launch_assertion_proof, pr_base_branch, COALESCE(omit_intent, 0), pi_profile, COALESCE(quota_routing, ''), verification_plan, closing_issue_refs, closing_issue_refs_locked_at, pr_title, pr_body, %s, %s, created_at, updated_at, terminal_source_state`
 
 func (d *DB) runColumns() string {
 	return runColumnsFrom(d.sql)
@@ -157,13 +162,17 @@ func runColumnsFrom(q columnQuerier) string {
 	if hasColumn(q, "runs", "evidence_dir") {
 		evidenceDir = "evidence_dir"
 	}
-	return fmt.Sprintf(runColumns, intentCheck, evidenceDir)
+	testOutputDirs := "NULL"
+	if hasColumn(q, "runs", "test_output_dirs") {
+		testOutputDirs = "test_output_dirs"
+	}
+	return fmt.Sprintf(runColumns, intentCheck, evidenceDir, testOutputDirs)
 }
 
 func scanRun(row interface {
 	Scan(...any) error
 }, r *Run) error {
-	var storedClosingIssues sql.NullString
+	var storedClosingIssues, storedTestOutputDirs sql.NullString
 	err := row.Scan(
 		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.WorktreeDir, &r.SubmittedHeadSHA, &r.NoMistakesVersion, &r.NoMistakesBuildSHA, &r.ReviewApprovedHeadSHA, &r.Status,
 		&r.PRURL, &r.PRState, &r.PRStateObservedAt, &r.CIReadyAt, &r.CIReadyNoCI, &r.CIReleasedAt,
@@ -175,7 +184,7 @@ func scanRun(row interface {
 		&r.LaunchAssertion, &r.LaunchAssertionProof,
 		&r.PRBaseBranch, &r.OmitIntent, &r.PiProfile, &r.QuotaRouting, &r.VerificationPlan,
 		&storedClosingIssues, &r.ClosingIssueRefsLockedAt,
-		&r.PRTitle, &r.PRBody, &r.EvidenceDir,
+		&r.PRTitle, &r.PRBody, &r.EvidenceDir, &storedTestOutputDirs,
 		&r.CreatedAt, &r.UpdatedAt,
 		&r.TerminalSourceState,
 	)
@@ -185,6 +194,11 @@ func scanRun(row interface {
 	r.ClosingIssueRefs, err = closingissues.Decode(storedClosingIssues.String)
 	if err != nil {
 		return fmt.Errorf("decode run closing issue references: %w", err)
+	}
+	if storedTestOutputDirs.Valid {
+		if err := json.Unmarshal([]byte(storedTestOutputDirs.String), &r.TestOutputDirs); err != nil {
+			return fmt.Errorf("decode run test output directories: %w", err)
+		}
 	}
 	return nil
 }
@@ -226,7 +240,7 @@ func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA 
 }
 
 func (d *DB) InsertRunWithLaunchAssertion(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, plan *verificationplan.Snapshot, expected *launchassert.Expectation, proof *launchassert.Proof, profiles ...*agentcfg.PiProfile) (*Run, error) {
-	return d.InsertLaunchedRun(repoID, branch, headSHA, baseSHA, intent, launchNonce, validationGeneration, intentDigest, prBaseBranch, omitIntent, plan, RunPRText{}, expected, proof, profiles...)
+	return d.InsertLaunchedRun(repoID, branch, headSHA, baseSHA, intent, launchNonce, validationGeneration, intentDigest, prBaseBranch, omitIntent, plan, RunPRText{}, nil, expected, proof, profiles...)
 }
 
 // RunPRText is a caller-supplied PR title and description. An empty field
@@ -265,12 +279,13 @@ func (r *Run) PRTextDigest() string {
 // InsertRunWithPRText is InsertRunWithIntentAndLaunchNonce that also stores
 // the caller-supplied PR text in the same row write.
 func (d *DB) InsertRunWithPRText(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, plan *verificationplan.Snapshot, prText RunPRText, profiles ...*agentcfg.PiProfile) (*Run, error) {
-	return d.InsertLaunchedRun(repoID, branch, headSHA, baseSHA, intent, launchNonce, validationGeneration, intentDigest, prBaseBranch, omitIntent, plan, prText, nil, nil, profiles...)
+	return d.InsertLaunchedRun(repoID, branch, headSHA, baseSHA, intent, launchNonce, validationGeneration, intentDigest, prBaseBranch, omitIntent, plan, prText, nil, nil, nil, profiles...)
 }
 
 // InsertLaunchedRun writes one run row with everything bound to its launch:
-// the caller's PR text, and the launch assertion with its proof.
-func (d *DB) InsertLaunchedRun(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, plan *verificationplan.Snapshot, prText RunPRText, expected *launchassert.Expectation, proof *launchassert.Proof, profiles ...*agentcfg.PiProfile) (*Run, error) {
+// the caller's PR text, the operator's Test output directories, and the launch
+// assertion with its proof.
+func (d *DB) InsertLaunchedRun(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, plan *verificationplan.Snapshot, prText RunPRText, testOutputDirs []string, expected *launchassert.Expectation, proof *launchassert.Proof, profiles ...*agentcfg.PiProfile) (*Run, error) {
 	// The proof is written with the row: a receipt claim must never observe an
 	// asserted run whose proof has not landed yet.
 	if err := proof.Check(expected); err != nil {
@@ -328,9 +343,19 @@ func (d *DB) InsertLaunchedRun(repoID, branch, headSHA, baseSHA string, intent *
 	if prText.Body != "" {
 		r.PRBody = &prText.Body
 	}
+	var storedTestOutputDirs *string
+	if len(testOutputDirs) > 0 {
+		r.TestOutputDirs = testOutputDirs
+		encoded, err := json.Marshal(testOutputDirs)
+		if err != nil {
+			return nil, fmt.Errorf("encode test output directories: %w", err)
+		}
+		stored := string(encoded)
+		storedTestOutputDirs = &stored
+	}
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_assertion, launch_assertion_proof, pr_base_branch, omit_intent, pi_profile, verification_plan, pr_title, pr_body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.LaunchAssertion, r.LaunchAssertionProof, r.PRBaseBranch, r.OmitIntent, r.PiProfile, r.VerificationPlan, r.PRTitle, r.PRBody, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_assertion, launch_assertion_proof, pr_base_branch, omit_intent, pi_profile, verification_plan, pr_title, pr_body, test_output_dirs, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.LaunchAssertion, r.LaunchAssertionProof, r.PRBaseBranch, r.OmitIntent, r.PiProfile, r.VerificationPlan, r.PRTitle, r.PRBody, storedTestOutputDirs, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)

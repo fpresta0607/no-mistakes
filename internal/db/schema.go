@@ -541,4 +541,7 @@ COMMIT;`,
 	// outcome is outstanding for the step.
 	`ALTER TABLE step_results ADD COLUMN side_lane_head TEXT`,
 	`ALTER TABLE step_results ADD COLUMN side_lane_refusal TEXT`,
+	// Operator-authorized Test output directories (axi run --test-output-dir),
+	// a JSON array written once with the row. NULL means none.
+	`ALTER TABLE runs ADD COLUMN test_output_dirs TEXT`,
 }

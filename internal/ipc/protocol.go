@@ -170,6 +170,9 @@ type PushReceivedParams struct {
 	// ClosingIssueRefs are the explicit issues (axi run --closes) the
 	// generated PR should close.
 	ClosingIssueRefs []string `json:"closing_issue_refs,omitempty"`
+	// TestOutputDirs are the operator-authorized Test output directories
+	// (axi run --test-output-dir); the daemon admits them again before use.
+	TestOutputDirs []string `json:"test_output_dirs,omitempty"`
 	// PRTitle and PRBody are the caller-supplied PR title and description
 	// (axi run --pr-title / --pr-body-file), used only when the run creates
 	// the PR.
@@ -195,6 +198,7 @@ type StartFreshRunParams struct {
 	PRBaseBranch         string           `json:"pr_base_branch,omitempty"`
 	OmitIntent           bool             `json:"omit_intent,omitempty"`
 	ClosingIssueRefs     []string         `json:"closing_issue_refs,omitempty"`
+	TestOutputDirs       []string         `json:"test_output_dirs,omitempty"`
 	PRTitle              string           `json:"pr_title,omitempty"`
 	PRBody               string           `json:"pr_body,omitempty"`
 }
@@ -337,6 +341,9 @@ type RerunParams struct {
 	// ClosingIssueRefs are added to the references the selected run carried;
 	// a rerun never drops an inherited closing reference.
 	ClosingIssueRefs []string `json:"closing_issue_refs,omitempty"`
+	// TestOutputDirs are given to the new run only; the selected run's own
+	// directories are never inherited.
+	TestOutputDirs []string `json:"test_output_dirs,omitempty"`
 	// PRTitle and PRBody each replace the selected run's supplied value when
 	// set; an unset field inherits it.
 	PRTitle string `json:"pr_title,omitempty"`
@@ -647,6 +654,9 @@ type RunInfo struct {
 	// refuse different text without the text riding every run listing.
 	PRTitleDigest string `json:"pr_title_digest,omitempty"`
 	PRBodyDigest  string `json:"pr_body_digest,omitempty"`
+	// TestOutputDirs are the operator-authorized Test output directories the
+	// run recorded (axi run --test-output-dir).
+	TestOutputDirs []string `json:"test_output_dirs,omitempty"`
 	// QuotaRouting is the run's quota-aware agent-ordering record (the raw
 	// quotarouting.Record JSON) when the feature is on for this run, empty
 	// otherwise. Local-only observability; see internal/quotarouting.

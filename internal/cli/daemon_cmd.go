@@ -162,6 +162,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			testOutputDirs, err := parseTestOutputDirsPushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
 			gatePath, err := normalizeNotifyGatePath(gate)
 			if err != nil {
 				return err
@@ -197,6 +201,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				VerificationPlanID:     verificationPlanID,
 				ReconciledPreviousHead: reconciledPreviousHead,
 				ClosingIssueRefs:       closingIssues,
+				TestOutputDirs:         testOutputDirs,
 				PRTitle:                prText.Title,
 				PRBody:                 prText.Body,
 			}, &result)
@@ -504,6 +509,34 @@ func parseClosingIssueRefsPushOptions(options []string) ([]string, error) {
 		values = append(values, value)
 	}
 	return normalizeClosingIssueRefs(values)
+}
+
+// testOutputDirPushOptionPrefix carries one operator-authorized Test output
+// directory through a git push; repeating it preserves the repeatable
+// --test-output-dir CLI contract. The daemon admits the values again.
+const testOutputDirPushOptionPrefix = "no-mistakes.test-output-dir="
+
+func formatTestOutputDirsPushOptions(dirs []string) []string {
+	options := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		options = append(options, testOutputDirPushOptionPrefix+dir)
+	}
+	return options
+}
+
+func parseTestOutputDirsPushOptions(options []string) ([]string, error) {
+	var dirs []string
+	for _, option := range options {
+		value, ok := strings.CutPrefix(option, testOutputDirPushOptionPrefix)
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(value) == "" {
+			return nil, fmt.Errorf("invalid test output directory push option: value is required")
+		}
+		dirs = append(dirs, value)
+	}
+	return dirs, nil
 }
 
 func formatSkipPushOptions(steps []types.StepName) []string {

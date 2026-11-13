@@ -153,6 +153,7 @@ no-mistakes axi run --intent "the user's goal" --pr-title "Add widget export" --
 | `--intent`      | `string` | (none)  | What the user set out to accomplish; `-` reads stdin to EOF; exclusive with `--intent-file` |
 | `--intent-file` | `string` | (none)  | Read intent from a file relative to the caller's working directory; exclusive with `--intent` |
 | `--verification-plan` | `string` | (none) | Path to a nonempty UTF-8 verification plan, at most 64 KiB (65,536 bytes), captured as separate evidence for a new run only |
+| `--test-output-dir` | `string`, repeatable | (none) | Existing absolute directory outside the repository that the Test step's commands may write outputs to, for a new run only; see [Test output directories](#test-output-directories) |
 | `-y`, `--yes`   | `bool`   | `false` | Auto-resolve eligible gates until a decision point or outcome                                       |
 | `--skip`        | `string` | (none)  | Comma-separated pipeline steps to skip                                                               |
 | `--base-branch` | `string` | (none)  | Integration branch for this run only; overrides [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) |
@@ -209,6 +210,28 @@ The captured bytes live privately at `<NM_HOME>/run-inputs/<run-id>/verification
 Review and Test, including their fix turns, receive the same digest-checked snapshot as labeled evidence. Editing or deleting the original source cannot change it; a missing or altered snapshot fails closed when consumed. Reattach with `no-mistakes axi run` **without** `--verification-plan`; providing the flag for an existing run is refused, including strict-launch replay. A new run without the flag does not inherit a prior run's plan. Capture time records when no-mistakes read the file, not proof that its author wrote it before implementation.
 
 Only attached runs receive plan-aware guidance. Review and Test assess the proposed scenarios and independent expected results against actual evidence; the attachment does not direct Review to execute verification. Test receives the execution guidance: when no existing check drives a scenario, perform repeatable product verification with a retained artifact, or name the missing capability and how to provide it and mark the scenario untested. Both steps must follow repository testing rules before changing permanent tests; an attached plan alone is not a reason to add tests. A missing-test finding must identify the observable failure, why existing checks and product evidence do not cover it, and the independent expected result. Runs without a plan retain their existing Review and Test guidance.
+
+### Test output directories
+
+```sh
+no-mistakes axi run --intent "the user's goal" --test-output-dir /srv/test-output/logs --test-output-dir /srv/test-output/provenance
+```
+
+`--test-output-dir` authorizes a directory you reviewed as an output destination for the commands the Test step runs, such as logs, PID files, temporary build files and provenance.
+Without it, the Test agent writes only to the worktree, the run's evidence directory and its own scratch directory, and refuses a command whose outputs land anywhere else.
+Repeat the flag for each directory.
+Each Test agent prompt names every authorized directory; every other destination outside the worktree, the evidence directory and the scratch directory stays refused.
+
+Each value must be an absolute path to an existing directory that is not a filesystem or volume root, not inside the repository being validated, not inside the no-mistakes home (which holds run worktrees and the default evidence directory), and not a directory that holds either one, since that would authorize writes into all of it.
+Values are canonicalized, with symbolic links and Windows junctions resolved, before these checks, so a link into the repository counts as inside it, and duplicates are dropped.
+A refused value fails the launch before anything is pushed, with an error that names the value, the rule it broke and the correction, for example `--test-output-dir C:\x is inside the repository; choose a directory outside it`.
+The daemon checks the values again when it admits the run, because push options and IPC are a boundary a request can cross without the CLI.
+They can also be passed on a plain gate push as repeated `-o no-mistakes.test-output-dir=<dir>` push options.
+
+The directories belong to the run they were given to.
+Reattaching with `--test-output-dir` is refused (`--test-output-dir is accepted only when starting a new run; omit it to reattach`), a strict-launch replay with a different set is refused, and `axi retry`, `no-mistakes rerun` and the rerun fallback of a no-op push never carry a previous run's directories.
+`axi status` lists them under `run.test_output_dirs`.
+An older daemon would drop them silently, so after the run starts `axi run` reads it back and fails with `the daemon did not record --test-output-dir; restart it on this build` unless the run recorded exactly the requested set.
 
 ### Other run options
 

@@ -2003,3 +2003,112 @@ func TestOwnedGateAcceptsARelativeRootSpelling(t *testing.T) {
 		t.Fatal("a gate under another root must still be refused")
 	}
 }
+
+type captureTestOutputDirsStep struct {
+	seen chan<- []string
+}
+
+func (s *captureTestOutputDirsStep) Name() types.StepName { return types.StepTest }
+
+func (s *captureTestOutputDirsStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	s.seen <- sctx.Run.TestOutputDirs
+	return &pipeline.StepOutcome{}, nil
+}
+
+func newTestOutputDirsManager(t *testing.T) (*RunManager, *paths.Paths, *db.DB, *db.Repo, string, <-chan []string) {
+	t.Helper()
+	t.Setenv("NM_DEMO", "1")
+	p, database := newRefreshRunFixture(t)
+	repo, head := setupTestGitRepo(t, p, database, "test-output-dirs")
+	seen := make(chan []string, 4)
+	manager := NewRunManager(database, p, func() []pipeline.Step {
+		return []pipeline.Step{&captureTestOutputDirsStep{seen: seen}}
+	})
+	t.Cleanup(manager.Shutdown)
+	return manager, p, database, repo, head, seen
+}
+
+func TestStartRunHandsTheAdmittedTestOutputDirsToTheExecutor(t *testing.T) {
+	manager, _, database, repo, head, seen := newTestOutputDirsManager(t)
+	outputDir := t.TempDir()
+	want, err := realpath.Resolve(outputDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runID, err := manager.startRunWithPRText(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "carry the operator's output directories", "", false, "", nil, []string{outputDir, outputDir}, db.RunPRText{})
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if run := waitForRunTerminalState(t, database, runID); run.Status != types.RunCompleted {
+		t.Fatalf("run status = %s, error = %v", run.Status, run.Error)
+	}
+
+	select {
+	case got := <-seen:
+		if len(got) != 1 || got[0] != want {
+			t.Fatalf("executor run carries %q, want [%q]", got, want)
+		}
+	default:
+		t.Fatal("the Test step never ran")
+	}
+	stored, err := database.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.TestOutputDirs) != 1 || stored.TestOutputDirs[0] != want {
+		t.Fatalf("stored run carries %q, want [%q]", stored.TestOutputDirs, want)
+	}
+}
+
+func TestStartRunRefusesAnInadmissibleTestOutputDirWithoutARunRow(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		value    func(p *paths.Paths, repo *db.Repo) string
+		wantRule string
+	}{
+		{"relative", func(*paths.Paths, *db.Repo) string { return "relative-out" }, "is not an absolute path"},
+		{"inside_repository", func(_ *paths.Paths, repo *db.Repo) string { return repo.WorkingPath }, "is inside the repository"},
+		{"inside_home", func(p *paths.Paths, _ *db.Repo) string { return p.Root() }, "is inside the no-mistakes home"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager, p, database, repo, head, _ := newTestOutputDirsManager(t)
+			value := tc.value(p, repo)
+
+			_, err := manager.startRunWithPRText(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "refuse the destination", "", false, "", nil, []string{value}, db.RunPRText{})
+
+			if err == nil || !strings.Contains(err.Error(), "--test-output-dir "+value+" "+tc.wantRule) {
+				t.Fatalf("start run = %v, want a refusal naming %q and %q", err, value, tc.wantRule)
+			}
+			runs, err := database.GetRunsByRepo(repo.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(runs) != 0 {
+				t.Fatalf("a refused launch left %d run rows", len(runs))
+			}
+		})
+	}
+}
+
+func TestFreshLaunchReplayRefusesDifferentTestOutputDirs(t *testing.T) {
+	manager, _, database, repo, head, _ := newTestOutputDirsManager(t)
+	first, second := t.TempDir(), t.TempDir()
+	params := &ipc.StartFreshRunParams{RepoID: repo.ID, Branch: "main", HeadSHA: head, Intent: "bind the output directories", LaunchNonce: "output-dirs", ValidationGeneration: "generation", TestOutputDirs: []string{first}}
+	receipt, err := manager.HandleStartFreshRun(context.Background(), params)
+	if err != nil {
+		t.Fatalf("fresh launch: %v", err)
+	}
+	if run := waitForRunTerminalState(t, database, receipt.RunID); run.Status != types.RunCompleted {
+		t.Fatalf("run status = %s, error = %v", run.Status, run.Error)
+	}
+
+	replayed, err := manager.HandleStartFreshRun(context.Background(), params)
+	if err != nil || replayed.RunID != receipt.RunID {
+		t.Fatalf("same-directory replay = %+v, %v; want the bound run", replayed, err)
+	}
+	params.TestOutputDirs = []string{second}
+	if _, err := manager.HandleStartFreshRun(context.Background(), params); err == nil || !strings.Contains(err.Error(), "different test output directories") {
+		t.Fatalf("different-directory replay = %v, want refused", err)
+	}
+}

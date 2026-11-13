@@ -29,6 +29,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
+	"github.com/kunchenguid/no-mistakes/internal/testoutputdirs"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 	"github.com/spf13/cobra"
@@ -222,6 +223,13 @@ func newAxiRunCmd() *cobra.Command {
 			"control or bidi characters, and no-mistakes markers are refused before any\n" +
 			"push. They are inherited by rerun and retry, and cannot be combined with\n" +
 			"--skip pr.\n\n" +
+			"--test-output-dir <dir> authorizes an operator-reviewed directory outside\n" +
+			"the repository as an output destination (logs, PID files, temporary build\n" +
+			"files, provenance) for the commands the Test step runs. Repeat it for each\n" +
+			"directory. Each must be an existing absolute directory that is not a\n" +
+			"filesystem root, not inside the repository or the no-mistakes home, and\n" +
+			"not above either one. It applies to a new run only, and retry and rerun\n" +
+			"do not carry it.\n\n" +
 			"--model and/or --effort opt into an immutable Pi profile for a new run.\n" +
 			"An omitted field comes from agent_config.pi; both must resolve. Requires\n" +
 			"Pi-only agents; raw native selection flags conflict. The pin outranks\n" +
@@ -280,6 +288,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this run (tighten-only; full intent still reaches every step prompt except PR drafting)")
 	cmd.Flags().StringArrayVar(&closesIssues, "closes", nil, "issue this PR closes when merged; repeat for multiple issues (42, owner/repo#42, or a nested GitLab project path)")
 	cmd.Flags().String("verification-plan", "", "capture a nonempty UTF-8 verification plan as separate run evidence (new runs only)")
+	cmd.Flags().StringArray("test-output-dir", nil, "existing absolute directory outside the repository the Test step's commands may write outputs to; repeat for multiple directories (new runs only)")
 	cmd.Flags().String("launch-assertion", "", "required JSON proof of the expected trusted SHA and effective agent profiles for a nonce-bound launch")
 	bindPRTextFlags(cmd, &prTitle, &prBodyFile)
 	bindAxiWaitFlag(cmd, &wait)
@@ -370,6 +379,14 @@ func runAxiRunWithPRText(cmd *cobra.Command, autoYes bool, skipSteps []types.Ste
 	if err := requireDaemonHonorsRunPRText(env.client, prText); err != nil {
 		return emitError(cmd, 2, err.Error())
 	}
+	var testOutputDirs []string
+	if cmd.Flags().Lookup("test-output-dir") != nil {
+		requested, _ := cmd.Flags().GetStringArray("test-output-dir")
+		testOutputDirs, err = testoutputdirs.Validate(requested, env.repo.WorkingPath, env.p.Root())
+		if err != nil {
+			return emitError(cmd, 2, err.Error())
+		}
+	}
 
 	branch, err := git.CurrentBranch(ctx, ".")
 	if err != nil {
@@ -438,6 +455,9 @@ func runAxiRunWithPRText(cmd *cobra.Command, autoYes bool, skipSteps []types.Ste
 	if runID != "" && planRequested {
 		return emitError(cmd, 2, "--verification-plan is accepted only when starting a new run; omit it to reattach")
 	}
+	if runID != "" && len(testOutputDirs) > 0 {
+		return emitError(cmd, 2, "--test-output-dir is accepted only when starting a new run; omit it to reattach")
+	}
 	if runID == "" {
 		if err := env.d.RefuseUnlinkedValidation(env.repo.ID, branch); err != nil {
 			return emitError(cmd, 1, err.Error())
@@ -497,12 +517,12 @@ func runAxiRunWithPRText(cmd *cobra.Command, autoYes bool, skipSteps []types.Ste
 		}
 		var err error
 		if launchNonce != "" {
-			launchReceipt, err = triggerProofRun(ctx, env, branch, headSHA, skipSteps, intent, baseBranch, omitIntent, launchNonce, validationGeneration, planID, closesIssues, expected, prText, profile)
+			launchReceipt, err = triggerProofRun(ctx, env, branch, headSHA, skipSteps, intent, baseBranch, omitIntent, launchNonce, validationGeneration, planID, closesIssues, testOutputDirs, expected, prText, profile)
 			if err == nil {
 				runID = launchReceipt.RunID
 			}
 		} else {
-			runID, err = triggerRunWithPRText(ctx, env, branch, skipSteps, intent, baseBranch, omitIntent, planID, closesIssues, prText, profile)
+			runID, err = triggerRunWithPRText(ctx, env, branch, skipSteps, intent, baseBranch, omitIntent, planID, closesIssues, testOutputDirs, prText, profile)
 		}
 		if err == nil && planID != "" && runID != planID {
 			err = fmt.Errorf("launched run does not own the captured verification plan")
@@ -512,6 +532,18 @@ func runAxiRunWithPRText(cmd *cobra.Command, autoYes bool, skipSteps []types.Ste
 				return emitBranchOwnershipError(cmd, ownershipErr)
 			}
 			return emitError(cmd, 1, err.Error())
+		}
+		// An older daemon drops an unknown push option or IPC field silently,
+		// so the started run is read back before anything relies on it.
+		if len(testOutputDirs) > 0 {
+			var result ipc.GetRunResult
+			if err := env.client.Call(ipc.MethodGetRun, &ipc.GetRunParams{RunID: runID}, &result); err != nil {
+				return emitError(cmd, 1, fmt.Sprintf("confirm --test-output-dir on run %s: %v", runID, err))
+			}
+			if err := requireRunRecordedTestOutputDirs(result.Run, testOutputDirs); err != nil {
+				return emitError(cmd, 1, err.Error(),
+					"Run `no-mistakes daemon restart`, abort run "+runID+" with `no-mistakes axi abort`, and start the run again.")
+			}
 		}
 	}
 	if launchReceipt != nil {
@@ -537,6 +569,15 @@ func runAxiRunWithPRText(cmd *cobra.Command, autoYes bool, skipSteps []types.Ste
 		return emitError(cmd, 1, fmt.Sprintf("drive run: %v", err))
 	}
 	return renderDriveResult(cmd, run, ciReady)
+}
+
+// requireRunRecordedTestOutputDirs refuses a started run that does not carry
+// exactly the admitted --test-output-dir set.
+func requireRunRecordedTestOutputDirs(run *ipc.RunInfo, requested []string) error {
+	if run == nil || !slices.Equal(run.TestOutputDirs, requested) {
+		return errors.New("the daemon did not record --test-output-dir; restart it on this build")
+	}
+	return nil
 }
 
 func digestLaunchIntent(intent string) string {
@@ -839,16 +880,17 @@ func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.
 // no-op (the gate already had this commit). Callers must check for an existing
 // active run first (see activeRunID) and apply pre-flight guards.
 func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, planID string, closesIssues []string, profiles ...*agentcfg.PiProfile) (string, error) {
-	return triggerRunWithPRText(ctx, env, branch, skipSteps, intent, baseBranch, omitIntent, planID, closesIssues, db.RunPRText{}, profiles...)
+	return triggerRunWithPRText(ctx, env, branch, skipSteps, intent, baseBranch, omitIntent, planID, closesIssues, nil, db.RunPRText{}, profiles...)
 }
 
-// triggerRunWithPRText is triggerRun carrying caller-supplied PR text on the
-// push and on the rerun fallback.
-func triggerRunWithPRText(ctx context.Context, env *axiEnv, branch string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, planID string, closesIssues []string, prText db.RunPRText, profiles ...*agentcfg.PiProfile) (string, error) {
+// triggerRunWithPRText is triggerRun carrying caller-supplied PR text and the
+// admitted Test output directories on the push and on the rerun fallback.
+func triggerRunWithPRText(ctx context.Context, env *axiEnv, branch string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, planID string, closesIssues, testOutputDirs []string, prText db.RunPRText, profiles ...*agentcfg.PiProfile) (string, error) {
 	profile := agentcfg.OptionalPiProfile(profiles)
 	pushOptions := append(formatSkipPushOptions(skipSteps), formatPiProfilePushOptions(profile)...)
 	pushOptions = append(pushOptions, formatVerificationPlanPushOptions(planID)...)
 	pushOptions = append(pushOptions, formatClosingIssueRefsPushOptions(closesIssues)...)
+	pushOptions = append(pushOptions, formatTestOutputDirsPushOptions(testOutputDirs)...)
 	pushOptions = append(pushOptions, formatPRTextPushOptions(prText)...)
 	if opt := formatIntentPushOption(intent); opt != "" {
 		pushOptions = append(pushOptions, opt)
@@ -935,6 +977,7 @@ func triggerRunWithPRText(ctx context.Context, env *axiEnv, branch string, skipS
 	params.OmitIntent = omitIntent
 	params.PiProfile = profile
 	params.ClosingIssueRefs = closesIssues
+	params.TestOutputDirs = testOutputDirs
 	params.PRTitle, params.PRBody = prText.Title, prText.Body
 	params.VerificationPlanID = planID
 	params.CallerHeadSHA, err = rerunCallerHead(ctx)
@@ -974,7 +1017,7 @@ func claimLaunchReceipt(client *ipc.Client, repoID, branch, launchNonce, submitt
 // triggerProofRun captures the immutable submitted commit and waits only for
 // the matching nonce-bound receipt. Ordinary active-run heuristics never prove
 // strict launch identity.
-func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, launchNonce, validationGeneration, planID string, closesIssues []string, expected *launchassert.Expectation, prText db.RunPRText, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
+func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, launchNonce, validationGeneration, planID string, closesIssues, testOutputDirs []string, expected *launchassert.Expectation, prText db.RunPRText, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
 	profile := agentcfg.OptionalPiProfile(profiles)
 	assertionOptions, err := formatLaunchAssertionPushOptions(expected)
 	if err != nil {
@@ -984,6 +1027,7 @@ func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, s
 	pushOptions = append(pushOptions, assertionOptions...)
 	pushOptions = append(pushOptions, formatVerificationPlanPushOptions(planID)...)
 	pushOptions = append(pushOptions, formatClosingIssueRefsPushOptions(closesIssues)...)
+	pushOptions = append(pushOptions, formatTestOutputDirsPushOptions(testOutputDirs)...)
 	pushOptions = append(pushOptions, formatPRTextPushOptions(prText)...)
 	pushOptions = append(pushOptions,
 		formatIntentPushOption(intent),
@@ -1016,7 +1060,7 @@ func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, s
 		LaunchAssertion: expected,
 		RepoID:          env.repo.ID, Branch: branch, HeadSHA: headSHA, SkipSteps: skipSteps,
 		Intent: intent, LaunchNonce: launchNonce, ValidationGeneration: validationGeneration, PRBaseBranch: baseBranch, OmitIntent: omitIntent, PiProfile: profile, VerificationPlanID: planID,
-		ClosingIssueRefs: closesIssues, PRTitle: prText.Title, PRBody: prText.Body,
+		ClosingIssueRefs: closesIssues, TestOutputDirs: testOutputDirs, PRTitle: prText.Title, PRBody: prText.Body,
 	}, &result); err != nil {
 		return nil, fmt.Errorf("start fresh run: %w", err)
 	}
