@@ -917,6 +917,13 @@ What stands behind it:
 
 `commands.prepare`, `commands.lint`, `commands.format`, and repository `gates` start as they always have.
 
+The Test agent's prompts name the same words, filled in the same way, as a JSON list.
+The agent is told to start every command of its own that installs dependencies, builds, compiles or runs tests behind them, so the heavy work it chooses by itself takes a turn too, most of all in a repository that names no `commands.test`.
+With a `refusal_prefix`, it is told that a refusal means the command never ran, to report each scenario that needed it as untested with the wrapper's line, and never to run the command another way.
+A wrapper that cannot be filled for the run, such as one naming `{test_comparison_sha}` with no resolved comparison, gives the agent no words, and the agent is told to start no build or test run at all.
+The step logs one line saying the agent was given the wrapper.
+These are instructions in the agent's prompt, not starts the step makes, so they hold as far as the agent follows them.
+
 `refusal_prefix` is optional and tells the wrapper's own refusal from a test result.
 The convention is the one `env`, `nice`, and `timeout` share: a wrapper exits 125 when it gave up before starting the command and 126 when the command could not be started.
 A test command can exit with those codes too, so the step reads them as a refusal only when the last non-empty line of output starts with `refusal_prefix`.
