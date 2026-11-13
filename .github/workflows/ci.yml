@@ -92,20 +92,29 @@ jobs:
             name: test (windows-steps-5)
             shard: steps
             steps_skip: '^Test[A-Q]'
+          # ^Test[A-O] on one row took 735-744s of internal/daemon's 15m budget
+          # on a normal runner, nearly all of it serial, and timed out on a
+          # slower one with no test hung (issue #120). In run 43434071938 the
+          # admission tests (^Test[A-K]) took 321s and the manager and launch
+          # tests (^Test[L-O]) 414s, so they run on separate rows.
           - os: windows-latest
             name: test (windows-daemon-1)
             shard: daemon
-            daemon_run: '^Test[A-O]'
+            daemon_run: '^Test[A-K]'
           - os: windows-latest
             name: test (windows-daemon-2)
             shard: daemon
-            daemon_run: '^TestP'
+            daemon_run: '^Test[L-O]'
           - os: windows-latest
             name: test (windows-daemon-3)
             shard: daemon
-            daemon_run: '^Test[QR]'
+            daemon_run: '^TestP'
           - os: windows-latest
             name: test (windows-daemon-4)
+            shard: daemon
+            daemon_run: '^Test[QR]'
+          - os: windows-latest
+            name: test (windows-daemon-5)
             shard: daemon
             daemon_skip: '^Test[A-R]'
           - os: windows-latest
