@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -1053,7 +1054,11 @@ func TestClaudeAgent_BackgroundWorkAfterResult(t *testing.T) {
 	})
 	t.Run("completed children required fails promptly while owned work runs", func(t *testing.T) {
 		_, err, took := run(t, "result-with-background-child", true)
-		if err == nil || !strings.Contains(err.Error(), "background work outlived the result") || !strings.Contains(err.Error(), "active owned children") {
+		// The probe's last ps call gets only what is left of the settle
+		// window, so a slow runner can refuse on the member the last good
+		// probe saw instead of a finished final probe. Both name the child.
+		namesChild := regexp.MustCompile(`(active owned children: |last observed )pid \d+`)
+		if err == nil || !strings.Contains(err.Error(), "background work outlived the result") || !namesChild.MatchString(err.Error()) {
 			t.Fatalf("err = %v, want the background-work refusal naming the owned children", err)
 		}
 		if took > 5*time.Second {
