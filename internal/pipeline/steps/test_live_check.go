@@ -50,12 +50,14 @@ var errTestLiveCheckBudget = errors.New("test live check budget")
 // evidencePublishExcludedDirs names the folders of a run's evidence directory
 // that are never published to the evidence branch. The review conversation is
 // excluded for the reason evidence_publish.go records; the live check folder
-// holds a ledger and set-aside work, neither of which is evidence. Legacy Test
+// holds a ledger and set-aside work, neither of which is evidence, and so is the
+// review repair folder's set-aside work (setAsideUnnamedNewFiles). Legacy Test
 // scratch directories remain excluded; newTestScratch allocates outside evidence.
 func evidencePublishExcludedDirs() []string {
 	return []string{
 		reviewqa.DirName,
 		liveCheckDirName,
+		reviewRepairDirName,
 		testScratchDirName,
 		// A Test step whose work started beside the review (side_by_side)
 		// keeps its evidence and ledger one level down. Exclude any legacy

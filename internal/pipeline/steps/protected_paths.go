@@ -14,7 +14,9 @@ import (
 const githubMaxFileBytes = 100 << 20
 
 // stagePipelineChanges guards every pipeline-owned catch-all staging path,
-// including Push's leftover commit. Refusal preserves the index and worktree.
+// including Push's leftover commit. Its refusal preserves the index and
+// worktree; only a Review repair's unnamed new files change after it (see
+// unnamed below).
 //
 // before lists the untracked files the worktree held when the work being
 // committed began, as untrackedFiles read them. Those files are left out,
@@ -26,15 +28,29 @@ const githubMaxFileBytes = 100 << 20
 // (fpresta0607/code-goblins#1316). A nil before leaves no file out for that
 // reason.
 //
+// unnamed lists the new files a Review repair created but did not name in its
+// new_files (see unnamedNewFiles). They are left out the same way and named in
+// the step log under their own line, and the repair then moves them out of the
+// checkout (setAsideUnnamedNewFiles): a repair that pointed pytest's basetemp
+// into the checkout once committed 20 test artifacts (issue #114). One the
+// repair staged is unstaged here, after the protected_paths check, so every
+// refusal before staging leaves the index as the repair left it. A Review
+// repair refused at that check parks for a retry, so executeFixMode then
+// unstages and moves them out as well.
+//
 // An untracked file larger than githubMaxFileBytes is left out too, unstaged
 // and unhashed, and named in the step log. Such a file is an agent's disposable
 // artifact rather than a correction: a Test agent whose cleanup was refused
 // left a whole Chrome build in the worktree, `git add -A` committed its 302 MB
 // chrome.dll, and the push could never succeed (#1076).
-func stagePipelineChanges(sctx *pipeline.StepContext, before []string) error {
+func stagePipelineChanges(sctx *pipeline.StepContext, before, unnamed []string) error {
 	leftBehind := make(map[string]bool, len(before))
 	for _, file := range before {
 		leftBehind[file] = true
+	}
+	isUnnamed := make(map[string]bool, len(unnamed))
+	for _, file := range unnamed {
+		isUnnamed[file] = true
 	}
 	if len(sctx.Config.ProtectedPaths) > 0 {
 		// Disable renames so both source and destination are checked, and list
@@ -52,7 +68,7 @@ func stagePipelineChanges(sctx *pipeline.StepContext, before []string) error {
 				return fmt.Errorf("check protected_paths: invalid git status entry %q", entry)
 			}
 			file := entry[3:]
-			if entry[:2] == "??" && leftBehind[file] {
+			if (entry[:2] == "??" && (leftBehind[file] || isUnnamed[file])) || (entry[0] == 'A' && isUnnamed[file]) {
 				continue
 			}
 			for _, pattern := range sctx.Config.ProtectedPaths {
@@ -62,14 +78,21 @@ func stagePipelineChanges(sctx *pipeline.StepContext, before []string) error {
 			}
 		}
 	}
+	if err := unstageUnnamedNewFiles(sctx, unnamed); err != nil {
+		return err
+	}
 	untracked, err := untrackedFiles(sctx)
 	if err != nil {
 		return err
 	}
-	var notMade, oversized []string
+	var notMade, notNamed, oversized []string
 	for _, file := range untracked {
 		if leftBehind[file] {
 			notMade = append(notMade, file)
+			continue
+		}
+		if isUnnamed[file] {
+			notNamed = append(notNamed, file)
 			continue
 		}
 		info, err := os.Lstat(filepath.Join(sctx.WorkDir, filepath.FromSlash(file)))
@@ -83,10 +106,13 @@ func stagePipelineChanges(sctx *pipeline.StepContext, before []string) error {
 	if len(notMade) > 0 {
 		sctx.Log(fmt.Sprintf("left the untracked files the worktree held before this change out of the commit (%d): %s", len(notMade), namedPaths(notMade)))
 	}
+	if len(notNamed) > 0 {
+		sctx.Log(fmt.Sprintf("left the new files the repair did not name in new_files out of the commit (%d): %s", len(notNamed), namedPaths(notNamed)))
+	}
 	if len(oversized) > 0 {
 		sctx.Log(fmt.Sprintf("left untracked files larger than GitHub's 100 MiB limit out of the commit: %s", strings.Join(oversized, ", ")))
 	}
-	if len(notMade) == 0 && len(oversized) == 0 {
+	if len(notMade) == 0 && len(notNamed) == 0 && len(oversized) == 0 {
 		if _, err := stepGitRun(sctx, "add", "-A"); err != nil {
 			return err
 		}
@@ -95,7 +121,7 @@ func stagePipelineChanges(sctx *pipeline.StepContext, before []string) error {
 	// The exclusions go on standard input: a step can leave hundreds of files
 	// behind, and as arguments their paths would overrun Windows' command line.
 	pathspecs := []string{"."}
-	for _, file := range append(notMade, oversized...) {
+	for _, file := range append(append(notMade, notNamed...), oversized...) {
 		pathspecs = append(pathspecs, ":(exclude,literal)"+file)
 	}
 	if _, err := stepGitRunInput(sctx, strings.Join(pathspecs, "\x00"), "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
