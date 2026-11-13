@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -216,6 +217,11 @@ func TestTestStep_NoWrapperStartsTheBaselineAsBefore(t *testing.T) {
 	if log := strings.Join(*f.logs, "\n"); !strings.Contains(log, "baseline-ran") || strings.Contains(log, "wrapper") {
 		t.Fatalf("step log = %q, want the command's output and no word of a wrapper", log)
 	}
+	for _, call := range f.agent.calls {
+		if strings.Contains(call.Prompt, "test line") {
+			t.Fatalf("prompt = %q, want no word of a test line with no wrapper configured", call.Prompt)
+		}
+	}
 }
 
 func TestLintStep_WrapperLeavesLintAlone(t *testing.T) {
@@ -227,6 +233,98 @@ func TestLintStep_WrapperLeavesLintAlone(t *testing.T) {
 	}
 	if calls := f.calls(t); len(calls) != 0 {
 		t.Fatalf("wrapper starts = %q, want none: the wrapper is for the baseline test command", calls)
+	}
+}
+
+// wrapperWordsMarker precedes the wrapper's words, as a JSON list, in a Test
+// agent's prompt.
+const wrapperWordsMarker = "followed by the command's program and its own arguments: "
+
+// agentBuildBehindWrapper is a Test agent that starts its own build the way
+// its prompt tells it to, behind the words the prompt names, and fails the
+// test when the prompt names none.
+func agentBuildBehindWrapper(t *testing.T, f *wrapperFixture, build string) func(context.Context, agent.RunOpts) (*agent.Result, error) {
+	return func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		passing := &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}
+		_, rest, found := strings.Cut(opts.Prompt, wrapperWordsMarker)
+		if !found {
+			t.Errorf("prompt names no wrapper words for the agent's own build:\n%s", opts.Prompt)
+			return passing, nil
+		}
+		var words []string
+		if err := json.NewDecoder(strings.NewReader(rest)).Decode(&words); err != nil || len(words) == 0 {
+			t.Errorf("wrapper words in the prompt = %q, %v", words, err)
+			return passing, nil
+		}
+		shell, flag := "sh", "-c"
+		if runtime.GOOS == "windows" {
+			shell, flag = "cmd.exe", "/c"
+		}
+		shellPath, err := exec.LookPath(shell)
+		if err != nil {
+			t.Errorf("find %s: %v", shell, err)
+			return passing, nil
+		}
+		cmd := exec.CommandContext(ctx, words[0], append(words[1:], shellPath, flag, build)...)
+		cmd.Dir = opts.CWD
+		cmd.Env = mergeEnv(f.sctx.Env)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Errorf("agent's build behind the wrapper: %v\n%s", err, output)
+		}
+		return passing, nil
+	}
+}
+
+// Issue #252: a repository that names no test command leaves the build to the
+// Test agent, and that build once ran beside the machine's test line, holding
+// memory the waiting test runs of other gates needed.
+func TestTestStep_AgentStartsItsOwnBuildBehindTheWrapper(t *testing.T) {
+	f := newWrapperFixture(t, config.Commands{}, nil)
+	f.agent.runFn = agentBuildBehindWrapper(t, f, "echo agent-build")
+
+	if _, err := (&TestStep{}).Execute(f.sctx); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(f.agent.calls) == 0 {
+		t.Fatal("no Test agent turn ran")
+	}
+	calls := f.calls(t)
+	if len(calls) != 1 {
+		t.Fatalf("wrapper starts = %q, want the agent's one build and nothing else", calls)
+	}
+	run8 := f.sctx.Run.ID
+	if len(run8) > 8 {
+		run8 = run8[:8]
+	}
+	if args := calls[0]; len(args) < 3 || args[0] != "--as" || args[1] != "repo feature, run "+run8 || args[2] != "--" {
+		t.Fatalf("wrapper words = %q, want the run's facts filled in as for the baseline", args)
+	}
+	assertShellCall(t, calls[0][3:], "echo agent-build")
+	prompt := f.agent.calls[0].Prompt
+	if !strings.Contains(prompt, `starts with "turnline: "`) || !strings.Contains(prompt, "as untested with that line") {
+		t.Fatalf("prompt = %q, want the wrapper's refusal named and the scenario reported untested on it", prompt)
+	}
+	if log := strings.Join(*f.logs, "\n"); !strings.Contains(log, "machine-local wrapper given to the Test agent") {
+		t.Fatalf("step log = %q, want one line declaring the wrapper the agent was given", log)
+	}
+}
+
+// A wrapper that cannot be filled for this run gives the agent no words, so
+// the agent is told to start no build rather than start one outside the line.
+func TestTestStep_AgentWithAWrapperThatCannotBeFilledStartsNoBuild(t *testing.T) {
+	f := newWrapperFixture(t, config.Commands{}, nil)
+	f.sctx.SideLane, f.sctx.SideLaneBaseSHA = true, "HEAD"
+	f.sctx.Config.TestCommandWrapper.Command[2] = "{test_comparison_sha}"
+
+	if _, err := (&TestStep{}).Execute(f.sctx); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(f.agent.calls) == 0 {
+		t.Fatal("no Test agent turn ran")
+	}
+	prompt := f.agent.calls[0].Prompt
+	if strings.Contains(prompt, wrapperWordsMarker) || !strings.Contains(prompt, "Start no build, compile or test run") || !strings.Contains(prompt, "test_comparison_sha") {
+		t.Fatalf("prompt = %q, want no wrapper words, the reason named, and no build allowed", prompt)
 	}
 }
 
