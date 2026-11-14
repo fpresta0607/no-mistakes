@@ -424,9 +424,19 @@ type GateContextParams struct {
 }
 
 // AdmitPushParams asks whether a local receive hook's authenticated process
-// ancestry is allowed to mutate a managed gate ref.
+// ancestry is allowed to make the proposed updates to managed gate refs. Updates
+// are the pre-receive input Git read before moving any ref; the daemon refuses
+// an admission without them, since it cannot inspect what the push would move.
 type AdmitPushParams struct {
-	Gate string `json:"gate"`
+	Gate    string          `json:"gate"`
+	Updates []GateRefUpdate `json:"updates"`
+}
+
+// GateRefUpdate is one proposed ref update from a receive hook's input line.
+type GateRefUpdate struct {
+	Old string `json:"old"`
+	New string `json:"new"`
+	Ref string `json:"ref"`
 }
 
 // HealthParams has no fields but exists for consistency.

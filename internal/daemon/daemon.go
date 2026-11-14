@@ -1605,11 +1605,15 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if strings.TrimSpace(p.Gate) == "" {
 			return nil, fmt.Errorf("gate path is required")
 		}
-		if _, err := ownedGateRepoID(mgr.paths, p.Gate); err != nil {
+		repoID, err := ownedGateRepoID(mgr.paths, p.Gate)
+		if err != nil {
 			return nil, err
 		}
 		result, err := classify(ctx, "", false, true)
 		if err != nil {
+			return nil, err
+		}
+		if err := refuseUnadmittableRefUpdates(d, repoID, p.Updates); err != nil {
 			return nil, err
 		}
 		return &ipc.AdmitPushResult{Context: gateContextResult(result)}, nil

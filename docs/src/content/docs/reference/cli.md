@@ -467,6 +467,7 @@ A progressed child is observed or recovered through its existing execution; a ca
 Later authored descendants must preserve the same controller policy assertion, historical uncertainty and zero repair authority.
 Continuing from a published predecessor requires a GitHub repository with the predecessor's PR open.
 The lineage therefore ends once its newest authored child is terminal and its CI step recorded the PR merged or closed: ordinary launches and `rerun` on that branch are accepted again, since nothing can continue the lineage.
+Until then the gate's `pre-receive` admission also refuses a plain `git push no-mistakes <branch>` to that branch, and every other ref the same push carries, before any gate ref moves, so the gate branch stays at a head the lineage bound.
 Only the CI step records a PR as merged or closed, and nothing refreshes a terminal run's recorded PR state.
 Any child that ended while its PR was still open therefore keeps refusing after a later merge or close on the forge (tracked in issue #194), for example one finished by `ci_end_at_green`, `ci.release_after_checks_pass` or the CI idle timeout, or one that failed or was cancelled.
 The way out today is [`eject`](#no-mistakes-eject) followed by [`init`](#no-mistakes-init), which also deletes the repository's run history.

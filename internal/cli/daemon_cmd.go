@@ -72,8 +72,12 @@ func newDaemonAdmitPushCmd() *cobra.Command {
 				return fmt.Errorf("connect to daemon: %w", err)
 			}
 			defer client.Close()
+			updates, err := parseReceiveUpdates(cmd.InOrStdin())
+			if err != nil {
+				return err
+			}
 			var result ipc.AdmitPushResult
-			if err := client.Call(ipc.MethodAdmitPush, &ipc.AdmitPushParams{Gate: gatePath}, &result); err != nil {
+			if err := client.Call(ipc.MethodAdmitPush, &ipc.AdmitPushParams{Gate: gatePath, Updates: updates}, &result); err != nil {
 				return err
 			}
 			if !result.Context.Nested {
@@ -93,6 +97,29 @@ func newDaemonAdmitPushCmd() *cobra.Command {
 	cmd.Flags().StringVar(&gate, "gate", "", "bare repo path that is about to receive a push")
 	_ = cmd.MarkFlagRequired("gate")
 	return cmd
+}
+
+// parseReceiveUpdates reads Git's pre-receive input from standard input: one
+// "<old> <new> <ref>" line per proposed ref update. The daemon validates each
+// value and refuses an admission that carries none.
+func parseReceiveUpdates(input io.Reader) ([]ipc.GateRefUpdate, error) {
+	data, err := io.ReadAll(input)
+	if err != nil {
+		return nil, fmt.Errorf("read proposed ref updates: %w", err)
+	}
+	text := strings.TrimSuffix(string(data), "\n")
+	if text == "" {
+		return nil, nil
+	}
+	var updates []ipc.GateRefUpdate
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.Split(line, " ")
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("malformed proposed ref update %q: want \"<old> <new> <ref>\"", line)
+		}
+		updates = append(updates, ipc.GateRefUpdate{Old: fields[0], New: fields[1], Ref: fields[2]})
+	}
+	return updates, nil
 }
 
 func newDaemonNotifyPushCmd() *cobra.Command {
