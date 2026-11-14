@@ -61,6 +61,7 @@ test:
     For PR drafting prompts and title/body publication behavior, use the existing internal/e2e harness:
     TMPDIR=/tmp bash scripts/e2e.sh -tags=e2e -count=1 -v -run '<journey>' ./internal/e2e/
     On Unix keep TMPDIR=/tmp so the temporary daemon socket fits its path limit.
+    On Windows a bare bash can be the WSL launcher: run the script with the verified native Git Bash in NO_MISTAKES_TEST_BASH instead, keeping the Test scratch TMPDIR, and without one report the journey untested with that missing prerequisite.
     The harness builds this worktree's binary and fake agent, then runs the real binary, daemon and pipeline in temporary NM_HOME and HOME against local bare repositories with fail-closed forge stubs first on PATH.
     Harness.AgentInvocations returns every agent prompt.
     With FAKEAGENT_GH_MODE and FAKEAGENT_GH_LOG set, readGHStubInvocations returns each gh call including the PR body the PR phase would have published.
