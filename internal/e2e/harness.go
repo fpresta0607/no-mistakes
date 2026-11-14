@@ -675,25 +675,6 @@ func (h *Harness) TryCancelRun(runID string) error {
 	return nil
 }
 
-// RestartIdleDaemon restarts the daemon once it is idle. A run's terminal
-// status is recorded before its executor finishes cleaning up, so a restart
-// right after a run finishes can be refused with "retry when idle"; that
-// refusal changes nothing, so it is retried until the executor is released.
-func (h *Harness) RestartIdleDaemon() string {
-	h.t.Helper()
-	deadline := time.Now().Add(h.timeout(30 * time.Second))
-	for {
-		out, err := h.Run("daemon", "restart")
-		if err == nil {
-			return out
-		}
-		if !strings.Contains(out, "retry when idle") || time.Now().After(deadline) {
-			h.t.Fatalf("daemon restart: %v\n%s", err, out)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-}
-
 func (h *Harness) waitForRunStatus(branch string, timeout time.Duration, match func(types.RunStatus) bool, action string) *ipc.RunInfo {
 	h.t.Helper()
 	timeout = h.timeout(timeout)

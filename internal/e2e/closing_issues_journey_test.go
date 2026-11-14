@@ -242,7 +242,9 @@ func TestClosingIssueRefsGitHubJourney(t *testing.T) {
 	}
 
 	// Scenario: a rerun (after a daemon restart) inherits refs and adds one.
-	h.RestartIdleDaemon()
+	if out, err := h.Run("daemon", "restart"); err != nil {
+		t.Fatalf("daemon restart: %v\n%s", err, out)
+	}
 	if out, err := h.RunInDir(wt, "rerun", "--closes", "200"); err != nil || !strings.Contains(out, "Rerun started") {
 		t.Fatalf("rerun --closes: %v\n%s", err, out)
 	}

@@ -29,13 +29,9 @@ type evidenceFixture struct {
 
 func newEvidenceFixture(t *testing.T) *evidenceFixture {
 	t.Helper()
-	// Use short temp dir to avoid macOS 104-byte Unix socket path limit.
-	tmpDir, err := os.MkdirTemp("", "dtest")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(tmpDir) })
-	p := paths.WithRoot(tmpDir)
+	// The daemon socket lives under this root, and t.TempDir() puts it past
+	// the macOS Unix socket path limit.
+	p := paths.WithRoot(shortTempDir(t))
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}
