@@ -44,6 +44,7 @@ Invalid, non-positive, fractional, or overflowing values fail the test instead o
 
 Go's package timeout remains the outer limit.
 Raise it separately when the complete suite needs more time, for example: `bash scripts/e2e.sh -tags=e2e -count=1 -timeout=60m ./internal/e2e/... ./internal/pipeline/steps/...`.
+On Windows, run the script with Git for Windows' Bash, as `make e2e` does, because a bare `bash` can resolve to the WSL launcher; the script refuses to build or start anything when its shell and the `go` on its `PATH` target different platforms.
 
 ## `NM_DAEMON_CONNECT_TIMEOUT`
 
