@@ -978,7 +978,7 @@ func TestBuildTestingSummaryForPR_FencesFileCaption(t *testing.T) {
 	evidenceRoot := filepath.Join(t.TempDir(), "evidence", "run-123")
 	fileBody := "safe evidence body"
 	localPath := writeTempEvidenceFile(t, evidenceRoot, "caption.txt", []byte(fileBody))
-	caption := "<img src=x onerror=alert(1)>\n[leak](file:///tmp/secret)"
+	caption := "<img src=x onerror=alert(1)>\n[leak](javascript:alert(2))"
 	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"label":"Captioned log","path":%q,"content":%q}]}`, localPath, caption)
 	steps := []*db.StepResult{
 		{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings},

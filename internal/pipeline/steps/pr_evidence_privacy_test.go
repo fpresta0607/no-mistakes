@@ -112,12 +112,122 @@ func TestPRStep_ExecuteKeepsCapturedRuntimeContextOutOfThePublishedBody(t *testi
 				fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(capturedPrompt))),
 				"Binary capture",
 				withheldArtifactContent,
-				"publish ok in " + safepath.EvidencePlaceholder,
+				// Test evidence naming the run's directory is withheld rather
+				// than rewritten (issue #125); the agent-written body is not Test
+				// evidence and keeps its rewrite.
+				"Test evidence entries withheld from this pull request",
 				"evidence now lands under " + safepath.EvidencePlaceholder,
-				"from a stub agent in " + safepath.EvidencePlaceholder + ".",
 			} {
 				if !strings.Contains(filepath.ToSlash(published), want) {
 					t.Errorf("expected %q in published PR content:\n%s", want, published)
+				}
+			}
+		})
+	}
+}
+
+// TestPRStep_ExecuteWithholdsTestEvidenceCarryingPrivateRuntimeDetails reproduces
+// issue #125 on the bytes handed to the provider CLI: synthetic Test evidence
+// nests a home-relative cache path, an interpreter location, a run identifier
+// and a process identifier inside serialized JSON, an artifact label and
+// scenario text. Path redaction only rewrote known prefixes, so all of them were
+// published. Each entry that carries one is withheld and counted in a notice,
+// repository-relative entries stay public, and restamping the attestation for a
+// later head (the CI path) brings none of them back (decision 1022050).
+func TestPRStep_ExecuteWithholdsTestEvidenceCarryingPrivateRuntimeDetails(t *testing.T) {
+	t.Parallel()
+	const syntheticRunID = "01M7SYNTHETICRUN0000000000"
+	for _, tc := range []struct {
+		name      string
+		isCompact bool
+	}{
+		{name: "compact", isCompact: true},
+		{name: "expanded", isCompact: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			env, logFile := fakeGH(t, "")
+			ag := &mockAgent{
+				name: "test",
+				runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+					payload, err := json.Marshal(prContent{Title: "fix(checkout): retry declined cards", Body: "## What Changed\n\n- the retry button is back"})
+					if err != nil {
+						return nil, err
+					}
+					return &agent.Result{Output: json.RawMessage(payload)}, nil
+				},
+			}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			publishValidationTextForTest(sctx)
+			sctx.Env = env
+			sctx.EvidenceDir = filepath.Join(t.TempDir(), "evidence", syntheticRunID)
+			sctx.Config.Test.Evidence.Compact = tc.isCompact
+
+			nestedEvidence := `{"evidence":{"artifact":{"path":"/home/runner/.cache/checkout/report.json"},"run":"` + syntheticRunID + `","pid":4711}}`
+			insertCompletedStep(t, sctx, types.StepTest, findingsJSON(t, types.Findings{
+				TestingSummary: "Drove the checkout with the interpreter at /opt/toolchain/bin/python3.",
+				Tested: []string{
+					"`go test ./internal/checkout/...`",
+					`{"interpreter":"C:\\Toolchain\\python.exe","process_id":4711}`,
+					"warmed the cache at ~/.cache/checkout",
+				},
+				Verdict: types.TestVerdictGo,
+				Scenarios: []types.TestScenario{
+					{Name: "a declined card can retry", Result: types.ScenarioResultPass, Live: true, Evidence: "screenshots/retry.png"},
+					{Name: "the receipt email arrives", Result: types.ScenarioResultUntested, Reason: "needs the mailer at /usr/local/bin/mailer"},
+				},
+				Artifacts: []types.TestArtifact{
+					{Kind: "command-output", Label: "Runtime evidence", Content: nestedEvidence},
+					{Kind: "command-output", Label: "Captured from /var/tmp/checkout-build", Content: "build ok"},
+					{Kind: "command-output", Label: "Retry response", Content: "internal/checkout/handler.go answered 200 on retry"},
+				},
+			}), "")
+
+			if _, err := (&PRStep{}).Execute(sctx); err != nil {
+				t.Fatal(err)
+			}
+
+			data, err := os.ReadFile(logFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			published := string(data)
+			leaks := []string{"/home/runner", ".cache/checkout", "/opt/toolchain", "Toolchain", "/usr/local/bin", "/var/tmp", syntheticRunID, "4711"}
+			for _, leak := range leaks {
+				if strings.Contains(published, leak) {
+					t.Errorf("published PR content leaked %q:\n%s", leak, published)
+				}
+			}
+			for _, want := range []string{
+				"6 Test evidence entries withheld from this pull request",
+				"The raw evidence is kept privately with the run.",
+				"a declined card can retry",
+				"screenshots/retry.png",
+				"Retry response",
+				"internal/checkout/handler.go answered 200 on retry",
+				pipelineAttestationCommentPrefix,
+				headSHA,
+			} {
+				if !strings.Contains(published, want) {
+					t.Errorf("expected %q in published PR content:\n%s", want, published)
+				}
+			}
+			if !tc.isCompact && !strings.Contains(published, "go test ./internal/checkout/...") {
+				t.Errorf("expected the repository-relative tested entry in the expanded body:\n%s", published)
+			}
+
+			steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			restamped, ok := rebindPipelineAttestationWithSteps(published, strings.Repeat("d", 40), steps, pipelineAttestationPolicy{})
+			if !ok {
+				t.Fatalf("the published body carries no attestation to restamp:\n%s", published)
+			}
+			for _, leak := range leaks {
+				if strings.Contains(restamped, leak) {
+					t.Errorf("restamped PR content leaked %q:\n%s", leak, restamped)
 				}
 			}
 		})
