@@ -6,7 +6,9 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func releasedStepHandback(t *testing.T) (*DB, *StepHandback) {
+// parkedStepHandback parks a Test step on its failed initial round and returns
+// the receipt a release of that round would record.
+func parkedStepHandback(t *testing.T) (*DB, *StepHandback) {
 	t.Helper()
 	database := openTestDB(t)
 	repo, err := database.InsertRepo("fixture", "https://github.com/example/fixture.git", "main")
@@ -35,7 +37,12 @@ func releasedStepHandback(t *testing.T) (*DB, *StepHandback) {
 	if err := database.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 1, 10, &findings); err != nil {
 		t.Fatal(err)
 	}
-	receipt := &StepHandback{RunID: run.ID, StepResultID: step.ID, StepName: types.StepTest, RoundID: round.ID, CallerDir: "caller", ReleasedHead: "released"}
+	return database, &StepHandback{RunID: run.ID, StepResultID: step.ID, StepName: types.StepTest, RoundID: round.ID, CallerDir: "caller", ReleasedHead: "released"}
+}
+
+func releasedStepHandback(t *testing.T) (*DB, *StepHandback) {
+	t.Helper()
+	database, receipt := parkedStepHandback(t)
 	if err := database.ReleaseStepHandback(receipt); err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +69,7 @@ func TestAcceptStepHandbackRequiresTheReleasedGateUnchanged(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		{"validation-only run pinned no repair", pinValidationOnlyAutoFixLimit},
 		{"receipt already accepted", func(t *testing.T, database *DB, receipt *StepHandback) {
 			if _, err := database.sql.Exec(`UPDATE step_handbacks SET accepted_head = 'earlier' WHERE id = ?`, receipt.ID); err != nil {
 				t.Fatal(err)
@@ -108,5 +116,32 @@ func TestReleaseStepHandbackIssuesOneReceiptPerRound(t *testing.T) {
 	stored, err := database.GetStepHandbackByRound(receipt.RoundID)
 	if err != nil || stored == nil || stored.ID != receipt.ID {
 		t.Fatalf("round receipt = %+v, %v; want %s", stored, err, receipt.ID)
+	}
+}
+
+// pinValidationOnlyAutoFixLimit records the zero limit StartStepWithAutoFixLimit
+// pins on every step of a validation-only run, instead of the NULL an ordinary
+// auto_fix.<step>: 0 stores.
+func pinValidationOnlyAutoFixLimit(t *testing.T, database *DB, receipt *StepHandback) {
+	t.Helper()
+	if _, err := database.sql.Exec(`UPDATE step_results SET auto_fix_limit = 0 WHERE id = ?`, receipt.StepResultID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReleaseStepHandbackRefusesAValidationOnlyGate(t *testing.T) {
+	// Arrange
+	database, receipt := parkedStepHandback(t)
+	pinValidationOnlyAutoFixLimit(t, database, receipt)
+
+	// Act
+	err := database.ReleaseStepHandback(receipt)
+
+	// Assert
+	if err == nil {
+		t.Fatal("a validation-only gate was released to its contributor")
+	}
+	if stored, err := database.GetStepHandbackByRound(receipt.RoundID); err != nil || stored != nil {
+		t.Fatalf("refused release recorded receipt %+v, %v", stored, err)
 	}
 }

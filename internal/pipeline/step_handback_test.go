@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,11 +17,14 @@ import (
 const handbackGateFailure = `{"findings":[{"id":"failure-1","severity":"error","action":"auto-fix","description":"command failed"}]}`
 
 // handbackGateStep fails its first execution, accepts a handback by moving
-// the run to its correction, and passes only when re-executed on that head.
+// the run to its correction, and passes only when re-executed on that head,
+// or in an operator's fix round when isFixPassing is set.
 type handbackGateStep struct {
-	name       types.StepName
-	correction string
-	executions atomic.Int32
+	name         types.StepName
+	correction   string
+	isFixPassing bool
+	executions   atomic.Int32
+	handbacks    atomic.Int32
 }
 
 func (s *handbackGateStep) Name() types.StepName { return s.name }
@@ -29,6 +33,9 @@ func (s *handbackGateStep) Execute(sctx *StepContext) (*StepOutcome, error) {
 	if s.executions.Add(1) == 1 && sctx.Run.HeadSHA != s.correction {
 		return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: handbackGateFailure}, nil
 	}
+	if sctx.Fixing && s.isFixPassing {
+		return &StepOutcome{}, nil
+	}
 	if sctx.Run.HeadSHA != s.correction || sctx.Fixing {
 		return nil, fmt.Errorf("re-executed on %s with fixing %v, want a fresh validation of %s", sctx.Run.HeadSHA, sctx.Fixing, s.correction)
 	}
@@ -36,6 +43,7 @@ func (s *handbackGateStep) Execute(sctx *StepContext) (*StepOutcome, error) {
 }
 
 func (s *handbackGateStep) HandbackStep(sctx *StepContext, request ipc.StepHandbackParams) (*ipc.StepHandbackResult, error) {
+	s.handbacks.Add(1)
 	if !request.Resume {
 		return &ipc.StepHandbackResult{RunID: sctx.Run.ID, Step: s.name, ReceiptID: "receipt"}, nil
 	}
@@ -244,4 +252,89 @@ func TestExecutorHandbackRefusesAGateWithAutomaticRepair(t *testing.T) {
 	}
 	cancel()
 	<-done
+}
+
+// A released gate is still the operator's: approve, fix and skip reach it, and
+// the receipt it was released on can no longer move the run afterwards.
+func TestExecutorReleasedHandbackGateStillTakesOperatorResponses(t *testing.T) {
+	for _, action := range []types.ApprovalAction{types.ActionApprove, types.ActionFix, types.ActionSkip} {
+		for _, name := range []types.StepName{types.StepTest, types.StepLint} {
+			t.Run(string(action)+"/"+string(name), func(t *testing.T) {
+				// Arrange
+				database, paths, run, repo := setupTest(t)
+				gate := &handbackGateStep{name: name, correction: "correction", isFixPassing: true}
+				next := newPassStep(types.StepPush)
+				executor := NewExecutor(database, paths, &config.Config{}, nil, []Step{gate, next}, nil)
+				done := make(chan error, 1)
+				go func() { done <- executor.Execute(context.Background(), run, repo, t.TempDir()) }()
+				waitForHandbackGate(t, executor)
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				defer cancel()
+				request := ipc.StepHandbackParams{RepoID: repo.ID, RunID: run.ID, Branch: run.Branch}
+				if _, err := executor.HandbackStep(ctx, request); err != nil {
+					t.Fatalf("release: %v", err)
+				}
+				var findingIDs []string
+				if action == types.ActionFix {
+					findingIDs = []string{"failure-1"}
+				}
+
+				// Act
+				respondErr := executor.Respond(name, action, findingIDs)
+				var runErr error
+				select {
+				case runErr = <-done:
+				case <-time.After(10 * time.Second):
+					t.Fatalf("run did not finish after %s", action)
+				}
+				request.Resume, request.ReceiptID = true, "receipt"
+				_, resumeErr := executor.HandbackStep(ctx, request)
+
+				// Assert
+				if respondErr != nil || runErr != nil {
+					t.Fatalf("%s on a released gate: respond %v, run %v", action, respondErr, runErr)
+				}
+				if resumeErr == nil {
+					t.Fatal("a receipt resumed after its gate moved on")
+				}
+				if gate.handbacks.Load() != 1 || next.callCount() != 1 {
+					t.Fatalf("the step handled %d handbacks and the next step ran %d times, want only the release and one run", gate.handbacks.Load(), next.callCount())
+				}
+				stored, err := database.GetRun(run.ID)
+				if err != nil || stored.Status != types.RunCompleted || stored.HeadSHA != run.HeadSHA {
+					t.Fatalf("run = %+v, %v; want it completed on its own head %s", stored, err, run.HeadSHA)
+				}
+			})
+		}
+	}
+}
+
+func TestValidationOnlyRefusesStepHandback(t *testing.T) {
+	for _, isResume := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resume=%t", isResume), func(t *testing.T) {
+			// Arrange
+			database, root, child, repo := validationOnlyFixture(t)
+			gate := &handbackGateStep{name: types.StepTest, correction: "correction"}
+			executor := NewExecutor(database, root, &config.Config{}, nil, []Step{gate}, nil)
+			ctx := startParkedValidation(t, executor, child, repo, types.StepTest)
+
+			// Act
+			_, err := executor.HandbackStep(ctx, ipc.StepHandbackParams{RepoID: repo.ID, RunID: child.ID, Branch: child.Branch, Resume: isResume, ReceiptID: "receipt"})
+
+			// Assert
+			if err == nil || !strings.Contains(err.Error(), "zero automatic/manual repair authority") {
+				t.Fatalf("handback error = %v, want the zero repair authority refusal", err)
+			}
+			if gate.handbacks.Load() != 0 {
+				t.Fatal("a validation-only Test gate released or accepted a handback")
+			}
+			if !executor.AwaitingApproval() {
+				t.Fatal("a refused handback released the validation-only gate")
+			}
+			stored, err := database.GetRun(child.ID)
+			if err != nil || stored.HeadSHA != child.HeadSHA {
+				t.Fatalf("run = %+v, %v; want its head %s unchanged", stored, err, child.HeadSHA)
+			}
+		})
+	}
 }

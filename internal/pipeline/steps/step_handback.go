@@ -94,13 +94,13 @@ func requireContributorFailure(findingsJSON string) error {
 	if err != nil {
 		return err
 	}
-	if len(findings.Items) == 0 {
-		return fmt.Errorf("handback requires a parked failure")
-	}
 	for _, finding := range findings.Items {
-		if finding.ActionOrDefault() != types.ActionAutoFix {
+		if finding.ActionOrDefault() == types.ActionAskUser {
 			return fmt.Errorf("finding %s needs an operator decision, not a contributor correction", finding.ID)
 		}
+	}
+	if len(types.AutoFixableFindings(findings).Items) == 0 {
+		return fmt.Errorf("handback requires a parked failure")
 	}
 	return nil
 }

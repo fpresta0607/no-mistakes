@@ -15,6 +15,10 @@ import (
 
 const stepHandbackFailure = `{"findings":[{"id":"failure-1","severity":"error","action":"auto-fix","description":"command failed with exit code 1"}]}`
 
+// stepHandbackFailureWithNote is a contributor failure plus the informational
+// note the Test step adds when a program it started opens a window.
+const stepHandbackFailureWithNote = `{"findings":[{"id":"failure-1","severity":"error","action":"auto-fix","description":"command failed with exit code 1"},{"id":"test-window-1","severity":"info","action":"no-op","description":"a program opened a window on the hidden desktop"}]}`
+
 type stepHandbackFixture struct {
 	t        *testing.T
 	caller   string
@@ -125,44 +129,52 @@ func (f *stepHandbackFixture) assertHandbackUnmoved(released *ipc.StepHandbackRe
 }
 
 func TestStepHandbackAcceptsOneContributorCommitOnTheParkedHead(t *testing.T) {
-	for _, name := range []types.StepName{types.StepTest, types.StepLint} {
-		t.Run(string(name), func(t *testing.T) {
-			// Arrange
-			fixture := setupStepHandback(t, name, stepHandbackFailure)
-			released := fixture.release()
-			if released.ReceiptID == "" || released.ReleasedHead != fixture.run.HeadSHA || released.Step != name {
-				t.Fatalf("release result = %+v", released)
-			}
-			if anchored := gitCmd(t, fixture.caller, "rev-parse", released.ReleasedRef); anchored != released.ReleasedHead {
-				t.Fatalf("released ref %s = %s, want %s", released.ReleasedRef, anchored, released.ReleasedHead)
-			}
-			if replay := fixture.release(); replay.ReceiptID != released.ReceiptID {
-				t.Fatalf("a second release of the same round issued receipt %s, want %s", replay.ReceiptID, released.ReceiptID)
-			}
-			correction := commitCorrection(t, fixture.caller, "correction.txt")
+	for _, test := range []struct {
+		name     string
+		findings string
+	}{
+		{"failure", stepHandbackFailure},
+		{"failure with an informational note", stepHandbackFailureWithNote},
+	} {
+		for _, name := range []types.StepName{types.StepTest, types.StepLint} {
+			t.Run(test.name+"/"+string(name), func(t *testing.T) {
+				// Arrange
+				fixture := setupStepHandback(t, name, test.findings)
+				released := fixture.release()
+				if released.ReceiptID == "" || released.ReleasedHead != fixture.run.HeadSHA || released.Step != name {
+					t.Fatalf("release result = %+v", released)
+				}
+				if anchored := gitCmd(t, fixture.caller, "rev-parse", released.ReleasedRef); anchored != released.ReleasedHead {
+					t.Fatalf("released ref %s = %s, want %s", released.ReleasedRef, anchored, released.ReleasedHead)
+				}
+				if replay := fixture.release(); replay.ReceiptID != released.ReceiptID {
+					t.Fatalf("a second release of the same round issued receipt %s, want %s", replay.ReceiptID, released.ReceiptID)
+				}
+				correction := commitCorrection(t, fixture.caller, "correction.txt")
 
-			// Act
-			accepted, err := fixture.handler.HandbackStep(fixture.sctx, fixture.request(true, released.ReceiptID))
+				// Act
+				accepted, err := fixture.handler.HandbackStep(fixture.sctx, fixture.request(true, released.ReceiptID))
 
-			// Assert
-			if err != nil {
-				t.Fatalf("resume: %v", err)
-			}
-			if accepted.AcceptedHead != correction || accepted.ReceiptID != released.ReceiptID {
-				t.Fatalf("resume result = %+v, want accepted %s", accepted, correction)
-			}
-			if head := gitCmd(t, fixture.managed, "rev-parse", "HEAD"); head != correction {
-				t.Fatalf("managed head = %s, want the correction %s", head, correction)
-			}
-			run, err := fixture.database.GetRun(fixture.run.ID)
-			if err != nil || run.HeadSHA != correction || fixture.sctx.Run.HeadSHA != correction {
-				t.Fatalf("run head = %+v, %v; in memory %s; want %s", run, err, fixture.sctx.Run.HeadSHA, correction)
-			}
-			receipt, err := fixture.database.GetStepHandback(released.ReceiptID)
-			if err != nil || receipt.AcceptedHead == nil || *receipt.AcceptedHead != correction {
-				t.Fatalf("receipt = %+v, %v", receipt, err)
-			}
-		})
+				// Assert
+				if err != nil {
+					t.Fatalf("resume: %v", err)
+				}
+				if accepted.AcceptedHead != correction || accepted.ReceiptID != released.ReceiptID {
+					t.Fatalf("resume result = %+v, want accepted %s", accepted, correction)
+				}
+				if head := gitCmd(t, fixture.managed, "rev-parse", "HEAD"); head != correction {
+					t.Fatalf("managed head = %s, want the correction %s", head, correction)
+				}
+				run, err := fixture.database.GetRun(fixture.run.ID)
+				if err != nil || run.HeadSHA != correction || fixture.sctx.Run.HeadSHA != correction {
+					t.Fatalf("run head = %+v, %v; in memory %s; want %s", run, err, fixture.sctx.Run.HeadSHA, correction)
+				}
+				receipt, err := fixture.database.GetStepHandback(released.ReceiptID)
+				if err != nil || receipt.AcceptedHead == nil || *receipt.AcceptedHead != correction {
+					t.Fatalf("receipt = %+v, %v", receipt, err)
+				}
+			})
+		}
 	}
 }
 
@@ -247,6 +259,9 @@ func TestStepHandbackLeavesOperatorDecisionsParked(t *testing.T) {
 	}{
 		{"automatic repair enabled", stepHandbackFailure, 1},
 		{"ask-user finding", `{"findings":[{"id":"failure-1","severity":"error","action":"auto-fix","description":"failed"},{"id":"verdict-1","severity":"warning","action":"ask-user","description":"inconclusive"}]}`, 0},
+		{"safety refusal", `{"findings":[{"id":"failure-1","severity":"error","action":"auto-fix","description":"failed"},{"id":"agent-safety-refusal","severity":"error","action":"ask-user","description":"the agent refused"}]}`, 0},
+		{"protected-path refusal", `{"findings":[{"id":"failure-1","severity":"error","action":"auto-fix","description":"failed"},{"id":"protected-path-refusal","severity":"error","action":"ask-user","description":"the repair touched a protected path"}]}`, 0},
+		{"only an informational note", `{"findings":[{"id":"test-window-1","severity":"info","action":"no-op","description":"a program opened a window on the hidden desktop"}]}`, 0},
 	} {
 		for _, name := range []types.StepName{types.StepTest, types.StepLint} {
 			t.Run(test.name+"/"+string(name), func(t *testing.T) {
@@ -270,5 +285,29 @@ func TestStepHandbackLeavesOperatorDecisionsParked(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestStepHandbackRefusesAResumeFromAnotherWorktree(t *testing.T) {
+	for _, name := range []types.StepName{types.StepTest, types.StepLint} {
+		t.Run(string(name), func(t *testing.T) {
+			// Arrange
+			fixture := setupStepHandback(t, name, stepHandbackFailure)
+			released := fixture.release()
+			other := filepath.Join(t.TempDir(), "other")
+			gitCmd(t, fixture.caller, "clone", "--branch", "feature", fixture.caller, other)
+			correction := commitCorrection(t, other, "correction.txt")
+			request := fixture.request(true, released.ReceiptID)
+			request.CallerDir, request.HeadSHA = other, correction
+
+			// Act
+			_, err := fixture.handler.HandbackStep(fixture.sctx, request)
+
+			// Assert
+			if err == nil || !strings.Contains(err.Error(), "resume from the worktree the failure was released to") {
+				t.Fatalf("resume from another worktree = %v, want a recorded-worktree refusal", err)
+			}
+			fixture.assertHandbackUnmoved(released)
+		})
 	}
 }

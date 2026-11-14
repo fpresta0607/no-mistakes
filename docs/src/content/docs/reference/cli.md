@@ -803,7 +803,8 @@ no-mistakes axi handback
 no-mistakes axi handback --resume --receipt <id>
 ```
 
-Release requires every finding on the parked step to be auto-fixable, with no `ask-user` finding and no safety or protected-path refusal, and refuses a validation-only run.
+Release requires at least one auto-fixable finding on the parked step, with no `ask-user` finding and no safety or protected-path refusal; informational `no-op` findings do not block it.
+Release refuses a validation-only run.
 The caller must be a worktree of the repository on the run's branch whose head is the run's head or one of its ancestors, and the managed worktree must be clean on that head.
 Release fetches the run's head into the caller as `refs/no-mistakes/step-handback/<run>/<round>` and records one native receipt for the parked round.
 The run stays active and the step stays `awaiting_approval` with its findings intact; release invokes no fixer and records no decision.
