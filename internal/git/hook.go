@@ -19,7 +19,9 @@ const preservedPreReceiveHook = "pre-receive.no-mistakes-user"
 // PreReceiveHookScript returns the fail-closed admission hook that runs before
 // Git mutates any managed gate ref. The daemon authenticates the hook process's
 // ancestry, so a validation-step descendant cannot bypass CLI guards with a
-// direct push.
+// direct push, and it reads the proposed ref updates, so a branch-specific
+// refusal lands before Git moves any ref of the push. The hook reads its input
+// once and hands the same bytes to admission and to a preserved user hook.
 func PreReceiveHookScript() string {
 	exe, err := os.Executable()
 	if err != nil {
@@ -48,7 +50,8 @@ case "$GATE_DIR" in
     GATE_DIR=$(cd "$HOOK_DIR/.." 2>/dev/null && (/bin/pwd -P 2>/dev/null || pwd -P) || :)
     ;;
 esac
-out=$(NM_HOOK_HELPER=1 "$NM_BIN" daemon admit-push --gate "$GATE_DIR" 2>&1)
+NM_UPDATES=$(cat)
+out=$(printf '%s\n' "$NM_UPDATES" | NM_HOOK_HELPER=1 "$NM_BIN" daemon admit-push --gate "$GATE_DIR" 2>&1)
 status=$?
 if [ $status -ne 0 ]; then
   printf 'no-mistakes: gate push refused before ref mutation:\n%s\n' "$out" >&2
@@ -56,7 +59,8 @@ if [ $status -ne 0 ]; then
 fi
 USER_HOOK="$GATE_DIR/hooks/` + preservedPreReceiveHook + `"
 if [ -x "$USER_HOOK" ]; then
-  exec "$USER_HOOK"
+  printf '%s\n' "$NM_UPDATES" | "$USER_HOOK"
+  exit $?
 fi
 exit 0
 `

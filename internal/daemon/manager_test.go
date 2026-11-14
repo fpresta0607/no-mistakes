@@ -1964,7 +1964,8 @@ func TestAdmitPushRejectsGateFromAnotherHome(t *testing.T) {
 	}
 
 	var ok ipc.AdmitPushResult
-	if err := client.Call(ipc.MethodAdmitPush, &ipc.AdmitPushParams{Gate: p.RepoDir(repoID)}, &ok); err != nil {
+	update := ipc.GateRefUpdate{Old: strings.Repeat("0", 40), New: strings.Repeat("a", 40), Ref: "refs/heads/main"}
+	if err := client.Call(ipc.MethodAdmitPush, &ipc.AdmitPushParams{Gate: p.RepoDir(repoID), Updates: []ipc.GateRefUpdate{update}}, &ok); err != nil {
 		t.Fatalf("admit for this daemon's own gate must still be classified: %v", err)
 	}
 }
