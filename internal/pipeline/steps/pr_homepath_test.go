@@ -63,6 +63,11 @@ var homePathLeakNeedles = []string{
 	"C:/Users/testuser",
 }
 
+// withheldNoticeFragment is in the notice that replaces Test evidence carrying a
+// local path: such an entry is withheld whole, not published path-redacted
+// (issue #125), and the notice is what shows it was not dropped silently.
+const withheldNoticeFragment = "withheld from this pull request"
+
 type homePathLeakCase struct {
 	name string
 	// evidenceDir overrides the run's evidence directory. Absolute artifact
@@ -117,7 +122,7 @@ func TestPRStep_BuildPRContentRedactsAbsoluteHomePaths(t *testing.T) {
 					Content: "platform linux -- Python 3.12.3, pytest-8.2.0\nrootdir: " + fixtureWorktreePath + "\nconfigfile: pyproject.toml\n2 passed in 0.31s",
 				}},
 			}),
-			wantVisible: []string{"rootdir: ~/.no-mistakes/worktrees/ab12cd/1/svc", "2 passed in 0.31s"},
+			wantVisible: []string{"Ran the targeted suite.", withheldNoticeFragment},
 		},
 		{
 			name:        "worktree path assignment inside captured output",
@@ -130,7 +135,7 @@ func TestPRStep_BuildPRContentRedactsAbsoluteHomePaths(t *testing.T) {
 					Content: `WORKTREE = "` + fixtureWorktreePath + `"` + "\nDEBUG = False",
 				}},
 			}),
-			wantVisible: []string{`WORKTREE = "~/.no-mistakes/worktrees/ab12cd/1/svc"`, "DEBUG = False"},
+			wantVisible: []string{"Replayed the generator with the recorded settings.", withheldNoticeFragment},
 		},
 		{
 			name:        "the same path repeated many times",
@@ -147,7 +152,7 @@ func TestPRStep_BuildPRContentRedactsAbsoluteHomePaths(t *testing.T) {
 						"basetemp: " + fixtureHome + "/tmp/pytest-of-testuser",
 				}},
 			}),
-			wantVisible: []string{"cachedir: ~/.no-mistakes/worktrees/ab12cd/1/svc/.pytest_cache"},
+			wantVisible: []string{"Collected the full session header.", withheldNoticeFragment},
 		},
 		{
 			name:        "macOS home root",
@@ -160,7 +165,7 @@ func TestPRStep_BuildPRContentRedactsAbsoluteHomePaths(t *testing.T) {
 					Content: "rootdir: /Users/testuser/.no-mistakes/worktrees/ab12cd/1/svc",
 				}},
 			}),
-			wantVisible: []string{"rootdir: ~/.no-mistakes/worktrees/ab12cd/1/svc"},
+			wantVisible: []string{"Captured the run header.", withheldNoticeFragment},
 		},
 		{
 			name:        "windows home root",
@@ -173,7 +178,7 @@ func TestPRStep_BuildPRContentRedactsAbsoluteHomePaths(t *testing.T) {
 					Content: `rootdir: C:\Users\testuser\.no-mistakes\worktrees\ab12cd\1\svc`,
 				}},
 			}),
-			wantVisible: []string{`rootdir: ~\.no-mistakes\worktrees\ab12cd\1\svc`},
+			wantVisible: []string{"Captured the run header.", withheldNoticeFragment},
 		},
 		{
 			name:        "testing summary prose",
@@ -181,7 +186,7 @@ func TestPRStep_BuildPRContentRedactsAbsoluteHomePaths(t *testing.T) {
 			testFindings: findingsJSON(t, types.Findings{
 				TestingSummary: "Ran the suite from " + fixtureWorktreePath + " and captured the output.",
 			}),
-			wantVisible: []string{"Ran the suite from ~/.no-mistakes/worktrees/ab12cd/1/svc"},
+			wantVisible: []string{withheldNoticeFragment},
 		},
 		{
 			name:        "tested command detail",
@@ -190,7 +195,7 @@ func TestPRStep_BuildPRContentRedactsAbsoluteHomePaths(t *testing.T) {
 				Items:  []types.Finding{{Severity: types.FindingSeverityError, Description: "one assertion failed"}},
 				Tested: []string{"python -m pytest " + fixtureWorktreePath + "/tests/test_api.py"},
 			}),
-			wantVisible: []string{"python -m pytest ~/.no-mistakes/worktrees/ab12cd/1/svc/tests/test_api.py"},
+			wantVisible: []string{withheldNoticeFragment},
 		},
 		{
 			name:        "review finding file and description",
@@ -295,7 +300,7 @@ func TestPRStep_ExecuteRedactsAbsoluteHomePathsBeforePublishing(t *testing.T) {
 			t.Fatalf("published PR content leaked %q:\n%s", needle, published)
 		}
 	}
-	for _, want := range []string{"rootdir: ~/.no-mistakes/worktrees/ab12cd/1/svc", "evidence now lands under " + safepath.EvidencePlaceholder} {
+	for _, want := range []string{"Captured the run header.", withheldNoticeFragment, "evidence now lands under " + safepath.EvidencePlaceholder} {
 		if !strings.Contains(published, want) {
 			t.Fatalf("expected %q in published PR content:\n%s", want, published)
 		}
@@ -580,7 +585,9 @@ func TestPRStep_BuildPRContentRedactsRunWorktreePaths(t *testing.T) {
 			t.Errorf("PR body leaked %q:\n%s", leak, content.Body)
 		}
 	}
-	for _, want := range []string{"ran " + filepath.Join("{run-worktree}", "bin", "tool"), "saw " + filepath.Join("{run-worktree}", "out.log")} {
+	// Test evidence naming a worktree is withheld whole rather than rewritten
+	// (issue #125); the leak checks above still hold.
+	for _, want := range []string{"Ran the tool.", withheldNoticeFragment} {
 		if !strings.Contains(content.Body, want) {
 			t.Errorf("expected %q in PR body:\n%s", want, content.Body)
 		}
