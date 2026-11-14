@@ -2,10 +2,12 @@ package git
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -26,11 +28,80 @@ func TestPreReceiveHookScript(t *testing.T) {
 			t.Errorf("pre-receive hook missing %q", want)
 		}
 	}
-	if strings.Contains(script, "read oldrev") {
-		t.Fatal("admission wrapper must leave stdin untouched for a preserved user hook")
-	}
 	if !strings.Contains(script, "exit $status") {
 		t.Fatal("admission failure must reject the ref update")
+	}
+}
+
+// TestPreReceiveHookHandsTheSameUpdatesToAdmissionAndTheUserHook runs the
+// managed hook with a stand-in admission binary: admission must read the exact
+// proposed updates, a preserved user hook must read the same bytes after it,
+// and a refusal must reject the push without running the user hook.
+func TestPreReceiveHookHandsTheSameUpdatesToAdmissionAndTheUserHook(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pre-receive hook is /bin/sh-only")
+	}
+	const updates = "1111111111111111111111111111111111111111 2222222222222222222222222222222222222222 refs/heads/feature\n" +
+		"0000000000000000000000000000000000000000 3333333333333333333333333333333333333333 refs/heads/side\n"
+	for _, test := range []struct {
+		name        string
+		admitStatus int
+	}{
+		{name: "admitted", admitStatus: 0},
+		{name: "refused", admitStatus: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			bare := filepath.Join(base, "gate.git")
+			if err := InitBare(context.Background(), bare); err != nil {
+				t.Fatal(err)
+			}
+			admitInput := filepath.Join(base, "admit-input")
+			userInput := filepath.Join(base, "user-input")
+			fakeBin := filepath.Join(base, "fake-no-mistakes")
+			fakeScript := "#!/bin/sh\ncat > " + shellSingleQuote(admitInput) + "\nexit " + strconv.Itoa(test.admitStatus) + "\n"
+			if err := os.WriteFile(fakeBin, []byte(fakeScript), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			hookPath := filepath.Join(bare, "hooks", "pre-receive")
+			if err := os.WriteFile(hookPath, []byte(preReceiveHookScript(fakeBin)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			userHook := "#!/bin/sh\ncat > " + shellSingleQuote(userInput) + "\nexit 5\n"
+			if err := os.WriteFile(filepath.Join(bare, "hooks", preservedPreReceiveHook), []byte(userHook), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("/bin/sh", hookPath)
+			cmd.Dir = bare
+			cmd.Stdin = strings.NewReader(updates)
+
+			out, err := cmd.CombinedOutput()
+
+			admitted, readErr := os.ReadFile(admitInput)
+			if readErr != nil || string(admitted) != updates {
+				t.Fatalf("admission input = %q (%v), want %q", admitted, readErr, updates)
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("hook exit = %v, want a non-zero status: %s", err, out)
+			}
+			if test.admitStatus != 0 {
+				if exitErr.ExitCode() != test.admitStatus || !strings.Contains(string(out), "gate push refused before ref mutation") {
+					t.Fatalf("refusal exit %d, output %q", exitErr.ExitCode(), out)
+				}
+				if _, statErr := os.Stat(userInput); !os.IsNotExist(statErr) {
+					t.Fatalf("user hook ran after a refusal: %v", statErr)
+				}
+				return
+			}
+			if exitErr.ExitCode() != 5 {
+				t.Fatalf("hook exit %d, want the user hook's 5: %s", exitErr.ExitCode(), out)
+			}
+			user, readErr := os.ReadFile(userInput)
+			if readErr != nil || string(user) != updates {
+				t.Fatalf("user hook input = %q (%v), want %q", user, readErr, updates)
+			}
+		})
 	}
 }
 

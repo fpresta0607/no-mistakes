@@ -54,7 +54,7 @@ That is a core design choice, not an implementation detail.
 ## How a push flows
 
 1. You run `git push no-mistakes <branch>`.
-2. The gate repo's `pre-receive` hook asks the daemon to admit the update before Git changes any gate ref. An active validation-step descendant is refused, including a direct push that bypasses the CLI.
+2. The gate repo's `pre-receive` hook asks the daemon to admit the update before Git changes any gate ref. An active validation-step descendant is refused, including a direct push that bypasses the CLI, and so is a push to a branch whose validation-only authored lineage has not ended.
 3. Git writes an admitted push into the local bare gate repo.
 4. The gate repo's `post-receive` hook notifies the daemon.
 5. The daemon creates a detached worktree for this run.
@@ -218,7 +218,10 @@ or phase details when authenticated ancestry cannot identify them uniquely.
 On Windows a process keeps its dead parent's pid and pids are reused, so the
 ancestry walk stops at a recorded parent created after its child rather than
 mistaking an unrelated client for a descendant.
-An existing custom `pre-receive` hook is preserved and runs after admission.
+The hook also hands the daemon every proposed ref update it read from Git.
+An update to a branch whose [validation-only authored lineage](/no-mistakes/reference/cli/#no-mistakes-axi-validate-authored) has not ended refuses the whole push, so an ordinary push cannot move that branch to a head the lineage never bound.
+Updates the daemon cannot read, or a lineage it cannot inspect, refuse the push as well.
+An existing custom `pre-receive` hook is preserved and runs after admission, with the same input Git gave the managed hook.
 
 When `git push no-mistakes <branch>` lands, the bare repo's `post-receive` hook
 fires. It resolves the gate to an absolute bare-repo path using Git's own view
