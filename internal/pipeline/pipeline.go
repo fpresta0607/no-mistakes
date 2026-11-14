@@ -96,6 +96,11 @@ type StepContext struct {
 	// StepResultID is the DB row ID of the current step's step_results record.
 	// Steps use it to query their own round history for multi-round prompts.
 	StepResultID string
+	// AdoptedRounds is how many leading rounds of this step's history an
+	// adopted CI repair carried in from the Review it adopted. They still count
+	// toward the step's fix-round limits, but the fresh Review is neither shown
+	// nor bound by their decisions. Zero for every other step.
+	AdoptedRounds int
 	// EvidenceDir is where this run's test-evidence artifacts belong, always
 	// outside the worktree. The executor resolves it once from the app root
 	// (honoring test.evidence.local_root) so every consumer - the test step's

@@ -1147,6 +1147,57 @@ func TestCIAdoptionLimitsAndReviewCarrySurviveOrdinaryReset(t *testing.T) {
 	}
 }
 
+// An adopted repair restarts Review fresh. A fresh finding that shares its
+// identity with one a human chose to fix in an adopted round is the fresh
+// Review's own decision: declining it is not refused as reversing that earlier
+// fix, and omitting it is not kept as already decided.
+func TestCIAdoptionFreshReviewResponseIsNotBoundByAdoptedDecisions(t *testing.T) {
+	database, paths, run, _ := setupTest(t)
+	step, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"carried","severity":"error","file":"source.go","description":"same concern","action":"ask-user"}]}`
+	adopted, err := database.InsertStepRound(step.ID, 1, "initial", &findings, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := `["carried"]`
+	if err := database.SetStepRoundUserDecision(adopted.ID, &selected, db.RoundSelectionSourceUser, nil); err != nil {
+		t.Fatal(err)
+	}
+	original, err := database.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := database.InsertStepRound(step.ID, 2, "initial", &findings, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutor(database, paths, nil, nil, nil, nil)
+	executor.adoption = &db.CIRepairAdoption{Steps: []db.CIRepairAdoptionStep{{Snapshot: *step, Rounds: []db.StepRound{*original[0]}}}}
+	executor.waiting = true
+	executor.waitingStep = types.StepReview
+	executor.waitingStepResultID = step.ID
+	executor.waitingRoundID = fresh.ID
+	executor.waitingFindings = findings
+	executor.approvalCh = make(chan approvalResponse, 1)
+
+	_, err = executor.RespondWithOverrides(types.StepReview, types.ActionFix, nil, nil, nil, nil, "")
+	var refusal *RespondRefusal
+	if !errors.As(err, &refusal) || strings.Join(refusal.Missing, ",") != "carried" {
+		t.Fatalf("omitting the fresh finding = %v, want it named as undecided", err)
+	}
+
+	dispositions, err := executor.RespondWithOverrides(types.StepReview, types.ActionFix, nil, []string{"carried"}, nil, nil, "")
+	if err != nil {
+		t.Fatalf("declining the fresh finding was bound by an adopted decision: %v", err)
+	}
+	if strings.Join(dispositions.Ignored, ",") != "carried" || len(dispositions.Kept) != 0 {
+		t.Fatalf("dispositions = %+v, want the fresh finding declined and nothing kept", dispositions)
+	}
+}
+
 func TestCIAdoptionRestartsOnlyAnExactlyReviewedInterruptedPush(t *testing.T) {
 	for _, name := range []string{"exact push", "inactive push", "parked handoff", "agent writer", "review missing", "interrupted test", "untested head", "validation hold", "protected hold", "interrupted pr"} {
 		t.Run(name, func(t *testing.T) {

@@ -215,14 +215,18 @@ func (e *Executor) acceptCIAdoption(run *db.Run, event *db.CIRepairAdoption, pub
 }
 
 func (e *Executor) originalAdoptedReviewRound(stepResultID string, round int) bool {
+	return round <= e.adoptedReviewRounds(stepResultID)
+}
+
+func (e *Executor) adoptedReviewRounds(stepResultID string) int {
 	if e.adoption != nil {
 		for _, original := range e.adoption.Steps {
 			if original.Snapshot.ID == stepResultID && original.Snapshot.StepName == types.StepReview {
-				return round <= len(original.Rounds)
+				return len(original.Rounds)
 			}
 		}
 	}
-	return false
+	return 0
 }
 
 const PublicationSelectionFindingID = "ci-publication-credentials"

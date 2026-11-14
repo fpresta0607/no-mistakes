@@ -1120,6 +1120,26 @@ func (d *DB) UpdateRunErrorStatusWithVerifiedHead(id, errMsg string, status type
 	return nil
 }
 
+// UpdateRunErrorStatusWithHead records an anchored but unverified head in the
+// same write as the terminal status, leaving terminal_head_verified_at unset.
+func (d *DB) UpdateRunErrorStatusWithHead(id, errMsg string, status types.RunStatus, headSHA string) error {
+	_, err := d.sql.Exec(`UPDATE runs SET error = ?, status = ?, head_sha = ?, push_active = 0, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ?`, errMsg, status, headSHA, now(), id)
+	if err != nil {
+		return fmt.Errorf("update run error with head: %w", err)
+	}
+	return nil
+}
+
+// UpdateRunStatusWithHead records an anchored but unverified head in the same
+// write as the terminal status, leaving terminal_head_verified_at unset.
+func (d *DB) UpdateRunStatusWithHead(id string, status types.RunStatus, headSHA string) error {
+	_, err := d.sql.Exec(`UPDATE runs SET status = ?, head_sha = ?, push_active = 0, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ?`, status, headSHA, now(), id)
+	if err != nil {
+		return fmt.Errorf("update run status with head: %w", err)
+	}
+	return nil
+}
+
 func (d *DB) UpdateRunStatusWithVerifiedHead(id string, status types.RunStatus, headSHA string) error {
 	ts := now()
 	_, err := d.sql.Exec(`UPDATE runs SET status = ?, head_sha = ?, push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ?`, status, headSHA, ts, ts, id)

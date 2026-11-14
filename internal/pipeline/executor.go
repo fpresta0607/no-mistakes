@@ -502,7 +502,13 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		if isRepairCutRecheck(findingIDs, ignoreFindingIDs, addedFindings) {
 			accountedGate = filterFindingsJSON(accountedGate, findingIDs)
 		}
-		split, err := splitFixResponse(accountedGate, rounds, findingIDs, ignoreFindingIDs)
+		decisionRounds := make([]*db.StepRound, 0, len(rounds))
+		for _, round := range rounds {
+			if !e.originalAdoptedReviewRound(e.waitingStepResultID, round.Round) {
+				decisionRounds = append(decisionRounds, round)
+			}
+		}
+		split, err := splitFixResponse(accountedGate, decisionRounds, findingIDs, ignoreFindingIDs)
 		if err != nil {
 			e.mu.Unlock()
 			return RespondDispositions{}, err
@@ -1778,6 +1784,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		ForgeContext:          e.forge,
 		DB:                    e.db,
 		StepResultID:          sr.ID,
+		AdoptedRounds:         e.adoptedReviewRounds(sr.ID),
 		UserIntent:            userIntent,
 		IntentSource:          userIntentSource,
 		Sessions:              e.sessions,
@@ -3082,7 +3089,7 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded {
 		runStatus = types.RunCancelled
 	}
-	verifiedHead, verified := e.reconcileTerminalRunHead(run)
+	terminalHead, verified := e.reconcileTerminalRunHead(run)
 	if errMsg == types.RunCancelReasonAbortedByUser {
 		if isCIRepairHeld {
 			if err := CheckCIRepairCancellation(e.workDir, verified); err != nil {
@@ -3095,9 +3102,12 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		run.AwaitingAgentSince = nil
 	}
 	var dbErr error
-	if verified {
-		dbErr = e.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, errMsg, runStatus, verifiedHead)
-	} else {
+	switch {
+	case verified:
+		dbErr = e.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, errMsg, runStatus, terminalHead)
+	case terminalHead != "":
+		dbErr = e.db.UpdateRunErrorStatusWithHead(run.ID, errMsg, runStatus, terminalHead)
+	default:
 		dbErr = e.db.UpdateRunErrorStatus(run.ID, errMsg, runStatus)
 	}
 	if dbErr != nil {
@@ -3107,8 +3117,8 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 			// abort settles that exact head; nothing may treat it as finished.
 			return fmt.Errorf("record cancelled CI repair: %w", dbErr)
 		}
-	} else if verified {
-		run.HeadSHA = verifiedHead
+	} else if terminalHead != "" {
+		run.HeadSHA = terminalHead
 	}
 	run.Status = runStatus
 	run.Error = &errMsg
@@ -3126,17 +3136,20 @@ func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
 
 func (e *Executor) completeRunWithStatus(run *db.Run, repo *db.Repo, status types.RunStatus) error {
 	var err error
-	verifiedHead, verified := e.reconcileTerminalRunHead(run)
-	if verified {
-		err = e.db.UpdateRunStatusWithVerifiedHead(run.ID, status, verifiedHead)
-	} else {
+	terminalHead, verified := e.reconcileTerminalRunHead(run)
+	switch {
+	case verified:
+		err = e.db.UpdateRunStatusWithVerifiedHead(run.ID, status, terminalHead)
+	case terminalHead != "":
+		err = e.db.UpdateRunStatusWithHead(run.ID, status, terminalHead)
+	default:
 		err = e.db.UpdateRunStatus(run.ID, status)
 	}
 	if err != nil {
 		return err
 	}
-	if verified {
-		run.HeadSHA = verifiedHead
+	if terminalHead != "" {
+		run.HeadSHA = terminalHead
 	}
 	run.Status = status
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
@@ -3223,9 +3236,10 @@ func (e *Executor) reconcileTerminalRunHead(run *db.Run) (string, bool) {
 			return "", false
 		}
 	}
-	// The observed head is recorded only by the caller's terminal write. Writing
-	// it here first left a run that never settled recorded at a head it never
-	// validated, which reads as no retained CI repair after a restart.
+	// The anchored head is returned for the caller's terminal write to record,
+	// verified or not. Writing it here first left a run that never settled
+	// recorded at a head it never validated, which reads as no retained CI
+	// repair after a restart.
 	if !e.preserveUnpublishedTerminalHead(ctx, recordedRun, observed) {
 		return "", false
 	}
@@ -3238,11 +3252,11 @@ func (e *Executor) reconcileTerminalRunHead(run *db.Run) (string, bool) {
 	}
 	if err := e.db.RecordTerminalSourceState(run.ID, sourceState); err != nil {
 		slog.Warn("failed to record source before terminalization", "run", run.ID, "error", err)
-		return "", false
+		return observed, false
 	}
 	if statusErr != nil || isDirty {
 		slog.Warn("managed worktree still holds dirty or unreadable source before terminalization", "run", run.ID, "error", statusErr)
-		return "", false
+		return observed, false
 	}
 	return observed, true
 }
