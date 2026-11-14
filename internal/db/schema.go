@@ -30,6 +30,19 @@ CREATE TABLE IF NOT EXISTS ci_handbacks (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ci_handbacks_open ON ci_handbacks(run_id) WHERE accepted_head IS NULL;
 
+CREATE TABLE IF NOT EXISTS step_handbacks (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    step_result_id TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+    step_name TEXT NOT NULL,
+    round_id TEXT NOT NULL UNIQUE REFERENCES step_rounds(id) ON DELETE CASCADE,
+    caller_dir TEXT NOT NULL,
+    released_head TEXT NOT NULL,
+    released_at INTEGER NOT NULL,
+    accepted_head TEXT,
+    accepted_at INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS repos (
     id             TEXT PRIMARY KEY,
     working_path   TEXT NOT NULL UNIQUE,

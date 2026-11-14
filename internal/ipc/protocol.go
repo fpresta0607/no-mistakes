@@ -36,6 +36,7 @@ const (
 	MethodRespond                   = "respond"
 	MethodRespondReviewScope        = "respond_review_scope"
 	MethodCIHandback                = "ci_handback"
+	MethodStepHandback              = "step_handback"
 	MethodAnswerReview              = "answer_review_question"
 	MethodCancelRun                 = "cancel_run"
 	MethodHandoffRun                = "handoff_run"
@@ -136,6 +137,29 @@ type CIHandbackResult struct {
 	ReceiptID    string            `json:"receipt_id"`
 	RoundID      string            `json:"round_id"`
 	Binding      CIHandbackBinding `json:"binding"`
+}
+
+// StepHandbackParams releases a parked Test or Lint failure to its contributor,
+// or, with Resume, submits the contributor's one-commit correction to that run.
+type StepHandbackParams struct {
+	RepoID    string `json:"repo_id"`
+	RunID     string `json:"run_id"`
+	Branch    string `json:"branch"`
+	CallerDir string `json:"caller_dir"`
+	HeadSHA   string `json:"head_sha"`
+	Resume    bool   `json:"resume,omitempty"`
+	ReceiptID string `json:"receipt_id,omitempty"`
+}
+
+type StepHandbackResult struct {
+	RunID        string         `json:"run_id"`
+	Step         types.StepName `json:"step"`
+	RoundID      string         `json:"round_id"`
+	ReceiptID    string         `json:"receipt_id"`
+	CallerDir    string         `json:"caller_dir"`
+	ReleasedHead string         `json:"released_head"`
+	ReleasedRef  string         `json:"released_ref"`
+	AcceptedHead string         `json:"accepted_head,omitempty"`
 }
 
 // PushReceivedParams are sent by the post-receive hook when a push arrives.

@@ -1839,6 +1839,16 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		}
 		return mgr.HandleCIHandback(ctx, request)
 	})
+	srv.Handle(ipc.MethodStepHandback, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var request ipc.StepHandbackParams
+		if err := json.Unmarshal(params, &request); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		return mgr.HandleStepHandback(ctx, request)
+	})
 
 	respond := func(ctx context.Context, params json.RawMessage, isScopeResponse bool) (interface{}, error) {
 		if err := refuseNested(ctx, false); err != nil {

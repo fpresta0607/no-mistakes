@@ -736,7 +736,7 @@ For example, a merge automation can compare its live PR head with `run.last_push
 
 ## no-mistakes axi handback
 
-Returns eligible failed published GitHub CI to its author for a correction in the same run.
+Returns eligible failed published GitHub CI, or a failed Test or Lint step, to its author for a correction in the same run.
 
 ```bash
 no-mistakes axi sync
@@ -791,6 +791,38 @@ These fields are comparisons, never a selector that adopts another or newer run.
 On resume, `caller_head` is the authored correction; `current_head`, `published_head` and `push_generation` remain the original released binding.
 Unknown or missing fields, changed identities and a wrong receipt refuse before custody changes.
 If the bounded resume wait ends, its structured output still includes the accepted native receipt; inspect progress with `axi status` or reattach with `axi run`.
+
+### Test and Lint handback
+
+With automatic repair disabled (`auto_fix.test: 0` or `auto_fix.lint: 0`), a failed Test or Lint step parks at `awaiting_approval` with nothing to repair it.
+When the latest branch run is parked there, `axi handback` returns that failure to its author instead of to the gate's repair agent.
+
+```bash
+no-mistakes axi handback
+# Make the correction as one commit on the released head.
+no-mistakes axi handback --resume --receipt <id>
+```
+
+Release requires every finding on the parked step to be auto-fixable, with no `ask-user` finding and no safety or protected-path refusal, and refuses a validation-only run.
+The caller must be a worktree of the repository on the run's branch whose head is the run's head or one of its ancestors, and the managed worktree must be clean on that head.
+Release fetches the run's head into the caller as `refs/no-mistakes/step-handback/<run>/<round>` and records one native receipt for the parked round.
+The run stays active and the step stays `awaiting_approval` with its findings intact; release invokes no fixer and records no decision.
+It returns `handback: released`, the run, the step, the full `released_head`, and a `receipt` with its ID, round, caller directory, `released_head`, `released_ref` and state.
+When the caller is behind the released head, `next_action` names `git merge --ff-only <released_ref>` before the correction; otherwise it names the resume command.
+Releasing the same round again from the same caller and head returns the same receipt.
+
+`--resume --receipt <id>` accepts the correction only from the recorded caller worktree, and only while the parked round, its findings and the run head are unchanged.
+The correction must be exactly one non-merge commit whose parent is the released head; no commit, several commits, a rewritten head and a merge commit refuse.
+A receipt from another run refuses before it reaches the daemon.
+The daemon fast-forwards the managed worktree to the correction, moves the run head, and runs the failed step again in the same run as a `handback` round, then continues with the steps after it.
+The earlier round, the intent and the spent automatic repair allowances stay as they were; a handback grants no repair allowance.
+Like the gate's own Test repair commits, the correction descends from the review-approved head and is validated from the failed step without another Review.
+If acceptance fails after the managed worktree moved, it is restored to the released head.
+A daemon that stops after accepting the correction validates it from the failed step when it restarts, rather than parking the gate again on an unvalidated head.
+Resume returns the full `accepted_head` and follows the next decision point, bounded by `--wait` (default `8m`).
+An `approve`, `fix` or `skip` delivered after release moves the gate on, and a later resume of that receipt refuses.
+`--expect` and `--revalidate-publication` apply only to a CI handback.
+The IPC method is `step_handback`.
 
 ## no-mistakes axi sync
 

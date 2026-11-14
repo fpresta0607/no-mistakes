@@ -135,6 +135,10 @@ type Executor struct {
 	ciHandbackCh       chan ciHandbackRequest
 	ciHandbackPending  bool
 	ciHandbackReleased bool
+	// stepHandbackCh carries a Test or Lint handback into its parked gate's
+	// wait, so it is serialized with the gate's responses.
+	stepHandbackCh      chan stepHandbackRequest
+	stepHandbackPending bool
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -234,6 +238,7 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 		onEvent:               onEvent,
 		approvalCh:            make(chan approvalResponse, 1),
 		ciHandbackCh:          make(chan ciHandbackRequest),
+		stepHandbackCh:        make(chan stepHandbackRequest),
 		gateReconcileInterval: defaultGateReconcileInterval,
 		gateReconcileTimeout:  defaultGateReconcileTimeout,
 	}
@@ -356,6 +361,10 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 	if e.ciHandbackPending || e.ciHandbackReleased {
 		e.mu.Unlock()
 		return RespondDispositions{}, fmt.Errorf("CI handback owns this gate; submit the additive follow-up with axi handback --resume")
+	}
+	if e.stepHandbackPending {
+		e.mu.Unlock()
+		return RespondDispositions{}, fmt.Errorf("a handback is being applied to this gate; respond after it returns")
 	}
 	if !e.waiting {
 		e.mu.Unlock()
@@ -802,6 +811,9 @@ type stepExecutionState struct {
 	// retrying restarts the step a failed run failed in, at the start of the
 	// run that continues it (SetRetrySource).
 	retrying bool
+	// handingBack re-enters a recovered Test or Lint gate on its contributor's
+	// accepted correction (actionStepHandback).
+	handingBack bool
 }
 
 func (e *Executor) durableExecutionState(stepResultID string) (stepExecutionState, error) {
@@ -914,6 +926,44 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 
 	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
 	duration := recoveredStepDuration(gate.stepResult)
+	revalidateHandback := func() error {
+		state := stepExecutionState{
+			roundNum:        gate.round,
+			autoFixAttempts: gate.autoFixes,
+			executionMS:     duration,
+			currentRoundID:  gate.lastRoundID,
+			handingBack:     true,
+		}
+		skipRemaining, restartFrom, err := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, state)
+		if err != nil {
+			return e.failRun(run, repo, err, ctx)
+		}
+		if skipRemaining {
+			return e.skipRecoveredRemainder(run, repo, gate.index+1)
+		}
+		if restartFrom != "" {
+			restartIndex, indexErr := e.prepareRestart(run.ID, restartFrom, gate.index)
+			if indexErr != nil {
+				return e.failRun(run, repo, fmt.Errorf("step %s requested invalid restart from %s", gate.step.Name(), restartFrom), ctx)
+			}
+			return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, true)
+		}
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
+	}
+	// A correction accepted before the daemon stopped moved the run head
+	// without validating it; parking again would let an approval publish it.
+	if isStepHandbackGate(gate.step.Name()) {
+		receipt, err := e.db.GetStepHandbackByRound(gate.lastRoundID)
+		if err != nil {
+			return err
+		}
+		if receipt != nil && receipt.AcceptedHead != nil {
+			if err := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); err != nil {
+				return e.failRun(run, repo, fmt.Errorf("complete awaiting-agent state for accepted handback: %w", err), ctx)
+			}
+			return revalidateHandback()
+		}
+	}
 	completeRecoveredGate := func() error {
 		if gate.step.Name() == types.StepReview {
 			if gate.reviewedHeadSHA == "" {
@@ -1030,6 +1080,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			return e.failRun(run, repo, err, ctx)
 		}
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, index, true)
+	}
+	if response.action == actionStepHandback {
+		return revalidateHandback()
 	}
 
 	approvalFields := telemetry.Fields{
@@ -1774,6 +1827,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// round - which IsFixRound then reads as one.
 	case state.answering:
 		nextTrigger = "answer"
+	case state.handingBack:
+		nextTrigger = "handback"
 	case sctx.Fixing:
 		nextTrigger = "auto_fix"
 	case state.retrying:
@@ -2135,6 +2190,25 @@ rounds:
 			}
 			if response.action == actionCIFollowup {
 				return false, types.StepReview, nil
+			}
+			if response.action == actionStepHandback {
+				// The contributor's correction is the run's head now: validate
+				// the step again from the beginning, as a new round of the same
+				// step that keeps every earlier round and allowance.
+				phaseStart = time.Now()
+				writeLog(fmt.Sprintf("contributor correction %s accepted; validating %s again after round %d", run.HeadSHA, stepName, roundNum))
+				if err := markRunning(); err != nil {
+					return false, "", err
+				}
+				sctx.Fixing = false
+				sctx.AutoFixRound = false
+				sctx.FinalizingAnswers = false
+				sctx.SkipFixExecution = false
+				sctx.PreviousFindings = ""
+				sctx.DeferredFindings = ""
+				sctx.PreviousReviewedPaths = nil
+				nextTrigger = "handback"
+				continue rounds
 			}
 
 			approvalFields := telemetry.Fields{
@@ -2703,11 +2777,17 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 	_, reconciles := step.(ApprovalGateReconciler)
 	_, resumes := step.(ApprovalGateResumer)
 	if !reconciles && !resumes {
-		select {
-		case response := <-e.approvalCh:
-			return response, false, nil
-		case <-ctx.Done():
-			return approvalResponse{}, false, e.approvalWaitError(ctx, sctx.Run.ID, step.Name())
+		for {
+			select {
+			case request := <-e.stepHandbackCh:
+				if e.serveStepHandback(ctx, step, sctx, request) {
+					return approvalResponse{action: actionStepHandback}, false, nil
+				}
+			case response := <-e.approvalCh:
+				return response, false, nil
+			case <-ctx.Done():
+				return approvalResponse{}, false, e.approvalWaitError(ctx, sctx.Run.ID, step.Name())
+			}
 		}
 	}
 
@@ -2749,6 +2829,10 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 			request.reply <- ciHandbackReply{result: result, err: err}
 			if err == nil && request.params.Resume {
 				return approvalResponse{action: actionCIFollowup}, false, nil
+			}
+		case request := <-e.stepHandbackCh:
+			if e.serveStepHandback(ctx, step, sctx, request) {
+				return approvalResponse{action: actionStepHandback}, false, nil
 			}
 		case response := <-e.approvalCh:
 			return response, false, nil
