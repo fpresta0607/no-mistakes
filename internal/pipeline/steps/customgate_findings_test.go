@@ -23,7 +23,7 @@ func gateTestCommand(t *testing.T, dir, unixCommand, windowsCommand string) stri
 		if err := os.WriteFile(path, []byte("@echo off\r\n"+windowsCommand+"\r\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		return "call gate-command.cmd"
+		return `call .\gate-command.cmd`
 	}
 	return unixCommand
 }
@@ -124,6 +124,31 @@ func TestCustomGateStep_StructuredFindings(t *testing.T) {
 				t.Fatalf("step environment mutated: %v", sctx.Env)
 			}
 		})
+	}
+}
+
+// A hardened Windows shell sets NoDefaultCurrentDirectoryInExePath, so cmd.exe
+// no longer finds a bare script name in the gate's working directory.
+func TestGateTestCommandRunsWithoutCurrentDirectorySearch(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "gate-report.json"), []byte(`{"findings":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sctx := newTestContext(t, &mockAgent{name: "mock"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = []string{"NoDefaultCurrentDirectoryInExePath=1"}
+	step := &CustomGateStep{Gate: config.Gate{Name: "budget", After: types.StepTest, Command: gateReportCommand(t, dir, 0)}}
+
+	outcome, err := step.Execute(sctx)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval || outcome.ExitCode != 0 {
+		t.Fatalf("outcome = %+v, want the gate script to run and pass", outcome)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "gate-path.txt")); err != nil {
+		t.Fatalf("gate script did not run: %v", err)
 	}
 }
 
