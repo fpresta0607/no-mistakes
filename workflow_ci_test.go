@@ -6,11 +6,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 func TestCIWorkflowRunsTestsOnAllSupportedDesktopPlatforms(t *testing.T) {
@@ -246,12 +247,9 @@ func TestCIWorkflow_UnixPackageBudgetExceedsGoDefaultAndFiresBeforeJobCap(t *tes
 func TestCIWorkflow_UnixStepFailsClosedWhenTheRemainderPackageSetIsEmpty(t *testing.T) {
 	t.Parallel()
 
-	bash, err := exec.LookPath("bash")
+	bash, err := testgit.Bash()
 	if err != nil {
-		t.Skip("bash unavailable to execute the Unix test step")
-	}
-	if runtime.GOOS == "windows" && !isNativeGitBash(t, bash) {
-		t.Skipf("resolved bash %q is not native Git Bash, and the guarded Unix step never runs on Windows", bash)
+		t.Skipf("bash unavailable to execute the Unix test step: %v", err)
 	}
 	step := unixTestStep(t)
 
@@ -365,12 +363,9 @@ func TestCIWorkflow_UnixRowsRunEachPartExactlyOnce(t *testing.T) {
 func TestCIWorkflow_UnixStepRunsOnlyItsRowsPart(t *testing.T) {
 	t.Parallel()
 
-	bash, err := exec.LookPath("bash")
+	bash, err := testgit.Bash()
 	if err != nil {
-		t.Skip("bash unavailable to execute the Unix test step")
-	}
-	if runtime.GOOS == "windows" && !isNativeGitBash(t, bash) {
-		t.Skipf("resolved bash %q is not native Git Bash, and the guarded Unix step never runs on Windows", bash)
+		t.Skipf("bash unavailable to execute the Unix test step: %v", err)
 	}
 	step := unixTestStep(t)
 
@@ -509,13 +504,4 @@ printf '%s\n' "$@" > "$record"
 		tests = append(tests, strings.Join(args, " "))
 	}
 	return tests, err, output.String()
-}
-
-// isNativeGitBash reports whether bash identifies as the MSYS shell that runs
-// the Unix step, so a WSL launcher earlier on PATH cannot make the guard hand a
-// checkout path to a Linux shell.
-func isNativeGitBash(t *testing.T, bash string) bool {
-	t.Helper()
-	output, err := exec.Command(bash, "-c", `printf %s "$OSTYPE"`).Output()
-	return err == nil && strings.TrimSpace(string(output)) == "msys"
 }
