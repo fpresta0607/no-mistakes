@@ -113,7 +113,7 @@ func TestProvenLaunchKeepsItsChainOrderUnderQuotaRouting(t *testing.T) {
 			cfg.TrustedConfigSHA = strings.Repeat("a", 40)
 			cfg.AgentArgsOverride = map[string][]string{"codex": {"-c", `service_tier="default"`}}
 			if !tc.isApplied {
-				if err := cfg.ApplyLaunchSelection(chain); err != nil {
+				if err := cfg.ApplyLaunchSelection(chain, chain, chain); err != nil {
 					t.Fatal(err)
 				}
 			}

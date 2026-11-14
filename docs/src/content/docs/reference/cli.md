@@ -393,9 +393,23 @@ Add `"apply": true` to the file to make the assertion a launch selection, which 
 }
 ```
 
-Before the proof, the daemon replaces this run's agent chain with the asserted chain in order, sets each named harness's model and effort to the asserted ones, and runs every review role on that chain, whatever `agent`, `review_agents` and `agent_config` model or effort the global config or the trusted repository names.
-It changes that run alone and writes no config file, so one daemon can run launches started at the same time each on the harness its own caller names.
-A selection names one chain: `reviewer` and `fixer` must equal `primary`, the later-round roles are refused, and a harness may appear once.
+Before the proof, the daemon replaces this run's agent chain with the `primary` chain in order and sets each of its harnesses' model and effort to the asserted ones, whatever `agent`, `review_agents` and `agent_config` model or effort the global config or the trusted repository names.
+A `reviewer` or `fixer` chain equal to `primary` runs that role on the primary chain, as above.
+One that differs pins the role, on the same harness or another: [`review_agents.reviewer`](/no-mistakes/reference/global-config/#review_agents) becomes the reviewer chain's first entry with the rest as its `fallback`, and `review_agents.fixer` becomes the fixer chain's entry.
+It changes that run alone and writes no config file, so one daemon can run launches started at the same time each on the harnesses its own caller names.
+A selection names exactly the `primary`, `reviewer` and `fixer` roles (the later-round roles are refused), each chain names a harness once, and a `fixer` chain that differs from `primary` names one entry, since `review_agents.fixer` takes no fallback.
+
+```json
+{
+  "trusted_sha": "0123456789abcdef0123456789abcdef01234567",
+  "apply": true,
+  "profiles": {
+    "primary": [{ "harness": "claude", "model": "claude-opus-5-5", "effort": "high" }],
+    "reviewer": [{ "harness": "claude", "model": "claude-fable-5-2", "effort": "xhigh" }],
+    "fixer": [{ "harness": "claude", "model": "claude-sonnet-5-5", "effort": "high" }]
+  }
+}
+```
 
 [`agent_args_override`](/no-mistakes/reference/global-config/#agent_args_override) stays the operator's.
 The proof that follows derives every entry from the arguments the agent will really be started with, so an override that pins another model or effort still refuses the launch.

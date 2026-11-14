@@ -156,6 +156,44 @@ func TestLaunchSelectionRunsItsOwnHarnessWhateverTheMachineChain(t *testing.T) {
 	}
 }
 
+// The fixture step calls the primary, then the reviewer, then the fixer. Each
+// role runs its own Claude model, not the primary's and not the machine's
+// Codex review roles, and the receipt proves each role's chain.
+func TestLaunchSelectionRunsTheReviewerAndFixerOnTheirOwnModels(t *testing.T) {
+	manager, _, database, repository, head, claudeMarker, codexMarker := selectionFixture(t, "codex", false, false)
+	reviewer := agentcfg.Selection{Harness: types.AgentClaude, Model: "claude-reviewer-fixture", Effort: agentcfg.EffortXHigh}
+	fixer := agentcfg.Selection{Harness: types.AgentClaude, Model: "claude-fixer-fixture", Effort: agentcfg.EffortMedium}
+	expected := &launchassert.Expectation{TrustedSHA: head, Apply: true, Profiles: map[string][]agentcfg.Selection{
+		"primary": {selectedClaude}, "reviewer": {reviewer}, "fixer": {fixer},
+	}}
+
+	receipt, err := manager.HandleStartFreshRun(context.Background(), &ipc.StartFreshRunParams{
+		RepoID: repository.ID, Branch: "feature", HeadSHA: head, Intent: "review and fix on their own models",
+		LaunchNonce: "role-task", ValidationGeneration: "generation", LaunchAssertion: expected,
+	})
+
+	if err != nil || receipt.LaunchAssertionProof.Check(expected) != nil {
+		t.Fatalf("selection receipt = %+v %v", receipt, err)
+	}
+	if run := waitForRunTerminalState(t, database, receipt.RunID); run.Status != types.RunCompleted {
+		t.Fatalf("selected run = %+v", run)
+	}
+	lines := markerLines(t, claudeMarker)
+	want := []string{"--model claude-fixture --effort high", "--model claude-reviewer-fixture --effort xhigh", "--model claude-fixer-fixture --effort medium"}
+	if len(lines) != len(want) {
+		t.Fatalf("Claude ran %d of the 3 duties: %v", len(lines), lines)
+	}
+	for index, line := range lines {
+		model, effort, _ := strings.Cut(want[index], " --effort ")
+		if !strings.Contains(line, model) || !strings.Contains(line, "--effort "+effort) || !strings.Contains(line, "--strict-mcp-config") {
+			t.Fatalf("duty %d ran %s, want %s with the operator's arguments", index, line, want[index])
+		}
+	}
+	if started := markerLines(t, codexMarker); started != nil {
+		t.Fatalf("the machine's Codex review roles started for a run that selected its own: %v", started)
+	}
+}
+
 func TestLaunchSelectionsOnTwoHarnessesShareOneDaemon(t *testing.T) {
 	manager, root, database, repository, head, claudeMarker, codexMarker := selectionFixture(t, "codex", false, false)
 	gitCmd(t, root.RepoDir(repository.ID), "update-ref", "refs/heads/second", head)
