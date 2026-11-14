@@ -843,6 +843,7 @@ func (e *Executor) durableExecutionState(stepResultID string) (stepExecutionStat
 		return stepExecutionState{}, err
 	}
 	state := stepExecutionState{}
+	freshRounds := make([]*db.StepRound, 0, len(rounds))
 	for _, round := range rounds {
 		state.roundNum = max(state.roundNum, round.Round)
 		if round.SelectionSource != nil && *round.SelectionSource == db.RoundSelectionSourceAutoFix {
@@ -851,13 +852,14 @@ func (e *Executor) durableExecutionState(stepResultID string) (stepExecutionStat
 		if e.originalAdoptedReviewRound(stepResultID, round.Round) {
 			continue
 		}
+		freshRounds = append(freshRounds, round)
 		if round.FindingsJSON != nil {
 			state.outstandingFindings = *round.FindingsJSON
 		} else {
 			state.outstandingFindings = ""
 		}
 	}
-	state.selectedOutstandingIDs = SelectedOutstandingFindingIDs(rounds)
+	state.selectedOutstandingIDs = SelectedOutstandingFindingIDs(freshRounds)
 	return state, nil
 }
 
