@@ -49,9 +49,7 @@ func TestAxiAuthoredValidationHasFreshStagesAndNoRepairAuthorityAfterCrash(t *te
 		t.Fatalf("terminalize fixture predecessor: %v\n%s", err, out)
 	}
 	parent := h.WaitForRun(branch, 30*time.Second)
-	if out, err := h.Run("daemon", "restart"); err != nil {
-		t.Fatalf("settle original executor: %v\n%s", err, out)
-	}
+	h.RestartIdleDaemon()
 	root := paths.WithRoot(h.NMHome)
 	database, err := db.OpenReadOnly(root.DB())
 	if err != nil {

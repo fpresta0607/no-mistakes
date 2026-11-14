@@ -29,7 +29,13 @@ type evidenceFixture struct {
 
 func newEvidenceFixture(t *testing.T) *evidenceFixture {
 	t.Helper()
-	p := paths.WithRoot(t.TempDir())
+	// Use short temp dir to avoid macOS 104-byte Unix socket path limit.
+	tmpDir, err := os.MkdirTemp("", "dtest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+	p := paths.WithRoot(tmpDir)
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}
