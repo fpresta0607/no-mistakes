@@ -145,7 +145,7 @@ func applyLaunchSelection(cfg *config.Config, expected *launchassert.Expectation
 	if err := expected.Validate(); err != nil {
 		return err
 	}
-	return cfg.ApplyLaunchSelection(expected.Profiles["primary"])
+	return cfg.ApplyLaunchSelection(expected.Profiles["primary"], expected.Profiles[config.RoleReviewer], expected.Profiles[config.RoleFixer])
 }
 
 func prepareLaunchAssertion(ctx context.Context, expected *launchassert.Expectation, cfg *config.Config, lookPath func(string) (string, error)) (map[string][]*config.Config, *launchassert.Proof, error) {

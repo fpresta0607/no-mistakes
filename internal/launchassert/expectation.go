@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
@@ -22,9 +23,11 @@ const MaxBytes = 8192
 //
 // Apply makes it a launch selection: before the daemon proves the profiles it
 // sets this run's agent chain, and each named harness's model and effort, to
-// them, for every role and for this run alone. One daemon can then run each
+// them, for each role and for this run alone. One daemon can then run each
 // launch on the harness its own caller names, with no config file edited. A
-// selection names one chain, so its reviewer and fixer equal its primary.
+// reviewer or fixer chain that differs from the primary pins that review role;
+// a pinned fixer names one profile, since review_agents.fixer takes no
+// fallback.
 type Expectation struct {
 	TrustedSHA string                          `json:"trusted_sha"`
 	Profiles   map[string][]agentcfg.Selection `json:"profiles"`
@@ -60,14 +63,18 @@ func (e *Expectation) Validate() error {
 		}
 	}
 	if e.Apply {
-		primary := e.Profiles["primary"]
-		if len(e.Profiles) != 3 || !reflect.DeepEqual(e.Profiles["reviewer"], primary) || !reflect.DeepEqual(e.Profiles["fixer"], primary) {
-			return fmt.Errorf("launch selection names one agent chain for the primary, reviewer and fixer roles")
+		if len(e.Profiles) != 3 {
+			return fmt.Errorf("launch selection names a chain for the primary, reviewer and fixer roles alone")
 		}
-		for index, profile := range primary {
-			for _, earlier := range primary[:index] {
-				if earlier.Harness == profile.Harness {
-					return fmt.Errorf("launch selection names an agent harness once")
+		if fixer := e.Profiles["fixer"]; len(fixer) > 1 && !slices.Equal(fixer, e.Profiles["primary"]) {
+			return fmt.Errorf("launch selection names one fixer profile unless the fixer runs the primary chain")
+		}
+		for _, chain := range e.Profiles {
+			for index, profile := range chain {
+				for _, earlier := range chain[:index] {
+					if earlier.Harness == profile.Harness {
+						return fmt.Errorf("launch selection names an agent harness once")
+					}
 				}
 			}
 		}

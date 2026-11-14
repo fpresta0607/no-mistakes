@@ -110,8 +110,9 @@ func TestLaunchAssertionFileAcceptsClaudeEntriesWithoutServiceTier(t *testing.T)
 	}
 }
 
-func TestLaunchSelectionNamesOneChainForEveryRole(t *testing.T) {
+func TestLaunchSelectionNamesAChainForEachRole(t *testing.T) {
 	claude := agentcfg.Selection{Harness: types.AgentClaude, Model: "claude-fixture", Effort: agentcfg.EffortHigh}
+	claudeReviewer := agentcfg.Selection{Harness: types.AgentClaude, Model: "claude-reviewer", Effort: agentcfg.EffortXHigh}
 	codex := agentcfg.Selection{Harness: types.AgentCodex, Model: "fixture", Effort: agentcfg.EffortXHigh, ServiceTier: "default"}
 	selection := func(primary, reviewer, fixer []agentcfg.Selection) *Expectation {
 		return &Expectation{TrustedSHA: strings.Repeat("a", 40), Apply: true, Profiles: map[string][]agentcfg.Selection{
@@ -119,13 +120,22 @@ func TestLaunchSelectionNamesOneChainForEveryRole(t *testing.T) {
 		}}
 	}
 	chain := []agentcfg.Selection{claude, codex}
-	if err := selection(chain, chain, chain).Validate(); err != nil {
-		t.Fatalf("one chain for every role was refused: %v", err)
+	for name, valid := range map[string]*Expectation{
+		"one chain for every role":              selection(chain, chain, chain),
+		"reviewer on another model":             selection(chain, []agentcfg.Selection{claudeReviewer}, chain),
+		"reviewer on another harness":           selection(chain, []agentcfg.Selection{codex, claudeReviewer}, chain),
+		"fixer on another model":                selection(chain, chain, []agentcfg.Selection{claudeReviewer}),
+		"fixer on the primary's first profile":  selection(chain, chain, []agentcfg.Selection{claude}),
+		"reviewer and fixer on their own model": selection([]agentcfg.Selection{claude}, []agentcfg.Selection{claudeReviewer, codex}, []agentcfg.Selection{codex}),
+	} {
+		if err := valid.Validate(); err != nil {
+			t.Fatalf("%s was refused: %v", name, err)
+		}
 	}
 	for name, invalid := range map[string]*Expectation{
-		"reviewer on another harness": selection(chain, []agentcfg.Selection{codex}, chain),
-		"fixer without the fallback":  selection(chain, chain, []agentcfg.Selection{claude}),
-		"one harness twice":           selection([]agentcfg.Selection{claude, claude}, []agentcfg.Selection{claude, claude}, []agentcfg.Selection{claude, claude}),
+		"fixer with a fallback":          selection(chain, chain, []agentcfg.Selection{claudeReviewer, codex}),
+		"one harness twice":              selection([]agentcfg.Selection{claude, claude}, []agentcfg.Selection{claude, claude}, []agentcfg.Selection{claude, claude}),
+		"one harness twice for reviewer": selection(chain, []agentcfg.Selection{claude, claudeReviewer}, chain),
 	} {
 		if err := invalid.Validate(); err == nil {
 			t.Fatalf("%s was accepted as a launch selection", name)
