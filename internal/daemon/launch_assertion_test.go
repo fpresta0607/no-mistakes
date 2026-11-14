@@ -70,9 +70,24 @@ func launchExpectation(head string) *launchassert.Expectation {
 	}}
 }
 
+// shortTempDir is a temporary directory for a Git repository that receives
+// pushes or hosts run worktrees. t.TempDir() carries up to 64 characters of
+// the test's name, which under a nested Test scratch TMP put a gate's
+// receive-pack objects past Windows MAX_PATH and a run worktree's gitdir past
+// Git's PATH_MAX-40 limit (issue #152).
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "dtest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 func launchAssertionFixture(t *testing.T, factory StepFactory) (*RunManager, *paths.Paths, *db.DB, *db.Repo, string, string, string) {
 	t.Helper()
-	root := paths.WithRoot(t.TempDir())
+	root := paths.WithRoot(shortTempDir(t))
 	if err := root.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}
