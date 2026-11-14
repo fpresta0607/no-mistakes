@@ -156,6 +156,31 @@ func TestAuthorizedRemediesPromptSection_Scope(t *testing.T) {
 			source:   db.RoundSelectionSourceUser,
 		},
 		{
+			name:     "protected-path refusal is a pipeline notice, not a remedy",
+			findings: `{"findings":[{"id":"protected-path-refusal","file":"AGENTS.md","description":"refusing automatic commit","action":"ask-user"}]}`,
+			selected: `["protected-path-refusal"]`,
+			source:   db.RoundSelectionSourceUser,
+		},
+		{
+			name:     "native safety refusal is a pipeline notice, not a remedy",
+			findings: `{"findings":[{"id":"agent-safety-refusal","description":"the agent refused","action":"ask-user"}]}`,
+			selected: `["agent-safety-refusal"]`,
+			source:   db.RoundSelectionSourceUser,
+		},
+		{
+			name:     "unreadable question history is a pipeline notice, not a remedy",
+			findings: `{"findings":[{"id":"review-questions-unreadable","description":"Decide this gate yourself","action":"ask-user"}]}`,
+			selected: `["review-questions-unreadable"]`,
+			source:   db.RoundSelectionSourceUser,
+		},
+		{
+			name:     "a reviewer finding renamed off the safety-refusal id is still a remedy",
+			findings: `{"findings":[{"id":"agent-safety-refusal-1","description":"add durable state","action":"ask-user"}]}`,
+			selected: `["agent-safety-refusal-1"]`,
+			source:   db.RoundSelectionSourceUser,
+			want:     []string{"add durable state"},
+		},
+		{
 			name:     "auto-fix selection decides nothing",
 			findings: `{"findings":[{"id":"R1","description":"add durable state","action":"ask-user"}]}`,
 			selected: `["R1"]`,

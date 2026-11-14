@@ -64,7 +64,8 @@ func authorizedRemediesPromptSection(sctx *pipeline.StepContext) string {
 // authorizedRemedyLines returns one attributed line per ask-user finding this
 // round's user selection chose to fix, skipping any finding a later round
 // already rendered. A finding the operator added is their own, not a reviewer
-// remedy, and a review question is settled by an answer, so neither is one.
+// remedy, a review question is settled by an answer, and a pipeline-owned
+// notice reports the pipeline's own refusal, so none of them is one.
 func authorizedRemedyLines(r *db.StepRound, seen map[string]bool) []string {
 	if r == nil || selectionSourceValue(r.SelectionSource) != db.RoundSelectionSourceUser || r.SelectedFindingIDs == nil {
 		return nil
@@ -91,7 +92,8 @@ func authorizedRemedyLines(r *db.StepRound, seen map[string]bool) []string {
 	var authorized types.Findings
 	for _, item := range findings.Items {
 		if item.ID == "" || !selected[item.ID] || item.ActionOrDefault() != types.ActionAskUser ||
-			item.Source == types.FindingSourceUser || item.Category == types.FindingCategoryReviewQuestion {
+			item.Source == types.FindingSourceUser || item.Category == types.FindingCategoryReviewQuestion ||
+			pipeline.IsReservedFindingID(item.ID) || item.ID == types.FindingIDAgentSafetyRefusal {
 			continue
 		}
 		key := pipeline.FindingDecisionKey(item)
