@@ -577,6 +577,7 @@ Revalidation, a new fix round, or skipping the step clears that current-step app
 This is separate from the configured-command waiver and trusted repository opt-in used by [PR enforcement](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation); neither that policy nor approval authority changes.
 `--instructions` remains fix guidance, not an approval-reason input.
 It is recorded as the driving agent's `driver_instructions`, apart from the TUI's per-finding user instructions: the step's own round history names it as driver guidance that scoped that fix round only, and the decision history carried to other steps and later runs never repeats it as the user's choice.
+The selection it accompanies is still the operator's decision: selecting a reviewer's `ask-user` finding authorizes that finding's own remedy, which `--instructions` may narrow but never widen, as the [Review step reference](/no-mistakes/reference/pipeline-steps/#review) describes.
 
 `--scope-decision-file` carries an explicit accepted scope correction on a Review fix response, separately from `--instructions-file` guidance.
 It requires a single JSON object of at most 32 KiB and refuses `--yes`.
