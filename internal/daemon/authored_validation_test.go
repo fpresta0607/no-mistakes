@@ -1161,7 +1161,7 @@ func TestAuthoredAdmissionContinuesAChildPublishedThroughEitherInitOrigin(t *tes
 			manager, database, repo, request, gate := authoredAdmissionFixture(t, func() []pipeline.Step {
 				return []pipeline.Step{&authoredFixtureStep{name: types.StepReview, calls: &calls}, &authoredPublishStep{prURL: prURL}}
 			})
-			published := filepath.ToSlash(filepath.Join(t.TempDir(), "published.git"))
+			published := filepath.ToSlash(filepath.Join(shortTempDir(t), "published.git"))
 			gitCmd(t, "", "init", "--bare", published)
 			gitCmd(t, gate, "push", published, "refs/heads/main")
 			gitCmd(t, gate, "config", "--unset", "url."+filepath.ToSlash(gate)+".insteadOf")
