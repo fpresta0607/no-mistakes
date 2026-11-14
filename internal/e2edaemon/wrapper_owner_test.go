@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 // A sibling wrapper's pre-reap stops every inventory whose owner it reads as
@@ -67,26 +69,13 @@ func TestE2EWrapperRecordsAnOwnerTheReaperSeesAlive(t *testing.T) {
 	}
 }
 
-// suiteWrapperBash returns the bash that runs scripts/e2e.sh. On Windows a
-// bare bash can resolve to the WSL launcher, so it is Git for Windows' own,
-// found beside the git on PATH as make e2e finds it, and no candidate is
-// started to ask what it is.
+// suiteWrapperBash returns the bash that runs scripts/e2e.sh: on Windows Git
+// for Windows' own, never a WSL launcher leading PATH (testgit.Bash).
 func suiteWrapperBash(t *testing.T) string {
 	t.Helper()
-	if runtime.GOOS != "windows" {
-		bash, err := exec.LookPath("bash")
-		if err != nil {
-			t.Skip("bash unavailable to run the suite wrapper")
-		}
-		return bash
-	}
-	execPath, err := exec.Command("git", "--exec-path").Output()
+	bash, err := testgit.Bash()
 	if err != nil {
-		t.Skipf("git unavailable to locate Git for Windows' bash: %v", err)
-	}
-	bash := filepath.Join(strings.TrimSpace(string(execPath)), "..", "..", "..", "bin", "bash.exe")
-	if _, err := os.Stat(bash); err != nil {
-		t.Skipf("Git for Windows' bash unavailable to run the suite wrapper: %v", err)
+		t.Skipf("bash unavailable to run the suite wrapper: %v", err)
 	}
 	return bash
 }
