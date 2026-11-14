@@ -615,6 +615,7 @@ func testStepOutcome(sctx *pipeline.StepContext, findings Findings, baseline tes
 		findings.Tested = append(append([]string{}, baseline.tested...), findings.Tested...)
 	}
 	findings.TestedHeadSHA = sctx.Run.HeadSHA
+	findings.TestComparisonSHA = sctx.TestComparisonSHA
 	findings.Items = append(baseline.findings, findings.Items...)
 	if baseline.summary != "" {
 		findings.Summary = strings.TrimSpace(strings.Join([]string{baseline.summary, findings.Summary}, "\n"))

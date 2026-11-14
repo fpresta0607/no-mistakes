@@ -307,6 +307,7 @@ const (
 	ActionFix              ApprovalAction = "fix"
 	ActionSkip             ApprovalAction = "skip"
 	ActionAbort            ApprovalAction = "abort"
+	ActionRevalidate       ApprovalAction = "revalidate"
 	ActionCompleteCoverage ApprovalAction = "complete-coverage"
 	// ActionAnswer releases a review gate that parked on the reviewer's own
 	// open questions, once every one of them is answered. It is neither a

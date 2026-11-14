@@ -686,8 +686,9 @@ func isDocumentationPath(sctx *pipeline.StepContext, path string) bool {
 // lint step and the formatter may all have added commits since.
 //
 // A configured baseline requires Test's recorded comparison from this daemon
-// lifetime. Missing or malformed proof refuses the push rather than resolving
-// a new comparison.
+// lifetime, or the durable one an adopted CI repair's publication supplies in
+// sctx.TestComparisonSHA. Missing or malformed proof refuses the push rather
+// than resolving a new comparison.
 //
 // It names those commits when the comparison is proven or no baseline is
 // configured. When they touch more than documentation, and a baseline is
@@ -719,6 +720,9 @@ func baselineBeforePush(sctx *pipeline.StepContext, head string) (note string, r
 	testCmd := strings.TrimSpace(sctx.Config.Commands.Test)
 	hasBaseline := testCmd != "" || len(sctx.Config.CommandOverrides["test"].Additional) > 0
 	tested, comparison, passed, recorded := sctx.Shared.Baseline()
+	if !recorded && comparison == "" {
+		comparison = sctx.TestComparisonSHA
+	}
 	if hasBaseline {
 		if err := config.ValidateTestComparisonSHA(comparison); err != nil {
 			return "", false, fmt.Errorf("the Test comparison is not proven in this daemon; run Test again before pushing: %w", err)

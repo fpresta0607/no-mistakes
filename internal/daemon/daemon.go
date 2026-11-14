@@ -538,7 +538,11 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 
 	mgr.startup.complete("terminal_pr_runs")
 	parkedStarted := time.Now()
-	plans, preserved := mgr.recoverableParkedRuns(context.Background())
+	plans, preserved, recoveryErr := mgr.recoverableParkedRuns(context.Background())
+	if recoveryErr != nil {
+		slog.Error("cannot classify active ownership; startup cleanup refused", "error", recoveryErr)
+		return
+	}
 	active, err := d.GetActiveRuns()
 	if err != nil {
 		slog.Error("failed to inspect pending terminal successors", "error", err)
@@ -668,6 +672,18 @@ func preserveStaleRunHeads(d *db.DB, p *paths.Paths, excluded map[string]struct{
 }
 
 func preserveRunHead(d *db.DB, workDir string, run *db.Run) (string, bool) {
+	head, verified := anchorRunHead(d, workDir, run)
+	if !verified {
+		return "", false
+	}
+	if err := d.RecordRunTerminalHeadEvidence(run.ID, head); err != nil {
+		slog.Warn("failed to record managed worktree head before terminalization", "run", run.ID, "head", head, "error", err)
+		return "", false
+	}
+	return head, true
+}
+
+func anchorRunHead(d *db.DB, workDir string, run *db.Run) (string, bool) {
 	if d == nil || run == nil || strings.TrimSpace(workDir) == "" {
 		return "", false
 	}
@@ -705,10 +721,6 @@ func preserveRunHead(d *db.DB, workDir string, run *db.Run) (string, bool) {
 			slog.Warn("failed to anchor managed worktree head before terminalization", "run", run.ID, "head", head, "error", err)
 			return "", false
 		}
-	}
-	if err := d.RecordRunTerminalHeadEvidence(run.ID, head); err != nil {
-		slog.Warn("failed to record managed worktree head before terminalization", "run", run.ID, "head", head, "error", err)
-		return "", false
 	}
 	return head, true
 }
@@ -1850,6 +1862,15 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		}
 		if isScopeResponse && p.ScopeDecision == nil {
 			return nil, fmt.Errorf("respond_review_scope requires scope_decision")
+		}
+		if p.Action == types.ActionRevalidate || p.CIRevalidation != nil {
+			if isScopeResponse || p.ScopeDecision != nil {
+				return nil, fmt.Errorf("CI revalidation cannot carry a review scope decision")
+			}
+			if err := mgr.HandleCIRevalidation(ctx, p); err != nil {
+				return nil, err
+			}
+			return &ipc.RespondResult{OK: true}, nil
 		}
 		dispositions, err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, respondInstructions(p), p.AddedFindings, p.ApprovalReason, pipeline.ResponseOptions{Origin: p.Origin, Coverage: p.Coverage, ScopeDecision: p.ScopeDecision})
 		if err != nil {

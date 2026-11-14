@@ -59,6 +59,27 @@ func TestParseFindingsJSON_TestedDetails(t *testing.T) {
 	}
 }
 
+// The persisted key is a contract: a publication replay after a daemon restart
+// reads this value back from the Test step's stored findings.
+func TestParseFindingsJSON_KeepsTheTestComparison(t *testing.T) {
+	comparison := strings.Repeat("a", 40)
+	stored := `{"findings":[],"tested_head_sha":"head","test_comparison_sha":"` + comparison + `"}`
+
+	parsed, err := ParseFindingsJSON(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := MarshalFindingsJSON(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTripped, err := ParseFindingsJSON(encoded)
+
+	if err != nil || parsed.TestComparisonSHA != comparison || roundTripped.TestComparisonSHA != comparison {
+		t.Fatalf("comparison = %q, after a round trip %q (%v), want %q", parsed.TestComparisonSHA, roundTripped.TestComparisonSHA, err, comparison)
+	}
+}
+
 func TestParseFindingsJSON_TestingSummary(t *testing.T) {
 	raw := `{"findings":[],"summary":"ok","testing_summary":"Validated CLI and config flows; all passed."}`
 	f, err := ParseFindingsJSON(raw)

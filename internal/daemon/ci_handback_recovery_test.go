@@ -230,7 +230,10 @@ func TestManagerCancelReleasedCIHandbackAfterRecoveryFailure(t *testing.T) {
 				}
 				t.Fatalf("recovery did not fail at the trusted-config boundary: %v", err)
 			}
-			plans, preserved := manager.recoverableParkedRuns(t.Context())
+			plans, preserved, err := manager.recoverableParkedRuns(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
 			if len(plans) != 0 {
 				for _, plan := range plans {
 					plan.agent.Close()
@@ -321,8 +324,8 @@ func TestManagerCancelReleasedCIHandbackAfterRecoveryFailure(t *testing.T) {
 			if _, err := manager.prepareRecoveredRun(t.Context(), after); err == nil {
 				t.Fatal("recovery resurrected an explicitly aborted reservation")
 			}
-			plans, preserved = manager.recoverableParkedRuns(t.Context())
-			if len(plans) != 0 || len(preserved) != 0 {
+			plans, preserved, err = manager.recoverableParkedRuns(t.Context())
+			if err != nil || len(plans) != 0 || len(preserved) != 0 {
 				t.Fatal("startup resurrected an explicitly aborted reservation")
 			}
 			if err := database.PrepareCIHandback(stored, fixture.followup, stored.BaseHead, "HEAD", fixture.repo); err == nil {
@@ -399,12 +402,23 @@ func TestManagerCancelReleasedCIHandbackRefusesWritersAndTransitions(t *testing.
 }
 
 func TestManagerCancelUsesLiveCancellation(t *testing.T) {
-	manager := NewRunManager(nil, nil, nil)
+	for _, name := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "NM_HOME", "CFO_HOME"} {
+		t.Setenv(name, t.TempDir())
+	}
+	fixture := newEvidenceFixture(t)
+	run, err := fixture.db.InsertRun(fixture.repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewRunManager(fixture.db, fixture.p, nil)
 	ctx, cancel := context.WithCancelCause(t.Context())
 	defer cancel(nil)
-	manager.cancels["live"] = cancel
+	manager.cancels[run.ID] = cancel
 
-	if err := manager.HandleCancel("live"); err != nil {
+	if err := manager.HandleCancel(run.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -546,7 +560,10 @@ func TestManagerCIHandbackCrashRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			database = manager.db
-			plans, preserved := manager.recoverableParkedRuns(t.Context())
+			plans, preserved, err := manager.recoverableParkedRuns(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
 			if _, ok := preserved[fixture.run.ID]; !ok {
 				t.Fatal("interrupted handback fell through to stale-run cleanup")
 			}

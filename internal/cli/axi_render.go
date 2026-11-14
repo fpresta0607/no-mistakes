@@ -681,6 +681,13 @@ func gateFields(gate stepView) []toon.Field {
 func gateFieldsForRun(gate stepView, runID string) []toon.Field {
 	respond := "no-mistakes axi respond" + runFlag(runID)
 	abort := "no-mistakes axi abort" + runFlag(runID)
+	if pipeline.HasPublicationRevalidationHold(gate.FindingsJSON) {
+		return gateFieldsWithHelp(gate, []string{
+			"This hold takes no response: nothing can authorize a head that changed after validation, so approve, fix, skip and credential reselection are all refused.",
+			"Run `" + abort + "` to end this run, which preserves the source and completed results.",
+			fmt.Sprintf("Run `%s` to read the complete step summary and log", axiLogsFullCommand(gate.Name, runID)),
+		})
+	}
 	if gate.ValidationOnly {
 		help := []string{"This authored validation has zero automatic/manual repair authority. Required stages cannot be skipped."}
 		switch {
@@ -771,6 +778,8 @@ func inspectionOnlyGateFields(gate stepView, runID string, isHandbackOpen bool) 
 	if isHandbackOpen {
 		// The executor refuses every response while a handback owns the gate.
 		next = fmt.Sprintf("The explicitly selected gate for run %s is inspection-only here: a CI handback owns it and it takes no response. Run `no-mistakes axi status` from the recorded caller worktree for the next step", runID)
+	} else if pipeline.HasPublicationRevalidationHold(gate.FindingsJSON) {
+		next = fmt.Sprintf("The explicitly selected gate for run %s takes no response. Run `no-mistakes axi abort --run %s` to end the run, which preserves the source and completed results", runID, runID)
 	}
 	return gateFieldsWithHelp(gate, []string{
 		next,

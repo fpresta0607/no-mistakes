@@ -646,6 +646,10 @@ func TestSideBySide_WrapperComparisonSurvivesDefaultMovement(t *testing.T) {
 	if err != nil || outcome == nil || outcome.NeedsApproval {
 		t.Fatalf("Execute() = %#v, %v; log = %s", outcome, err, f.logText())
 	}
+	durable, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil || durable.TestComparisonSHA != f.baseSHA {
+		t.Fatalf("taken lane's durable comparison = %q, %v, want %q", durable.TestComparisonSHA, err, f.baseSHA)
+	}
 	_, comparison, passed, recorded := f.review.Shared.Baseline()
 	if comparison != f.baseSHA || !passed || !recorded {
 		t.Fatalf("recorded comparison = %q, passed = %v, recorded = %v", comparison, passed, recorded)
