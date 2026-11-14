@@ -77,8 +77,18 @@ test:
 # an interrupted or timed-out go test child cannot leave detached e2e
 # daemons behind. Keepalive shells are out of scope. A SIGKILL of the
 # wrapper shell itself does not run its trap; next-run pre-reap recovers.
+#
+# On Windows a bare bash can resolve to the WSL launcher, which would run the
+# suite in Linux with another toolchain or none, so the wrapper runs in the
+# bash of Git for Windows, found beside the git on PATH.
+ifeq ($(OS),Windows_NT)
+E2E_BASH = $(shell git --exec-path)/../../../bin/bash.exe
+else
+E2E_BASH = bash
+endif
+
 e2e:
-	@bash scripts/e2e.sh
+	@"$(E2E_BASH)" scripts/e2e.sh
 
 # Re-record fixtures from the real claude/codex/opencode/antigravity CLIs and overwrite
 # internal/e2e/fixtures/. Spends real API quota — run only when the upstream

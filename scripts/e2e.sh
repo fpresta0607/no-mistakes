@@ -17,6 +17,20 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# On Windows a bare bash can resolve to the WSL launcher, whose Linux shell
+# would build and start the suite with another platform's go, or with none.
+# Refuse before the first build or daemon launch unless this shell and the go
+# it finds target one platform.
+shell_goos="${OSTYPE%%[-0-9]*}"
+case "$shell_goos" in
+  msys | cygwin) shell_goos=windows ;;
+esac
+go_goos="$(go env GOOS 2>/dev/null)"
+if [[ "$go_goos" != "$shell_goos" ]]; then
+  printf 'scripts/e2e.sh: this bash runs on %s, but the go on its PATH targets %s, so nothing was built or started. Run the suite with a bash and go of one platform; on Windows that is the bash of Git for Windows, which make e2e selects.\n' "$shell_goos" "${go_goos:-nothing (go is missing or failed)}" >&2
+  exit 1
+fi
+
 if [[ -z "${NM_E2E_DAEMON_INVENTORY:-}" ]]; then
   base="/tmp"
   if [[ -d /private/tmp ]]; then
