@@ -243,7 +243,7 @@ func TestManagerCancelReleasedCIHandbackAfterRecoveryFailure(t *testing.T) {
 			if _, ok := preserved[fixture.run.ID]; !ok {
 				t.Fatal("startup lost the released reservation")
 			}
-			if _, err := database.RecoverStaleRunsExcept("daemon restarted", preserved); err != nil {
+			if _, err := database.RecoverStaleRunsExcept("daemon restarted", preserved, nil); err != nil {
 				t.Fatal(err)
 			}
 			if err := os.Rename(fixture.remote+".offline", fixture.remote); err != nil {
@@ -567,7 +567,7 @@ func TestManagerCIHandbackCrashRecovery(t *testing.T) {
 			if _, ok := preserved[fixture.run.ID]; !ok {
 				t.Fatal("interrupted handback fell through to stale-run cleanup")
 			}
-			if _, err := database.RecoverStaleRunsExcept("fixture process exited", preserved); err != nil {
+			if _, err := database.RecoverStaleRunsExcept("fixture process exited", preserved, nil); err != nil {
 				t.Fatal(err)
 			}
 			after, err := database.GetRun(fixture.run.ID)

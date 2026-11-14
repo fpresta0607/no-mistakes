@@ -391,7 +391,7 @@ func TestCIRevalidationStartupPreservesUnreadableCandidateBeforeStaleCleanup(t *
 	if _, ok := preserved[run.ID]; !ok {
 		t.Fatal("unreadable candidate never entered the startup preserved set")
 	}
-	if _, err := database.RecoverStaleRunsExcept("crashed", preserved); err != nil {
+	if _, err := database.RecoverStaleRunsExcept("crashed", preserved, nil); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := database.GetRun(run.ID)
@@ -596,7 +596,7 @@ func TestCIRevalidationStartupPreservesTheReceiptUntilPushCompletes(t *testing.T
 		if _, ok := preserved[run.ID]; !ok {
 			t.Fatalf("post-receipt Push with push_active=%v was not preserved", isPushActive)
 		}
-		if _, err := database.RecoverStaleRunsExcept("crashed", preserved); err != nil {
+		if _, err := database.RecoverStaleRunsExcept("crashed", preserved, nil); err != nil {
 			t.Fatal(err)
 		}
 		stored, err := database.GetRun(run.ID)
@@ -618,7 +618,7 @@ func TestCIRevalidationStartupPreservesTheReceiptUntilPushCompletes(t *testing.T
 		if _, ok := preserved[run.ID]; !ok {
 			t.Fatal("startup lost a recorded publication before delivery reached CI")
 		}
-		if _, err := database.RecoverStaleRunsExcept("crashed", preserved); err != nil {
+		if _, err := database.RecoverStaleRunsExcept("crashed", preserved, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

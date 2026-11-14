@@ -187,7 +187,7 @@ func (m *RunManager) cancelQueuedRun(qe queuedRun, cause string) {
 	var head string
 	var verified bool
 	if qe.recovered != nil {
-		head, verified = preserveRunHead(m.db, qe.wtDir, qe.recovered)
+		head, verified = anchorRunHead(m.db, qe.wtDir, qe.recovered)
 	}
 	var err error
 	if verified {

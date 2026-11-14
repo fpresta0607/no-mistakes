@@ -3100,6 +3100,11 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	}
 	if dbErr != nil {
 		slog.Error("failed to update run error status", "run", run.ID, "error", dbErr)
+		if isCIRepairHeld {
+			// The anchored repair stays running in its worktree so a repeated
+			// abort settles that exact head; nothing may treat it as finished.
+			return fmt.Errorf("record cancelled CI repair: %w", dbErr)
+		}
 	} else if verified {
 		run.HeadSHA = verifiedHead
 	}
@@ -3216,15 +3221,11 @@ func (e *Executor) reconcileTerminalRunHead(run *db.Run) (string, bool) {
 			return "", false
 		}
 	}
+	// The observed head is recorded only by the caller's terminal write. Writing
+	// it here first left a run that never settled recorded at a head it never
+	// validated, which reads as no retained CI repair after a restart.
 	if !e.preserveUnpublishedTerminalHead(ctx, recordedRun, observed) {
 		return "", false
-	}
-	if observed != recorded {
-		if err := e.db.UpdateRunHeadSHA(run.ID, observed); err != nil {
-			slog.Warn("failed to record preserved terminal head", "run", run.ID, "error", err)
-			return "", false
-		}
-		run.HeadSHA = observed
 	}
 	isDirty, statusErr := git.HasUncommittedChangesIncludingHidden(ctx, e.workDir)
 	sourceState := "clean:" + observed

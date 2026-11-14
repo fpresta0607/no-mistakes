@@ -1154,16 +1154,6 @@ func (d *DB) VerifyTerminalRunRecordedHead(id string, status types.RunStatus, re
 	return updated == 1, err
 }
 
-// RecordRunTerminalHeadEvidence records a managed worktree head that was
-// verified immediately before crash recovery makes the run terminal. The
-// subsequent stale-run status transition deliberately preserves this stamp.
-func (d *DB) RecordRunTerminalHeadEvidence(id, headSHA string) error {
-	ts := now()
-	_, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status IN (?, ?)`,
-		headSHA, ts, ts, id, types.RunPending, types.RunRunning)
-	return err
-}
-
 // RunIntentSourceAgent is the intent_source value stamped when the driving
 // agent supplied the intent explicitly via `axi run --intent`. It marks an
 // authoritative, author-stated goal (score 1) as opposed to a transcript
@@ -1442,13 +1432,15 @@ func (d *DB) CompleteRunAwaitingAgent(id string, ms int64) error {
 // created PR are preserved as a non-failure outcome; all other stale runs are
 // failed. Returns the number of recovered runs.
 func (d *DB) RecoverStaleRuns(errMsg string) (int, error) {
-	return d.RecoverStaleRunsExcept(errMsg, nil)
+	return d.RecoverStaleRunsExcept(errMsg, nil, nil)
 }
 
 // RecoverStaleRunsExcept marks active runs as failed unless their IDs appear
 // in preserved. Callers use preserved only after independently proving a run
-// can be reconstructed safely.
-func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}) (int, error) {
+// can be reconstructed safely. verifiedHeads holds the managed worktree heads
+// the caller anchored for runs it terminalizes; each is recorded in the same
+// transaction as the run's terminal status, never before it.
+func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}, verifiedHeads map[string]string) (int, error) {
 	ts := now()
 
 	tx, err := d.sql.Begin()
@@ -1456,6 +1448,16 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 		return 0, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback()
+
+	for id, head := range verifiedHeads {
+		if _, isPreserved := preserved[id]; isPreserved {
+			continue
+		}
+		if _, err := tx.Exec(`UPDATE runs SET head_sha = ?, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status IN (?, ?)`,
+			head, ts, ts, id, types.RunPending, types.RunRunning); err != nil {
+			return 0, fmt.Errorf("record stale run head: %w", err)
+		}
+	}
 
 	placeholders, args := recoveryExclusionClause(preserved)
 

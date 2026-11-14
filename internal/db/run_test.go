@@ -1726,7 +1726,7 @@ func TestRecoverStaleRunsExceptPreservesOnlyValidatedRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	count, err := d.RecoverStaleRunsExcept("daemon crashed", map[string]struct{}{preserved.ID: {}})
+	count, err := d.RecoverStaleRunsExcept("daemon crashed", map[string]struct{}{preserved.ID: {}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2051,7 +2051,7 @@ func TestRecoverStaleRunsCompletedCI(t *testing.T) {
 				preserved[run.ID] = struct{}{}
 			}
 			for attempt := 0; attempt < 2; attempt++ {
-				if _, err := d.RecoverStaleRunsExcept("daemon crashed", preserved); err != nil {
+				if _, err := d.RecoverStaleRunsExcept("daemon crashed", preserved, nil); err != nil {
 					t.Fatal(err)
 				}
 				got, err := d.GetRun(run.ID)

@@ -733,7 +733,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 					status := types.RunFailed
 					verifiedHead, isVerified := "", false
 					if pipeline.IsUserAbort(runCtx) {
-						verifiedHead, isVerified = preserveRunHead(m.db, plan.workDir, plan.run)
+						verifiedHead, isVerified = anchorRunHead(m.db, plan.workDir, plan.run)
 						errMsg, status = types.RunCancelReasonAbortedByUser, types.RunCancelled
 						if dbErr := m.db.ClearRunAwaitingAgent(plan.run.ID); dbErr != nil {
 							slog.Error("failed to clear cancelled run gate", "run_id", plan.run.ID, "error", dbErr)
@@ -2424,7 +2424,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 					}
 					addRunPerformanceSummary(m.db, run.ID, fields)
 					telemetry.Track("run", fields)
-					verifiedHead, verified := preserveRunHead(m.db, wtDir, run)
+					verifiedHead, verified := anchorRunHead(m.db, wtDir, run)
 					var dbErr error
 					if verified {
 						dbErr = m.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, errMsg, types.RunFailed, verifiedHead)

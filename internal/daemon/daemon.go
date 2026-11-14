@@ -583,10 +583,10 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	// so: recovery below turns them terminal, and they are the ones whose
 	// worktree may already be gone with something still standing in it.
 	activeWorktrees := activeRecordedRunWorktrees(d, p)
-	preserveStaleRunHeads(d, p, preserved)
+	verifiedHeads := preserveStaleRunHeads(d, p, preserved)
 
 	staleStarted := time.Now()
-	count, err := d.RecoverStaleRunsExcept("daemon crashed during execution", preserved)
+	count, err := d.RecoverStaleRunsExcept("daemon crashed during execution", preserved, verifiedHeads)
 	if err != nil {
 		slog.Error("failed to recover stale runs", "error", err)
 		logStartupPhase("stale_runs", staleStarted, "failed", true)
@@ -649,11 +649,15 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	mgr.resumeRecoveredRuns(plans)
 }
 
-func preserveStaleRunHeads(d *db.DB, p *paths.Paths, excluded map[string]struct{}) {
+// preserveStaleRunHeads anchors each crashed run's managed worktree head and
+// returns the verified heads for RecoverStaleRunsExcept to record with the
+// runs' terminal status.
+func preserveStaleRunHeads(d *db.DB, p *paths.Paths, excluded map[string]struct{}) map[string]string {
+	verifiedHeads := map[string]string{}
 	active, err := d.ActiveRunWorktrees()
 	if err != nil {
 		slog.Warn("failed to list active run heads before crash recovery", "error", err)
-		return
+		return verifiedHeads
 	}
 	for _, wt := range active {
 		if _, skip := excluded[wt.RunID]; skip {
@@ -667,22 +671,16 @@ func preserveStaleRunHeads(d *db.DB, p *paths.Paths, excluded map[string]struct{
 		if _, err := os.Stat(workDir); err != nil {
 			continue
 		}
-		preserveRunHead(d, workDir, run)
+		if head, verified := anchorRunHead(d, workDir, run); verified {
+			verifiedHeads[run.ID] = head
+		}
 	}
+	return verifiedHeads
 }
 
-func preserveRunHead(d *db.DB, workDir string, run *db.Run) (string, bool) {
-	head, verified := anchorRunHead(d, workDir, run)
-	if !verified {
-		return "", false
-	}
-	if err := d.RecordRunTerminalHeadEvidence(run.ID, head); err != nil {
-		slog.Warn("failed to record managed worktree head before terminalization", "run", run.ID, "head", head, "error", err)
-		return "", false
-	}
-	return head, true
-}
-
+// anchorRunHead preserves a run's managed worktree head and reports it as
+// verified. It records nothing on the run: the caller's terminal write is the
+// one owner of the run's head.
 func anchorRunHead(d *db.DB, workDir string, run *db.Run) (string, bool) {
 	if d == nil || run == nil || strings.TrimSpace(workDir) == "" {
 		return "", false
