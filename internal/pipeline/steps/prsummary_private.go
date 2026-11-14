@@ -17,14 +17,14 @@ import (
 // repository-relative path matches none of these and stays public. The rules
 // fail closed: a false positive withholds one entry the notice still counts.
 var privateRuntimeDetailPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?:^|[^A-Za-z0-9])[A-Za-z]:[\\/]`),
+	regexp.MustCompile(`(?:^|[^A-Za-z0-9])(?:/[A-Za-z]{1,3})?[A-Za-z]:[\\/]`),
 	regexp.MustCompile(privatePathBoundary + `[A-Za-z]:[\\/]`),
 	regexp.MustCompile(privatePathBoundary + `(?i:file://)?/[A-Za-z0-9._~-]+/`),
 	regexp.MustCompile(privatePathBoundary + `\\\\(?:\\\\)?[A-Za-z0-9]`),
 	regexp.MustCompile(privatePathBoundary + `~[\\/]`),
 	regexp.MustCompile(`(?i)\$\{?(?:HOME|TMPDIR|USERPROFILE)\b|%(?:USERPROFILE|HOMEPATH|LOCALAPPDATA|APPDATA|TEMP|TMP)%`),
 	regexp.MustCompile(`\b[0-9A-Z]{26}\b`),
-	regexp.MustCompile(`(?i)\b(?:pid|process[ _-]?id)s?\b[^\w\n]{0,8}\d+`),
+	regexp.MustCompile(`(?i)\b(?:pid|process[ _-]?id)s?\b\W{0,8}\d+`),
 }
 
 // privatePathBoundary is what may precede a local path: anything that does not
