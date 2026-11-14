@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,10 +17,7 @@ import (
 // Bash's $$ is its own numbering rather than a Windows PID, and recording it
 // made concurrent suites stop each other's live daemons.
 func TestE2EWrapperRecordsAnOwnerTheReaperSeesAlive(t *testing.T) {
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skip("bash unavailable to run the suite wrapper")
-	}
+	bash := suiteWrapperBash(t)
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
@@ -28,7 +26,7 @@ func TestE2EWrapperRecordsAnOwnerTheReaperSeesAlive(t *testing.T) {
 	ownerCopy := filepath.ToSlash(filepath.Join(scratch, "owner"))
 	release := filepath.ToSlash(filepath.Join(scratch, "release"))
 	// The stand-in for go holds the wrapper open exactly as a running suite does.
-	fakeGo := "#!/bin/sh\n[ \"$1\" = test ] || exit 0\ncp \"$NM_E2E_DAEMON_INVENTORY/owner.pid\" '" + ownerCopy + ".tmp'\nmv '" + ownerCopy + ".tmp' '" + ownerCopy + "'\nwhile [ ! -e '" + release + "' ]; do sleep 0.2; done\n"
+	fakeGo := "#!/bin/sh\n[ \"$1 $2\" = 'env GOOS' ] && printf '%s\\n' " + runtime.GOOS + "\n[ \"$1\" = test ] || exit 0\ncp \"$NM_E2E_DAEMON_INVENTORY/owner.pid\" '" + ownerCopy + ".tmp'\nmv '" + ownerCopy + ".tmp' '" + ownerCopy + "'\nwhile [ ! -e '" + release + "' ]; do sleep 0.2; done\n"
 	if err := os.WriteFile(filepath.Join(scratch, "go"), []byte(fakeGo), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -67,6 +65,30 @@ func TestE2EWrapperRecordsAnOwnerTheReaperSeesAlive(t *testing.T) {
 	if parseErr != nil || aliveErr != nil || !isAlive {
 		t.Fatalf("running wrapper's owner %q reads as alive=%t (%v, %v); a sibling's pre-reap would stop its daemons", owner, isAlive, parseErr, aliveErr)
 	}
+}
+
+// suiteWrapperBash returns the bash that runs scripts/e2e.sh. On Windows a
+// bare bash can resolve to the WSL launcher, so it is Git for Windows' own,
+// found beside the git on PATH as make e2e finds it, and no candidate is
+// started to ask what it is.
+func suiteWrapperBash(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		bash, err := exec.LookPath("bash")
+		if err != nil {
+			t.Skip("bash unavailable to run the suite wrapper")
+		}
+		return bash
+	}
+	execPath, err := exec.Command("git", "--exec-path").Output()
+	if err != nil {
+		t.Skipf("git unavailable to locate Git for Windows' bash: %v", err)
+	}
+	bash := filepath.Join(strings.TrimSpace(string(execPath)), "..", "..", "..", "bin", "bash.exe")
+	if _, err := os.Stat(bash); err != nil {
+		t.Skipf("Git for Windows' bash unavailable to run the suite wrapper: %v", err)
+	}
+	return bash
 }
 
 func filterInventoryEnv(environment []string) []string {
