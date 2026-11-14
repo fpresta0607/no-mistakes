@@ -646,6 +646,7 @@ no-mistakes axi respond --action revalidate --candidate <full-sha> --reason "val
 
 This keeps the same run and PR, revokes current approvals, and starts fresh required validation at Review.
 Original findings, rounds, spent automatic repair selections, and original per-step limits remain recorded.
+The adopted Review rounds still count toward Review's fix-round limits, but the fresh Review neither shows its reviewer their decisions nor carries their selections or fix and ignore choices into its own gate responses.
 Adoption itself launches no CI fixer and renews no repair budget.
 It revokes the run's stored agent sessions in the same transaction, so fresh validation never resumes a session that saw the retained contents.
 An immutable local audit records the authenticated operator process, reason, candidate, caller, and original state in the same transaction that revokes approval and resets validation.
