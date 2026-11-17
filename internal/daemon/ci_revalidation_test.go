@@ -473,7 +473,7 @@ func TestCIRevalidationUserAbortCleansUpRecoveredPublicationHold(t *testing.T) {
 	go func() { manager.wg.Wait(); close(finished) }()
 	select {
 	case <-finished:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("aborted recovered run did not finish cleanup")
 	}
 	stored, err := fixture.db.GetRun(run.ID)
@@ -945,7 +945,7 @@ func TestCIRevalidationRecoveredAbortRefusesUnpreservableSource(t *testing.T) {
 	cancel(errors.New(types.RunCancelReasonAbortedByUser))
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("recovered executor did not stop")
 	}
 

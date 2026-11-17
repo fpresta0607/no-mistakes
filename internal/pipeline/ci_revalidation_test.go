@@ -113,6 +113,7 @@ func TestCIAdoptionInterruptionCauseAndValidationBoundaryMatrix(t *testing.T) {
 		for _, mode := range []string{"live gate", "recovered gate", "pending", "executing"} {
 			for _, cause := range []string{"shutdown", "cancelled", "abort"} {
 				t.Run(string(entry)+"/"+mode+"/"+cause, func(t *testing.T) {
+					t.Parallel()
 					database, locations, run, repo := setupTest(t)
 					run.HeadSHA = strings.Repeat("c", 40)
 					if err := database.UpdateRunHeadSHA(run.ID, run.HeadSHA); err != nil {
@@ -255,13 +256,15 @@ func TestCIAdoptionEveryRecoveryEntryHoldsAPushValidationRestart(t *testing.T) {
 	for _, entry := range []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.CustomGateStepName(types.StepLint, "fixture"), types.StepPush} {
 		for _, status := range []types.StepStatus{types.StepStatusPending, types.StepStatusAwaitingApproval} {
 			t.Run(string(entry)+"/"+string(status), func(t *testing.T) {
+				t.Parallel()
 				database, locations, run, repo := setupTest(t)
 				workDir := t.TempDir()
 				initGitRepo(t, workDir)
-				run.HeadSHA, err = git.HeadSHA(t.Context(), workDir)
+				head, err := git.HeadSHA(t.Context(), workDir)
 				if err != nil {
 					t.Fatal(err)
 				}
+				run.HeadSHA = head
 				run, event, names := prepareCIAdoptionRecovery(t, database, run, entry, status)
 				var steps []Step
 				pushCalls, testCalls := 0, 0
@@ -1201,6 +1204,7 @@ func TestCIAdoptionFreshReviewResponseIsNotBoundByAdoptedDecisions(t *testing.T)
 func TestCIAdoptionRestartsOnlyAnExactlyReviewedInterruptedPush(t *testing.T) {
 	for _, name := range []string{"exact push", "inactive push", "parked handoff", "agent writer", "review missing", "interrupted test", "untested head", "validation hold", "protected hold", "interrupted pr"} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			database, locations, run, repo := setupTest(t)
 			if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 				t.Fatal(err)
@@ -1333,6 +1337,7 @@ func TestCIPublicationReselectionRejectsSnapshotChangesAtEveryHandoff(t *testing
 	for _, boundary := range []string{"before proof", "during proof", "queued", "recovered entry"} {
 		for _, field := range []string{"repository", "run", "publication", "gates", "step", "limit", "round"} {
 			t.Run(boundary+"/"+field, func(t *testing.T) {
+				t.Parallel()
 				database, locations, run, repo := setupTest(t)
 				run, event, _ := prepareCIAdoptionRecovery(t, database, run, types.StepPush, types.StepStatusAwaitingApproval)
 				expected := requireCIRepairSnapshot(t, database, run.ID)

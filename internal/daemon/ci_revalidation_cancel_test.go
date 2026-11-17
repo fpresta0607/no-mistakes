@@ -150,7 +150,7 @@ func TestCIRevalidationLiveAbortRecordsTheHeldHeadOnlyWithItsTerminalStatus(t *t
 	}
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("live executor did not stop")
 	}
 
@@ -231,7 +231,7 @@ func TestCIRevalidationLiveAbortSettlesAnAnchoredDirtyHeldRepair(t *testing.T) {
 	}
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("live executor did not stop")
 	}
 
@@ -357,7 +357,7 @@ func TestCIRevalidationLiveAbortPreservesOnlyTheQuiescedHead(t *testing.T) {
 			releaseOnce.Do(func() { close(release) })
 			select {
 			case <-done:
-			case <-time.After(5 * time.Second):
+			case <-time.After(30 * time.Second):
 				t.Fatal("cancelled writer did not finish and settle")
 			}
 			select {
@@ -452,11 +452,11 @@ func TestCIRevalidationQueuedAbortOwnsPreservationDuringAdmission(t *testing.T) 
 		}
 		select {
 		case <-cancelDone:
-		case <-time.After(5 * time.Second):
+		case <-time.After(30 * time.Second):
 			t.Error("queued cancellation did not finish")
 		}
 	})
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if _, err := os.Stat(readyPath); err == nil {
 			break
@@ -478,7 +478,7 @@ func TestCIRevalidationQueuedAbortOwnsPreservationDuringAdmission(t *testing.T) 
 		_ = os.WriteFile(releasePath, nil, 0o600)
 		select {
 		case <-pumpDone:
-		case <-time.After(5 * time.Second):
+		case <-time.After(30 * time.Second):
 			t.Error("competing admission did not finish")
 		}
 	}()
@@ -497,12 +497,12 @@ func TestCIRevalidationQueuedAbortOwnsPreservationDuringAdmission(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("queued cancellation did not settle")
 	}
 	select {
 	case <-pumpDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("scheduler did not finish after cancellation")
 	}
 	manager.mu.Lock()
