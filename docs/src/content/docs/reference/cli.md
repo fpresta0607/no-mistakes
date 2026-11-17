@@ -425,7 +425,7 @@ Validate one explicitly declared, clean authored commit and tree linked to an im
 A branch with validation-only lineage can therefore validate a follow-up change after its child completes, while a completed run that was not itself admitted through `validate-authored` or `validate-terminal` is refused as a predecessor.
 This is a new validation-only child: the predecessor stays terminal, and every core stage and current trusted custom gate starts fresh without an inherited pass, review approval, CI-ready state, exception or agent session.
 All automatic and manual repair authority is zero, including stages the predecessor never reached.
-Fix selections, skips, CI handbacks, ordinary fresh launches that would drop the lineage, and repair dispatch after restart are refused.
+Fix selections, skips, CI, Test and Lint handbacks, ordinary fresh launches that would drop the lineage, and repair dispatch after restart are refused.
 
 ```sh
 no-mistakes axi validate-authored --admission-file admission.json --wait 8m
@@ -819,7 +819,7 @@ The daemon fast-forwards the managed worktree to the correction, moves the run h
 The earlier round, the intent and the spent automatic repair allowances stay as they were; a handback grants no repair allowance.
 Like the gate's own Test repair commits, the correction descends from the review-approved head and is validated from the failed step without another Review.
 If acceptance fails after the managed worktree moved, it is restored to the released head.
-A daemon that stops after accepting the correction validates it from the failed step when it restarts, rather than parking the gate again on an unvalidated head.
+A daemon that stops after accepting the correction validates it on restart, as [Crash recovery](/no-mistakes/concepts/daemon/#crash-recovery) describes.
 Resume returns the full `accepted_head` and follows the next decision point, bounded by `--wait` (default `8m`).
 An `approve`, `fix` or `skip` delivered after release moves the gate on, and a later resume of that receipt refuses.
 `--expect` and `--revalidate-publication` apply only to a CI handback.
@@ -1018,7 +1018,7 @@ Each round has these fields:
 - `id` and `step_result_id`: the stored round and owning step identities.
 - `reviewed_head_sha` and `trusted_config_sha`: the recorded reviewed head and trusted configuration identity, or `null` when unavailable.
 - `round`: the step-local round number; identify a round by `(run_id, step, round)`, not by finding ID alone.
-- `trigger`: the recorded execution trigger, such as `initial`, `auto_fix`, legacy `user_fix`, `coverage`, `answer`, or `retry`; consumers must allow new trigger values.
+- `trigger`: the recorded execution trigger, such as `initial`, `auto_fix`, legacy `user_fix`, `coverage`, `answer`, `handback`, or `retry`; consumers must allow new trigger values.
 - `summary` and `findings`: the round's complete summary and array of finding objects, or `null` when absent.
   Finding fields are preserved, including optional fields and instructions; consumers must ignore unknown fields.
   TOON prints an integer outside ±(2^53−1) as a quoted decimal string to keep it exact; `--json` keeps it a number.
