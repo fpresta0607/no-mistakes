@@ -302,6 +302,8 @@ An automatic fix round preserves every unselected finding whose action is `ask-u
 
 The [finding-action model](/no-mistakes/concepts/auto-fix/#finding-actions) owns the default for an omitted action. Step-owned verdict, configured-command, and budget-cut findings are excluded from this carry rule. A fix started by an operator or the `axi run --yes` loop does not carry declined findings, because the [fix response](/no-mistakes/reference/cli/#no-mistakes-axi-respond) already accounts for them.
 
+With `auto_fix.test: 0`, a parked Test failure with auto-fixable findings and no `ask-user` finding can go back to its author for one correcting commit in the same run with [`axi handback`](/no-mistakes/reference/cli/#test-and-lint-handback).
+
 **Default auto-fix limit:** `3`.
 
 ## Document
@@ -344,6 +346,8 @@ Combined-pass lint findings use the same gate: `error` and `warning` findings pa
 
 **Auto-fix:** when `commands.lint` is configured, the lint step follows the same pattern as test - the agent fixes `action: auto-fix` issues using the previous findings plus any per-finding user notes, any selected user-authored findings from the TUI or AXI interface, and the shared [finding decision history](#finding-decision-history), including earlier fix summaries for this step, then lint re-runs.
 When `commands.lint` is empty, unresolved findings from the combined pass pause for approval instead of starting another automatic lint/fix loop, because the agent already attempted safe fixes during housekeeping.
+
+With `auto_fix.lint: 0`, a parked Lint failure with auto-fixable findings and no `ask-user` finding can go back to its author for one correcting commit in the same run with [`axi handback`](/no-mistakes/reference/cli/#test-and-lint-handback).
 
 **Default auto-fix limit:** `3`.
 

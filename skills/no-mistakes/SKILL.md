@@ -254,6 +254,8 @@ Run the pipeline and decide on its findings as they come up:
    A wrapper must bind all source identities with `--expect binding.json` and resume with the returned native receipt ID.
    The expectation contains exactly repo_id, run_id, branch, caller_dir, caller_head, current_head, published_head and push_generation; resume changes only caller_head to the authored correction.
    An ordinary authored correction must retain both the original author and published histories and pass complete validation again in the same run, without granting another automatic repair allowance or deciding the failed CI findings.
+   A Test or Lint failure parked with `auto_fix.test: 0` or `auto_fix.lint: 0` and auto-fixable findings but no ask-user finding goes back to its author the same way: `no-mistakes axi handback` returns a receipt and a `released_ref` to integrate with `git merge --ff-only` when behind.
+   Commit exactly one correction on the released head in that worktree, then run `no-mistakes axi handback --resume --receipt <id>`; the same run validates it from the failed step with no new repair allowance.
 
     Each `respond` blocks until the next `gate:`, `checks-passed` decision point, or final outcome, subject to the same default `--wait 8m` hold.
 
