@@ -3092,7 +3092,7 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	terminalHead, verified := e.reconcileTerminalRunHead(run)
 	if errMsg == types.RunCancelReasonAbortedByUser {
 		if isCIRepairHeld {
-			if err := CheckCIRepairCancellation(e.workDir, verified); err != nil {
+			if err := CheckCIRepairCancellation(e.workDir, terminalHead != ""); err != nil {
 				return err
 			}
 		}

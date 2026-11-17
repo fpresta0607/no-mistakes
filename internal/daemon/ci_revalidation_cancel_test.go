@@ -187,6 +187,66 @@ func TestCIRevalidationLiveAbortRecordsTheHeldHeadOnlyWithItsTerminalStatus(t *t
 	}
 }
 
+// A held repair whose fixer left an untracked file is preserved by its anchor,
+// so the first live abort settles it at the anchored head, unverified, and keeps
+// the dirty worktree. Refusing it left an anchored run that nothing could adopt
+// until a second abort settled the same state.
+func TestCIRevalidationLiveAbortSettlesAnAnchoredDirtyHeldRepair(t *testing.T) {
+	repair := seedRetainedCIRepair(t)
+	gateDir := repair.fixture.p.RepoDir(repair.repo.ID)
+	run, err := repair.fixture.db.GetRun(repair.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leftover := filepath.Join(repair.workDir, "fixer-leftover.txt")
+	if err := os.WriteFile(leftover, []byte("uncommitted fixer output\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var steps []pipeline.Step
+	for _, name := range types.AllSteps() {
+		steps = append(steps, &mockPassStep{name: name})
+	}
+	manager := NewRunManager(repair.fixture.db, repair.fixture.p, nil)
+	t.Cleanup(manager.Shutdown)
+	manager.resumeRecoveredRun(recoveredRunPlan{
+		run: run, repo: repair.repo, workDir: repair.workDir, gateDir: gateDir,
+		cfg: config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{}), agent: recoveredRunTestAgent{}, steps: steps,
+	})
+	manager.mu.Lock()
+	executor, done := manager.executors[run.ID], manager.dones[run.ID]
+	manager.mu.Unlock()
+	if executor == nil || done == nil {
+		t.Fatal("fixture did not start a live executor for the held run")
+	}
+	parkDeadline := time.Now().Add(5 * time.Second)
+	for !executor.AwaitingApproval() {
+		if time.Now().After(parkDeadline) {
+			t.Fatal("live executor never parked at the held CI gate")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := manager.HandleCancel(run.ID); err != nil {
+		t.Fatalf("abort did not reach the live executor: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("live executor did not stop")
+	}
+
+	settled, err := repair.fixture.db.GetRun(run.ID)
+	if err != nil || settled.Status != types.RunCancelled || settled.HeadSHA != repair.candidate || settled.TerminalHeadVerifiedAt != nil {
+		t.Fatalf("first abort did not settle the anchored dirty head unverified: %+v, %v", settled, err)
+	}
+	if anchor := gitOutput(t, gateDir, "rev-parse", "refs/no-mistakes/recover/"+run.ID); anchor != repair.candidate {
+		t.Fatalf("abort anchored %s, want the candidate", anchor)
+	}
+	if _, err := os.Stat(leftover); err != nil {
+		t.Fatalf("abort discarded the fixer's uncommitted file: %v", err)
+	}
+}
+
 type cancellationCommitStep struct {
 	commitContext context.Context
 	started       chan struct{}
