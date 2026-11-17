@@ -35,7 +35,8 @@ type StepRound struct {
 	ID           string
 	StepResultID string
 	Round        int
-	// Trigger is "initial", "auto_fix", "coverage", or "answer" (a review turn resumed
+	// Trigger is "initial", "auto_fix", "coverage", "handback" (a Test or Lint step
+	// validating its contributor's accepted correction), or "answer" (a review turn resumed
 	// once every question it left open was answered - not a fix round, since
 	// no code changed). "coverage" starts another static review without a fix
 	// or verdict; legacy "user_fix" is treated as "auto_fix".

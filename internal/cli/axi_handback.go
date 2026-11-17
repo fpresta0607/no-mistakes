@@ -26,8 +26,12 @@ func newAxiHandbackCmd() *cobra.Command {
 	var expectationPath, receiptID string
 	command := &cobra.Command{
 		Use:   "handback",
-		Short: "Return failed published CI to its author for revalidation",
-		Long: "Release ordinary failed checks or a published CI merge conflict with automatic CI repair disabled.\n" +
+		Short: "Return a parked failure to its author for revalidation in the same run",
+		Long: "Release a parked Test or Lint failure whose auto_fix is 0 to this worktree.\n" +
+			"Commit exactly one correction on the released head (released_ref), then use\n" +
+			"--resume --receipt <id> from the same worktree: the same run validates that\n" +
+			"commit again from the failed step, keeping every allowance it spent.\n\n" +
+			"Release ordinary failed checks or a published CI merge conflict with automatic CI repair disabled.\n" +
 			"The same run, PR, findings and repair budgets remain unresolved. Synchronize\n" +
 			"behind caller with axi sync. Ordinary divergence is anchored without moving\n" +
 			"the author branch; follow branch_sync.next_action for additive integration.\n\n" +
@@ -90,6 +94,16 @@ func newAxiHandbackCmd() *cobra.Command {
 			}
 			if active.Run == nil {
 				return emitError(command, 1, "no active run on the current branch to hand back")
+			}
+			isStep, err := isStepHandback(env.d, active.Run.ID, shouldResume, receiptID)
+			if err != nil {
+				return emitError(command, 1, err.Error())
+			}
+			if isStep {
+				if expected != nil || shouldRevalidatePublication {
+					return emitError(command, 2, "--expect and --revalidate-publication apply only to a CI handback")
+				}
+				return runAxiStepHandback(command, env, active.Run, ipc.StepHandbackParams{RepoID: env.repo.ID, RunID: active.Run.ID, Branch: branch, CallerDir: caller, HeadSHA: head, Resume: shouldResume, ReceiptID: receiptID}, wait)
 			}
 			request := ipc.CIHandbackParams{RepoID: env.repo.ID, RunID: active.Run.ID, Branch: branch, CallerDir: caller, HeadSHA: head, Resume: shouldResume, RevalidatePublication: shouldRevalidatePublication, ReceiptID: receiptID, Expect: expected}
 			stored, err := env.d.GetRun(active.Run.ID)
