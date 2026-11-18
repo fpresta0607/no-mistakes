@@ -730,19 +730,18 @@ func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext) (ciRepairR
 	}
 	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
 	sctx.Log("retrying retained CI repair after protected-path refusal")
-	// A refused base merge is retained in progress (concludeCIMerge), and only
-	// the pipeline concludes it.
-	if mergeInProgress(sctx.Ctx, sctx.WorkDir) {
-		merged, err := commitCIMerge(sctx, "", "", nil, nil)
-		if err != nil {
-			return ciRepairResult{}, err
-		}
-		return s.recordRepair(sctx, merged)
-	}
-	// Under rebase.strategy: merge, an operator who resolves a refused protected
-	// path concludes the retained merge in the run worktree, as for every other
-	// refused repair, and that merge is theirs to record.
+	// Under rebase.strategy: merge, a refused base merge is retained in progress
+	// (concludeCIMerge) and only the pipeline concludes it, while an operator who
+	// resolves a refused protected path concludes it in the run worktree, as for
+	// every other refused repair, and that merge is theirs to record.
 	if mergesMovedBase(sctx) {
+		if mergeInProgress(sctx.Ctx, sctx.WorkDir) {
+			merged, err := commitCIMerge(sctx, "", "", nil, nil)
+			if err != nil {
+				return ciRepairResult{}, err
+			}
+			return s.recordRepair(sctx, merged)
+		}
 		merged, err := operatorConcludedCIMerge(sctx)
 		if err != nil {
 			return ciRepairResult{}, err

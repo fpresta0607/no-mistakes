@@ -413,3 +413,39 @@ func TestCIStep_MergeStrategyRetryRecordsAnOperatorConcludedMerge(t *testing.T) 
 		})
 	}
 }
+
+// Under the default rebase strategy the pipeline never concludes a merge, so
+// an unfinished merge the operator left in the run worktree is retried as an
+// ordinary repair, whose protected_paths check reads the whole change against
+// the recorded head and refuses the protected file the base brought in.
+func TestCIStep_RebaseStrategyRetryNeverConcludesAnOperatorsUnfinishedMerge(t *testing.T) {
+	t.Parallel()
+	f := newMergeRepairFixture(t, func(t *testing.T, f *mergeRepairFixture) {
+		conflictingBase(t, f)
+		if err := os.MkdirAll(filepath.Join(f.dir, ".github"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, f.dir, ".github/base.yml", "from the base\n")
+	}, nil)
+	f.sctx.Config.Rebase.Strategy = config.RebaseStrategyRebase
+	f.sctx.Config.ProtectedPaths = []string{".github/base.yml"}
+	if _, err := runGitIn(f.dir, "merge", "--no-ff", "--no-commit", f.baseTip); err == nil {
+		t.Fatal("operator merge of the conflicting base succeeded, want a conflict")
+	}
+	if err := resolveConflict(f.dir); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := (&CIStep{}).retryProtectedPathRepair(f.sctx)
+
+	var refusal *pipeline.ProtectedPathError
+	if !errors.As(err, &refusal) || refusal.Path != ".github/base.yml" {
+		t.Fatalf("retry error = %v, want a protected-path refusal of .github/base.yml\nlog:\n%s", err, f.log())
+	}
+	if head := f.localHead(t); head != f.reviewedHead {
+		t.Errorf("local head = %s, want the operator's merge left unconcluded on the reviewed head %s", head, f.reviewedHead)
+	}
+	if f.sctx.Run.HeadSHA != f.reviewedHead || f.remoteHead(t) != f.reviewedHead {
+		t.Errorf("recorded head %s, remote %s; want both still on the reviewed head %s", f.sctx.Run.HeadSHA, f.remoteHead(t), f.reviewedHead)
+	}
+}
