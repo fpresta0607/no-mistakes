@@ -128,7 +128,9 @@ func verifyCIHandbackValidationHeads(sctx *pipeline.StepContext, run *db.Run, va
 		if err != nil {
 			return fmt.Errorf("publication revalidation Rebase target is missing")
 		}
-		if reason := pureReplayGap(sctx, heads[0], base, firstReviewedHead); reason != "" {
+		// Review read firstReviewedHead itself, so a base edit that only moved
+		// its diff context was reviewed; its changed lines must still match.
+		if reason := pureReplayGap(sctx, heads[0], base, firstReviewedHead, true); reason != "" {
 			return fmt.Errorf("publication revalidation cannot prove submitted source through Rebase: %s", reason)
 		}
 		heads = append([]string{heads[0], firstReviewedHead}, heads[1:]...)

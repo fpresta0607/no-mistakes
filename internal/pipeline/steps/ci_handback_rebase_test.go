@@ -17,14 +17,21 @@ import (
 
 func newRebasedCIHandbackFixture(t *testing.T) *ordinaryCIHandbackFixture {
 	t.Helper()
-	fixture := newOrdinaryCIHandbackFixture(t)
+	return rebaseCIHandbackFixture(t, newOrdinaryCIHandbackFixture(t), "main.txt", "advanced main\n")
+}
+
+// rebaseCIHandbackFixture advances main by writing mainFile, lets native
+// Rebase rewrite the submitted commit onto it, and publishes Document and Lint
+// commits after Review and Test, so the run needs --revalidate-publication.
+func rebaseCIHandbackFixture(t *testing.T, fixture *ordinaryCIHandbackFixture, mainFile, mainContent string) *ordinaryCIHandbackFixture {
+	t.Helper()
 	sctx := fixture.context
 	submitted := *sctx.Run.SubmittedHeadSHA
 	gitCmd(t, fixture.caller, "checkout", "main")
-	if err := os.WriteFile(filepath.Join(fixture.caller, "main.txt"), []byte("advanced main\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(fixture.caller, mainFile), []byte(mainContent), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	gitCmd(t, fixture.caller, "add", "main.txt")
+	gitCmd(t, fixture.caller, "add", mainFile)
 	gitCmd(t, fixture.caller, "commit", "-m", "advance main")
 	gitCmd(t, fixture.remote, "fetch", fixture.caller, "main:main")
 	gitCmd(t, fixture.caller, "checkout", "feature")
@@ -164,6 +171,73 @@ func TestCIHandbackRebasedPublicationRevalidatesTheSameRun(t *testing.T) {
 	}
 	if head := gitCmd(t, fixture.remote, "rev-parse", "feature"); head != original.HeadSHA {
 		t.Fatal("resume published before fresh validation")
+	}
+}
+
+// Issue #198: native Rebase replays the submitted commits without a conflict
+// while the base edited lines next to a submitted hunk. The rewritten commit's
+// diff context moved, but Review read that rewritten commit itself, so the
+// submitted source is proven by its changed lines. A rebase that changed those
+// lines, here by absorbing part of the submitted change into the base, still
+// refuses.
+func TestCIHandbackRebasedPublicationProvesSourceByChangedLines(t *testing.T) {
+	sharedLines := make([]string, 20)
+	for index := range sharedLines {
+		sharedLines[index] = fmt.Sprintf("line %02d", index+1)
+	}
+	withLines := func(edits map[int]string) string {
+		lines := append([]string(nil), sharedLines...)
+		for index, line := range edits {
+			lines[index] = line
+		}
+		return strings.Join(lines, "\n") + "\n"
+	}
+	for _, scenario := range []struct {
+		name          string
+		submitted     map[int]string
+		base          map[int]string
+		shouldRelease bool
+	}{
+		{name: "base edit beside a submitted hunk", submitted: map[int]string{9: "feature edit"}, base: map[int]string{7: "base edit"}, shouldRelease: true},
+		{name: "base absorbed a submitted hunk", submitted: map[int]string{9: "feature edit", 15: "shared edit"}, base: map[int]string{15: "shared edit"}},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			caller, _, _ := setupGitRepo(t)
+			gitCmd(t, caller, "checkout", "main")
+			if err := os.WriteFile(filepath.Join(caller, "shared.txt"), []byte(withLines(nil)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, caller, "add", "shared.txt")
+			gitCmd(t, caller, "commit", "-m", "shared file")
+			base := gitCmd(t, caller, "rev-parse", "HEAD")
+			gitCmd(t, caller, "checkout", "feature")
+			gitCmd(t, caller, "rebase", "main")
+			if err := os.WriteFile(filepath.Join(caller, "shared.txt"), []byte(withLines(scenario.submitted)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, caller, "commit", "-a", "-m", "feature edits shared")
+			submitted := gitCmd(t, caller, "rev-parse", "HEAD")
+			fixture := rebaseCIHandbackFixture(t, newOrdinaryCIHandbackFixtureFromRepo(t, caller, base, submitted), "shared.txt", withLines(scenario.base))
+			sctx := fixture.context
+			if diff := gitCmd(t, sctx.WorkDir, "diff-tree", "-p", *sctx.Run.ReviewApprovedHeadSHA); scenario.shouldRelease && !strings.Contains(diff, "\n base edit\n") {
+				t.Fatalf("fixture did not move the reviewed commit's context:\n%s", diff)
+			}
+
+			released, err := (&CIStep{}).HandbackCI(sctx, fixture.request)
+
+			if scenario.shouldRelease {
+				if err != nil || released.ReleasedHead != sctx.Run.HeadSHA {
+					t.Fatalf("revalidation refused a conflict-free Rebase whose base edited nearby lines: %#v %v", released, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "cannot prove submitted source through Rebase") {
+				t.Fatalf("a Rebase that changed the submitted lines was not refused: %v", err)
+			}
+			if receipt, err := sctx.DB.LatestCIHandback(sctx.Run.ID); err != nil || receipt != nil {
+				t.Fatalf("refusal left a receipt: %#v %v", receipt, err)
+			}
+		})
 	}
 }
 
