@@ -515,13 +515,29 @@ func TestIntentStepPropagatesSafetyRefusal(t *testing.T) {
 // A conflict resolver that ends in a native safety refusal keeps the rebase or
 // merge in progress with its partial resolution, as the operator must inspect it
 // before deciding, and the operator's fix finishes that kept resolution rather
-// than starting another integration over it.
+// than starting another integration over it. Finishing it stands in for no
+// other target: a commit pushed to the branch while the gate was parked is
+// still integrated, and a target already in the branch before the kept
+// integration began is not integrated again.
 func TestRebaseStep_RefusedConflictResolutionIsKeptForTheOperator(t *testing.T) {
 	t.Parallel()
-	for _, strategy := range []string{config.RebaseStrategyRebase, config.RebaseStrategyMerge} {
-		t.Run(strategy, func(t *testing.T) {
+	for _, tc := range []struct {
+		strategy        string
+		isRemoteAdvance bool
+	}{
+		{strategy: config.RebaseStrategyRebase},
+		{strategy: config.RebaseStrategyMerge},
+		{strategy: config.RebaseStrategyMerge, isRemoteAdvance: true},
+	} {
+		strategy := tc.strategy
+		name := strategy
+		if tc.isRemoteAdvance {
+			name += " with the branch advanced while parked"
+		}
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			f := newMergeFixture(t, true)
+			gitCmd(t, f.dir, "push", "origin", "feature")
 			inProgress := rebaseInProgress
 			if strategy == config.RebaseStrategyMerge {
 				inProgress = mergeInProgress
@@ -545,6 +561,7 @@ func TestRebaseStep_RefusedConflictResolutionIsKeptForTheOperator(t *testing.T) 
 				return &agent.Result{Output: json.RawMessage(`{"summary":"finished the kept resolution"}`)}, nil
 			}}
 			sctx := f.context(t, ag, strategy)
+			sctx.Run.BaseSHA = f.headSHA
 			sctx.Fixing = true
 
 			_, err := (&RebaseStep{}).Execute(sctx)
@@ -557,6 +574,17 @@ func TestRebaseStep_RefusedConflictResolutionIsKeptForTheOperator(t *testing.T) 
 			}
 			if got, err := os.ReadFile(filepath.Join(f.dir, "shared.txt")); err != nil || string(got) != "main line\npartial\n" {
 				t.Fatalf("the refused partial resolution was lost: %q, %v", got, err)
+			}
+
+			var collaboratorSHA string
+			if tc.isRemoteAdvance {
+				clone := t.TempDir()
+				gitCmd(t, clone, "clone", "--branch", "feature", f.upstream, ".")
+				writeFixtureFile(t, clone, "collaborator.txt", "collaborator line\n")
+				gitCmd(t, clone, "add", "collaborator.txt")
+				gitCmd(t, clone, "commit", "-m", "collaborator change")
+				collaboratorSHA = gitCmd(t, clone, "rev-parse", "HEAD")
+				gitCmd(t, clone, "push", "origin", "feature")
 			}
 
 			isRefusing = false
@@ -575,8 +603,15 @@ func TestRebaseStep_RefusedConflictResolutionIsKeptForTheOperator(t *testing.T) 
 			if !isAncestor(context.Background(), f.dir, f.mainSHA, head) || sctx.Run.HeadSHA != head {
 				t.Fatalf("head %s (run head %s) does not integrate origin/main %s", head, sctx.Run.HeadSHA, f.mainSHA)
 			}
+			if tc.isRemoteAdvance && !isAncestor(context.Background(), f.dir, collaboratorSHA, head) {
+				t.Fatalf("head %s dropped %s, pushed to the branch while the gate was parked", head, collaboratorSHA)
+			}
 			if strategy == config.RebaseStrategyMerge {
-				if got := parents(t, f.dir, head); len(got) != 2 || got[0] != f.headSHA || got[1] != f.mainSHA {
+				keptMerge := head
+				if tc.isRemoteAdvance {
+					keptMerge = gitCmd(t, f.dir, "rev-parse", head+"^1")
+				}
+				if got := parents(t, f.dir, keptMerge); len(got) != 2 || got[0] != f.headSHA || got[1] != f.mainSHA {
 					t.Fatalf("finished merge parents = %v, want [%s %s]", got, f.headSHA, f.mainSHA)
 				}
 			}
