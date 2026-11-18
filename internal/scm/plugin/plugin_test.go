@@ -665,8 +665,9 @@ func TestGetMergedProof(t *testing.T) {
 	transport.wantArgv("pr", "merged", "7", "--expected-head=abc123")
 
 	transport.reply(`{"merged":true,"number":7,"url":"` + url + `","head_sha":"other","merge_commit_sha":"m1","merged_at":"2026-01-02T03:04:05Z"}`)
-	if _, err := host.GetMergedProof(ctx, testPR(), "abc123"); !errors.Is(err, scm.ErrHeadChanged) {
-		t.Fatalf("head mismatch error = %v", err)
+	var moved *scm.HeadChangedError
+	if _, err := host.GetMergedProof(ctx, testPR(), "abc123"); !errors.As(err, &moved) || moved.Reported != "other" {
+		t.Fatalf("head mismatch error = %v, want ErrHeadChanged naming the proof's head", err)
 	}
 	transport.reply(`{"merged":true,"number":7,"url":"` + url + `","head_sha":"abc123"}`)
 	if _, err := host.GetMergedProof(ctx, testPR(), "abc123"); err == nil || !strings.Contains(err.Error(), "merge_commit_sha and merged_at") {

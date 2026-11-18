@@ -526,8 +526,9 @@ func TestMergedProofRejectsAlreadyMergedHeadRace(t *testing.T) {
 	proof := `{"merged":true,"number":42,"url":"` + testPRURL + `","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","merge_commit_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","merged_at":"2025-01-02T00:00:00Z","merged_by":"alice"}`
 	host := newTestHost(&fakeRecorder{responses: []fakeResponse{{stdout: `{"proof":` + proof + `}`}}})
 	_, err := host.GetMergedProof(context.Background(), testPR(), testHeadSHA)
-	if !errors.Is(err, scm.ErrHeadChanged) {
-		t.Fatalf("GetMergedProof() error = %v, want ErrHeadChanged", err)
+	var moved *scm.HeadChangedError
+	if !errors.As(err, &moved) || moved.Reported != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("GetMergedProof() error = %v, want ErrHeadChanged naming the proof's head", err)
 	}
 }
 

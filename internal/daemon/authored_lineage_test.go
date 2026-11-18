@@ -38,10 +38,10 @@ func TestAuthoredLineageEndsWhenTheChildsOpenPRWasLaterMergedOrClosed(t *testing
 	}{
 		{name: "merged on the forge after the child ended", branch: "authored", childStatus: types.RunCompleted, hasOpenPR: true, liveState: "MERGED", wantRecorded: "merged", wantForgeRead: true},
 		{name: "closed on the forge after the child failed", branch: "authored", childStatus: types.RunFailed, hasOpenPR: true, liveState: "CLOSED", wantRecorded: "closed", wantForgeRead: true},
-		{name: "still open on the forge", branch: "authored", childStatus: types.RunCompleted, hasOpenPR: true, liveState: "OPEN", wantRefusalHas: "validation-only authored lineage", wantRecorded: "open", wantForgeRead: true},
+		{name: "still open on the forge", branch: "authored", childStatus: types.RunCompleted, hasOpenPR: true, liveState: "OPEN", wantRefusalHas: "reattach its active child", wantRecorded: "open", wantForgeRead: true},
 		{name: "live state cannot be read", branch: "authored", childStatus: types.RunCompleted, hasOpenPR: true, liveStateErr: "HTTP 502", wantRefusalHas: "live PR state could not be read", wantRecorded: "open", wantForgeRead: true},
-		{name: "active child with an open PR", branch: "authored", childStatus: types.RunRunning, hasOpenPR: true, liveState: "MERGED", wantRefusalHas: "validation-only authored lineage", wantRecorded: "open"},
-		{name: "terminal child without a PR", branch: "authored", childStatus: types.RunFailed, liveState: "MERGED", wantRefusalHas: "validation-only authored lineage", wantRecorded: "none"},
+		{name: "active child with an open PR", branch: "authored", childStatus: types.RunRunning, hasOpenPR: true, liveState: "MERGED", wantRefusalHas: "reattach its active child", wantRecorded: "open"},
+		{name: "terminal child without a PR", branch: "authored", childStatus: types.RunFailed, liveState: "MERGED", wantRefusalHas: "reattach its active child", wantRecorded: "none"},
 		{name: "branch without authored lineage", branch: "other", childStatus: types.RunCompleted, hasOpenPR: true, liveState: "MERGED", wantRecorded: "open"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -129,7 +129,7 @@ func TestAxiRunLineageCheckReadsTheLivePR(t *testing.T) {
 		wantRecorded   string
 	}{
 		{name: "merged on the forge", branch: "authored", liveState: "MERGED", wantRecorded: "merged"},
-		{name: "still open on the forge", branch: "authored", liveState: "OPEN", wantRefusalHas: "validation-only authored lineage", wantRecorded: "open"},
+		{name: "still open on the forge", branch: "authored", liveState: "OPEN", wantRefusalHas: "reattach its active child", wantRecorded: "open"},
 		{name: "no branch named", liveState: "MERGED", wantRefusalHas: "repo_id and branch are required", wantRecorded: "open"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -244,7 +244,7 @@ func TestAuthoredLineageEndsWhenTheChildsPRWasMergedAtAnotherHead(t *testing.T) 
 	}{
 		{name: "merged at the child's head", liveState: "merged", liveHead: childHead, wantRecorded: "merged"},
 		{name: "merged at a head moved outside no-mistakes", liveState: "merged", liveHead: movedHead, wantRecorded: "open"},
-		{name: "still open at a head moved outside no-mistakes", liveState: "open", liveHead: movedHead, wantRefusalHas: "validation-only authored lineage", wantRecorded: "open"},
+		{name: "still open at a head moved outside no-mistakes", liveState: "open", liveHead: movedHead, wantRefusalHas: "reattach its active child", wantRecorded: "open"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			// Arrange

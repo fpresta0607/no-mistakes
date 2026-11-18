@@ -368,6 +368,19 @@ var (
 	ErrHeadChanged = errors.New("pull request head changed")
 )
 
+// HeadChangedError is ErrHeadChanged from an answer that named the head the
+// provider reported, so a caller can ask again about that exact head.
+type HeadChangedError struct {
+	Expected string
+	Reported string
+}
+
+func (e *HeadChangedError) Error() string {
+	return fmt.Sprintf("%v: expected %s, got %q", ErrHeadChanged, e.Expected, e.Reported)
+}
+
+func (e *HeadChangedError) Unwrap() error { return ErrHeadChanged }
+
 // ReviewComment represents a code review comment or bot finding on a pull request.
 type CheckTarget struct {
 	Name       string `json:"name"`

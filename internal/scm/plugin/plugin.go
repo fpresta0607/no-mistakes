@@ -481,7 +481,7 @@ func (h *Host) GetMergedProof(ctx context.Context, pr *scm.PR, expectedHead stri
 		return scm.MergedProof{}, h.protocolf(CmdPRMerged, "proof identifies %q, expected %q", result.URL, wantURL)
 	}
 	if result.HeadSHA != expectedHead {
-		return scm.MergedProof{}, fmt.Errorf("provider plugin %q %s: %w: expected %s, got %q", h.opts.Name, CmdPRMerged, scm.ErrHeadChanged, expectedHead, result.HeadSHA)
+		return scm.MergedProof{}, fmt.Errorf("provider plugin %q %s: %w", h.opts.Name, CmdPRMerged, &scm.HeadChangedError{Expected: expectedHead, Reported: result.HeadSHA})
 	}
 	proof := scm.MergedProof{
 		Merged:         result.Merged,

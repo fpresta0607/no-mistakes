@@ -1,9 +1,12 @@
 package steps
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/scm/plugin/fakeplugin"
 )
 
@@ -76,4 +79,77 @@ func TestObserveTerminalPRStateProvesTheMergeAtTheLastPublishedHead(t *testing.T
 			}
 		})
 	}
+}
+
+// TestProveMergeEndsOnlyOnAValidatedProofAtTheReportedHead covers a merged PR
+// whose proof does not name the head the run published. The lineage may end
+// only when the forge proves the merge at the head it reports instead (merged,
+// the same PR); a proof that says the PR is not merged, one for another PR,
+// or a head change that names no head proves nothing and fails closed.
+func TestProveMergeEndsOnlyOnAValidatedProofAtTheReportedHead(t *testing.T) {
+	t.Parallel()
+	const (
+		publishedHead = "1111111111111111111111111111111111111111"
+		movedHead     = "2222222222222222222222222222222222222222"
+	)
+	pr := &scm.PR{Number: "42", URL: "https://forge.example/octo/widgets/pulls/42"}
+	merged := scm.MergedProof{Merged: true, Number: "42", URL: pr.URL, MergeCommitSHA: "3333333333333333333333333333333333333333"}
+	for _, test := range []struct {
+		name          string
+		forgeProof    scm.MergedProof
+		forgeErr      error
+		wantElsewhere bool
+		wantErr       bool
+	}{
+		{name: "merged at the published head", forgeProof: withHead(merged, publishedHead)},
+		{name: "merged at the head the forge reports", forgeProof: withHead(merged, movedHead), wantElsewhere: true},
+		{name: "proof at the reported head says not merged", forgeProof: scm.MergedProof{Number: "42", URL: pr.URL, HeadSHA: movedHead}, wantErr: true},
+		{name: "proof at the reported head names another PR", forgeProof: scm.MergedProof{Merged: true, Number: "43", URL: pr.URL, HeadSHA: movedHead}, wantErr: true},
+		{name: "head change that names no head", forgeErr: fmt.Errorf("provider plugin: %w", scm.ErrHeadChanged), wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			// Arrange
+			host := &reportedHeadProofHost{proof: test.forgeProof, err: test.forgeErr}
+
+			// Act
+			isMergedAtAnotherHead, err := proveMerge(context.Background(), host, pr, publishedHead)
+
+			// Assert
+			if (err != nil) != test.wantErr {
+				t.Fatalf("proveMerge() error = %v, want error %v", err, test.wantErr)
+			}
+			if isMergedAtAnotherHead != test.wantElsewhere {
+				t.Fatalf("proveMerge() merged at another head = %v, want %v", isMergedAtAnotherHead, test.wantElsewhere)
+			}
+		})
+	}
+}
+
+func withHead(proof scm.MergedProof, head string) scm.MergedProof {
+	proof.HeadSHA = head
+	return proof
+}
+
+// reportedHeadProofHost answers a merged-proof request the way the
+// proof-capable providers do: a proof for another head is refused with the
+// head it names.
+type reportedHeadProofHost struct {
+	scm.Host
+	proof scm.MergedProof
+	err   error
+}
+
+func (h *reportedHeadProofHost) Capabilities() scm.Capabilities {
+	return scm.Capabilities{MergedProof: true}
+}
+
+func (h *reportedHeadProofHost) GetMergedProof(_ context.Context, _ *scm.PR, expectedHead string) (scm.MergedProof, error) {
+	if h.err != nil {
+		return scm.MergedProof{}, h.err
+	}
+	if h.proof.HeadSHA != expectedHead {
+		return scm.MergedProof{}, &scm.HeadChangedError{Expected: expectedHead, Reported: h.proof.HeadSHA}
+	}
+	return h.proof, nil
 }
