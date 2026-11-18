@@ -765,6 +765,9 @@ func gateFieldsForRun(gate stepView, runID string) []toon.Field {
 		}
 	}
 	skip := "Run `" + respond + " --action skip` to skip this step"
+	if pipeline.HasSafetyRefusal(gate.FindingsJSON) && gate.Name == string(types.StepRebase) {
+		skip = "Skip is rejected: the refused conflict resolution may still be in progress in the run worktree, and the steps after rebase would commit and publish it unproven. Run `" + respond + " --action fix` to finish it, or `no-mistakes axi abort" + runFlag(runID) + "` to stop the run"
+	}
 	if pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON) {
 		help = []string{
 			"Approve is rejected: the run worktree holds work a timed-out Test agent left that no Test turn validated, and approval would publish it. The findings name that work and how to inspect it.",

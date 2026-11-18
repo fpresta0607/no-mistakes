@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -170,6 +171,112 @@ func TestRecoveredSafetyRefusalRejectsAnswer(t *testing.T) {
 	}
 	if called.Load() {
 		t.Fatal("recovered review restarted")
+	}
+}
+
+// A refused conflict resolver leaves its merge in progress for the operator.
+// Skipping that Rebase gate would hand the half-finished merge to the steps
+// after Rebase, whose next commit concludes and publishes it unproven, so skip
+// is refused on the live and the recovered gate and the kept merge stays as it
+// was for fix or abort.
+func TestRebaseSafetyRefusalRejectsSkipAndKeepsTheIntegration(t *testing.T) {
+	for _, path := range []string{"live", "recovered"} {
+		t.Run(path, func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			workDir := t.TempDir()
+			initGitRepo(t, workDir)
+			execGit(t, workDir, "checkout", "-b", "feature")
+			execGit(t, workDir, "branch", "upstream")
+			writeTestFile(t, workDir, "shared.txt", "feature line\n")
+			execGit(t, workDir, "add", ".")
+			execGit(t, workDir, "commit", "-m", "feature")
+			execGit(t, workDir, "checkout", "upstream")
+			writeTestFile(t, workDir, "shared.txt", "main line\n")
+			execGit(t, workDir, "add", ".")
+			execGit(t, workDir, "commit", "-m", "upstream")
+			execGit(t, workDir, "checkout", "feature")
+			if out, err := exec.Command("git", "-C", workDir, "merge", "upstream").CombinedOutput(); err == nil {
+				t.Fatalf("merge did not conflict: %s", out)
+			}
+			writeTestFile(t, workDir, "shared.txt", "main line\npartial\n")
+			gitOutput := func(args ...string) string {
+				t.Helper()
+				out, err := exec.Command("git", append([]string{"-C", workDir}, args...)...).Output()
+				if err != nil {
+					t.Fatalf("git %v: %v", args, err)
+				}
+				return strings.TrimSpace(string(out))
+			}
+			keptHead, keptMergeHead := gitOutput("rev-parse", "HEAD"), gitOutput("rev-parse", "MERGE_HEAD")
+
+			var reviewed atomic.Bool
+			rebase := &adaptiveCallStep{name: types.StepRebase, fn: func(*StepContext) (*StepOutcome, error) {
+				return nil, errors.Join(agent.ErrSafetyRefusal, errors.New("codex exited: This content was flagged for possible cybersecurity risk."))
+			}}
+			review := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) { reviewed.Store(true); return &StepOutcome{}, nil }}
+			if path == "recovered" {
+				if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+					t.Fatal(err)
+				}
+				step, err := database.InsertStepResult(run.ID, types.StepRebase)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := database.StartStep(step.ID); err != nil {
+					t.Fatal(err)
+				}
+				findings := `{"findings":[{"id":"agent-safety-refusal","severity":"error","description":"refused","action":"ask-user"}]}`
+				if _, err := database.InsertStepRound(step.ID, 1, "initial", &findings, nil, 1); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := database.InsertStepResult(run.ID, types.StepReview); err != nil {
+					t.Fatal(err)
+				}
+				if run, err = database.GetRun(run.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			executor := NewExecutor(database, p, &config.Config{}, nil, []Step{rebase, review}, nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() {
+				if path == "recovered" {
+					done <- executor.Resume(ctx, run, repo, workDir)
+				} else {
+					done <- executor.Execute(ctx, run, repo, workDir)
+				}
+			}()
+			t.Cleanup(func() { cancel(); <-done })
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				err := executor.Respond(types.StepTest, types.ActionApprove, nil)
+				if err != nil && strings.Contains(err.Error(), "step mismatch") {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("rebase gate did not park: %v", err)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+
+			err := executor.Respond(types.StepRebase, types.ActionSkip, nil)
+
+			if err == nil || !strings.Contains(err.Error(), "use fix to finish it, or abort the run") {
+				t.Fatalf("skip at a rebase safety refusal = %v, want a refusal naming fix and abort", err)
+			}
+			if head, mergeHead := gitOutput("rev-parse", "HEAD"), gitOutput("rev-parse", "MERGE_HEAD"); head != keptHead || mergeHead != keptMergeHead {
+				t.Fatalf("kept merge changed: HEAD %s MERGE_HEAD %s, want %s %s", head, mergeHead, keptHead, keptMergeHead)
+			}
+			if got, err := os.ReadFile(filepath.Join(workDir, "shared.txt")); err != nil || string(got) != "main line\npartial\n" {
+				t.Fatalf("kept partial resolution = %q, %v", got, err)
+			}
+			if reviewed.Load() {
+				t.Fatal("the step after rebase ran past the refusal")
+			}
+		})
 	}
 }
 
