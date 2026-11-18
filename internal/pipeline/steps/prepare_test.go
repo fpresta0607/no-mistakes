@@ -537,8 +537,19 @@ func TestEnsurePrepared_LogsDurationAfterFailure(t *testing.T) {
 	if err := ensurePrepared(sctx, types.StepTest); err == nil {
 		t.Fatal("failing preparation unexpectedly succeeded")
 	}
-	if !strings.Contains(strings.Join(logs, "\n"), "dependency preparation attempt completed in") {
+	var attempt string
+	for _, line := range logs {
+		if strings.Contains(line, "dependency preparation attempt completed in") {
+			attempt = line
+		}
+	}
+	if attempt == "" {
 		t.Fatalf("preparation logs did not include attempt duration: %q", logs)
+	}
+	for _, want := range []string{"prepare command", "cleanup", "restore"} {
+		if !strings.Contains(attempt, want) {
+			t.Fatalf("attempt duration line %q does not name the %s time", attempt, want)
+		}
 	}
 }
 
@@ -672,6 +683,64 @@ func TestEnsurePrepared_KeepsNestedSubmoduleInitializedByPreparation(t *testing.
 	}
 	if got := gitStatusPorcelain(t, dir); got != "" {
 		t.Fatalf("preparation left nested submodule mutation: %q", got)
+	}
+}
+
+func TestEnsurePrepared_CleansNestedSubmoduleMutations(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupNestedSubmodules(t)
+	outer := filepath.Join(dir, "outer")
+	inner := filepath.Join(outer, "inner")
+	sctx := newPreparationTestContext(t, nil, dir, baseSHA, headSHA, config.Commands{Prepare: mutatesNestedSubmodulesPreparationCommand()})
+	sctx.Shared = &pipeline.RunShared{}
+
+	if err := ensurePrepared(sctx, types.StepTest); err != nil {
+		t.Fatalf("prepare mutates nested submodules: %v", err)
+	}
+
+	for _, leftover := range []string{filepath.Join(inner, "prepare.tmp"), filepath.Join(outer, "prepare.tmp")} {
+		if _, err := os.Lstat(leftover); !os.IsNotExist(err) {
+			t.Fatalf("preparation left %s behind: %v", leftover, err)
+		}
+	}
+	if got := strings.TrimSpace(readFile(t, filepath.Join(inner, "inner.txt"))); got != "inner" {
+		t.Fatalf("nested submodule inner.txt = %q, want %q", got, "inner")
+	}
+	if got := gitStatusPorcelain(t, dir); got != "" {
+		t.Fatalf("preparation left nested submodule mutation: %q", got)
+	}
+}
+
+func TestEnsurePrepared_RepositoryWithoutSubmodulesRunsNoSubmoduleCommand(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newPreparationTestContext(t, nil, dir, baseSHA, headSHA, config.Commands{Prepare: preparationCommand()})
+	sctx.Shared = &pipeline.RunShared{}
+	if testGitErr != nil {
+		t.Fatal(testGitErr)
+	}
+	binDir := fakeCLIBinDir(t)
+	linkTestBinary(t, binDir, "git")
+	logFile := filepath.Join(t.TempDir(), "git.log")
+	t.Setenv("FAKE_CLI_MODE", "git-slow-submodule")
+	t.Setenv("FAKE_CLI_REAL_GIT", testGitExecutable)
+	t.Setenv("FAKE_CLI_LOG", logFile)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	previousTimeout := prepareCleanupTimeout
+	prepareCleanupTimeout = 3 * time.Second
+	t.Cleanup(func() { prepareCleanupTimeout = previousTimeout })
+
+	if err := ensurePrepared(sctx, types.StepTest); err != nil {
+		t.Fatalf("prepare repository without submodules: %v", err)
+	}
+
+	invocations := readFile(t, logFile)
+	if invocations == "" {
+		t.Fatal("fake git logged no invocations, so the test did not exercise the preparation path")
+	}
+	for _, invocation := range strings.Split(strings.TrimSpace(invocations), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(invocation), "submodule") {
+			t.Fatalf("preparation started a submodule command in a repository without submodules: %q", invocation)
+		}
 	}
 }
 
@@ -965,6 +1034,13 @@ func initializesNestedSubmodulePreparationCommand() string {
 		return `git -C outer -c protocol.file.allow=always submodule update --init inner`
 	}
 	return `git -C outer -c protocol.file.allow=always submodule update --init inner`
+}
+
+func mutatesNestedSubmodulesPreparationCommand() string {
+	if runtime.GOOS == "windows" {
+		return `echo temporary>outer\inner\prepare.tmp & echo temporary>outer\prepare.tmp & echo changed>outer\inner\inner.txt`
+	}
+	return `echo temporary > outer/inner/prepare.tmp && echo temporary > outer/prepare.tmp && echo changed > outer/inner/inner.txt`
 }
 
 func failingPreparationCommand() string {

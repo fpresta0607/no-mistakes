@@ -422,7 +422,8 @@ When set, no-mistakes runs this command before the first configured Test, Lint, 
 By default, it is a lazy command hook rather than an additional pipeline step: when no configured command needs it and [`test.prepare`](#testprepare) is false, `commands.prepare` alone does nothing.
 Trusted `test.prepare: true` instead triggers it eagerly before agent-only Test while leaving `commands.test` unset.
 A successful result is shared by all later configured commands in that isolated worktree, including after daemon recovery.
-The dependent step log records the preparation command, output, and elapsed preparation time.
+The dependent step log records the preparation command, output, and elapsed preparation time, split into the command, the cleanup of its changes, and the restoration of earlier pending changes.
+The cleanup walks registered submodules natively, so a repository without a `.gitmodules` file starts no submodule process.
 A non-zero exit or launch failure fails that step before its command runs.
 
 Use this for deterministic dependency materialization such as `npm ci --prefer-offline`. The run worktree starts with tracked files only, so ignored dependency directories such as `node_modules` are otherwise absent. no-mistakes keeps ignored files produced by preparation, and keeps any submodule it checks out at the commit the superproject records, while removing its tracked, ordinary untracked, and nested-repository mutations before continuing; a submodule commit the command moved to is reset to the recorded commit. Earlier pending tracked and ordinary untracked pipeline changes are restored exactly, so preparation can run before a later configured command without admitting setup artifacts into a fix commit.
