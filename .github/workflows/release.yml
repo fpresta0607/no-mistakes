@@ -14,7 +14,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Releases are cut only in the upstream repository. A fork has no release
+  # for release-please to anchor on, so each push there would walk the whole
+  # recent history through the GraphQL API and fail on any transient error.
   release-please:
+    if: github.repository == 'kunchenguid/no-mistakes'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
