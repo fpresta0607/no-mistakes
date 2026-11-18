@@ -618,74 +618,107 @@ func lastReviewPrompt(t *testing.T, m *mockAgent) string {
 // round's fixes are already applied and committed, so replaying the round to
 // deliver the answer must replay its review turn only. Running the fixer again
 // would re-apply the same findings to already-fixed code.
+//
+// The park has two releasers, and the gate re-checks the conversation the
+// moment it parks, so which one wins is a race in a real run. Each subtest pins
+// one of them deterministically: an explicit answer response, with every
+// automatic claim deferred as the daemon's claim guard can, and the gate's own
+// resumer, with no response at all.
 func TestReviewStep_AnsweringARereviewQuestionDoesNotReRunTheFixer(t *testing.T) {
 	t.Parallel()
-	reviewTurn := 0
-	mock := &sessionMockAgent{}
-	var convDir string
-	mock.respond = func(opts agent.RunOpts) *agent.Result {
-		switch opts.Purpose {
-		case "review":
-			reviewTurn++
-			if reviewTurn == 1 {
-				return &agent.Result{Output: []byte(
-					`{"findings":[{"id":"f-1","severity":"error","file":"feature.txt","description":"bug","action":"auto-fix"}],"summary":"1 issue","risk_level":"medium","risk_rationale":"bug","risk_scope":"source-or-external"}`,
-				)}
-			}
-			if reviewTurn == 2 {
-				if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"question","question":"was the fix meant to change this behaviour?","options":["yes","no"],"weight":"major"}`); err != nil {
-					t.Errorf("append question: %v", err)
+	for _, tc := range []struct {
+		name               string
+		isExplicitResponse bool
+	}{
+		{name: "explicit answer response", isExplicitResponse: true},
+		{name: "gate resumer releases the park", isExplicitResponse: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reviewTurn := 0
+			mock := &sessionMockAgent{}
+			var convDir string
+			mock.respond = func(opts agent.RunOpts) *agent.Result {
+				switch opts.Purpose {
+				case "review":
+					reviewTurn++
+					if reviewTurn == 1 {
+						return &agent.Result{Output: []byte(
+							`{"findings":[{"id":"f-1","severity":"error","file":"feature.txt","description":"bug","action":"auto-fix"}],"summary":"1 issue","risk_level":"medium","risk_rationale":"bug","risk_scope":"source-or-external"}`,
+						)}
+					}
+					if reviewTurn == 2 {
+						if err := appendAgentQuestionLine(convDir, `{"id":"q1","kind":"question","question":"was the fix meant to change this behaviour?","options":["yes","no"],"weight":"major"}`); err != nil {
+							t.Errorf("append question: %v", err)
+						}
+					}
+					return &agent.Result{Output: []byte(cleanReviewJSON)}
+				case "review-fix":
+					return &agent.Result{Output: []byte(`{"summary":"fix the bug"}`)}
+				default:
+					t.Errorf("unexpected agent purpose %q", opts.Purpose)
+					return &agent.Result{Output: []byte(`{}`)}
 				}
 			}
-			return &agent.Result{Output: []byte(cleanReviewJSON)}
-		case "review-fix":
-			return &agent.Result{Output: []byte(`{"summary":"fix the bug"}`)}
-		default:
-			t.Errorf("unexpected agent purpose %q", opts.Purpose)
-			return &agent.Result{Output: []byte(`{}`)}
-		}
-	}
 
-	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}}, enableReviewConversation)
-	convDir = exec.ReviewConversationDir(run.ID)
+			exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}}, enableReviewConversation)
+			convDir = exec.ReviewConversationDir(run.ID)
+			resumerSawAnswer := make(chan struct{})
+			if tc.isExplicitResponse {
+				var closeOnce sync.Once
+				exec.SetGateClaimGuard(func() (func(), bool) {
+					closeOnce.Do(func() { close(resumerSawAnswer) })
+					return nil, false
+				})
+			}
+			exec.SetGateReconcileTimings(10*time.Millisecond, 0)
 
-	done := make(chan error, 1)
-	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
+			done := make(chan error, 1)
+			go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
 
-	waitForReviewStatus(t, database, run.ID, types.StepStatusFixReview)
-	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "yes", AskOrdinal: 1}); err != nil {
-		t.Fatalf("append answer: %v", err)
-	}
-	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
-		t.Fatalf("respond with answers: %v", err)
-	}
+			waitForReviewStatus(t, database, run.ID, types.StepStatusFixReview)
+			if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "yes", AskOrdinal: 1}); err != nil {
+				t.Fatalf("append answer: %v", err)
+			}
+			if tc.isExplicitResponse {
+				select {
+				case <-resumerSawAnswer:
+				case <-time.After(reviewRunTimeout):
+					t.Fatal("the gate's resumer never saw the settled conversation")
+				}
+				if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+					t.Fatalf("respond with answers: %v", err)
+				}
+			}
 
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("execute: %v", err)
-		}
-	case <-time.After(reviewRunTimeout):
-		t.Fatal("executor timed out")
-	}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("execute: %v", err)
+				}
+			case <-time.After(reviewRunTimeout):
+				t.Fatal("executor timed out")
+			}
 
-	calls := mock.snapshot()
-	if got := len(fixCalls(calls)); got != 1 {
-		t.Fatalf("fixer ran %d times, want exactly 1: answering a question is not a new fix round", got)
-	}
-	reviews := reviewCalls(calls)
-	if len(reviews) != 3 {
-		t.Fatalf("expected 3 review turns (initial, post-fix rereview, finalize), got %d", len(reviews))
-	}
-	// The rereview and its finalize replay both judge pipeline-authored code,
-	// so both stay cold: a reviewer session must never span a code change.
-	for i := 1; i < 3; i++ {
-		if reviews[i].Session != nil {
-			t.Fatalf("review turn %d ran with session %+v, want cold across a fix round", i+1, reviews[i].Session)
-		}
-	}
-	if !strings.Contains(reviews[2].Prompt, `answer="yes"`) {
-		t.Fatalf("finalize replay is missing the answer:\n%s", reviews[2].Prompt)
+			calls := mock.snapshot()
+			if got := len(fixCalls(calls)); got != 1 {
+				t.Fatalf("fixer ran %d times, want exactly 1: answering a question is not a new fix round", got)
+			}
+			reviews := reviewCalls(calls)
+			if len(reviews) != 3 {
+				t.Fatalf("expected 3 review turns (initial, post-fix rereview, finalize), got %d", len(reviews))
+			}
+			// The rereview and its finalize replay both judge pipeline-authored code,
+			// so both stay cold: a reviewer session must never span a code change.
+			for i := 1; i < 3; i++ {
+				if reviews[i].Session != nil {
+					t.Fatalf("review turn %d ran with session %+v, want cold across a fix round", i+1, reviews[i].Session)
+				}
+			}
+			if !strings.Contains(reviews[2].Prompt, `answer="yes"`) {
+				t.Fatalf("finalize replay is missing the answer:\n%s", reviews[2].Prompt)
+			}
+		})
 	}
 }
 
