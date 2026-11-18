@@ -218,7 +218,7 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		} else if evidenceRoot, err = m.newRunEvidenceRoot(globalCfg); err != nil {
 			return "", err
 		}
-		ag, _, err := newResolvedPipelineAgent(ctx, cfg, roleConfigs, evidenceRoot, forgeEnvironment(forge), quotaRecord)
+		ag, _, err := newResolvedPipelineAgent(ctx, cfg, roleConfigs, evidenceRoot, runEnvironment(forge, &original.Run), quotaRecord)
 		if err != nil {
 			return "", err
 		}

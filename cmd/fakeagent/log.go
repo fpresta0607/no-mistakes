@@ -19,6 +19,28 @@ type invocation struct {
 	Args   []string `json:"args"`
 	Prompt string   `json:"prompt"`
 	CWD    string   `json:"cwd,omitempty"`
+	// Env records the per-run agent environment pairs (see
+	// agentEnvNames) that were present in this process's own environment.
+	Env map[string]string `json:"env,omitempty"`
+}
+
+// agentEnvNames are the only variables a run's --agent-env may carry. The
+// fake agent reports whichever of them it was launched with so tests can
+// prove they reach every agent subprocess and configured step command of
+// that run, and only that run.
+var agentEnvNames = []string{"PIP_UPLOADED_PRIOR_TO", "UV_EXCLUDE_NEWER", "npm_config_before"}
+
+func presentAgentEnv() map[string]string {
+	var present map[string]string
+	for _, name := range agentEnvNames {
+		if value, ok := os.LookupEnv(name); ok {
+			if present == nil {
+				present = make(map[string]string, len(agentEnvNames))
+			}
+			present[name] = value
+		}
+	}
+	return present
 }
 
 func logInvocation(agent, prompt string, args []string) {
@@ -33,6 +55,7 @@ func logInvocation(agent, prompt string, args []string) {
 		Args:   args,
 		Prompt: prompt,
 		CWD:    cwd,
+		Env:    presentAgentEnv(),
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {

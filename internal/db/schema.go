@@ -573,4 +573,7 @@ COMMIT;`,
 	// Operator-authorized Test output directories (axi run --test-output-dir),
 	// a JSON array written once with the row. NULL means none.
 	`ALTER TABLE runs ADD COLUMN test_output_dirs TEXT`,
+	// Release-cutoff environment pairs (axi run --agent-env), a JSON object
+	// written once with the row. NULL means none.
+	`ALTER TABLE runs ADD COLUMN agent_env TEXT`,
 }

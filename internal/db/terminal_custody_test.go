@@ -24,6 +24,17 @@ func setFixtureTestOutputDirs(t *testing.T, database *DB, runID string) {
 	}
 }
 
+// fixtureAgentEnv is the release-cutoff pair a predecessor run carries into its
+// successor or admitted child.
+var fixtureAgentEnv = map[string]string{"UV_EXCLUDE_NEWER": "7 days"}
+
+func setFixtureAgentEnv(t *testing.T, database *DB, runID string) {
+	t.Helper()
+	if _, err := database.sql.Exec(`UPDATE runs SET agent_env = ? WHERE id = ?`, `{"UV_EXCLUDE_NEWER":"7 days"}`, runID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newTerminalAdoptionFixture(t *testing.T) (*DB, TerminalAdoption) {
 	t.Helper()
 	database := openTestDB(t)
@@ -66,6 +77,7 @@ func newTerminalAdoptionFixture(t *testing.T) (*DB, TerminalAdoption) {
 		t.Fatal(err)
 	}
 	setFixtureTestOutputDirs(t, database, run.ID)
+	setFixtureAgentEnv(t, database, run.ID)
 	before, err := database.ReadContinuationSnapshot(run.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -539,6 +551,9 @@ func TestTerminalSuccessorInheritsPublicBindingWithoutValidationStamps(t *testin
 	}
 	if !reflect.DeepEqual(child.TestOutputDirs, fixtureTestOutputDirs) {
 		t.Fatalf("successor test output dirs = %q, want the predecessor's %q", child.TestOutputDirs, fixtureTestOutputDirs)
+	}
+	if !reflect.DeepEqual(child.AgentEnv, fixtureAgentEnv) {
+		t.Fatalf("successor agent env = %q, want the predecessor's %q", child.AgentEnv, fixtureAgentEnv)
 	}
 	if err := database.UpdateRunPublication(child.ID, PushBinding{HeadSHA: strings.Repeat("f", 40), TargetKind: "fork", TargetFingerprint: "fixture-target", Ref: "refs/heads/feature"}); err != nil {
 		t.Fatal(err)

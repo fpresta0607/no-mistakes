@@ -64,6 +64,7 @@ func admissionFixture(t *testing.T) (*DB, ValidationAdmission) {
 		t.Fatal(err)
 	}
 	setFixtureTestOutputDirs(t, database, parent.ID)
+	setFixtureAgentEnv(t, database, parent.ID)
 	snapshot, err := database.ReadTerminalSnapshot(parent.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +97,9 @@ func TestValidationAdmissionPreservesThePredecessorAndStartsWithNoCertification(
 	}
 	if !reflect.DeepEqual(child.TestOutputDirs, fixtureTestOutputDirs) {
 		t.Fatalf("admitted child test output dirs = %q, want the predecessor's %q", child.TestOutputDirs, fixtureTestOutputDirs)
+	}
+	if !reflect.DeepEqual(child.AgentEnv, fixtureAgentEnv) {
+		t.Fatalf("admitted child agent env = %q, want the predecessor's %q", child.AgentEnv, fixtureAgentEnv)
 	}
 	steps, err := database.GetStepsByRun(child.ID)
 	if err != nil || len(steps) != 0 {

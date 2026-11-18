@@ -35,6 +35,33 @@ func TestGitSafeEnvAppliesRunOverlayBeforeGateEnvironment(t *testing.T) {
 	}
 }
 
+func TestGitSafeEnvRunOverlayWinsOverAnAmbientExtraEnvironment(t *testing.T) {
+	t.Setenv("UV_EXCLUDE_NEWER", "7 days")
+	t.Setenv("GH_TOKEN", "ambient-token")
+	testStepEnvironment := append(os.Environ(), "NO_MISTAKES_TEST_SCRATCH=/scratch")
+
+	resolved := resolveAgentEnv(gitSafeEnvWithOverlay("/work/dir", runenv.Overlay{
+		Set:   map[string]string{"UV_EXCLUDE_NEWER": "2026-11-10T00:00:00Z"},
+		Unset: []string{"GH_TOKEN"},
+	}, testStepEnvironment))
+
+	if got := resolved["UV_EXCLUDE_NEWER"]; got != "2026-11-10T00:00:00Z" {
+		t.Errorf("UV_EXCLUDE_NEWER = %q, want the run's 2026-11-10T00:00:00Z over the ambient value", got)
+	}
+	if got, ok := resolved["GH_TOKEN"]; ok {
+		t.Errorf("GH_TOKEN = %q, want it removed even when the extra environment carries it again", got)
+	}
+	if got := resolved["NO_MISTAKES_TEST_SCRATCH"]; got != "/scratch" {
+		t.Errorf("NO_MISTAKES_TEST_SCRATCH = %q, want /scratch from the extra environment", got)
+	}
+	if got := resolved[GateRoleEnvVar]; got != "1" {
+		t.Errorf("%s = %q, want 1", GateRoleEnvVar, got)
+	}
+	if got := resolved[CompactAdviserDisableEnvVar]; got != "1" {
+		t.Errorf("%s = %q, want 1", CompactAdviserDisableEnvVar, got)
+	}
+}
+
 func resolveAgentEnv(env []string) map[string]string {
 	m := map[string]string{}
 	for _, kv := range env {

@@ -28,6 +28,22 @@ func (o Overlay) Clone() Overlay {
 	return cloned
 }
 
+// WithSet returns a clone of the overlay with extra Set entries added. Entries
+// for a name the overlay already sets replace it; the receiver is unchanged.
+func (o Overlay) WithSet(extra map[string]string) Overlay {
+	cloned := o.Clone()
+	if len(extra) == 0 {
+		return cloned
+	}
+	if cloned.Set == nil {
+		cloned.Set = make(map[string]string, len(extra))
+	}
+	for key, value := range extra {
+		cloned.Set[key] = value
+	}
+	return cloned
+}
+
 // Apply returns base with the overlay applied. A nil base uses the current
 // process environment. The input slice is never modified.
 func (o Overlay) Apply(base []string) []string {

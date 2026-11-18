@@ -1799,7 +1799,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		runID, err := mgr.HandleRerun(ctx, p.RepoID, p.Branch, p.PreviousRunID, p.SkipSteps, p.Intent, p.PRBaseBranch, p.OmitIntent, p.CallerHeadSHA, p.VerificationPlanID, p.ClosingIssueRefs, p.TestOutputDirs, db.RunPRText{Title: p.PRTitle, Body: p.PRBody}, p.PiProfile)
+		runID, err := mgr.HandleRerun(ctx, p.RepoID, p.Branch, p.PreviousRunID, p.SkipSteps, p.Intent, p.PRBaseBranch, p.OmitIntent, p.CallerHeadSHA, p.VerificationPlanID, p.ClosingIssueRefs, p.TestOutputDirs, p.AgentEnv, db.RunPRText{Title: p.PRTitle, Body: p.PRBody}, p.PiProfile)
 		if err != nil {
 			return nil, err
 		}
@@ -2053,6 +2053,7 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		PiProfile:          r.PiProfile,
 		VerificationPlan:   r.VerificationPlan,
 		TestOutputDirs:     r.TestOutputDirs,
+		AgentEnv:           r.AgentEnv,
 		AwaitingAgent:      r.AwaitingAgentSince != nil,
 		AwaitingAgentSince: r.AwaitingAgentSince,
 		CreatedAt:          r.CreatedAt,
