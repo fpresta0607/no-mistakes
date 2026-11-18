@@ -75,21 +75,8 @@ func TestTriggerRunAfterRemoteRewrittenRecovery(t *testing.T) {
 			Branch: "feature/sync", HeadSHA: liveHead, Status: types.RunRunning,
 		}}, nil
 	})
-	done := make(chan error, 1)
-	go func() { done <- srv.Serve(socketPaths.Socket()) }()
-	t.Cleanup(func() { srv.Close(); <-done })
-	var client *ipc.Client
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		client, err = ipc.Dial(socketPaths.Socket())
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal(err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	startIPCServer(t, srv, socketPaths.Socket())
+	client := dialReady(t, socketPaths.Socket())
 	defer client.Close()
 	env := &axiEnv{p: p, d: d, repo: repo, cfg: config.DefaultGlobalConfig(), client: client}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

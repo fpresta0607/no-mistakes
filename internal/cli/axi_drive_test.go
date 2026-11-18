@@ -53,30 +53,8 @@ func TestDriveRun_HealthyWaitStaysWithinRequestBudget(t *testing.T) {
 			return nil
 		}, nil
 	})
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(socketPath) }()
-	t.Cleanup(func() {
-		srv.Close()
-		select {
-		case <-errCh:
-		case <-time.After(time.Second):
-			t.Error("IPC server did not stop")
-		}
-	})
-
-	var client *ipc.Client
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		var err error
-		client, err = ipc.Dial(socketPath)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if client == nil {
-		t.Fatal("IPC server did not become ready")
-	}
+	startIPCServer(t, srv, socketPath)
+	client := dialReady(t, socketPath)
 	defer client.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
@@ -378,29 +356,8 @@ func TestDriveRun_YesLeavesRefusalGatesAwaitingResponse(t *testing.T) {
 		responses.Add(1)
 		return nil, errors.New("unexpected automatic response to a refusal gate")
 	})
-	done := make(chan error, 1)
-	go func() { done <- srv.Serve(socketPath) }()
-	t.Cleanup(func() {
-		srv.Close()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("IPC server did not stop")
-		}
-	})
-	var client *ipc.Client
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		var err error
-		client, err = ipc.Dial(socketPath)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if client == nil {
-		t.Fatal("IPC server did not become ready")
-	}
+	startIPCServer(t, srv, socketPath)
+	client := dialReady(t, socketPath)
 	defer client.Close()
 
 	protectedPath := pipeline.ProtectedPathOutcome(&pipeline.ProtectedPathError{Path: "package.lock", Rule: "*.lock"}).Findings
@@ -868,29 +825,8 @@ func TestDriveRun_YesLeavesAnOpenReviewQuestionAwaitingAnAnswer(t *testing.T) {
 		responses.Add(1)
 		return nil, errors.New("unexpected automatic response to an open review question")
 	})
-	done := make(chan error, 1)
-	go func() { done <- srv.Serve(socketPath) }()
-	t.Cleanup(func() {
-		srv.Close()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("IPC server did not stop")
-		}
-	})
-	var client *ipc.Client
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		var err error
-		client, err = ipc.Dial(socketPath)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if client == nil {
-		t.Fatal("IPC server did not become ready")
-	}
+	startIPCServer(t, srv, socketPath)
+	client := dialReady(t, socketPath)
 	defer client.Close()
 
 	// One open question beside an ordinary auto-fixable finding, which is the
@@ -969,29 +905,8 @@ func TestDriveRun_YesLeavesAnUnreadableQuestionHistoryAwaitingAHuman(t *testing.
 		responses.Add(1)
 		return nil, errors.New("unexpected automatic response to an unreadable question history")
 	})
-	done := make(chan error, 1)
-	go func() { done <- srv.Serve(socketPath) }()
-	t.Cleanup(func() {
-		srv.Close()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("IPC server did not stop")
-		}
-	})
-	var client *ipc.Client
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		var err error
-		client, err = ipc.Dial(socketPath)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if client == nil {
-		t.Fatal("IPC server did not become ready")
-	}
+	startIPCServer(t, srv, socketPath)
+	client := dialReady(t, socketPath)
 	defer client.Close()
 
 	unreadableFindings := `{"findings":[` +

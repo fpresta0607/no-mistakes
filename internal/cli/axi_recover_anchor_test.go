@@ -81,21 +81,8 @@ func TestTriggerRunReconcilesPrivateMirrorPreservedByRecoveryAnchor(t *testing.T
 			Status:  types.RunRunning,
 		}}, nil
 	})
-	done := make(chan error, 1)
-	go func() { done <- srv.Serve(p.Socket()) }()
-	t.Cleanup(func() { srv.Close(); <-done })
-	var client *ipc.Client
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		client, err = ipc.Dial(p.Socket())
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal(err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	startIPCServer(t, srv, p.Socket())
+	client := dialReady(t, p.Socket())
 	defer client.Close()
 	chdir(t, dir)
 	env := &axiEnv{p: p, d: d, repo: repo, cfg: config.DefaultGlobalConfig(), client: client}
