@@ -239,6 +239,49 @@ func TestCIStep_MergeStrategyRepairRejectsAMergeThePipelineDidNotConclude(t *tes
 	}
 }
 
+// A rejected merge round restores the recorded head with a hard reset, so the
+// pipeline never starts a merge over uncommitted tracked changes, such as a
+// timed-out repair's leftovers it reported to the operator: those would be
+// carried into the merge and discarded with it.
+func TestCIStep_MergeStrategyRepairRefusesToMergeOverUncommittedChanges(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		stage bool
+	}{
+		{name: "unstaged_edit"},
+		{name: "staged_edit", stage: true},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newMergeRepairFixture(t, conflictingBase, func(dir string) error { return nil })
+			writeFile(t, f.dir, "init.txt", "leftover repair work\n")
+			if tc.stage {
+				gitCmd(t, f.dir, "add", "init.txt")
+			}
+
+			_, err := f.repair(t, ciTargetsFor(nil, true))
+
+			if err == nil || !strings.Contains(err.Error(), "uncommitted changes to tracked files") {
+				t.Fatalf("merge repair error = %v, want a refusal naming the uncommitted changes\nlog:\n%s", err, f.log())
+			}
+			if len(f.prompts) != 0 {
+				t.Errorf("agent ran %d times, want no repair turn over the uncommitted changes", len(f.prompts))
+			}
+			if got, readErr := os.ReadFile(filepath.Join(f.dir, "init.txt")); readErr != nil || string(got) != "leftover repair work\n" {
+				t.Errorf("init.txt = %q (%v), want the uncommitted change kept", got, readErr)
+			}
+			if mergeInProgress(f.sctx.Ctx, f.dir) {
+				t.Error("a merge was started over the uncommitted changes")
+			}
+			if head := f.localHead(t); head != f.reviewedHead || f.sctx.Run.HeadSHA != f.reviewedHead || f.remoteHead(t) != f.reviewedHead {
+				t.Errorf("worktree head %s, recorded head %s, remote %s; want all on the reviewed head %s", head, f.sctx.Run.HeadSHA, f.remoteHead(t), f.reviewedHead)
+			}
+		})
+	}
+}
+
 // A merge moves a gitlink in the index but not the submodule's checkout, so
 // staging the checkout would silently revert the base's submodule bump.
 func TestCIStep_MergeStrategyRepairKeepsTheBasesSubmoduleBump(t *testing.T) {

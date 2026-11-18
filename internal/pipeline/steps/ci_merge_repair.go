@@ -62,6 +62,13 @@ func startCIMerge(sctx *pipeline.StepContext, target string) ([]string, error) {
 	if mergeInProgress(sctx.Ctx, sctx.WorkDir) || rebaseInProgress(sctx.Ctx, sctx.WorkDir) {
 		return nil, errors.New("the run worktree already has a merge or rebase in progress; refusing to start the base merge")
 	}
+	dirty, err := stepGitRun(sctx, "status", "--porcelain", "--untracked-files=no")
+	if err != nil {
+		return nil, fmt.Errorf("check the run worktree for uncommitted changes before merging the base branch: %w", err)
+	}
+	if dirty != "" {
+		return nil, fmt.Errorf("the run worktree at %s has uncommitted changes to tracked files; refusing to start the base merge, whose rejection restores the recorded head and would discard them; commit or discard them first:\n%s", sctx.WorkDir, dirty)
+	}
 	contained, err := headDescendsFrom(sctx, target, head)
 	if err != nil {
 		return nil, fmt.Errorf("check whether the branch contains base tip %s: %w", shortObjectID(target), err)
