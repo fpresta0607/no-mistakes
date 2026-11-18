@@ -890,7 +890,7 @@ func (s *CIStep) recordReplayedRepair(sctx *pipeline.StepContext, headSHA, base 
 		sctx.Log(fmt.Sprintf("not carrying the review approval across the rebase: gate %q runs after Review", gate))
 		return ciRepairResult{}, false, nil
 	}
-	if gap := pureReplayGap(sctx, approvedHead, base, headSHA); gap != "" {
+	if gap := pureReplayGap(sctx, approvedHead, base, headSHA, false); gap != "" {
 		sctx.Log(fmt.Sprintf("rebase repair is not a pure replay of the reviewed commits: %s", gap))
 		return ciRepairResult{}, false, nil
 	}
