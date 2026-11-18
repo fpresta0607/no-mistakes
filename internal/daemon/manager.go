@@ -1488,6 +1488,9 @@ func receiptForRun(run *db.Run, created bool) (ipc.LaunchReceipt, error) {
 // retarget can prove it is moving the same still-open review object.
 // A supplied clean caller head must match the selected head before any run
 // starts or is superseded. It never changes head selection.
+// Agent environment pairs follow the selected run: a request carrying none
+// inherits that run's stored pairs, and a request carrying some replaces them
+// whole (the rerun fallback of `axi run --agent-env`).
 func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prBaseBranch string, omitIntent bool, callerHeadSHA, planID string, closingIssues, testOutputDirs []string, agentEnv map[string]string, prText db.RunPRText, profiles ...*agentcfg.PiProfile) (string, error) {
 	if m.restartPending() {
 		return "", errRestartPending
@@ -1582,6 +1585,9 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	// Closing references are structured run metadata and survive reruns: an
 	// explicit request is added to, never replaces, what the selected run carried.
 	closingIssues = append(append([]string(nil), selectedRun.ClosingIssueRefs...), closingIssues...)
+	if len(agentEnv) == 0 {
+		agentEnv = selectedRun.AgentEnv
+	}
 	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, selectedRun.OmitIntent || omitIntent, inheritablePRURL(selectedRun), planID, closingIssues, testOutputDirs, agentEnv, inheritRunPRText(selectedRun, prText), profiles...)
 }
 

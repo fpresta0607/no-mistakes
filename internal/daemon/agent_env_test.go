@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"gopkg.in/yaml.v3"
 )
 
 // agentEnvCutoff has no digit before the redirection of the Windows capture
@@ -50,14 +51,19 @@ func readCapturedAgentEnv(t *testing.T, capturePath string) string {
 	return strings.TrimSpace(string(captured))
 }
 
-// useEnvCapturingPiAgent points the daemon root's agent at the fake pi and
-// clears any ambient UV_EXCLUDE_NEWER so the capture reflects the run alone.
-func useEnvCapturingPiAgent(t *testing.T, p *paths.Paths) string {
+func clearAmbientAgentEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("UV_EXCLUDE_NEWER", "ambient")
 	if err := os.Unsetenv("UV_EXCLUDE_NEWER"); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// useEnvCapturingPiAgent points the daemon root's agent at the fake pi and
+// clears any ambient UV_EXCLUDE_NEWER so the capture reflects the run alone.
+func useEnvCapturingPiAgent(t *testing.T, p *paths.Paths) string {
+	t.Helper()
+	clearAmbientAgentEnv(t)
 	capturePath := filepath.Join(t.TempDir(), "agent-env.txt")
 	piBin := writeEnvCapturingPiAgent(t, t.TempDir(), capturePath)
 	if err := os.WriteFile(p.ConfigFile(), []byte("agent: pi\nagent_path_override:\n  pi: "+piBin+"\n"), 0o644); err != nil {
@@ -284,5 +290,145 @@ func TestRunToInfoReportsTheRunsAgentEnv(t *testing.T) {
 
 	if !reflect.DeepEqual(info.AgentEnv, pairs) {
 		t.Fatalf("run info carries %v, want %v", info.AgentEnv, pairs)
+	}
+}
+
+func TestRerunInheritsTheSelectedRunsAgentEnvUnlessItIsGivenItsOwn(t *testing.T) {
+	step := &mockPassStep{name: types.StepReview}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{step} })
+	_, headSHA := setupTestGitRepo(t, p, d, "agent-env-rerun-repo")
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	push := func(pairs map[string]string) *db.Run {
+		t.Helper()
+		var result ipc.PushReceivedResult
+		err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+			Gate:     p.RepoDir("agent-env-rerun-repo"),
+			Ref:      "refs/heads/main",
+			Old:      refreshTestZeroSHA,
+			New:      headSHA,
+			AgentEnv: pairs,
+		}, &result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return waitForRunTerminalState(t, d, result.RunID)
+	}
+	older := push(map[string]string{"UV_EXCLUDE_NEWER": agentEnvCutoff})
+	latest := push(map[string]string{"npm_config_before": agentEnvCutoff})
+	replacement := map[string]string{"PIP_UPLOADED_PRIOR_TO": "2026-11-02T00:00:00Z"}
+
+	for _, tc := range []struct {
+		name     string
+		previous string
+		pairs    map[string]string
+		want     map[string]string
+	}{
+		{"no_pairs_inherits_the_latest_run", "", nil, latest.AgentEnv},
+		{"no_pairs_inherits_the_selected_run_not_the_latest", older.ID, nil, older.AgentEnv},
+		{"pairs_replace_the_selected_runs_whole", older.ID, replacement, replacement},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var result ipc.RerunResult
+			err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: "agent-env-rerun-repo", Branch: "main", PreviousRunID: tc.previous, AgentEnv: tc.pairs}, &result)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			rerun := waitForRunTerminalState(t, d, result.RunID)
+
+			if !reflect.DeepEqual(rerun.AgentEnv, tc.want) {
+				t.Fatalf("rerun carries %v, want %v", rerun.AgentEnv, tc.want)
+			}
+		})
+	}
+}
+
+// useEnvCapturingCodexAgent overwrites the fake codex binary that the launch
+// fixtures pin in the daemon root's config with one that records its
+// UV_EXCLUDE_NEWER, so a child run's agent can be observed.
+func useEnvCapturingCodexAgent(t *testing.T, p *paths.Paths) string {
+	t.Helper()
+	clearAmbientAgentEnv(t)
+	configured, err := os.ReadFile(p.ConfigFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var global struct {
+		AgentPathOverride map[string]string `yaml:"agent_path_override"`
+	}
+	if err := yaml.Unmarshal(configured, &global); err != nil {
+		t.Fatal(err)
+	}
+	capturePath := filepath.Join(t.TempDir(), "agent-env.txt")
+	const message = `{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}`
+	const completed = `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`
+	script := "#!/bin/sh\nif [ -n \"${UV_EXCLUDE_NEWER+x}\" ]; then printf 'set:%s' \"$UV_EXCLUDE_NEWER\" >" + shellQuoteForTest(capturePath) + "; else printf unset >" + shellQuoteForTest(capturePath) + "; fi\nprintf '%s\n' '" + message + "' '" + completed + "'\n"
+	if runtime.GOOS == "windows" {
+		script = "@echo off\r\nif defined UV_EXCLUDE_NEWER (echo set:%UV_EXCLUDE_NEWER% >\"" + capturePath + "\") else (echo unset >\"" + capturePath + "\")\r\necho " + message + "\r\necho " + completed + "\r\n"
+	}
+	if err := os.WriteFile(global.AgentPathOverride["codex"], []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return capturePath
+}
+
+func TestValidationChildrenRunTheirAgentsWithThePredecessorsAgentEnv(t *testing.T) {
+	launches := map[string]func(*testing.T, StepFactory, map[string]string) (*RunManager, *db.DB, func() (string, error)){
+		"authored": func(t *testing.T, factory StepFactory, pairs map[string]string) (*RunManager, *db.DB, func() (string, error)) {
+			manager, database, _, request, _ := authoredAdmissionFixtureWithEnv(t, factory, assertedLaunch, pairs)
+			return manager, database, func() (string, error) {
+				result, err := manager.validateAuthored(context.Background(), request, os.Getpid())
+				return result.Receipt.RunID, err
+			}
+		},
+		"terminal": func(t *testing.T, factory StepFactory, pairs map[string]string) (*RunManager, *db.DB, func() (string, error)) {
+			fixture := terminalChildLaunchWithEnv(t, assertedLaunch, factory, pairs)
+			return fixture.manager, fixture.database, func() (string, error) {
+				runID, _, err := fixture.launch()
+				return runID, err
+			}
+		},
+	}
+	factory := func() []pipeline.Step {
+		var sequence []pipeline.Step
+		for _, name := range types.AllSteps() {
+			if name == types.StepTest {
+				sequence = append(sequence, runAgentStep{})
+			} else {
+				sequence = append(sequence, &mockPassStep{name: name})
+			}
+		}
+		return sequence
+	}
+	for name, build := range launches {
+		for _, tc := range []struct {
+			name  string
+			pairs map[string]string
+			want  string
+		}{
+			{"with_pairs", map[string]string{"UV_EXCLUDE_NEWER": agentEnvCutoff}, "set:" + agentEnvCutoff},
+			{"without_pairs", nil, "unset"},
+		} {
+			t.Run(name+"/"+tc.name, func(t *testing.T) {
+				manager, database, launch := build(t, factory, tc.pairs)
+				capturePath := useEnvCapturingCodexAgent(t, manager.paths)
+
+				runID, err := launch()
+				if err != nil {
+					t.Fatalf("launch the child: %v", err)
+				}
+				if child := waitForRunTerminalState(t, database, runID); child.Status != types.RunCompleted {
+					t.Fatalf("child status = %s, error = %v", child.Status, child.Error)
+				}
+
+				if got := readCapturedAgentEnv(t, capturePath); got != tc.want {
+					t.Fatalf("the child's agent saw UV_EXCLUDE_NEWER as %q, want %q", got, tc.want)
+				}
+			})
+		}
 	}
 }

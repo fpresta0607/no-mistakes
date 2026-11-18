@@ -131,8 +131,8 @@ type Run struct {
 	TestOutputDirs []string
 	// AgentEnv are the release-cutoff environment pairs (axi run --agent-env),
 	// already admitted by internal/runenv, that join this run's agent and step
-	// command environment. They belong to this run alone: retry and rerun never
-	// carry them.
+	// command environment. A run started from a predecessor (retry, rerun and the
+	// validation children) inherits the predecessor's pairs.
 	AgentEnv map[string]string
 	// PRTitle and PRBody are the caller-supplied PR title and description
 	// (axi run --pr-title / --pr-body-file), already validated. They are

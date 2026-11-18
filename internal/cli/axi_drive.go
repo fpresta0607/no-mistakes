@@ -238,7 +238,8 @@ func newAxiRunCmd() *cobra.Command {
 			"accepted (exact case); another name, an empty value, a control character\n" +
 			"or a repeated name is refused before any push. Values pass through exactly\n" +
 			"as given. Reattaching to an active run keeps the pairs it recorded at its\n" +
-			"start and ignores the flag, and retry and rerun do not carry it.\n\n" +
+			"start and ignores the flag. Retry and rerun carry the previous run's pairs;\n" +
+			"a rerun fallback given its own pairs replaces them whole.\n\n" +
 			"--model and/or --effort opt into an immutable Pi profile for a new run.\n" +
 			"An omitted field comes from agent_config.pi; both must resolve. Requires\n" +
 			"Pi-only agents; raw native selection flags conflict. The pin outranks\n" +

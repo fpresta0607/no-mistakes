@@ -119,7 +119,16 @@ func authoredChildLaunch(t *testing.T, configure launchConfigurer) childLaunchFi
 func terminalChildLaunch(t *testing.T, configure launchConfigurer) childLaunchFixture {
 	t.Helper()
 	calls, evidence := &atomic.Int32{}, &atomic.Value{}
-	manager, p, database, repo, head, _, global := launchAssertionFixture(t, childLaunchFactory(calls, evidence))
+	fixture := terminalChildLaunchWithEnv(t, configure, childLaunchFactory(calls, evidence), nil)
+	fixture.calls, fixture.evidence = calls, evidence
+	return fixture
+}
+
+// terminalChildLaunchWithEnv is the fixture whose failed parent recorded
+// agentEnv at its start. It leaves calls and evidence to the caller.
+func terminalChildLaunchWithEnv(t *testing.T, configure launchConfigurer, factory StepFactory, agentEnv map[string]string) childLaunchFixture {
+	t.Helper()
+	manager, p, database, repo, head, _, global := launchAssertionFixture(t, factory)
 	assertion, _ := configure(t, p, repo, head, global)
 	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature", head)
 	gate := p.RepoDir(repo.ID)
@@ -128,7 +137,7 @@ func terminalChildLaunch(t *testing.T, configure launchConfigurer) childLaunchFi
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := database.InsertRunWithLaunchAssertion(repo.ID, "feature", head, head, nil, "nonce", "ordinary2", "intent", "", false, nil, assertion, proof)
+	run, err := database.InsertLaunchedRun(repo.ID, "feature", head, head, nil, "nonce", "ordinary2", "intent", "", false, nil, db.RunPRText{}, nil, agentEnv, assertion, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +171,7 @@ func terminalChildLaunch(t *testing.T, configure launchConfigurer) childLaunchFi
 	gitCmd(t, managed, "add", "correction.txt")
 	gitCmd(t, managed, "commit", "-m", "correction")
 	request := ipc.RecoverTerminalParams{RepoID: repo.ID, Branch: run.Branch, CallerDir: repo.WorkingPath, SnapshotDigest: observed.Digest(), Reason: "continue from the correction"}
-	return childLaunchFixture{manager: manager, database: database, repoID: repo.ID, calls: calls, evidence: evidence, launch: func() (string, bool, error) {
+	return childLaunchFixture{manager: manager, database: database, repoID: repo.ID, launch: func() (string, bool, error) {
 		result, err := manager.recoverTerminal(context.Background(), request, os.Getpid())
 		if err != nil {
 			return "", false, err

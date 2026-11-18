@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -709,9 +710,10 @@ func TestRetryInheritsTheSuppliedPRText(t *testing.T) {
 	}
 }
 
-func TestRetryDoesNotCarryTheSourceRunsAgentEnv(t *testing.T) {
-	f := newRetryFixture(t, retryFixtureOptions{agentEnv: map[string]string{"UV_EXCLUDE_NEWER": "7 days"}})
-	if len(f.source.AgentEnv) != 1 {
+func TestRetryCarriesTheSourceRunsAgentEnv(t *testing.T) {
+	pairs := map[string]string{"UV_EXCLUDE_NEWER": "7 days"}
+	f := newRetryFixture(t, retryFixtureOptions{agentEnv: pairs})
+	if !reflect.DeepEqual(f.source.AgentEnv, pairs) {
 		t.Fatalf("source run carries %v, want its recorded pair", f.source.AgentEnv)
 	}
 	result, err := f.retry(t, f.source.ID)
@@ -721,8 +723,8 @@ func TestRetryDoesNotCarryTheSourceRunsAgentEnv(t *testing.T) {
 
 	run := waitForRunTerminalState(t, f.d, result.RunID)
 
-	if run.AgentEnv != nil {
-		t.Fatalf("retried run carries %v, want none", run.AgentEnv)
+	if !reflect.DeepEqual(run.AgentEnv, pairs) {
+		t.Fatalf("retried run carries %v, want the source run's %v", run.AgentEnv, pairs)
 	}
 }
 

@@ -255,7 +255,9 @@ They can also be passed on a plain gate push as repeated `-o no-mistakes.agent-e
 The pairs belong to the run that was started with them.
 Reattaching to an active run is not refused, but the flag is not applied: the run keeps the pairs it recorded at its start, so a caller that recomputes a timestamp on every call can pass it each time.
 A strict-launch replay likewise keeps the run's recorded pairs.
-`axi retry`, `no-mistakes rerun` and the rerun fallback of a no-op push never carry a previous run's pairs; pairs reach a new run only when it is started with `axi run --agent-env` or the push options above.
+`axi retry`, `no-mistakes rerun`, the rerun fallback of a no-op push started without `--agent-env`, and the runs `validate-authored` and `validate-terminal` admit from a predecessor inherit that predecessor's recorded pairs.
+A rerun fallback started with `--agent-env` replaces them whole.
+A Test, Lint or CI handback correction continues the same run and keeps them.
 `axi status` lists them under `run.agent_env`, and a run that was recovered after a daemon restart gets the same pairs back.
 An older daemon would drop them silently, so after a new run starts `axi run` reads it back and fails with `the daemon did not record --agent-env; restart it on this build` unless the run recorded exactly the requested pairs.
 

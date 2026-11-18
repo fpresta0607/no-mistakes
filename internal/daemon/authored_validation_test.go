@@ -932,6 +932,13 @@ func authoredAdmissionFixture(t *testing.T, factory StepFactory) (*RunManager, *
 
 func authoredAdmissionFixtureFor(t *testing.T, factory StepFactory, configure launchConfigurer) (*RunManager, *db.DB, *db.Repo, ipc.ValidateAuthoredParams, string) {
 	t.Helper()
+	return authoredAdmissionFixtureWithEnv(t, factory, configure, nil)
+}
+
+// authoredAdmissionFixtureWithEnv is the fixture whose parent run recorded
+// agentEnv at its start.
+func authoredAdmissionFixtureWithEnv(t *testing.T, factory StepFactory, configure launchConfigurer, agentEnv map[string]string) (*RunManager, *db.DB, *db.Repo, ipc.ValidateAuthoredParams, string) {
+	t.Helper()
 	manager, root, database, repo, head, _, global := launchAssertionFixture(t, factory)
 	gitCmd(t, root.RepoDir(repo.ID), "config", "url."+filepath.ToSlash(root.RepoDir(repo.ID))+".insteadOf", repo.UpstreamURL)
 	gitCmd(t, root.RepoDir(repo.ID), "remote", "set-url", "origin", repo.UpstreamURL)
@@ -942,7 +949,7 @@ func authoredAdmissionFixtureFor(t *testing.T, factory StepFactory, configure la
 	}
 	intent := db.RunIntent{Summary: "Validate the declared authored source", Source: db.RunIntentSourceAgent, Score: 1}
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(intent.Summary)))
-	parent, err := database.InsertRunWithLaunchAssertion(repo.ID, "feature", head, head, &intent, "original-launch", "original-generation", digest, "", true, nil, assertion, proof)
+	parent, err := database.InsertLaunchedRun(repo.ID, "feature", head, head, &intent, "original-launch", "original-generation", digest, "", true, nil, db.RunPRText{}, nil, agentEnv, assertion, proof)
 	if err != nil {
 		t.Fatal(err)
 	}
