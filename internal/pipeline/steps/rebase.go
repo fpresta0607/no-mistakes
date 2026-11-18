@@ -139,8 +139,8 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 			return nil, err
 		}
 		for _, target := range targets {
-			if isKept && isAncestor(ctx, sctx.WorkDir, target, startHead) {
-				sctx.Log(fmt.Sprintf("%s was already integrated before the kept conflict resolution", target))
+			if isKept && !merging && target == branchTarget && isAncestor(ctx, sctx.WorkDir, target, startHead) {
+				sctx.Log(fmt.Sprintf("%s was already in the branch the kept rebase rewrote", target))
 				continue
 			}
 			var err error
@@ -740,7 +740,8 @@ func keepRefusedResolution(sctx *pipeline.StepContext, operation string, err err
 // starting another integration over it, and reports whether one was kept. A
 // kept merge is proved against its own MERGE_HEAD. Finishing it integrates
 // only that operation's target; every target still goes through the ordinary
-// integration afterwards.
+// integration afterwards, except the branch's own tracking ref already in the
+// branch a kept rebase rewrote.
 func finishKeptIntegration(ctx context.Context, sctx *pipeline.StepContext, merging bool) (bool, error) {
 	isRebasing := rebaseInProgress(ctx, sctx.WorkDir)
 	isMerging := mergeInProgress(ctx, sctx.WorkDir)
