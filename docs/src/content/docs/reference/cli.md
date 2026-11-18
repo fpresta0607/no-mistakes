@@ -498,6 +498,7 @@ Until then the gate's `pre-receive` admission also refuses a plain `git push no-
 A child can end while its PR is still open, for example one finished by `ci_end_at_green`, `ci.release_after_checks_pass` or the CI idle timeout, or one that failed or was cancelled, and its CI step no longer observes that PR.
 For that child alone, the daemon reads the live PR state on the forge before it decides a launch, `rerun`, terminal recovery or gate push, using global forge routing only, and records a merge or close the way the CI step does.
 A PR that is still open, or a state that cannot be read or proven, keeps the refusal.
+A merge whose proof names a head other than the one the child published (for example after the PR head moved outside no-mistakes) also ends the lineage, but records nothing on the child.
 The live PR's head and base repository names are compared case-insensitively with the registered repositories; head and base branch names must match exactly, including case.
 A predecessor that inherited an open PR URL through a same-head relaunch or `rerun`, but never recorded its own complete push binding, is ineligible even if that PR is still open.
 An inherited PR URL alone proves neither publication nor an unpublished predecessor, so admission fails closed rather than inferring a binding from the live PR.

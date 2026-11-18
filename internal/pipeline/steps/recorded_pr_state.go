@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -43,11 +44,14 @@ func readRecordedPRState(sctx *pipeline.StepContext) (scm.Host, *scm.PR, scm.PRS
 // idle timeout, a failure or a cancel). An open PR records nothing, and any
 // state that cannot be read or proven is an error, so callers fail closed.
 // The proof names the head the run last published: a run that ended before
-// its own push still carries the PR its predecessor published.
-func ObserveTerminalPRState(sctx *pipeline.StepContext) error {
+// its own push still carries the PR its predecessor published. A merge whose
+// proof names a different head records nothing and reports
+// isMergedAtAnotherHead: the PR is no longer open, but the run's head was not
+// the one merged.
+func ObserveTerminalPRState(sctx *pipeline.StepContext) (isMergedAtAnotherHead bool, err error) {
 	host, pr, state, err := readRecordedPRState(sctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	switch state {
 	case scm.PRStateMerged:
@@ -56,14 +60,17 @@ func ObserveTerminalPRState(sctx *pipeline.StepContext) error {
 			publishedHead = *sctx.Run.LastPushedSHA
 		}
 		if err := verifyMergedProof(sctx.Ctx, host, pr, publishedHead); err != nil {
-			return err
+			if errors.Is(err, scm.ErrHeadChanged) {
+				return true, nil
+			}
+			return false, err
 		}
-		return sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged")
+		return false, sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged")
 	case scm.PRStateClosed:
-		return sctx.DB.UpdateRunPRState(sctx.Run.ID, "closed")
+		return false, sctx.DB.UpdateRunPRState(sctx.Run.ID, "closed")
 	case scm.PRStateOpen:
-		return nil
+		return false, nil
 	default:
-		return fmt.Errorf("PR state is unresolved: %q", state)
+		return false, fmt.Errorf("PR state is unresolved: %q", state)
 	}
 }

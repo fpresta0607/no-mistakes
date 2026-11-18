@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/scm/plugin/fakeplugin"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -202,8 +203,18 @@ func TestAxiRunLineageCheckReadsTheLivePR(t *testing.T) {
 // each invocation to.
 func installFakeForge(t *testing.T) string {
 	t.Helper()
+	installFakeCLI(t, "gh")
+	t.Setenv("FAKE_CLI_MODE", "ci-gh")
+	forgeLog := filepath.Join(t.TempDir(), "gh.log")
+	t.Setenv("FAKE_CLI_LOG", forgeLog)
+	return forgeLog
+}
+
+// installFakeCLI builds internal/pipeline/fakecli under name, which selects
+// what it fakes, and puts it first on PATH.
+func installFakeCLI(t *testing.T, name string) {
+	t.Helper()
 	binDir := t.TempDir()
-	name := "gh"
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
@@ -212,8 +223,88 @@ func installFakeForge(t *testing.T) string {
 		t.Fatalf("build fake forge: %v\n%s", err, output)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("FAKE_CLI_MODE", "ci-gh")
-	forgeLog := filepath.Join(t.TempDir(), "gh.log")
-	t.Setenv("FAKE_CLI_LOG", forgeLog)
-	return forgeLog
+}
+
+// TestAuthoredLineageEndsWhenTheChildsPRWasMergedAtAnotherHead runs on a forge
+// whose merged proof names the merged head. A PR whose head moved outside
+// no-mistakes before it was merged is no longer open, so nothing can continue
+// the lineage, yet the proof does not name the child's published head. That
+// merge ends the lineage without being recorded as the child's own; refusing
+// it kept the branch locked for good, the issue #194 symptom.
+func TestAuthoredLineageEndsWhenTheChildsPRWasMergedAtAnotherHead(t *testing.T) {
+	const prURL = "https://git.example.com/team/repo/pulls/1"
+	childHead, movedHead := strings.Repeat("d", 40), strings.Repeat("9", 40)
+	installFakeCLI(t, fakeplugin.ExecutableName)
+	for _, test := range []struct {
+		name           string
+		liveState      string
+		liveHead       string
+		wantRefusalHas string
+		wantRecorded   string
+	}{
+		{name: "merged at the child's head", liveState: "merged", liveHead: childHead, wantRecorded: "merged"},
+		{name: "merged at a head moved outside no-mistakes", liveState: "merged", liveHead: movedHead, wantRecorded: "open"},
+		{name: "still open at a head moved outside no-mistakes", liveState: "open", liveHead: movedHead, wantRefusalHas: "validation-only authored lineage", wantRecorded: "open"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Arrange
+			p := paths.WithRoot(t.TempDir())
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			globalConfig := "provider_plugins:\n  fake:\n    command: " + fakeplugin.ExecutableName + "\n    hosts: [git.example.com]\n"
+			if err := os.WriteFile(p.ConfigFile(), []byte(globalConfig), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			statePath := filepath.Join(t.TempDir(), "plugin-state.json")
+			forge := fakeplugin.State{PRs: []fakeplugin.PR{{Number: "1", URL: prURL, HeadBranch: "authored", BaseBranch: "main", HeadSHA: test.liveHead, State: test.liveState}}}
+			if err := fakeplugin.Save(statePath, forge); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(fakeplugin.EnvState, statePath)
+			t.Setenv(fakeplugin.EnvLog, filepath.Join(t.TempDir(), "plugin-requests.ndjson"))
+			database, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = database.Close() })
+			repo, err := database.InsertRepoWithID("repo", t.TempDir(), "https://git.example.com/team/repo", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			child := seedAuthoredLineage(t, database, repo.ID, "authored")
+			if err := database.UpdateRunPRURL(child, prURL); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunPRState(child, "open"); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunStatus(child, types.RunCompleted); err != nil {
+				t.Fatal(err)
+			}
+			manager := NewRunManager(database, p, nil)
+			update := ipc.GateRefUpdate{Old: strings.Repeat("b", 40), New: strings.Repeat("1", 40), Ref: "refs/heads/authored"}
+
+			// Act
+			err = manager.refuseUnadmittableRefUpdates(context.Background(), repo.ID, []ipc.GateRefUpdate{update})
+
+			// Assert
+			if test.wantRefusalHas == "" && err != nil {
+				t.Fatalf("admissible push refused: %v", err)
+			}
+			if test.wantRefusalHas != "" && (err == nil || !strings.Contains(err.Error(), test.wantRefusalHas)) {
+				t.Fatalf("refusal = %v, want one naming %q", err, test.wantRefusalHas)
+			}
+			run, err := database.GetRun(child)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run.HeadSHA != childHead {
+				t.Fatalf("child head = %s, want the seeded %s", run.HeadSHA, childHead)
+			}
+			if run.PRState == nil || *run.PRState != test.wantRecorded {
+				t.Fatalf("recorded PR state = %v, want %q", run.PRState, test.wantRecorded)
+			}
+		})
+	}
 }

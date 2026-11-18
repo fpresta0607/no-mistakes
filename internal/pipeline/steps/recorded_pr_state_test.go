@@ -1,11 +1,9 @@
 package steps
 
 import (
-	"errors"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
-	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/scm/plugin/fakeplugin"
 )
 
@@ -15,6 +13,7 @@ import (
 // own HeadSHA is a candidate that may never have been pushed, so the PR head
 // the merge proves is the last published one. Proving it against HeadSHA, as
 // the CI step does for its own push, would keep the lineage locked for good.
+// A merge proven at any other head is reported, and nothing is recorded.
 func TestObserveTerminalPRStateProvesTheMergeAtTheLastPublishedHead(t *testing.T) {
 	t.Parallel()
 	const (
@@ -28,11 +27,11 @@ func TestObserveTerminalPRStateProvesTheMergeAtTheLastPublishedHead(t *testing.T
 		lastPushedSHA string
 		mergedHead    string
 		wantRecorded  string
-		wantErr       error
+		wantElsewhere bool
 	}{
 		{name: "merged at the head the predecessor published", lastPushedSHA: publishedHead, mergedHead: publishedHead, wantRecorded: "merged"},
-		{name: "merged at the candidate head the child never published", lastPushedSHA: publishedHead, mergedHead: candidateHead, wantRecorded: "open", wantErr: scm.ErrHeadChanged},
-		{name: "merged at a head that matches neither", lastPushedSHA: publishedHead, mergedHead: unrelatedHead, wantRecorded: "open", wantErr: scm.ErrHeadChanged},
+		{name: "merged at the candidate head the child never published", lastPushedSHA: publishedHead, mergedHead: candidateHead, wantRecorded: "open", wantElsewhere: true},
+		{name: "merged at a head that matches neither", lastPushedSHA: publishedHead, mergedHead: unrelatedHead, wantRecorded: "open", wantElsewhere: true},
 		{name: "merged at its own head when nothing was published before it", mergedHead: candidateHead, wantRecorded: "merged"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -59,14 +58,14 @@ func TestObserveTerminalPRStateProvesTheMergeAtTheLastPublishedHead(t *testing.T
 			}
 
 			// Act
-			err := ObserveTerminalPRState(sctx)
+			isMergedAtAnotherHead, err := ObserveTerminalPRState(sctx)
 
 			// Assert
-			if test.wantErr == nil && err != nil {
+			if err != nil {
 				t.Fatalf("ObserveTerminalPRState() error = %v", err)
 			}
-			if test.wantErr != nil && !errors.Is(err, test.wantErr) {
-				t.Fatalf("ObserveTerminalPRState() error = %v, want %v", err, test.wantErr)
+			if isMergedAtAnotherHead != test.wantElsewhere {
+				t.Fatalf("ObserveTerminalPRState() merged at another head = %v, want %v", isMergedAtAnotherHead, test.wantElsewhere)
 			}
 			run, err := sctx.DB.GetRun(sctx.Run.ID)
 			if err != nil {
