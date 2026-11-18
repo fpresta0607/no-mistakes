@@ -43,6 +43,7 @@ const (
 	MethodRefreshPR                 = "refresh_pr"
 	MethodGateContext               = "gate_context"
 	MethodAdmitPush                 = "admit_push"
+	MethodRefuseUnlinkedValidation  = "refuse_unlinked_validation"
 	MethodHealth                    = "health"
 	MethodShutdown                  = "shutdown"
 	MethodPrepareShutdown           = "prepare_shutdown"
@@ -473,6 +474,14 @@ type GateContextParams struct {
 type AdmitPushParams struct {
 	Gate    string          `json:"gate"`
 	Updates []GateRefUpdate `json:"updates"`
+}
+
+// RefuseUnlinkedValidationParams asks the daemon to decide, before any gate
+// ref moves, whether a fresh launch on the branch would drop validation-only
+// authored lineage. An error is the refusal.
+type RefuseUnlinkedValidationParams struct {
+	RepoID string `json:"repo_id"`
+	Branch string `json:"branch"`
 }
 
 // GateRefUpdate is one proposed ref update from a receive hook's input line.

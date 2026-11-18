@@ -356,6 +356,8 @@ type axiTimeoutOpts struct {
 	// return the refusals and recorded dispositions the CLI has to render.
 	respond      func(context.Context, json.RawMessage) (interface{}, error)
 	respondScope func(context.Context, json.RawMessage) (interface{}, error)
+	// refuseLineage, when set, serves the daemon's authored-lineage refusal.
+	refuseLineage func(context.Context, json.RawMessage) (interface{}, error)
 }
 
 type axiTimeoutFixture struct {
@@ -491,6 +493,9 @@ func newAxiTimeoutFixture(t *testing.T, opts axiTimeoutOpts) *axiTimeoutFixture 
 	}
 	if opts.respondScope != nil {
 		srv.Handle(ipc.MethodRespondReviewScope, opts.respondScope)
+	}
+	if opts.refuseLineage != nil {
+		srv.Handle(ipc.MethodRefuseUnlinkedValidation, opts.refuseLineage)
 	}
 	if opts.answer != nil {
 		srv.Handle(ipc.MethodAnswerReview, func(context.Context, json.RawMessage) (interface{}, error) {

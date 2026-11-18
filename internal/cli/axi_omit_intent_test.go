@@ -117,6 +117,9 @@ func olderDaemonFixture(t *testing.T, probe func() (interface{}, error), configu
 	srv.Handle(ipc.MethodGetRunsForHead, func(context.Context, json.RawMessage) (interface{}, error) {
 		return &ipc.GetRunsResult{}, nil
 	})
+	srv.Handle(ipc.MethodRefuseUnlinkedValidation, func(context.Context, json.RawMessage) (interface{}, error) {
+		return struct{}{}, nil
+	})
 	if probe != nil {
 		srv.Handle(ipc.MethodProbeOmitIntent, func(context.Context, json.RawMessage) (interface{}, error) { return probe() })
 	}

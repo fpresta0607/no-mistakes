@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/launchassert"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -75,7 +76,11 @@ func TestRefuseUnadmittableRefUpdates(t *testing.T) {
 		{name: "the lineage ended with its PR", updates: []ipc.GateRefUpdate{authored(strings.Repeat("b", 40), head)}, hasEndedPR: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			database, err := db.Open(filepath.Join(t.TempDir(), "no-mistakes.db"))
+			p := paths.WithRoot(t.TempDir())
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			database, err := db.Open(p.DB())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -91,7 +96,7 @@ func TestRefuseUnadmittableRefUpdates(t *testing.T) {
 				}
 			}
 
-			err = refuseUnadmittableRefUpdates(database, repo.ID, test.updates)
+			err = NewRunManager(database, p, nil).refuseUnadmittableRefUpdates(context.Background(), repo.ID, test.updates)
 
 			if test.wantRefusalHas == "" && err != nil {
 				t.Fatalf("admissible push refused: %v", err)

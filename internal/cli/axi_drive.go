@@ -478,8 +478,8 @@ func runAxiRunWithPRText(cmd *cobra.Command, autoYes bool, skipSteps []types.Ste
 		return emitError(cmd, 2, "--test-output-dir is accepted only when starting a new run; omit it to reattach")
 	}
 	if runID == "" {
-		if err := env.d.RefuseUnlinkedValidation(env.repo.ID, branch); err != nil {
-			return emitError(cmd, 1, err.Error())
+		if err := env.client.Call(ipc.MethodRefuseUnlinkedValidation, &ipc.RefuseUnlinkedValidationParams{RepoID: env.repo.ID, Branch: branch}, nil); err != nil {
+			return emitError(cmd, 1, fmt.Sprintf("check authored lineage: %v", err))
 		}
 		if err := configErrorForFreshAxiRun(env, runID); err != nil {
 			return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
