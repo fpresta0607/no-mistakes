@@ -790,6 +790,9 @@ type Invocation struct {
 	Args   []string `json:"args"`
 	Prompt string   `json:"prompt"`
 	CWD    string   `json:"cwd,omitempty"`
+	// Env holds the per-run agent environment pairs the fake agent was
+	// launched with; absent names are omitted.
+	Env map[string]string `json:"env,omitempty"`
 }
 
 func (h *Harness) runGit(ctx context.Context, dir string, args ...string) ([]byte, error) {

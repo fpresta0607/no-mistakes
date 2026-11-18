@@ -15,6 +15,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/lifecycle"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
 )
@@ -193,6 +194,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			agentEnv, err := parseAgentEnvPushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
 			gatePath, err := normalizeNotifyGatePath(gate)
 			if err != nil {
 				return err
@@ -229,6 +234,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				ReconciledPreviousHead: reconciledPreviousHead,
 				ClosingIssueRefs:       closingIssues,
 				TestOutputDirs:         testOutputDirs,
+				AgentEnv:               agentEnv,
 				PRTitle:                prText.Title,
 				PRBody:                 prText.Body,
 			}, &result)
@@ -564,6 +570,30 @@ func parseTestOutputDirsPushOptions(options []string) ([]string, error) {
 		dirs = append(dirs, value)
 	}
 	return dirs, nil
+}
+
+// agentEnvPushOptionPrefix carries one release-cutoff NAME=VALUE pair of
+// `axi run --agent-env` through a git push; repeating it preserves the
+// repeatable CLI contract. The daemon admits the pairs again.
+const agentEnvPushOptionPrefix = "no-mistakes.agent-env="
+
+func formatAgentEnvPushOptions(agentEnv map[string]string) []string {
+	pairs := runenv.FormatAgentEnv(agentEnv)
+	options := make([]string, 0, len(pairs))
+	for _, pair := range pairs {
+		options = append(options, agentEnvPushOptionPrefix+pair)
+	}
+	return options
+}
+
+func parseAgentEnvPushOptions(options []string) (map[string]string, error) {
+	var pairs []string
+	for _, option := range options {
+		if pair, ok := strings.CutPrefix(option, agentEnvPushOptionPrefix); ok {
+			pairs = append(pairs, pair)
+		}
+	}
+	return runenv.ParseAgentEnv(pairs)
 }
 
 func formatSkipPushOptions(steps []types.StepName) []string {

@@ -2037,7 +2037,7 @@ func TestStartRunHandsTheAdmittedTestOutputDirsToTheExecutor(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runID, err := manager.startRunWithPRText(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "carry the operator's output directories", "", false, "", nil, []string{outputDir, outputDir}, db.RunPRText{})
+	runID, err := manager.startRunWithPRText(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "carry the operator's output directories", "", false, "", nil, []string{outputDir, outputDir}, nil, db.RunPRText{})
 	if err != nil {
 		t.Fatalf("start run: %v", err)
 	}
@@ -2083,7 +2083,7 @@ func TestStartRunRefusesAnInadmissibleTestOutputDirWithoutARunRow(t *testing.T) 
 			manager, p, database, repo, head, _ := newTestOutputDirsManager(t)
 			value := tc.value(t, p, repo)
 
-			_, err := manager.startRunWithPRText(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "refuse the destination", "", false, "", nil, []string{value}, db.RunPRText{})
+			_, err := manager.startRunWithPRText(context.Background(), repo, "main", head, refreshTestZeroSHA, "test", nil, "refuse the destination", "", false, "", nil, []string{value}, nil, db.RunPRText{})
 
 			if err == nil || !strings.Contains(err.Error(), "--test-output-dir "+value+" "+tc.wantRule) {
 				t.Fatalf("start run = %v, want a refusal naming %q and %q", err, value, tc.wantRule)

@@ -154,6 +154,7 @@ no-mistakes axi run --intent "the user's goal" --pr-title "Add widget export" --
 | `--intent-file` | `string` | (none)  | Read intent from a file relative to the caller's working directory; exclusive with `--intent` |
 | `--verification-plan` | `string` | (none) | Path to a nonempty UTF-8 verification plan, at most 64 KiB (65,536 bytes), captured as separate evidence for a new run only |
 | `--test-output-dir` | `string`, repeatable | (none) | Existing absolute directory outside the repository that the Test step's commands may write outputs to, for a new run only; see [Test output directories](#test-output-directories) |
+| `--agent-env` | `NAME=VALUE`, repeatable | (none) | Release-cutoff variable (`PIP_UPLOADED_PRIOR_TO`, `UV_EXCLUDE_NEWER` or `npm_config_before`) given to every agent and step command of a new run; see [Release-cutoff environment](#release-cutoff-environment) |
 | `-y`, `--yes`   | `bool`   | `false` | Auto-resolve eligible gates until a decision point or outcome                                       |
 | `--skip`        | `string` | (none)  | Comma-separated pipeline steps to skip                                                               |
 | `--base-branch` | `string` | (none)  | Integration branch for this run only; overrides [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) |
@@ -233,6 +234,30 @@ The directories belong to the run they were given to.
 Reattaching with `--test-output-dir` is refused (`--test-output-dir is accepted only when starting a new run; omit it to reattach`), a strict-launch replay with a different set is refused, and `axi retry`, `no-mistakes rerun` and the rerun fallback of a no-op push never carry a previous run's directories.
 `axi status` lists them under `run.test_output_dirs`.
 An older daemon would drop them silently, so after the run starts `axi run` reads it back and fails with `the daemon did not record --test-output-dir; restart it on this build` unless the run recorded exactly the requested set.
+
+### Release-cutoff environment
+
+```sh
+no-mistakes axi run --intent "the user's goal" --agent-env UV_EXCLUDE_NEWER=2026-11-10T00:00:00Z --agent-env npm_config_before=2026-11-10T00:00:00Z
+```
+
+`--agent-env NAME=VALUE` sets a package manager's release-cutoff variable for one run.
+The pairs are added to the environment of every agent subprocess of the run and to every command the run's steps start, such as configured commands, gate commands and the git calls a step makes.
+No other run sees them, and neither does the daemon's own environment.
+Repeat the flag for each name.
+
+Only `PIP_UPLOADED_PRIOR_TO`, `UV_EXCLUDE_NEWER` and `npm_config_before` are accepted, in exactly that case.
+Values pass through exactly as given: no-mistakes does not trim them, compute a date, or add a default cutoff of its own.
+An entry with no `=`, any other name, an empty value, a value with a control character, or a name given twice is refused with an error that names it, and the launch fails before anything is pushed.
+The daemon checks the pairs again when it admits the run, because push options and IPC are a boundary a request can cross without the CLI.
+They can also be passed on a plain gate push as repeated `-o no-mistakes.agent-env=NAME=VALUE` push options.
+
+The pairs belong to the run that was started with them.
+Reattaching to an active run is not refused, but the flag is not applied: the run keeps the pairs it recorded at its start, so a caller that recomputes a timestamp on every call can pass it each time.
+A strict-launch replay likewise keeps the run's recorded pairs.
+`axi retry`, `no-mistakes rerun` and the rerun fallback of a no-op push never carry a previous run's pairs; pass the flag again to give them to the new run.
+`axi status` lists them under `run.agent_env`, and a run that was recovered after a daemon restart gets the same pairs back.
+An older daemon would drop them silently, so after a new run starts `axi run` reads it back and fails with `the daemon did not record --agent-env; restart it on this build` unless the run recorded exactly the requested pairs.
 
 ### Other run options
 

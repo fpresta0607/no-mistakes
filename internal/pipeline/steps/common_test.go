@@ -1060,6 +1060,77 @@ func TestStepCmd_AppliesRunForgeEnvironmentAfterInjectedEnvironment(t *testing.T
 	}
 }
 
+func TestStepEnvironment_AddsTheRunsAgentEnvAlongsideTheForgeOverlay(t *testing.T) {
+	t.Parallel()
+	forge := &forgecontext.Context{Environment: runenv.Overlay{
+		Set:   map[string]string{"GH_CONFIG_DIR": "/profiles/personal"},
+		Unset: []string{"GH_TOKEN"},
+	}}
+	tests := []struct {
+		name string
+		sctx *pipeline.StepContext
+		want map[string]string
+	}{
+		{
+			name: "run pairs with a forge overlay",
+			sctx: &pipeline.StepContext{
+				Env:          []string{"GH_TOKEN=injected", "UV_EXCLUDE_NEWER=injected", "KEEP=value"},
+				ForgeContext: forge,
+				Run:          &db.Run{AgentEnv: map[string]string{"UV_EXCLUDE_NEWER": "7 days"}},
+			},
+			want: map[string]string{"GH_CONFIG_DIR": "/profiles/personal", "UV_EXCLUDE_NEWER": "7 days", "KEEP": "value"},
+		},
+		{
+			name: "run pairs without a forge overlay",
+			sctx: &pipeline.StepContext{
+				Env: []string{"KEEP=value"},
+				Run: &db.Run{AgentEnv: map[string]string{"npm_config_before": "2026-11-01T12:30:00Z"}},
+			},
+			want: map[string]string{"npm_config_before": "2026-11-01T12:30:00Z", "KEEP": "value"},
+		},
+		{
+			name: "a run without pairs is exactly today's environment",
+			sctx: &pipeline.StepContext{
+				Env:          []string{"GH_TOKEN=injected", "KEEP=value"},
+				ForgeContext: forge,
+				Run:          &db.Run{},
+			},
+			want: map[string]string{"GH_CONFIG_DIR": "/profiles/personal", "KEEP": "value"},
+		},
+		{
+			name: "no run record changes nothing",
+			sctx: &pipeline.StepContext{Env: []string{"KEEP=value"}},
+			want: map[string]string{"KEEP": "value"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := make(map[string]string)
+			for _, entry := range stepEnvironment(tc.sctx) {
+				if key, value, ok := strings.Cut(entry, "="); ok {
+					got[key] = value
+				}
+			}
+			for key, want := range tc.want {
+				if got[key] != want {
+					t.Errorf("%s = %q, want %q", key, got[key], want)
+				}
+			}
+			if _, exists := got["GH_TOKEN"]; exists {
+				t.Error("injected GH_TOKEN survived the forge overlay")
+			}
+		})
+	}
+}
+
+func TestStepEnvironment_RunWithoutAgentEnvAndForgeKeepsTheAmbientEnvironment(t *testing.T) {
+	t.Parallel()
+	sctx := &pipeline.StepContext{Run: &db.Run{}}
+	if env := stepEnvironment(sctx); env != nil {
+		t.Fatalf("stepEnvironment() = %#v, want nil so the child inherits the process environment", env)
+	}
+}
+
 func TestStepCmdPreservesAmbientMultiAccountSelectionWithoutProfiles(t *testing.T) {
 	t.Parallel()
 	profileDir := t.TempDir()

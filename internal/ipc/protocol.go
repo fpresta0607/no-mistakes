@@ -197,6 +197,9 @@ type PushReceivedParams struct {
 	// TestOutputDirs are the operator-authorized Test output directories
 	// (axi run --test-output-dir); the daemon admits them again before use.
 	TestOutputDirs []string `json:"test_output_dirs,omitempty"`
+	// AgentEnv are the release-cutoff environment pairs (axi run --agent-env);
+	// the daemon admits them again before use.
+	AgentEnv map[string]string `json:"agent_env,omitempty"`
 	// PRTitle and PRBody are the caller-supplied PR title and description
 	// (axi run --pr-title / --pr-body-file), used only when the run creates
 	// the PR.
@@ -212,19 +215,20 @@ type StartFreshRunParams struct {
 	VerificationPlanID string                    `json:"verification_plan_id,omitempty"`
 	PiProfile          *agentcfg.PiProfile       `json:"pi_profile,omitempty"`
 
-	RepoID               string           `json:"repo_id"`
-	Branch               string           `json:"branch"`
-	HeadSHA              string           `json:"head_sha"`
-	SkipSteps            []types.StepName `json:"skip_steps,omitempty"`
-	Intent               string           `json:"intent"`
-	LaunchNonce          string           `json:"launch_nonce"`
-	ValidationGeneration string           `json:"validation_generation"`
-	PRBaseBranch         string           `json:"pr_base_branch,omitempty"`
-	OmitIntent           bool             `json:"omit_intent,omitempty"`
-	ClosingIssueRefs     []string         `json:"closing_issue_refs,omitempty"`
-	TestOutputDirs       []string         `json:"test_output_dirs,omitempty"`
-	PRTitle              string           `json:"pr_title,omitempty"`
-	PRBody               string           `json:"pr_body,omitempty"`
+	RepoID               string            `json:"repo_id"`
+	Branch               string            `json:"branch"`
+	HeadSHA              string            `json:"head_sha"`
+	SkipSteps            []types.StepName  `json:"skip_steps,omitempty"`
+	Intent               string            `json:"intent"`
+	LaunchNonce          string            `json:"launch_nonce"`
+	ValidationGeneration string            `json:"validation_generation"`
+	PRBaseBranch         string            `json:"pr_base_branch,omitempty"`
+	OmitIntent           bool              `json:"omit_intent,omitempty"`
+	ClosingIssueRefs     []string          `json:"closing_issue_refs,omitempty"`
+	TestOutputDirs       []string          `json:"test_output_dirs,omitempty"`
+	AgentEnv             map[string]string `json:"agent_env,omitempty"`
+	PRTitle              string            `json:"pr_title,omitempty"`
+	PRBody               string            `json:"pr_body,omitempty"`
 }
 
 // CaptureVerificationPlanParams requests a snapshot before the caller pushes.
@@ -368,6 +372,9 @@ type RerunParams struct {
 	// TestOutputDirs are given to the new run only; the selected run's own
 	// directories are never inherited.
 	TestOutputDirs []string `json:"test_output_dirs,omitempty"`
+	// AgentEnv are given to the new run only; the selected run's own pairs
+	// are never inherited.
+	AgentEnv map[string]string `json:"agent_env,omitempty"`
 	// PRTitle and PRBody each replace the selected run's supplied value when
 	// set; an unset field inherits it.
 	PRTitle string `json:"pr_title,omitempty"`
@@ -703,6 +710,9 @@ type RunInfo struct {
 	// TestOutputDirs are the operator-authorized Test output directories the
 	// run recorded (axi run --test-output-dir).
 	TestOutputDirs []string `json:"test_output_dirs,omitempty"`
+	// AgentEnv are the release-cutoff environment pairs the run recorded
+	// (axi run --agent-env).
+	AgentEnv map[string]string `json:"agent_env,omitempty"`
 	// QuotaRouting is the run's quota-aware agent-ordering record (the raw
 	// quotarouting.Record JSON) when the feature is on for this run, empty
 	// otherwise. Local-only observability; see internal/quotarouting.

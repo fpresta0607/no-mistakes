@@ -199,3 +199,56 @@ func TestParseTestOutputDirsPushOptionsRejectsAnEmptyValue(t *testing.T) {
 		t.Fatal("an empty test output directory push option was accepted")
 	}
 }
+
+func TestAgentEnvPushOptionsRoundTrip(t *testing.T) {
+	agentEnv := map[string]string{
+		"UV_EXCLUDE_NEWER":      "7 days",
+		"npm_config_before":     "2026-11-01T12:30:00Z",
+		"PIP_UPLOADED_PRIOR_TO": "2026-11-01",
+	}
+	options := formatAgentEnvPushOptions(agentEnv)
+
+	wantOptions := []string{
+		"no-mistakes.agent-env=PIP_UPLOADED_PRIOR_TO=2026-11-01",
+		"no-mistakes.agent-env=UV_EXCLUDE_NEWER=7 days",
+		"no-mistakes.agent-env=npm_config_before=2026-11-01T12:30:00Z",
+	}
+	if !reflect.DeepEqual(options, wantOptions) {
+		t.Fatalf("formatAgentEnvPushOptions() = %q, want %q", options, wantOptions)
+	}
+	got, err := parseAgentEnvPushOptions(append([]string{"ci.skip", "no-mistakes.closes=42"}, options...))
+	if err != nil {
+		t.Fatalf("parseAgentEnvPushOptions() error = %v", err)
+	}
+	if !reflect.DeepEqual(got, agentEnv) {
+		t.Fatalf("parseAgentEnvPushOptions() = %q, want %q", got, agentEnv)
+	}
+}
+
+func TestParseAgentEnvPushOptionsWithoutThemIsNil(t *testing.T) {
+	got, err := parseAgentEnvPushOptions([]string{"ci.skip", "no-mistakes.test-output-dir=/operator/logs"})
+	if err != nil || got != nil {
+		t.Fatalf("parseAgentEnvPushOptions() = %q, %v; want nil and no error", got, err)
+	}
+}
+
+func TestParseAgentEnvPushOptionsRefusesWhatTheCLIWouldRefuse(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		options []string
+		want    string
+	}{
+		{"name_outside_the_list", []string{"no-mistakes.agent-env=PATH=/evil"}, `"PATH"`},
+		{"no_equals", []string{"no-mistakes.agent-env=UV_EXCLUDE_NEWER"}, "NAME=VALUE"},
+		{"empty_value", []string{"no-mistakes.agent-env=UV_EXCLUDE_NEWER="}, "nonempty"},
+		{"duplicate_name", []string{"no-mistakes.agent-env=UV_EXCLUDE_NEWER=a", "no-mistakes.agent-env=UV_EXCLUDE_NEWER=b"}, "more than once"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseAgentEnvPushOptions(tc.options)
+
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("parseAgentEnvPushOptions() = %v, want an error containing %q", err, tc.want)
+			}
+		})
+	}
+}

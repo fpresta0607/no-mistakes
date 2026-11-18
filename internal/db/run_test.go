@@ -552,7 +552,7 @@ func TestInsertLaunchedRunPersistsTestOutputDirs(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			run, err := d.InsertLaunchedRun(repo.ID, "feature", "head", "base", nil, "", "", "", "", false, nil, RunPRText{}, tc.dirs, nil, nil)
+			run, err := d.InsertLaunchedRun(repo.ID, "feature", "head", "base", nil, "", "", "", "", false, nil, RunPRText{}, tc.dirs, nil, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -566,6 +566,62 @@ func TestInsertLaunchedRunPersistsTestOutputDirs(t *testing.T) {
 			}
 			if !reflect.DeepEqual(stored.TestOutputDirs, tc.dirs) {
 				t.Errorf("stored run carries %q, want %q", stored.TestOutputDirs, tc.dirs)
+			}
+		})
+	}
+}
+
+func TestInsertLaunchedRunPersistsAgentEnvAcrossReopen(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want map[string]string
+	}{
+		{"none", nil, nil},
+		{"empty_map_is_none", map[string]string{}, nil},
+		{"two_pairs", map[string]string{"UV_EXCLUDE_NEWER": "7 days", "npm_config_before": "2026-11-01T12:30:00Z"}, map[string]string{"UV_EXCLUDE_NEWER": "7 days", "npm_config_before": "2026-11-01T12:30:00Z"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "agent-env.sqlite")
+			d, err := Open(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo, err := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			run, err := d.InsertLaunchedRun(repo.ID, "feature", "head", "base", nil, "", "", "", "", false, nil, RunPRText{}, nil, tc.env, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored, err := d.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(run.AgentEnv, tc.want) {
+				t.Errorf("inserted run carries %q, want %q", run.AgentEnv, tc.want)
+			}
+			if !reflect.DeepEqual(stored.AgentEnv, tc.want) {
+				t.Errorf("stored run carries %q, want %q", stored.AgentEnv, tc.want)
+			}
+
+			// A daemon restart reopens the same file and must still hold the pairs.
+			if err := d.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { reopened.Close() })
+			after, err := reopened.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after.AgentEnv, tc.want) {
+				t.Errorf("reopened run carries %q, want %q", after.AgentEnv, tc.want)
 			}
 		})
 	}

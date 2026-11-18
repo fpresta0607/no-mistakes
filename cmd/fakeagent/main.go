@@ -52,6 +52,12 @@ func run(argv []string) int {
 		return runAgy(args, scenario)
 	case "opencode":
 		return runOpencode(args, scenario)
+	case "nm-env-probe":
+		// Stands in for a configured step command (commands.test,
+		// commands.lint): it records the environment it was started with and
+		// prints nothing a step could parse as findings.
+		logInvocation("env-probe", "", args)
+		return 0
 	case "gh":
 		return runGhStub(args)
 	case "tea":
