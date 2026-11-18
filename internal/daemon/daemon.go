@@ -1623,10 +1623,24 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err != nil {
 			return nil, err
 		}
-		if err := refuseUnadmittableRefUpdates(d, repoID, p.Updates); err != nil {
+		if err := mgr.refuseUnadmittableRefUpdates(ctx, repoID, p.Updates); err != nil {
 			return nil, err
 		}
 		return &ipc.AdmitPushResult{Context: gateContextResult(result)}, nil
+	})
+
+	srv.Handle(ipc.MethodRefuseUnlinkedValidation, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		var p ipc.RefuseUnlinkedValidationParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		if strings.TrimSpace(p.RepoID) == "" || strings.TrimSpace(p.Branch) == "" {
+			return nil, fmt.Errorf("repo_id and branch are required")
+		}
+		if err := mgr.refuseUnlinkedValidation(ctx, p.RepoID, p.Branch); err != nil {
+			return nil, err
+		}
+		return struct{}{}, nil
 	})
 
 	srv.Handle(ipc.MethodClaimLaunchReceipt, func(_ context.Context, params json.RawMessage) (interface{}, error) {

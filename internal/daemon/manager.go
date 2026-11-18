@@ -1495,7 +1495,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	if m.restartPending() {
 		return "", errRestartPending
 	}
-	if err := m.db.RefuseUnlinkedValidation(repoID, branch); err != nil {
+	if err := m.refuseUnlinkedValidation(ctx, repoID, branch); err != nil {
 		return "", err
 	}
 	repo, err := m.db.GetRepo(repoID)
@@ -1898,7 +1898,7 @@ func (m *RunManager) withBranchLock(repoID, branch string, action func() (string
 // the repository/branch lock. Proof fields are empty for ordinary launches,
 // and retry is nil for every run that does not continue a failed one.
 func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, inheritedPRURL, planID string, closingIssues, testOutputDirs []string, agentEnv map[string]string, prText db.RunPRText, expected *launchassert.Expectation, retry *retryLaunch, profiles ...*agentcfg.PiProfile) (string, error) {
-	if err := m.db.RefuseUnlinkedValidation(repo.ID, branch); err != nil {
+	if err := m.refuseUnlinkedValidation(ctx, repo.ID, branch); err != nil {
 		return "", err
 	}
 	sequence := m.reserveAdmission()

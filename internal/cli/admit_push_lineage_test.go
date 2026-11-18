@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +17,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -123,6 +126,93 @@ func TestGatePushToAnAuthoredLineageBranchIsRefusedBeforeTheRefMoves(t *testing.
 	}
 	if got := gateRef("refs/heads/feature"); got != ordinaryHead {
 		t.Fatalf("admitted push left the gate branch at %q, want %s", got, ordinaryHead)
+	}
+}
+
+// TestAxiRunLeavesARecordedOpenPRToDaemonAdmission covers the CLI half of
+// issue #194. axi run's own pre-push check read only the recorded PR state, so
+// it refused a branch whose newest authored child ended with its PR open even
+// after that PR was merged on the forge. axi run now asks the daemon, which
+// reads the live PR first, and it asks before any gate ref moves: the gate
+// branch below holds a lineage-bound head the operator's branch has since
+// rewritten, which stale-branch reconciliation would archive and delete. A
+// daemon that predates the method refuses the same way.
+func TestAxiRunLeavesARecordedOpenPRToDaemonAdmission(t *testing.T) {
+	const lineageRefusal = "this branch has validation-only authored lineage"
+	for _, test := range []struct {
+		name          string
+		refuseLineage func(context.Context, json.RawMessage) (interface{}, error)
+		wantRefusal   string
+	}{
+		{name: "daemon admits", refuseLineage: func(context.Context, json.RawMessage) (interface{}, error) { return struct{}{}, nil }},
+		{name: "daemon refuses", refuseLineage: func(context.Context, json.RawMessage) (interface{}, error) { return nil, errors.New(lineageRefusal) }, wantRefusal: lineageRefusal},
+		{name: "daemon predates the method", wantRefusal: "method not found: " + ipc.MethodRefuseUnlinkedValidation},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Arrange
+			requests := make(chan ipc.RefuseUnlinkedValidationParams, 1)
+			opts := axiTimeoutOpts{}
+			if test.refuseLineage != nil {
+				opts.refuseLineage = func(ctx context.Context, raw json.RawMessage) (interface{}, error) {
+					var request ipc.RefuseUnlinkedValidationParams
+					if err := json.Unmarshal(raw, &request); err != nil {
+						return nil, err
+					}
+					requests <- request
+					return test.refuseLineage(ctx, raw)
+				}
+			}
+			fx := newAxiTimeoutFixture(t, opts)
+			fx.setGetActive(func(context.Context) (*ipc.RunInfo, error) { return nil, nil })
+			p := paths.WithRoot(os.Getenv("NM_HOME"))
+			database, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = database.Close() })
+			repos, err := database.GetRepos()
+			if err != nil || len(repos) != 1 {
+				t.Fatalf("registered repos = %v, %v", repos, err)
+			}
+			local, err := os.Getwd()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cliGit(t, local, "commit", "--allow-empty", "-m", "lineage-bound head")
+			boundHead := cliGit(t, local, "rev-parse", "HEAD")
+			cliGit(t, local, "reset", "--hard", fx.head)
+			gateDir := p.RepoDir(repos[0].ID)
+			cliGit(t, local, "init", "--bare", gateDir)
+			cliGit(t, gateDir, "fetch", local, boundHead+":refs/heads/feature/timeout")
+
+			// Act
+			out, err := executeCmd("axi", "run", "--intent", "x")
+
+			// Assert
+			if test.refuseLineage != nil {
+				if request := <-requests; request.RepoID != repos[0].ID || request.Branch != "feature/timeout" {
+					t.Fatalf("lineage request = %+v, want repo %s branch feature/timeout", request, repos[0].ID)
+				}
+			}
+			untouchedGate := "refs/heads/feature/timeout " + boundHead
+			gateRefs := cliGit(t, gateDir, "for-each-ref", "--format=%(refname) %(objectname)")
+			if test.wantRefusal == "" {
+				if strings.Contains(out, "check authored lineage") {
+					t.Fatalf("admitted lineage refused: %v\n%s", err, out)
+				}
+				// Positive control: past the check, axi run reconciles the stale gate branch.
+				if gateRefs == untouchedGate {
+					t.Fatalf("admitted axi run never reached gate reconciliation:\n%s", out)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(out, "check authored lineage: "+test.wantRefusal) {
+				t.Fatalf("axi run was not refused with %q: %v\n%s", test.wantRefusal, err, out)
+			}
+			if gateRefs != untouchedGate {
+				t.Fatalf("refused axi run changed gate refs to:\n%s\nwant only %s", gateRefs, untouchedGate)
+			}
+		})
 	}
 }
 

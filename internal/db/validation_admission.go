@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/authoredvalidation"
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
@@ -283,12 +284,15 @@ func (d *DB) ValidatePendingAdmission(event *ValidationAdmission) error {
 	return err
 }
 
+const newestAuthoredChildQuery = ` FROM validation_admissions a JOIN runs r ON r.id = a.child_id WHERE r.repo_id = ? AND r.branch = ? ORDER BY r.id DESC LIMIT 1`
+
 // RefuseUnlinkedValidation prevents ordinary run/rerun from dropping family authority.
 // The lineage ends once its newest authored child is terminal with a merged or
 // closed PR: authored admission requires an open PR, so nothing can continue it.
+// It decides on the recorded PR state only; see TerminalAuthoredChildWithOpenPR.
 func (d *DB) RefuseUnlinkedValidation(repoID, branch string) error {
 	var status, prState string
-	err := d.sql.QueryRow(`SELECT r.status, COALESCE(r.pr_state, '') FROM validation_admissions a JOIN runs r ON r.id = a.child_id WHERE r.repo_id = ? AND r.branch = ? ORDER BY r.id DESC LIMIT 1`, repoID, branch).Scan(&status, &prState)
+	err := d.sql.QueryRow(`SELECT r.status, COALESCE(r.pr_state, '')`+newestAuthoredChildQuery, repoID, branch).Scan(&status, &prState)
 	if err == sql.ErrNoRows {
 		return nil
 	}
@@ -299,6 +303,30 @@ func (d *DB) RefuseUnlinkedValidation(repoID, branch string) error {
 		return nil
 	}
 	return fmt.Errorf("this branch has validation-only authored lineage; reattach its active child or use explicit authored admission for a terminal child")
+}
+
+// TerminalAuthoredChildWithOpenPR returns the branch's newest validation-only
+// authored child when it is terminal with its PR still recorded open, and nil
+// otherwise. Only an active CI step records a PR merged or closed, so a child
+// that ended with its PR open keeps that record after a later merge or close
+// on the forge; the caller reads the live state outside this package.
+func (d *DB) TerminalAuthoredChildWithOpenPR(repoID, branch string) (*Run, error) {
+	var id string
+	err := d.sql.QueryRow(`SELECT r.id`+newestAuthoredChildQuery, repoID, branch).Scan(&id)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	run, err := d.GetRun(id)
+	if err != nil || run == nil {
+		return nil, err
+	}
+	if !run.Status.Terminal() || run.PRState == nil || *run.PRState != "open" || run.PRURL == nil || strings.TrimSpace(*run.PRURL) == "" {
+		return nil, nil
+	}
+	return run, nil
 }
 
 func (d *DB) PendingValidationAdmissions() ([]*ValidationAdmission, error) {

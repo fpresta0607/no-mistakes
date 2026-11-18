@@ -291,6 +291,10 @@ Prove that the PR merged at the commit no-mistakes validated.
 for it), `head_sha` must equal `--expected-head` (or fail with code
 `head_changed`), and a merged proof must include `merge_commit_sha` and
 `merged_at`.
+A `head_sha` that differs is read as a head change naming that head, and to
+end a validation-only authored lineage no-mistakes may ask again with
+`--expected-head` set to it; a `head_changed` failure names no head, so that
+lineage stays refused.
 
 ### pr retarget (capability `set_pr_base_branch`)
 

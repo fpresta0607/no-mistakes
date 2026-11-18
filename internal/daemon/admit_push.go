@@ -1,10 +1,10 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
-	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 )
 
@@ -16,7 +16,7 @@ import (
 // would leave the branch at a head the immutable lineage never bound, which
 // the next authored admission refuses. Updates that cannot be read, or a
 // lineage that cannot be inspected, refuse the whole push.
-func refuseUnadmittableRefUpdates(database *db.DB, repoID string, updates []ipc.GateRefUpdate) error {
+func (m *RunManager) refuseUnadmittableRefUpdates(ctx context.Context, repoID string, updates []ipc.GateRefUpdate) error {
 	if len(updates) == 0 {
 		return fmt.Errorf("admission needs the proposed ref updates; a push whose updates cannot be inspected is refused")
 	}
@@ -25,8 +25,10 @@ func refuseUnadmittableRefUpdates(database *db.DB, repoID string, updates []ipc.
 			return fmt.Errorf("malformed proposed ref update %q %q %q", update.Old, update.New, update.Ref)
 		}
 	}
+	ctx, cancel := context.WithTimeout(ctx, terminalPRReadTimeout)
+	defer cancel()
 	for _, update := range updates {
-		if err := database.RefuseUnlinkedValidation(repoID, branchFromRef(update.Ref)); err != nil {
+		if err := m.refuseUnlinkedValidation(ctx, repoID, branchFromRef(update.Ref)); err != nil {
 			return fmt.Errorf("refuse %s before it moves: %w", update.Ref, err)
 		}
 	}

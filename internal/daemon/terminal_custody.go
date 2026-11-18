@@ -42,7 +42,7 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 			return "", fmt.Errorf("daemon is shutting down")
 		}
 		// Validation-only authored lineage never regains repair authority.
-		if err := m.db.RefuseUnlinkedValidation(request.RepoID, request.Branch); err != nil {
+		if err := m.refuseUnlinkedValidation(ctx, request.RepoID, request.Branch); err != nil {
 			return "", err
 		}
 		runs, err := m.db.GetRunsByRepo(request.RepoID)

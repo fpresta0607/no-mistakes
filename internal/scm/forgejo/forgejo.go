@@ -793,7 +793,7 @@ func (h *Host) validateExpectedHead(got, expected string) error {
 		return errors.New("forgejo-axi returned an empty PR head SHA")
 	}
 	if expected != "" && got != expected {
-		return fmt.Errorf("%w: Forgejo reported %s, expected %s", scm.ErrHeadChanged, got, expected)
+		return fmt.Errorf("Forgejo: %w", &scm.HeadChangedError{Expected: expected, Reported: got})
 	}
 	return nil
 }

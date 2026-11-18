@@ -345,6 +345,78 @@ func TestRefuseUnlinkedValidationEndsWithTheNewestChildsMergedOrClosedPR(t *test
 	}
 }
 
+func TestTerminalAuthoredChildWithOpenPRSelectsOnlyAnEndedChildWhosePRIsRecordedOpen(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		status        types.RunStatus
+		prState       string
+		prURL         string
+		hasDescendant bool
+		isSelected    bool
+	}{
+		{name: "completed child with an open PR", status: types.RunCompleted, prState: "open", prURL: "https://example.test/pull/1", isSelected: true},
+		{name: "failed child with an open PR", status: types.RunFailed, prState: "open", prURL: "https://example.test/pull/1", isSelected: true},
+		{name: "active child with an open PR", status: types.RunRunning, prState: "open", prURL: "https://example.test/pull/1"},
+		{name: "completed child with a merged PR", status: types.RunCompleted, prState: "merged", prURL: "https://example.test/pull/1"},
+		{name: "failed unpublished child", status: types.RunFailed, prState: "none"},
+		{name: "open record without a PR URL", status: types.RunCompleted, prState: "open", prURL: " "},
+		{name: "older child whose descendant is active", status: types.RunCompleted, prState: "open", prURL: "https://example.test/pull/1", hasDescendant: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Arrange
+			database, proposal := admissionFixture(t)
+			first, _, err := database.AcceptValidationAdmission(context.Background(), proposal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.hasDescendant {
+				if err := database.UpdateRunStatus(first.ChildID, types.RunCancelled); err != nil {
+					t.Fatal(err)
+				}
+				snapshot, err := database.ReadTerminalSnapshot(first.ChildID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				descendant := proposal
+				descendant.Snapshot = *snapshot
+				descendant.Request.PredecessorID, descendant.Request.SnapshotDigest = first.ChildID, snapshot.Digest()
+				descendant.Request.LaunchNonce = *snapshot.Run.LaunchNonce
+				descendant.Request.CandidateSHA = strings.Repeat("9", 40)
+				if _, _, err := database.AcceptValidationAdmission(context.Background(), descendant); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := database.sql.Exec(`UPDATE runs SET status = ?, pr_state = ?, pr_url = NULLIF(?, '') WHERE id = ?`, test.status, test.prState, test.prURL, first.ChildID); err != nil {
+				t.Fatal(err)
+			}
+
+			// Act
+			child, err := database.TerminalAuthoredChildWithOpenPR(proposal.Request.RepoID, proposal.Request.Branch)
+
+			// Assert
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.isSelected != (child != nil) {
+				t.Fatalf("selected child = %+v, want selected %v", child, test.isSelected)
+			}
+			if child != nil && child.ID != first.ChildID {
+				t.Fatalf("selected %s, want the newest child %s", child.ID, first.ChildID)
+			}
+		})
+	}
+}
+
+func TestTerminalAuthoredChildWithOpenPRIgnoresABranchWithoutLineage(t *testing.T) {
+	database, proposal := admissionFixture(t)
+
+	child, err := database.TerminalAuthoredChildWithOpenPR(proposal.Request.RepoID, proposal.Request.Branch)
+
+	if err != nil || child != nil {
+		t.Fatalf("branch without lineage selected %+v, %v", child, err)
+	}
+}
+
 func TestValidationAdmissionRejectsEveryEarlierFamilyHead(t *testing.T) {
 	for _, test := range []struct {
 		name        string
