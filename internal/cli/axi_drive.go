@@ -70,7 +70,7 @@ func validateAxiWait(wait time.Duration) error {
 }
 
 func isAxiWaitElapsed(parent, drive context.Context, err error) bool {
-	if err == nil || parent.Err() != nil || !errors.Is(err, context.DeadlineExceeded) {
+	if err == nil || parent.Err() != nil || (!errors.Is(err, context.DeadlineExceeded) && !ipc.IsCallTimeout(err)) {
 		return false
 	}
 	return deadlinePassed(drive)
@@ -1740,9 +1740,10 @@ func successReportHelp(fixes []fixRow) []string {
 const legacyApprovalReasonRefusal = "an approval reason applies only to Test approval"
 
 func newAxiRespondCmd() *cobra.Command {
-	var action, step, findings, ignore, instructions, instructionsFile, addFinding, addFindingFile, reason, runID string
+	var action, step, findings, ignore, instructions, instructionsFile, addFinding, addFindingFile, reason, runID, candidate, ghConfigDir, expectedLogin string
 	var scopeDecisionFile string
 	var autoYes bool
+	var reselectPublication bool
 	var wait time.Duration
 
 	cmd := &cobra.Command{
@@ -1774,6 +1775,8 @@ func newAxiRespondCmd() *cobra.Command {
 			"and silently replace content. Use --instructions-file or --add-finding-file\n" +
 			"for text containing backticks, quotes, or newlines. Use --instructions - or --add-finding - to read\n" +
 			"stdin until EOF, cancellation, or --wait; file paths are literal (including '-').\n\n" +
+			"Use revalidate with an exact retained CI candidate and existing publication\n" +
+			"credentials to adopt unvalidated contents for fresh required validation.\n\n" +
 			"--wait bounds this hold (default 8m) so an agent harness with a 10-minute\n" +
 			"tool cap gets a structured return instead of an unbounded hang. Elapsed wait\n" +
 			"is not a failed run: inspect with axi status and reattach. A slow live daemon\n" +
@@ -1788,25 +1791,33 @@ func newAxiRespondCmd() *cobra.Command {
 				"auto_yes": autoYes,
 			}, func() error {
 				return runAxiRespond(cmd, respondArgs{
-					scopeDecisionFile: scopeDecisionFile,
-					action:            action,
-					step:              step,
-					findings:          findings,
-					ignore:            ignore,
-					instructions:      instructions,
-					instructionsFile:  instructionsFile,
-					addFinding:        addFinding,
-					addFindingFile:    addFindingFile,
-					reason:            reason,
-					autoYes:           autoYes,
-					wait:              wait,
-					runID:             strings.TrimSpace(runID),
-					runFlagSet:        cmd.Flags().Changed("run"),
+					scopeDecisionFile:   scopeDecisionFile,
+					action:              action,
+					step:                step,
+					findings:            findings,
+					ignore:              ignore,
+					instructions:        instructions,
+					instructionsFile:    instructionsFile,
+					addFinding:          addFinding,
+					addFindingFile:      addFindingFile,
+					reason:              reason,
+					autoYes:             autoYes,
+					wait:                wait,
+					runID:               strings.TrimSpace(runID),
+					runFlagSet:          cmd.Flags().Changed("run"),
+					candidate:           candidate,
+					ghConfigDir:         ghConfigDir,
+					expectedLogin:       expectedLogin,
+					reselectPublication: reselectPublication,
 				})
 			})
 		},
 	}
-	cmd.Flags().StringVar(&action, "action", "", "approve | fix | skip | abort | complete-coverage (required)")
+	cmd.Flags().StringVar(&action, "action", "", "approve | fix | skip | abort | complete-coverage | revalidate (required)")
+	cmd.Flags().StringVar(&candidate, "candidate", "", "exact retained commit to adopt as unvalidated contents (with --action revalidate)")
+	cmd.Flags().StringVar(&ghConfigDir, "publication-gh-config-dir", "", "existing isolated GitHub config directory for this publication attempt")
+	cmd.Flags().StringVar(&expectedLogin, "publication-login", "", "expected existing GitHub account for both forge and Git credentials")
+	cmd.Flags().BoolVar(&reselectPublication, "reselect-publication", false, "restore the temporary publication selection without resetting fresh validation")
 	cmd.Flags().StringVar(&runID, "run", "", "answer this run id directly, without resolving the current branch or worktree")
 	cmd.Flags().StringVar(&step, "step", "", "step to respond to (default: the step awaiting approval)")
 	cmd.Flags().StringVar(&findings, "findings", "", "comma-separated finding IDs to fix (with --action fix)")
@@ -1814,7 +1825,7 @@ func newAxiRespondCmd() *cobra.Command {
 	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to selected findings; '-' reads stdin (exclusive with --instructions-file)")
 	cmd.Flags().StringVar(&instructionsFile, "instructions-file", "", "read fix guidance from a file (exclusive with --instructions)")
 	cmd.Flags().StringVar(&scopeDecisionFile, "scope-decision-file", "", "explicit controller_assertion bound to this Review fix response; never ordinary fix guidance")
-	cmd.Flags().StringVar(&reason, "reason", "", "reason preserved with a Test approval exception (--step test --action approve), and required with --action abort")
+	cmd.Flags().StringVar(&reason, "reason", "", "reason preserved with a Test approval exception (--step test --action approve), and required with --action abort or revalidate")
 	cmd.Flags().StringVar(&addFinding, "add-finding", "", "JSON finding object to add and fix; '-' reads stdin (exclusive with --add-finding-file)")
 	cmd.Flags().StringVar(&addFindingFile, "add-finding-file", "", "read JSON finding object from a file (exclusive with --add-finding)")
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve subsequent eligible gates until a decision point or outcome; protected-path and Test unvalidated-work refusals require an explicit response, and an open review question requires `axi answer`")
@@ -1823,20 +1834,24 @@ func newAxiRespondCmd() *cobra.Command {
 }
 
 type respondArgs struct {
-	scopeDecisionFile string
-	action            string
-	step              string
-	findings          string
-	ignore            string
-	instructions      string
-	instructionsFile  string
-	addFinding        string
-	addFindingFile    string
-	reason            string
-	autoYes           bool
-	wait              time.Duration
-	runID             string
-	runFlagSet        bool
+	scopeDecisionFile   string
+	action              string
+	step                string
+	findings            string
+	ignore              string
+	instructions        string
+	instructionsFile    string
+	addFinding          string
+	addFindingFile      string
+	reason              string
+	autoYes             bool
+	wait                time.Duration
+	runID               string
+	runFlagSet          bool
+	candidate           string
+	ghConfigDir         string
+	expectedLogin       string
+	reselectPublication bool
 }
 
 func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
@@ -1868,13 +1883,16 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	respondCmd := "no-mistakes axi respond" + runFlag(ra.runID)
 	act := types.ApprovalAction(strings.TrimSpace(ra.action))
 	switch act {
-	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAbort, types.ActionCompleteCoverage:
+	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAbort, types.ActionRevalidate, types.ActionCompleteCoverage:
 	case "":
 		return emitError(cmd, 2, "--action is required",
 			"Run `"+respondCmd+" --action approve|fix|skip|abort`")
 	default:
 		return emitError(cmd, 2, fmt.Sprintf("unknown action %q", ra.action),
-			"Valid actions: approve, fix, skip, abort, complete-coverage")
+			"Valid actions: approve, fix, skip, abort, complete-coverage, revalidate")
+	}
+	if act != types.ActionRevalidate && (ra.candidate != "" || ra.ghConfigDir != "" || ra.expectedLogin != "" || ra.reselectPublication) {
+		return emitError(cmd, 2, "publication candidate and credential flags require --action revalidate")
 	}
 	if act == types.ActionCompleteCoverage && (ra.autoYes || ra.findings != "" || ra.ignore != "" || ra.instructions != "" || ra.addFinding != "" || ra.reason != "") {
 		return emitError(cmd, 2, "complete-coverage cannot approve subsequent gates or change findings")
@@ -1955,6 +1973,9 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		return emitError(cmd, 1, fmt.Sprintf("load run: daemon returned run %s instead of the requested run %s", run.ID, runID))
 	}
 	rv := runViewFromIPC(run)
+	if act == types.ActionRevalidate {
+		return runAxiCIRevalidation(cmd, env, driveCtx, runID, rv, ra)
+	}
 	if ra.runID != "" {
 		if _, ok := rv.awaitingStep(); !ok {
 			return emitError(cmd, 1, fmt.Sprintf("run %s is not parked at a gate (status: %s)", runID, run.Status),

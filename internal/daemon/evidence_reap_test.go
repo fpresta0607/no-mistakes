@@ -29,7 +29,9 @@ type evidenceFixture struct {
 
 func newEvidenceFixture(t *testing.T) *evidenceFixture {
 	t.Helper()
-	p := paths.WithRoot(t.TempDir())
+	// The daemon socket lives under this root, and t.TempDir() puts it past
+	// the macOS Unix socket path limit.
+	p := paths.WithRoot(shortTempDir(t))
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}

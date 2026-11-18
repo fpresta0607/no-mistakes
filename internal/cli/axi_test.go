@@ -444,6 +444,29 @@ func TestGateHelpForProtectedPathRefusalWithExhaustedReviewBudget(t *testing.T) 
 	}
 }
 
+func TestGateHelpForPublicationRevalidationHoldOffersOnlyAbort(t *testing.T) {
+	gate := stepView{Name: "push", Status: "awaiting_approval", FindingsJSON: findingsJSON(t, []types.Finding{
+		{ID: pipeline.PublicationRevalidationFindingID, Severity: "error", Action: types.ActionAskUser, Description: "fresh validation is required"},
+	}, "")}
+	for _, runID := range []string{"", "run-7"} {
+		out := axiDoc(gateFieldsForRun(gate, runID)...)
+		for _, refused := range []string{"--action approve", "--action fix", "--action skip", "--reselect-publication"} {
+			if strings.Contains(out, refused) {
+				t.Fatalf("gate help offers %q, which the hold refuses:\n%s", refused, out)
+			}
+		}
+		if !strings.Contains(out, "`no-mistakes axi abort"+runFlag(runID)+"`") {
+			t.Fatalf("gate help names no exit:\n%s", out)
+		}
+	}
+
+	inspection := axiDoc(inspectionOnlyGateFields(gate, "run-7", false)...)
+
+	if strings.Contains(inspection, "approve|fix|skip") || !strings.Contains(inspection, "`no-mistakes axi abort --run run-7`") {
+		t.Fatalf("inspection help offers a refused response or names no exit:\n%s", inspection)
+	}
+}
+
 func TestWriteGateShape(t *testing.T) {
 	gate := stepView{
 		Name:   "review",

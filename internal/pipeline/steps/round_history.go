@@ -3,6 +3,7 @@ package steps
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -51,7 +52,11 @@ func stepRoundHistorySection(sctx *pipeline.StepContext) string {
 		return ""
 	}
 	rounds, err := sctx.DB.GetRoundsByStep(sctx.StepResultID)
-	if err != nil || len(rounds) == 0 {
+	if err != nil {
+		return ""
+	}
+	rounds = slices.DeleteFunc(rounds, func(r *db.StepRound) bool { return r.Round <= sctx.AdoptedRounds })
+	if len(rounds) == 0 {
 		return ""
 	}
 	blocks := renderRoundHistoryBlocks(rounds, true)

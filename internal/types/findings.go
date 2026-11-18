@@ -411,6 +411,10 @@ type Findings struct {
 	Scenarios      []TestScenario `json:"scenarios,omitempty"`
 	Verdict        string         `json:"verdict,omitempty"`
 	TestedHeadSHA  string         `json:"tested_head_sha,omitempty"`
+	// TestComparisonSHA is the comparison Test resolved for TestedHeadSHA. It
+	// outlives the in-memory run record for the one reader that cannot run Test
+	// again: publishing an adopted CI repair after a daemon restart.
+	TestComparisonSHA string `json:"test_comparison_sha,omitempty"`
 	// UnvalidatedSinceSHA is set only on a Test budget-cut park: the head its
 	// unvalidated-work check measured from, carried so a repeated cut before any
 	// evidence turn completes re-measures from that same head.
@@ -439,6 +443,7 @@ type findingsWire struct {
 	Scenarios           []TestScenario       `json:"scenarios"`
 	Verdict             string               `json:"verdict"`
 	TestedHeadSHA       string               `json:"tested_head_sha"`
+	TestComparisonSHA   string               `json:"test_comparison_sha"`
 	UnvalidatedSinceSHA string               `json:"unvalidated_since_sha"`
 	BaselineFailure     *TestBaselineFailure `json:"baseline_failure"`
 	FocusedCheck        *TestFocusedCheck    `json:"focused_check"`
@@ -472,6 +477,7 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		Scenarios:           wire.Scenarios,
 		Verdict:             wire.Verdict,
 		TestedHeadSHA:       wire.TestedHeadSHA,
+		TestComparisonSHA:   wire.TestComparisonSHA,
 		UnvalidatedSinceSHA: wire.UnvalidatedSinceSHA,
 		BaselineFailure:     wire.BaselineFailure,
 		FocusedCheck:        wire.FocusedCheck,

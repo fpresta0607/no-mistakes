@@ -544,14 +544,18 @@ no-mistakes axi respond --run <id> --action approve
 
 | Flag             | Type     | Default       | Description                                                          |
 | ---------------- | -------- | ------------- | -------------------------------------------------------------------- |
-| `--action`       | `string` | (none)        | `approve`, `fix`, `skip`, `complete-coverage`, or `abort`; required. A reviewer's open question is answered with [`axi answer`](#no-mistakes-axi-answer), not here |
+| `--action`       | `string` | (none)        | `approve`, `fix`, `skip`, `complete-coverage`, `abort`, or `revalidate`; required. A reviewer's open question is answered with [`axi answer`](#no-mistakes-axi-answer), not here |
 | `--run`          | `string` | current-branch active run | Answer the gate of this run ID from any directory, without resolving the current branch or worktree |
 | `--step`         | `string` | awaiting step | Step to respond to                                                   |
 | `--findings`     | `string` | (none)        | Comma-separated finding IDs to fix with `--action fix`               |
 | `--ignore`       | `string` | (none)        | Comma-separated finding IDs to decline with `--action fix`; see the accounting rules below |
 | `--instructions` | `string` | (none)        | Driver fix guidance applied to selected findings with `--action fix`; recorded as `driver_instructions`, never as the user's decision; `-` reads stdin until EOF, cancellation, or `--wait`; exclusive with `--instructions-file` |
 | `--instructions-file` | `string` | (none) | Read driver fix guidance from a file; exclusive with `--instructions` |
-| `--reason`       | `string` | (none)        | Operator's reason: optional exception explanation for a Test approval, required with `--action abort` |
+| `--reason`       | `string` | (none)        | Operator's reason: optional exception explanation for a Test approval, required with `--action abort`, and the required adoption reason with `--action revalidate` |
+| `--candidate` | `string` | (none) | Full retained commit SHA for `--action revalidate` |
+| `--publication-gh-config-dir` | `string` | (none) | Absolute existing GitHub CLI config directory for this publication attempt |
+| `--publication-login` | `string` | (none) | Expected existing account, independently verified for GitHub API and Git credentials |
+| `--reselect-publication` | `bool` | `false` | Restore a lost publication selection for an accepted adoption without resetting fresh validation |
 | `--add-finding`  | `string` | (none)        | JSON finding object to add and fix; a `driver_instructions` key is refused, since driver guidance comes only from `--instructions`; `-` reads stdin until EOF, cancellation, or `--wait`; exclusive with `--add-finding-file` |
 | `--add-finding-file` | `string` | (none) | Read JSON finding object from a file; exclusive with `--add-finding` |
 | `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve subsequent eligible gates until a decision point or outcome |
@@ -632,10 +636,42 @@ A running daemon older than this CLI only ever accepted a reason for a Test appr
 
 Without `--run`, the response goes to the active run on the current branch, and `no active run to respond to` is the error when it has none. With `--run <id>`, the response goes to exactly that run, from any directory and without resolving a repository, branch, or worktree; every other flag behaves as it does in context. The call is refused with a nonzero exit when the ID names no run (`no run with id <id>`) or the run is not parked at a gate (`run <id> is not parked at a gate`), and it never answers a different run. [`axi status --run`](#no-mistakes-axi-status) stays inspection-only for bare commands and names `axi respond --run <id>` as the response command. An empty or whitespace-only `--run` value is refused with a nonzero exit and never selects the current branch's run. Every follow-up command a `--run` call prints carries `--run <id>`; a command with no `--run` form (`axi answer`, `axi run`, `axi sync`, `rerun`) is named as one that must run in the clone of that run.
 
+A committed CI repair whose publication failed can remain in the managed worktree while the run and public branch still record the preceding head.
+The run must still be parked on its unpublished CI repair round with complete original step and round history; required preceding steps must have completed (Intent may have been skipped).
+From the clean original contributor worktree, still at its submitted or preceding public head, explicitly adopt that exact retained commit as unvalidated contents:
+
+```sh
+no-mistakes axi respond --action revalidate --candidate <full-sha> --reason "validate these retained contents" --publication-gh-config-dir <absolute-existing-directory> --publication-login <existing-login>
+```
+
+This keeps the same run and PR, revokes current approvals, and starts fresh required validation at Review.
+Original findings, rounds, spent automatic repair selections, and original per-step limits remain recorded.
+The adopted Review rounds still count toward Review's fix-round limits, but the fresh Review neither shows its reviewer their decisions nor carries their selections or fix and ignore choices into its own gate responses.
+Adoption itself launches no CI fixer and renews no repair budget.
+It revokes the run's stored agent sessions in the same transaction, so fresh validation never resumes a session that saw the retained contents.
+An immutable local audit records the authenticated operator process, reason, candidate, caller, and original state in the same transaction that revokes approval and resets validation.
+Adoption grants no review or publication authority.
+It refuses moved or dirty worktrees, changed publication bindings, competing writers of the retained source or branch, and unreadable identities.
+Ordinary approve and fix cannot consume the retained-candidate hold.
+Publication requires the exact adopted candidate: a later Document, Lint, fixer, or formatter commit holds publication even when it descends from that candidate.
+Credential reselection cannot authorize that changed head or reset validation.
+That hold takes no response: approve, fix, skip, abort through `axi respond`, and `--reselect-publication` are all refused.
+[`axi abort`](#no-mistakes-axi-abort) is its only exit, and it preserves the source and completed results.
+
+Publication selection supports credential-free HTTPS GitHub remotes and an existing single-account GitHub CLI directory.
+It changes neither sign-in nor shared Git, daemon, or credential configuration, and retains no token or selection in the run database.
+The selection ends when that publication is durably recorded; PR updates, CI monitoring, and later operations use the run's original forge context.
+If the selection is lost or publication fails, repeat the command with `--reselect-publication`, the same candidate, and the same original caller worktree and head, even if the new publication has already been recorded.
+This restores publication credentials without resetting completed fresh validation; [daemon recovery](/no-mistakes/concepts/daemon/#crash-recovery) owns which interrupted steps can resume and when a preserved Push can settle an already updated remote.
+The ordinary Push baseline guard still runs after a daemon restart; if it requires fresh validation, publication stays held without dispatching a fixer or resetting completed steps.
+Revalidation cannot be combined with `--yes` or finding actions.
+
 After the explicit response, `--yes` uses the same [auto-resolution behavior and exceptions as `axi run --yes`](#no-mistakes-axi-run).
 Each `axi respond` blocks until the next gate, CI-ready decision point, or final outcome, subject to the same default `--wait 8m` boundary as `axi run`. That boundary also covers its initial active-run and run-state reads plus event-subscription acknowledgement, so a caller can interrupt establishment as well as the later event wait.
 If it returns another `gate:`, answer that gate; do not idle-wait for the run to move forward by itself.
-When the daemon is already running, `axi respond` can continue an active run even if the global config file has become invalid, because it is not starting a fresh run.
+When the daemon is already running, ordinary approve, fix, and skip responses can continue an active run even if the global config file has become invalid, because they are not starting a fresh run.
+CI adoption or credential reselection that must rebuild an executor still requires readable current configuration.
+A first adoption that cannot build its executor refuses before it changes anything, so the run keeps its approvals.
 The same successful-output reporting instructions apply to `axi respond` results.
 
 ## no-mistakes axi answer
@@ -1090,6 +1126,11 @@ Use it to reap an orphaned CI monitor whose worktree was torn down before the PR
 A `--run` id that is not currently active is resolved against the exact run's durable record rather than trusted blindly: a known already-terminal run returns an idempotent success carrying its terminal `run_status` with no fabricated new cancellation, a positively proven unknown id keeps the documented successful no-op with no fabricated state, and a run that is recorded as still nonterminal or cannot be read returns the nonzero terminal-unconfirmed contract.
 When the daemon is not running, nothing can be cancelled and abort never starts one: the durable record alone decides the same three outcomes, and a recorded nonterminal run reports that cancellation could not be requested.
 When the daemon is already running, `axi abort` can cancel an active run even if the global config file has become invalid, because it is not starting a fresh run.
+A held CI repair ends the same way, and its evidence cleanup waits for a later finished run.
+Abort also ends a held CI repair whose managed worktree cannot be read: the run is cancelled with no verified head, and anything left in that directory is preserved.
+A head that can be read but not preserved still refuses, because cancelling would lose the source.
+An abort that anchors a held CI repair's head but cannot record the cancellation leaves the run held with no writer, across a daemon restart too: CI adoption and `--reselect-publication` are refused, and repeating `axi abort` settles that same head.
+The run's head is recorded only together with its cancellation, so until the abort settles the run keeps the head it last recorded and stays held, whether a live executor or the daemon ran the abort.
 If restart retained a released CI handback but could not restore its executor, abort can still terminate that reservation after verifying its unchanged recorded publication binding and unresolved CI round, completed preceding steps, and absence of an executor, active writers, candidate or accepted follow-up.
 That cancellation preserves source, receipts, findings, validation and decision history, actual execution spend and repair limits; it does not approve failed CI or allow the cancelled handback to resume.
 Both abort surfaces report a completed cancellation only after the exact run positively confirms a terminal state within the bounded wait; success then includes the terminal `run_status`, and branch-scoped abort renders the refreshed `branch_sync` object and its exact next action, if any.

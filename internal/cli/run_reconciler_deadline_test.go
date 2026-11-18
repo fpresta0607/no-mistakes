@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -44,6 +45,22 @@ func TestAxiWaitElapsedBeforeTheDriveTimerFires(t *testing.T) {
 	}
 	if isAxiWaitElapsed(context.Background(), context.Background(), context.DeadlineExceeded) {
 		t.Fatal("a deadline error with no drive deadline was classified as an elapsed wait")
+	}
+}
+
+// A call bounded by the drive deadline can fail on the read deadline just before
+// the context's own timer fires. The reply never arrived because the wait ended,
+// so that is an elapsed --wait, while the same timeout with time left is a
+// daemon that did not answer.
+func TestAxiCallTimeoutIsAnElapsedWaitOnlyOnceTheDriveDeadlinePassed(t *testing.T) {
+	callTimeout := fmt.Errorf("read response: %w", &ipc.CallTimeoutError{Method: ipc.MethodRespond, TimeoutDuration: 30 * time.Second})
+	if !isAxiWaitElapsed(context.Background(), passedDeadlineCtx{context.Background()}, callTimeout) {
+		t.Fatal("a call timeout at the drive deadline was not classified as an elapsed wait")
+	}
+	live, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	if isAxiWaitElapsed(context.Background(), live, callTimeout) {
+		t.Fatal("a call timeout with wait left was classified as an elapsed wait")
 	}
 }
 

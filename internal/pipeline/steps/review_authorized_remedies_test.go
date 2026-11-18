@@ -109,6 +109,42 @@ func TestReviewStep_SelectedAskUserRemedyStaysAuthorizedThroughBoundedHistory(t 
 	}
 }
 
+// An adopted CI repair restarts Review fresh on the same step row, so the rounds
+// it adopted are still stored there. The fresh reviewer is shown none of their
+// human decisions, neither in its round history nor as an authorized remedy,
+// while a decision made in the fresh Review is still shown.
+func TestReviewPromptOmitsTheDecisionsOfAdoptedRounds(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "claude"}, dir, baseSHA, headSHA, config.Commands{})
+	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.StepResultID = sr.ID
+	adopted := `{"findings":[{"id":"R1","severity":"error","file":"feature.txt","description":"adopted remedy","action":"ask-user"}]}`
+	fresh := `{"findings":[{"id":"R1","severity":"error","file":"feature.txt","description":"fresh remedy","action":"ask-user"}]}`
+	selectReviewRound(t, sctx.DB, sr.ID, 1, adopted, `["R1"]`, adopted, types.ResponseOriginInteractive)
+	selectReviewRound(t, sctx.DB, sr.ID, 2, fresh, `["R1"]`, fresh, types.ResponseOriginInteractive)
+
+	for _, test := range []struct {
+		adoptedRounds  int
+		isAdoptedShown bool
+	}{{adoptedRounds: 0, isAdoptedShown: true}, {adoptedRounds: 1, isAdoptedShown: false}} {
+		sctx.AdoptedRounds = test.adoptedRounds
+		history := roundHistoryPromptSection(sctx)
+		remedies := authorizedRemediesPromptSection(sctx)
+		for name, section := range map[string]string{"round history": history, "authorized remedies": remedies} {
+			if !strings.Contains(section, "fresh remedy") {
+				t.Fatalf("adopted rounds %d: %s lost the fresh decision:\n%s", test.adoptedRounds, name, section)
+			}
+			if strings.Contains(section, "adopted remedy") != test.isAdoptedShown {
+				t.Fatalf("adopted rounds %d: %s shows the adopted decision = %v, want %v:\n%s", test.adoptedRounds, name, !test.isAdoptedShown, test.isAdoptedShown, section)
+			}
+		}
+	}
+}
+
 // Only a user selection of a reviewer's ask-user finding authorizes a remedy:
 // an unselected one, an auto-fix one, an operator's addition, a review question
 // and an auto-fix selection stay undecided. The newest selection wins a repeat.

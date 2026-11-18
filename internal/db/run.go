@@ -1120,6 +1120,26 @@ func (d *DB) UpdateRunErrorStatusWithVerifiedHead(id, errMsg string, status type
 	return nil
 }
 
+// UpdateRunErrorStatusWithHead records an anchored but unverified head in the
+// same write as the terminal status, leaving terminal_head_verified_at unset.
+func (d *DB) UpdateRunErrorStatusWithHead(id, errMsg string, status types.RunStatus, headSHA string) error {
+	_, err := d.sql.Exec(`UPDATE runs SET error = ?, status = ?, head_sha = ?, push_active = 0, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ?`, errMsg, status, headSHA, now(), id)
+	if err != nil {
+		return fmt.Errorf("update run error with head: %w", err)
+	}
+	return nil
+}
+
+// UpdateRunStatusWithHead records an anchored but unverified head in the same
+// write as the terminal status, leaving terminal_head_verified_at unset.
+func (d *DB) UpdateRunStatusWithHead(id string, status types.RunStatus, headSHA string) error {
+	_, err := d.sql.Exec(`UPDATE runs SET status = ?, head_sha = ?, push_active = 0, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ?`, status, headSHA, now(), id)
+	if err != nil {
+		return fmt.Errorf("update run status with head: %w", err)
+	}
+	return nil
+}
+
 func (d *DB) UpdateRunStatusWithVerifiedHead(id string, status types.RunStatus, headSHA string) error {
 	ts := now()
 	_, err := d.sql.Exec(`UPDATE runs SET status = ?, head_sha = ?, push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ?`, status, headSHA, ts, ts, id)
@@ -1152,16 +1172,6 @@ func (d *DB) VerifyTerminalRunRecordedHead(id string, status types.RunStatus, re
 	}
 	updated, err := result.RowsAffected()
 	return updated == 1, err
-}
-
-// RecordRunTerminalHeadEvidence records a managed worktree head that was
-// verified immediately before crash recovery makes the run terminal. The
-// subsequent stale-run status transition deliberately preserves this stamp.
-func (d *DB) RecordRunTerminalHeadEvidence(id, headSHA string) error {
-	ts := now()
-	_, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status IN (?, ?)`,
-		headSHA, ts, ts, id, types.RunPending, types.RunRunning)
-	return err
 }
 
 // RunIntentSourceAgent is the intent_source value stamped when the driving
@@ -1442,13 +1452,15 @@ func (d *DB) CompleteRunAwaitingAgent(id string, ms int64) error {
 // created PR are preserved as a non-failure outcome; all other stale runs are
 // failed. Returns the number of recovered runs.
 func (d *DB) RecoverStaleRuns(errMsg string) (int, error) {
-	return d.RecoverStaleRunsExcept(errMsg, nil)
+	return d.RecoverStaleRunsExcept(errMsg, nil, nil)
 }
 
 // RecoverStaleRunsExcept marks active runs as failed unless their IDs appear
 // in preserved. Callers use preserved only after independently proving a run
-// can be reconstructed safely.
-func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}) (int, error) {
+// can be reconstructed safely. verifiedHeads holds the managed worktree heads
+// the caller anchored for runs it terminalizes; each is recorded in the same
+// transaction as the run's terminal status, never before it.
+func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}, verifiedHeads map[string]string) (int, error) {
 	ts := now()
 
 	tx, err := d.sql.Begin()
@@ -1456,6 +1468,16 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 		return 0, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback()
+
+	for id, head := range verifiedHeads {
+		if _, isPreserved := preserved[id]; isPreserved {
+			continue
+		}
+		if _, err := tx.Exec(`UPDATE runs SET head_sha = ?, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status IN (?, ?)`,
+			head, ts, ts, id, types.RunPending, types.RunRunning); err != nil {
+			return 0, fmt.Errorf("record stale run head: %w", err)
+		}
+	}
 
 	placeholders, args := recoveryExclusionClause(preserved)
 

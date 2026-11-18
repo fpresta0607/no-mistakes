@@ -87,11 +87,14 @@ func TestPreserveStaleRunHeadsAnchorsCrashWorkBeforeTerminalization(t *testing.T
 	fixture := newCrashedRunFixture(t)
 	d, p, run, gate, submitted, preserved := fixture.database, fixture.root, fixture.run, fixture.gate, fixture.submitted, fixture.preserved
 
-	preserveStaleRunHeads(d, p, nil)
+	verifiedHeads := preserveStaleRunHeads(d, p, nil)
 	if got := gitOutput(t, gate, "rev-parse", custody.RecoveryRef(run.ID)); got != preserved {
 		t.Fatalf("startup recovery anchor = %s, want %s", got, preserved)
 	}
-	if _, err := d.RecoverStaleRunsExcept("daemon crashed during execution", nil); err != nil {
+	if stored, err := d.GetRun(run.ID); err != nil || stored.HeadSHA != submitted || stored.TerminalHeadVerifiedAt != nil {
+		t.Fatalf("anchoring recorded a head before terminalization: %+v, %v", stored, err)
+	}
+	if _, err := d.RecoverStaleRunsExcept("daemon crashed during execution", nil, verifiedHeads); err != nil {
 		t.Fatal(err)
 	}
 	terminal, err := d.GetRun(run.ID)
@@ -128,7 +131,7 @@ func TestPreserveRunHeadAnchorsCrashWorkWhenTheSourceObservationStalls(t *testin
 	t.Setenv("FAKE_CLI_REAL_GIT", realGit)
 	t.Setenv("PATH", helperDirectory+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	head, isPreserved := preserveRunHead(fixture.database, fixture.managed, fixture.run)
+	head, isPreserved := anchorRunHead(fixture.database, fixture.managed, fixture.run)
 
 	if !isPreserved || head != fixture.preserved {
 		t.Fatalf("preserveRunHead = %q, %v; want the crash work %s anchored", head, isPreserved, fixture.preserved)
@@ -179,7 +182,7 @@ func TestPreserveRunHeadAnchorsASuccessorUnmovedAtACandidateItsCallerNeverHad(t 
 		t.Fatal(err)
 	}
 
-	head, isPreserved := preserveRunHead(d, fixture.managed, successor)
+	head, isPreserved := anchorRunHead(d, fixture.managed, successor)
 
 	if !isPreserved || head != preserved {
 		t.Fatalf("preserveRunHead = %q, %v; want the owed candidate %s anchored", head, isPreserved, preserved)

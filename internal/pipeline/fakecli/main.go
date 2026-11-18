@@ -73,6 +73,8 @@ func handleFakeCLI(mode string) {
 		fakeWrapperHandler(args)
 	case "git-passthrough":
 		fakeGitPassthroughHandler(args)
+	case "git-cancellation":
+		fakeGitCancellationHandler(args)
 	case "git-trusted-config-second-read-error":
 		fakeGitTrustedConfigSecondReadError(args)
 	case "git-move-head-passthrough":
@@ -95,6 +97,8 @@ func handleFakeCLI(mode string) {
 		fakeGitRemoteErrorHandler(args)
 	case "ci-gh":
 		fakeCIGHHandler(args)
+	case "ci-revalidation":
+		fakeCIRevalidationHandler(args)
 	case "ci-gh-seq":
 		fakeCIGHSequenceHandler(args)
 	case "ci-gh-nochecks":

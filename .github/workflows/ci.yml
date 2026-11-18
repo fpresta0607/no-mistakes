@@ -145,6 +145,29 @@ jobs:
             name: test (windows-cli-2)
             shard: cli
             cli_skip: '^TestAxi'
+          # internal/pipeline and internal/db shared windows-core with the rest
+          # of the remainder. internal/pipeline took 684s on main and 833s on the
+          # CI-repair adoption branch, then timed out at 15m with the running
+          # test a second old. internal/db, fully serial, passed the same run at
+          # 883s. In run 44150394072, ^TestExecutor_[A-Q] took 315s of
+          # pipeline's test time and the rest 357s; in run 44193905459 db's
+          # ^Test[A-L] took 418s and the rest 465s.
+          - os: windows-latest
+            name: test (windows-pipeline-1)
+            shard: pipeline
+            pipeline_run: '^TestExecutor_[A-Q]'
+          - os: windows-latest
+            name: test (windows-pipeline-2)
+            shard: pipeline
+            pipeline_skip: '^TestExecutor_[A-Q]'
+          - os: windows-latest
+            name: test (windows-db-1)
+            shard: db
+            db_run: '^Test[A-L]'
+          - os: windows-latest
+            name: test (windows-db-2)
+            shard: db
+            db_skip: '^Test[A-L]'
     runs-on: ${{ matrix.os }}
     # Sized for each Windows shard, which still sets the floor: git.exe plus
     # Defender tax makes git-backed packages ~10x their Linux time (see the
@@ -152,8 +175,8 @@ jobs:
     # and then ran those packages sequentially, so total wall could exceed
     # timeout-minutes with no package hitting go test -timeout - an
     # evidence-free cancellation. Git-heavy packages are split from the core
-    # remainder; pipeline/steps, daemon, gate, branchsync, and cli are their own
-    # shards, each also split by test name, so a 15m per-package hang still
+    # remainder; pipeline/steps, daemon, gate, branchsync, cli, pipeline, and db
+    # are their own shards, each also split by test name, so a 15m per-package hang still
     # dumps goroutines instead of cancelling the job. 40 is a runaway guard,
     # not a target - Linux and macOS finish far inside it, and it still keeps a
     # wedged runner well short of the six-hour default.
@@ -289,9 +312,10 @@ jobs:
 
       # Git-heavy packages are the Windows wall floor. NM_CI_WINDOWS_GIT_EXCLUDE
       # on the core shard is the union of the git, steps, daemon, gate,
-      # branchsync, and cli shards; the workflow tests resolve every shard through
-      # `go list` and fail if they drift or overlap. pipeline/steps, daemon,
-      # gate, branchsync, and cli are their own shards (each also split by test
+      # branchsync, cli, pipeline, and db shards; the workflow tests resolve
+      # every shard through `go list` and fail if they drift or overlap.
+      # pipeline/steps, daemon, gate, branchsync, cli, pipeline, and db are
+      # their own shards (each also split by test
       # name) so they run in parallel with the remaining git-heavy packages
       # instead of setting a serial floor that hits go test -timeout (issue
       # #1682).
@@ -349,11 +373,27 @@ jobs:
           NM_CI_WINDOWS_CLI_SKIP: ${{ matrix.cli_skip }}
         run: go test -v -timeout=15m "-run=$env:NM_CI_WINDOWS_CLI_RUN" "-skip=$env:NM_CI_WINDOWS_CLI_SKIP" ./internal/cli
 
+      - name: Test on Windows (pipeline)
+        if: runner.os == 'Windows' && matrix.shard == 'pipeline'
+        shell: pwsh
+        env:
+          NM_CI_WINDOWS_PIPELINE_RUN: ${{ matrix.pipeline_run }}
+          NM_CI_WINDOWS_PIPELINE_SKIP: ${{ matrix.pipeline_skip }}
+        run: go test -v -timeout=15m "-run=$env:NM_CI_WINDOWS_PIPELINE_RUN" "-skip=$env:NM_CI_WINDOWS_PIPELINE_SKIP" ./internal/pipeline
+
+      - name: Test on Windows (db)
+        if: runner.os == 'Windows' && matrix.shard == 'db'
+        shell: pwsh
+        env:
+          NM_CI_WINDOWS_DB_RUN: ${{ matrix.db_run }}
+          NM_CI_WINDOWS_DB_SKIP: ${{ matrix.db_skip }}
+        run: go test -v -timeout=15m "-run=$env:NM_CI_WINDOWS_DB_RUN" "-skip=$env:NM_CI_WINDOWS_DB_SKIP" ./internal/db
+
       - name: Test on Windows (core)
         if: runner.os == 'Windows' && matrix.shard == 'core'
         shell: pwsh
         env:
-          NM_CI_WINDOWS_GIT_EXCLUDE: '/internal/(git|branchsync|gate|evidence|pipeline/steps(/.*)?|daemon|eval|cli)$'
+          NM_CI_WINDOWS_GIT_EXCLUDE: '/internal/(git|branchsync|gate|evidence|pipeline(/steps(/.*)?)?|daemon|db|eval|cli)$'
         run: |
           $pkgs = go list ./... | Where-Object { $_ -notmatch $env:NM_CI_WINDOWS_GIT_EXCLUDE }
           go test -v -timeout=15m @pkgs

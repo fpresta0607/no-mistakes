@@ -3,6 +3,7 @@ package steps
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -39,6 +40,7 @@ func authorizedRemediesPromptSection(sctx *pipeline.StepContext) string {
 	if err != nil {
 		return ""
 	}
+	rounds = slices.DeleteFunc(rounds, func(r *db.StepRound) bool { return r.Round <= sctx.AdoptedRounds })
 	var current, earlier []string
 	seen := make(map[string]bool)
 	for i := len(rounds) - 1; i >= 0; i-- {

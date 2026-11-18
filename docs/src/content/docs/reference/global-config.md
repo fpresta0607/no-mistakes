@@ -568,7 +568,7 @@ Paths must be absolute or begin with `~/`; environment variables and other shell
 
 `forge_profiles` is read from the global config only. Repository config, including the pushed branch's `.no-mistakes.yaml`, can never add, select, or change a profile, because a profile decides whose credentials the run executes with.
 
-When a repository matches a profile, no-mistakes validates it before starting the pipeline and applies an immutable environment to every subprocess in that run: built-in provider commands, custom shell commands, agents, managed agent servers, and the run's Git commands together with any hooks or credential helpers they spawn. A GitHub profile sets `GH_CONFIG_DIR` (or, for a `gh_user` profile, the selected login's token, described below) and removes higher-precedence GitHub token, host, and repository variables; a GitLab profile does the equivalent for `GLAB_CONFIG_DIR` and GitLab variables. The daemon process environment is never changed.
+When a repository matches a profile, no-mistakes validates it before starting the pipeline and applies an immutable environment to every subprocess in that run: built-in provider commands, custom shell commands, agents, managed agent servers, and the run's Git commands together with any hooks or credential helpers they spawn. A GitHub profile sets `GH_CONFIG_DIR` (or, for a `gh_user` profile, the selected login's token, described below) and removes higher-precedence GitHub token, host, and repository variables; a GitLab profile does the equivalent for `GLAB_CONFIG_DIR` and GitLab variables. The explicit [CI adoption publication selection](/no-mistakes/reference/cli/#no-mistakes-axi-respond) is a temporary exception to that environment, not a change to `forge_profiles`. The daemon process environment is never changed.
 
 Each selected GitHub config directory (`gh_config_dir`) must contain the target host and exactly one account for it, with that account active. A selected GitLab config must contain the target host. An optional `expected_login` pins the account name the profile must be signed in as; resolution fails closed when the config's active login differs or is missing, so a swapped or re-authenticated config directory can never route a run through the wrong account. It carries an account name only, never credentials. `no-mistakes doctor` validates every configured profile and its online authentication.
 
@@ -989,10 +989,15 @@ So before anything is pushed, the Push step compares the head to push with the c
 
 - With a baseline configured, missing or malformed in-memory Test comparison proof refuses push until normal Test runs again.
   This applies even to the tested commit itself or documentation-only changes, and after a daemon restart.
+  The one exception is publishing the exact candidate of an adopted CI repair after a daemon restart: normal Test cannot run again there, so the baseline runs again on that candidate with the comparison its recorded Test result names.
 - The tested commit itself is pushed as it is.
 - Otherwise every commit after the tested one is named in an informational note on the Push step.
 - When those commits change only paths the repository counts as documentation, by [`test.documentation_paths`](/no-mistakes/reference/repo-config/#testdocumentation_paths), the head is pushed without the baseline running again.
-- When they change anything else, the baseline runs again on the head to push. A pass pushes. A failure pushes nothing and sends the run back to the Test step, which owns failing tests and their fix rounds. A second such failure in one run fails the run with nothing pushed.
+- When they change anything else, the baseline runs again on the head to push.
+  A pass permits publication subject to the other Push guards.
+  On an ordinary run, a failure pushes nothing and sends the run back to the Test step, which owns failing tests and their fix rounds.
+  A second such failure in one ordinary run fails the run with nothing pushed.
+  An adopted CI repair instead follows its [publication hold restrictions](/no-mistakes/reference/cli/#no-mistakes-axi-respond).
 - With no baseline configured, or a failing baseline a person approved the Test step over, the commits are named and nothing runs again.
 - A head where [`commands.test_focused`](/no-mistakes/reference/repo-config/#commandstest_focused) stood in for the baseline has had no full baseline, so it counts as untested and the baseline runs on the head to push.
 

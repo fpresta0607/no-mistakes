@@ -226,17 +226,26 @@ func TestAxiAbortStatusReadStallRespectsBoundedWait(t *testing.T) {
 		{name: "explicit run", args: []string{"axi", "abort", "--run", "run-quiesce"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			cancelRequested := make(chan time.Time, 1)
 			newAbortQuiescenceFixture(t, func(ctx context.Context, _ int) (*ipc.RunInfo, error) {
 				<-ctx.Done()
 				return nil, ctx.Err()
+			}, func() {
+				cancelRequested <- time.Now()
 			})
-			started := time.Now()
 			out, err := executeCmd(tc.args...)
+			finished := time.Now()
 			t.Logf("%s stalled-status-read CLI output:\n%s", tc.name, out)
 			if err == nil {
 				t.Fatalf("abort with a stalled status read must exit nonzero:\n%s", out)
 			}
-			if elapsed := time.Since(started); elapsed > time.Second {
+			var requestedAt time.Time
+			select {
+			case requestedAt = <-cancelRequested:
+			default:
+				t.Fatalf("abort did not reach the cancellation boundary: %s", out)
+			}
+			if elapsed := finished.Sub(requestedAt); elapsed > time.Second {
 				t.Fatalf("stalled status read exceeded bounded wait: %s\n%s", elapsed, out)
 			}
 			assertUnconfirmedAbortOutput(t, tc.name, out)

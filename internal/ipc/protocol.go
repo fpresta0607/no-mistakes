@@ -424,9 +424,21 @@ type RespondParams struct {
 	Instructions     map[string]string          `json:"instructions,omitempty"`
 	// InstructionsFromDriver marks Instructions as an agent driver's fix
 	// guidance rather than the user's own words.
-	InstructionsFromDriver bool            `json:"instructions_from_driver,omitempty"`
-	AddedFindings          []types.Finding `json:"added_findings,omitempty"`
-	ApprovalReason         string          `json:"approval_reason,omitempty"` // Test approval, or the reason recorded with an abort
+	InstructionsFromDriver bool                  `json:"instructions_from_driver,omitempty"`
+	AddedFindings          []types.Finding       `json:"added_findings,omitempty"`
+	ApprovalReason         string                `json:"approval_reason,omitempty"` // Test approval, or the reason recorded with an abort
+	CIRevalidation         *CIRevalidationParams `json:"ci_revalidation,omitempty"`
+}
+
+type CIRevalidationParams struct {
+	CandidateSHA        string `json:"candidate_sha"`
+	SnapshotDigest      string `json:"snapshot_digest"`
+	Reason              string `json:"reason"`
+	CallerDir           string `json:"caller_dir"`
+	CallerHeadSHA       string `json:"caller_head_sha"`
+	GHConfigDir         string `json:"gh_config_dir"`
+	ExpectedLogin       string `json:"expected_login"`
+	ReselectPublication bool   `json:"reselect_publication,omitempty"`
 }
 
 type CoverageBinding struct {

@@ -79,7 +79,11 @@ type approvalResponse struct {
 	// read), but an accepted response that selects nothing still has to be
 	// recorded as a decision: without the list the executor cannot tell an
 	// explicit all-ignored response from a gate with nothing to decide.
-	ignoreFindingIDs []string
+	ignoreFindingIDs    []string
+	adoption            *db.CIRepairAdoption
+	publication         *forgecontext.Context
+	publicationLogin    string
+	publicationSnapshot *db.CIRepairAdoption
 }
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
@@ -99,11 +103,19 @@ type Executor struct {
 
 	// sessions manages this run's durable review-loop agent sessions; shared
 	// carries run-scoped step-to-step results. Both are created per Execute.
-	sessions       *RunSessions
-	shared         *RunShared
-	workDir        string
-	runID          string
-	validationOnly bool
+	sessions                     *RunSessions
+	shared                       *RunShared
+	workDir                      string
+	runID                        string
+	adoption                     *db.CIRepairAdoption
+	adoptionRestartPending       bool
+	ciAdoptionReserved           bool
+	publicationForge             *forgecontext.Context
+	publicationLogin             string
+	publicationSnapshot          *db.CIRepairAdoption
+	publicationSelectionRequired bool
+	publicationOnlyResume        bool
+	validationOnly               bool
 	// stepRecords are this Execute's step rows by name. They let the review
 	// step be offered a context for another step's early work (side_by_side).
 	// Nil on a recovered run, which therefore starts nothing early.
@@ -416,6 +428,26 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		e.mu.Unlock()
 		return RespondDispositions{}, errors.New("an answer cannot release a native agent safety refusal: it needs an explicit decision")
 	}
+	if step == types.StepCI && e.runID != "" && !HasProtectedPathRefusal(e.waitingFindings) {
+		run, err := e.db.GetRun(e.runID)
+		if err != nil || run == nil {
+			e.mu.Unlock()
+			return RespondDispositions{}, fmt.Errorf("cannot read CI ownership; preserve the gate")
+		}
+		held, err := RetainedCIHead(context.Background(), run, e.workDir)
+		if held || err != nil {
+			e.mu.Unlock()
+			return RespondDispositions{}, fmt.Errorf("retained CI contents require explicit adoption for fresh validation")
+		}
+	}
+	if e.publicationSelectionRequired {
+		refusal := "publication credentials must be explicitly reselected"
+		if HasPublicationRevalidationHold(e.waitingFindings) {
+			refusal = PublicationRevalidationRefusal
+		}
+		e.mu.Unlock()
+		return RespondDispositions{}, errors.New(refusal)
+	}
 	if action == types.ActionApprove && e.waitingApprovalRefusal != "" {
 		refusal := e.waitingApprovalRefusal
 		e.mu.Unlock()
@@ -479,7 +511,13 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		if isRepairCutRecheck(findingIDs, ignoreFindingIDs, addedFindings) {
 			accountedGate = filterFindingsJSON(accountedGate, findingIDs)
 		}
-		split, err := splitFixResponse(accountedGate, rounds, findingIDs, ignoreFindingIDs)
+		decisionRounds := make([]*db.StepRound, 0, len(rounds))
+		for _, round := range rounds {
+			if !e.originalAdoptedReviewRound(e.waitingStepResultID, round.Round) {
+				decisionRounds = append(decisionRounds, round)
+			}
+		}
+		split, err := splitFixResponse(accountedGate, decisionRounds, findingIDs, ignoreFindingIDs)
 		if err != nil {
 			e.mu.Unlock()
 			return RespondDispositions{}, err
@@ -582,6 +620,7 @@ func (e *Executor) roundsForFixValidation() ([]*db.StepRound, *RespondRefusal) {
 // the cause message is preserved as the run's error in the DB.
 func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
 	e.workDir = workDir
+	e.runID = run.ID
 	ctx = e.runContext(ctx)
 	if err := e.initializeValidationAuthority(run); err != nil {
 		return e.failRun(run, repo, err, ctx)
@@ -605,7 +644,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.failRun(run, repo, err)
 	}
 	e.initializeRunScopes(run.ID)
-	defer e.shared.Close()
+	defer func() { e.shared.Close() }()
 
 	start := 0
 	var carried []*db.StepResult
@@ -655,7 +694,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	for i := start; i < len(e.steps); i++ {
 		step := e.steps[i]
 		if ctx.Err() != nil {
-			return e.failRun(run, repo, context.Cause(ctx))
+			return e.failRun(run, repo, context.Cause(ctx), ctx)
 		}
 		if err := e.validateSkippedReview(run, repo); err != nil {
 			return e.failRun(run, repo, err, ctx)
@@ -694,7 +733,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 			break
 		}
 		if restartFrom != "" {
-			restartIndex, err := e.prepareRestart(run.ID, restartFrom, i)
+			restartIndex, err := e.restartIndex(run.ID, restartFrom, i)
 			if err != nil {
 				return e.failRun(run, repo, fmt.Errorf("step %s requested invalid restart from %s", step.Name(), restartFrom), ctx)
 			}
@@ -822,18 +861,23 @@ func (e *Executor) durableExecutionState(stepResultID string) (stepExecutionStat
 		return stepExecutionState{}, err
 	}
 	state := stepExecutionState{}
+	freshRounds := make([]*db.StepRound, 0, len(rounds))
 	for _, round := range rounds {
 		state.roundNum = max(state.roundNum, round.Round)
 		if round.SelectionSource != nil && *round.SelectionSource == db.RoundSelectionSourceAutoFix {
 			state.autoFixAttempts++
 		}
+		if e.originalAdoptedReviewRound(stepResultID, round.Round) {
+			continue
+		}
+		freshRounds = append(freshRounds, round)
 		if round.FindingsJSON != nil {
 			state.outstandingFindings = *round.FindingsJSON
 		} else {
 			state.outstandingFindings = ""
 		}
 	}
-	state.selectedOutstandingIDs = SelectedOutstandingFindingIDs(rounds)
+	state.selectedOutstandingIDs = SelectedOutstandingFindingIDs(freshRounds)
 	return state, nil
 }
 
@@ -871,6 +915,7 @@ func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
 // an error so startup recovery can fail the run rather than guessing.
 func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
 	e.workDir = workDir
+	e.runID = run.ID
 	ctx = e.runContext(ctx)
 	if err := e.initializeValidationAuthority(run); err != nil {
 		return err
@@ -896,7 +941,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, err)
 	}
 	e.initializeRunScopes(run.ID)
-	defer e.shared.Close()
+	defer func() { e.shared.Close() }()
 	e.crashRetryRecovered = true
 	if restartIndex >= 0 {
 		if err := e.db.ResetStepsFrom(run.ID, types.StepReview.Order()); err != nil {
@@ -1039,6 +1084,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.waitingFindings = gate.findings
 	e.waitingStepResultID = gate.stepResult.ID
 	e.waitingRoundID = gate.lastRoundID
+	e.publicationSelectionRequired = e.adoption != nil && gate.step.Name() == types.StepPush && (hasFindingID(gate.findings, PublicationSelectionFindingID) || hasFindingID(gate.findings, PublicationRevalidationFindingID))
 	e.mu.Unlock()
 	e.emitStepEventWithFindingsAndError(
 		ipc.EventStepCompleted,
@@ -1050,15 +1096,37 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		"",
 		gate.stepResult.DurationMS,
 	)
+	if e.publicationSelectionRequired && e.publicationForge != nil && hasFindingID(gate.findings, PublicationSelectionFindingID) {
+		e.mu.Lock()
+		e.waiting = false
+		e.waitingFindings = ""
+		e.waitingStepResultID = ""
+		e.ciAdoptionReserved = true
+		e.approvalCh <- approvalResponse{action: types.ActionRevalidate, publication: e.publicationForge, publicationLogin: e.publicationLogin, publicationSnapshot: e.publicationSnapshot}
+		e.mu.Unlock()
+	}
 
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
 	if errors.Is(err, ErrCIHandbackSuspended) {
 		return err
 	}
+	if err == nil && ctx.Err() != nil {
+		err = context.Cause(ctx)
+	}
+	if err != nil && e.preserveCIAdoption(run, ctx) {
+		if IsUserAbort(ctx) {
+			return e.failRun(run, repo, err, ctx)
+		}
+		return err
+	}
 	if errors.Is(err, ErrDaemonShutdown) {
 		return ErrParkedAtShutdown
 	}
-	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
+	if err == nil && response.action == types.ActionRevalidate && response.adoption == nil {
+		if err := e.consumePublicationSelection(response, time.Since(parkStart).Milliseconds()); err != nil {
+			return err
+		}
+	} else if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
 	}
 	if err != nil {
@@ -1098,6 +1166,31 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	telemetry.Track("approval", approvalFields)
 	switch response.action {
+	case types.ActionRevalidate:
+		if response.adoption == nil && gate.step.Name() == types.StepPush {
+			state, err := e.durableExecutionState(gate.stepResult.ID)
+			if err != nil {
+				return err
+			}
+			_, restart, err := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, state)
+			if err != nil {
+				return err
+			}
+			if restart != "" {
+				return fmt.Errorf("publication reselection cannot restart validation")
+			}
+			return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
+		}
+		if response.adoption == nil || gate.step.Name() != types.StepCI {
+			return fmt.Errorf("invalid CI adoption response")
+		}
+		e.acceptCIAdoption(run, response.adoption, response.publication, response.publicationLogin)
+		e.adoptionRestartPending = false
+		index, err := e.stepIndex(types.StepReview)
+		if err != nil {
+			return err
+		}
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, index, true)
 	case types.ActionApprove:
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if err := e.applyApprovalOverride(gate.step, gate.stepResult.ID, response); err != nil {
@@ -1222,7 +1315,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			return e.skipRecoveredRemainder(run, repo, gate.index+1)
 		}
 		if restartFrom != "" {
-			restartIndex, indexErr := e.prepareRestart(run.ID, restartFrom, gate.index)
+			restartIndex, indexErr := e.restartIndex(run.ID, restartFrom, gate.index)
 			if indexErr != nil {
 				return e.failRun(run, repo, fmt.Errorf("step %s requested invalid restart from %s", gate.step.Name(), restartFrom), ctx)
 			}
@@ -1273,7 +1366,7 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 				if round.SelectionSource != nil && *round.SelectionSource == db.RoundSelectionSourceAutoFix {
 					autoFixes++
 				}
-				if round.SelectedFindingIDs != nil {
+				if round.SelectedFindingIDs != nil && !e.originalAdoptedReviewRound(result.ID, round.Round) {
 					selectedOutstandingIDs = combineFindingIDLists(selectedOutstandingIDs, findingIDsFromSelectionJSON(*round.SelectedFindingIDs))
 				}
 			}
@@ -1352,7 +1445,7 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 			return e.skipRecoveredRemainder(run, repo, index+1)
 		}
 		if restartFrom != "" {
-			restartIndex, indexErr := e.prepareRestart(run.ID, restartFrom, index)
+			restartIndex, indexErr := e.restartIndex(run.ID, restartFrom, index)
 			if indexErr != nil {
 				return e.failRun(run, repo, fmt.Errorf("step %s requested invalid restart from %s", e.steps[index].Name(), restartFrom), ctx)
 			}
@@ -1483,7 +1576,18 @@ func (e *Executor) sideLaneContext(ctx context.Context, run *db.Run, repo *db.Re
 }
 
 func (e *Executor) autoFixLimit(stepName types.StepName) int {
-	if e.validationOnly || e.config == nil {
+	if e.validationOnly {
+		return 0
+	}
+	if e.adoption != nil {
+		for _, original := range e.adoption.Steps {
+			if original.Snapshot.StepName == stepName {
+				return original.EffectiveAutoFixLimit
+			}
+		}
+		return 0
+	}
+	if e.config == nil {
 		return 0
 	}
 	return e.config.AutoFixLimit(stepName)
@@ -1733,6 +1837,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		ForgeContext:          e.forge,
 		DB:                    e.db,
 		StepResultID:          sr.ID,
+		AdoptedRounds:         e.adoptedReviewRounds(sr.ID),
 		UserIntent:            userIntent,
 		IntentSource:          userIntentSource,
 		Sessions:              e.sessions,
@@ -1867,7 +1972,13 @@ rounds:
 		if stepName == types.StepCI && e.ciMonitorLifecycle != nil {
 			e.ciMonitorLifecycle(run.ID, true)
 		}
-		outcome, err := e.executeWithCrashRetry(step, sctx, &crashRetriesRemaining)
+		var outcome *StepOutcome
+		var err error
+		if stepName == types.StepPush {
+			outcome, err = e.executeWithPublicationSelection(step, sctx)
+		} else {
+			outcome, err = e.executeWithCrashRetry(step, sctx, &crashRetriesRemaining)
+		}
 		if stepName == types.StepCI && e.ciMonitorLifecycle != nil {
 			e.ciMonitorLifecycle(run.ID, false)
 		}
@@ -1875,6 +1986,9 @@ rounds:
 			err = errors.Join(err, sourceErr)
 		}
 		sctx.CoverageContinuation = nil
+		if err != nil && e.preserveCIAdoption(run, ctx) {
+			return false, "", err
+		}
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
@@ -2171,10 +2285,20 @@ rounds:
 			if errors.Is(err, ErrCIHandbackSuspended) {
 				return false, "", err
 			}
+			if err == nil && ctx.Err() != nil {
+				err = context.Cause(ctx)
+			}
+			if err != nil && e.preserveCIAdoption(run, ctx) {
+				return false, "", err
+			}
 			if errors.Is(err, ErrDaemonShutdown) {
 				return false, "", ErrParkedAtShutdown
 			}
-			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
+			if err == nil && response.action == types.ActionRevalidate && response.adoption == nil {
+				if err := e.consumePublicationSelection(response, time.Since(parkStart).Milliseconds()); err != nil {
+					return false, "", err
+				}
+			} else if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
 			}
 			if err != nil {
@@ -2225,6 +2349,20 @@ rounds:
 			telemetry.Track("approval", approvalFields)
 
 			switch response.action {
+			case types.ActionRevalidate:
+				if response.adoption != nil && stepName == types.StepCI {
+					e.acceptCIAdoption(run, response.adoption, response.publication, response.publicationLogin)
+					return false, types.StepReview, nil
+				}
+				if stepName != types.StepPush || e.adoption == nil {
+					return false, "", fmt.Errorf("invalid publication reselection response")
+				}
+				phaseStart = time.Now()
+				if err := markRunning(); err != nil {
+					return false, "", err
+				}
+				nextTrigger = "initial"
+				continue rounds
 			case types.ActionApprove:
 				// Approved - execution already frozen in executionMS, reset phaseStart
 				// so the done label computes no additional elapsed.
@@ -2955,6 +3093,25 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 	if !ok {
 		return false, nil
 	}
+	if step.Name() == types.StepCI && sctx != nil {
+		e.mu.Lock()
+		if e.ciAdoptionReserved {
+			e.mu.Unlock()
+			return false, nil
+		}
+		// Keep classification inside the adoption reservation: a post-CAS
+		// recorded head must never authorize the old CI gate to reconcile.
+		stored, err := e.db.GetRun(sctx.Run.ID)
+		if err != nil || stored == nil {
+			e.mu.Unlock()
+			return false, fmt.Errorf("cannot read CI ownership; preserving its gate")
+		}
+		held, err := RetainedCIHead(ctx, stored, sctx.WorkDir)
+		e.mu.Unlock()
+		if held || err != nil {
+			return false, err
+		}
+	}
 	if HasProtectedPathRefusal(findingsJSON) || HasSafetyRefusal(findingsJSON) {
 		return false, nil
 	}
@@ -2967,6 +3124,11 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 	copyCtx := *sctx
 	copyCtx.Ctx = reconcileCtx
 	return reconciler.ReconcileApprovalGate(&copyCtx)
+}
+
+func IsUserAbort(ctx context.Context) bool {
+	cause := context.Cause(ctx)
+	return cause != nil && cause.Error() == types.RunCancelReasonAbortedByUser
 }
 
 // failRun marks a run as failed and returns the error.
@@ -2997,21 +3159,50 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 			break
 		}
 	}
+	isCIRepairHeld := false
+	for _, ctx := range append(ctxs, context.Background()) {
+		isCIRepairHeld = e.preserveCIAdoption(run, ctx)
+		if IsUserAbort(ctx) {
+			break
+		}
+		if isCIRepairHeld {
+			return err
+		}
+	}
 	runStatus := types.RunFailed
 	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded {
 		runStatus = types.RunCancelled
 	}
-	verifiedHead, verified := e.reconcileTerminalRunHead(run)
+	terminalHead, verified := e.reconcileTerminalRunHead(run)
+	if errMsg == types.RunCancelReasonAbortedByUser {
+		if isCIRepairHeld {
+			if err := CheckCIRepairCancellation(e.workDir, terminalHead != ""); err != nil {
+				return err
+			}
+		}
+		if dbErr := e.db.ClearRunAwaitingAgent(run.ID); dbErr != nil {
+			slog.Error("failed to clear cancelled run gate", "run", run.ID, "error", dbErr)
+		}
+		run.AwaitingAgentSince = nil
+	}
 	var dbErr error
-	if verified {
-		dbErr = e.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, errMsg, runStatus, verifiedHead)
-	} else {
+	switch {
+	case verified:
+		dbErr = e.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, errMsg, runStatus, terminalHead)
+	case terminalHead != "":
+		dbErr = e.db.UpdateRunErrorStatusWithHead(run.ID, errMsg, runStatus, terminalHead)
+	default:
 		dbErr = e.db.UpdateRunErrorStatus(run.ID, errMsg, runStatus)
 	}
 	if dbErr != nil {
 		slog.Error("failed to update run error status", "run", run.ID, "error", dbErr)
-	} else if verified {
-		run.HeadSHA = verifiedHead
+		if isCIRepairHeld {
+			// The anchored repair stays running in its worktree so a repeated
+			// abort settles that exact head; nothing may treat it as finished.
+			return fmt.Errorf("record cancelled CI repair: %w", dbErr)
+		}
+	} else if terminalHead != "" {
+		run.HeadSHA = terminalHead
 	}
 	run.Status = runStatus
 	run.Error = &errMsg
@@ -3029,17 +3220,20 @@ func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
 
 func (e *Executor) completeRunWithStatus(run *db.Run, repo *db.Repo, status types.RunStatus) error {
 	var err error
-	verifiedHead, verified := e.reconcileTerminalRunHead(run)
-	if verified {
-		err = e.db.UpdateRunStatusWithVerifiedHead(run.ID, status, verifiedHead)
-	} else {
+	terminalHead, verified := e.reconcileTerminalRunHead(run)
+	switch {
+	case verified:
+		err = e.db.UpdateRunStatusWithVerifiedHead(run.ID, status, terminalHead)
+	case terminalHead != "":
+		err = e.db.UpdateRunStatusWithHead(run.ID, status, terminalHead)
+	default:
 		err = e.db.UpdateRunStatus(run.ID, status)
 	}
 	if err != nil {
 		return err
 	}
-	if verified {
-		run.HeadSHA = verifiedHead
+	if terminalHead != "" {
+		run.HeadSHA = terminalHead
 	}
 	run.Status = status
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
@@ -3126,15 +3320,12 @@ func (e *Executor) reconcileTerminalRunHead(run *db.Run) (string, bool) {
 			return "", false
 		}
 	}
+	// The anchored head is returned for the caller's terminal write to record,
+	// verified or not. Writing it here first left a run that never settled
+	// recorded at a head it never validated, which reads as no retained CI
+	// repair after a restart.
 	if !e.preserveUnpublishedTerminalHead(ctx, recordedRun, observed) {
 		return "", false
-	}
-	if observed != recorded {
-		if err := e.db.UpdateRunHeadSHA(run.ID, observed); err != nil {
-			slog.Warn("failed to record preserved terminal head", "run", run.ID, "error", err)
-			return "", false
-		}
-		run.HeadSHA = observed
 	}
 	isDirty, statusErr := git.HasUncommittedChangesIncludingHidden(ctx, e.workDir)
 	sourceState := "clean:" + observed
@@ -3145,11 +3336,11 @@ func (e *Executor) reconcileTerminalRunHead(run *db.Run) (string, bool) {
 	}
 	if err := e.db.RecordTerminalSourceState(run.ID, sourceState); err != nil {
 		slog.Warn("failed to record source before terminalization", "run", run.ID, "error", err)
-		return "", false
+		return observed, false
 	}
 	if statusErr != nil || isDirty {
 		slog.Warn("managed worktree still holds dirty or unreadable source before terminalization", "run", run.ID, "error", statusErr)
-		return "", false
+		return observed, false
 	}
 	return observed, true
 }

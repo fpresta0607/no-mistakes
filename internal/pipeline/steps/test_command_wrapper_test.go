@@ -606,6 +606,106 @@ func TestTestStep_CancellationDoesNotLeakComparisonIntoAnotherTurn(t *testing.T)
 	}
 }
 
+func TestTestStep_KeepsItsComparisonInTheDurableResult(t *testing.T) {
+	f := newWrapperFixture(t, config.Commands{Test: "echo configured"}, nil)
+	f.sctx.Shared = &pipeline.RunShared{}
+	if _, err := f.sctx.DB.InsertStepResult(f.sctx.Run.ID, types.StepTest); err != nil {
+		t.Fatal(err)
+	}
+	want := gitCmd(t, f.sctx.WorkDir, "rev-parse", "main")
+
+	outcome, err := (&TestStep{}).Execute(f.sctx)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil || findings.TestComparisonSHA != want || findings.TestedHeadSHA != f.sctx.Run.HeadSHA {
+		t.Fatalf("durable result names comparison %q on head %q (%v), want %q on %q", findings.TestComparisonSHA, findings.TestedHeadSHA, err, want, f.sctx.Run.HeadSHA)
+	}
+}
+
+// After a daemon restart the head stays untested, so the guard runs the baseline
+// again. An adopted publication supplies the comparison Test recorded, and a
+// default branch that moved since must not change it.
+func TestBaselineBeforePush_AnAdoptedReplayRerunsTheBaselineOnItsRecordedComparison(t *testing.T) {
+	for _, scenario := range []struct {
+		name        string
+		command     string
+		wantRestart bool
+		wantPassed  bool
+	}{
+		{name: "passing baseline", command: "echo configured", wantPassed: true},
+		{name: "failing baseline", command: "exit 3", wantRestart: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			f := newWrapperFixture(t, config.Commands{Test: scenario.command}, nil)
+			f.sctx.Shared = &pipeline.RunShared{}
+			f.sctx.Config.SideBySide = true
+			f.sctx.Config.TestCommandWrapper.Command[2] = "{test_comparison_sha}"
+			step, err := f.sctx.DB.InsertStepResult(f.sctx.Run.ID, types.StepTest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.sctx.DB.CompleteStepWithStatus(step.ID, types.StepStatusCompleted, 0, 0, ""); err != nil {
+				t.Fatal(err)
+			}
+			recordedComparison := gitCmd(t, f.sctx.WorkDir, "rev-parse", "main")
+			head := gitCmd(t, f.sctx.WorkDir, "rev-parse", "HEAD")
+			gitCmd(t, f.sctx.WorkDir, "branch", "-f", "main", head)
+			f.sctx.TestComparisonSHA = recordedComparison
+
+			_, restart, err := baselineBeforePush(f.sctx, head)
+
+			if err != nil || restart != scenario.wantRestart {
+				t.Fatalf("baselineBeforePush() = %v, %v, want restart %v", restart, err, scenario.wantRestart)
+			}
+			calls := f.calls(t)
+			if len(calls) != 1 || calls[0][1] != recordedComparison {
+				t.Fatalf("wrapper calls = %q, want one baseline on Test's comparison %s", calls, recordedComparison)
+			}
+			tested, comparison, passed, recorded := f.sctx.Shared.Baseline()
+			if !recorded || tested != head || comparison != recordedComparison || passed != scenario.wantPassed {
+				t.Fatalf("baseline = head %q comparison %q passed %t recorded %t", tested, comparison, passed, recorded)
+			}
+		})
+	}
+}
+
+// A live record is what Test resolved in this daemon, so nothing replaces it.
+func TestBaselineBeforePush_ALiveRecordOutranksASuppliedComparison(t *testing.T) {
+	f := newWrapperFixture(t, config.Commands{Test: "echo configured"}, nil)
+	f.sctx.Shared = &pipeline.RunShared{}
+	f.sctx.Config.SideBySide = true
+	f.sctx.Config.TestCommandWrapper.Command[2] = "{test_comparison_sha}"
+	step, err := f.sctx.DB.InsertStepResult(f.sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sctx.DB.CompleteStepWithStatus(step.ID, types.StepStatusCompleted, 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	tested := gitCmd(t, f.sctx.WorkDir, "rev-parse", "HEAD")
+	live := gitCmd(t, f.sctx.WorkDir, "rev-parse", "main")
+	f.sctx.Shared.RecordBaseline(tested, live, true)
+	f.sctx.TestComparisonSHA = strings.Repeat("d", 40)
+	if err := os.WriteFile(filepath.Join(f.sctx.WorkDir, "later.go"), []byte("package later\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, f.sctx.WorkDir, "add", "later.go")
+	gitCmd(t, f.sctx.WorkDir, "commit", "-m", "add code")
+	head := gitCmd(t, f.sctx.WorkDir, "rev-parse", "HEAD")
+
+	_, restart, err := baselineBeforePush(f.sctx, head)
+
+	if err != nil || restart {
+		t.Fatalf("baselineBeforePush() = %v, %v", restart, err)
+	}
+	if calls := f.calls(t); len(calls) != 1 || calls[0][1] != live {
+		t.Fatalf("wrapper calls = %q, want one baseline on the live comparison %s", calls, live)
+	}
+}
+
 func TestBaselineBeforePush_WrapperReusesTestComparisonAndRefusesLostProof(t *testing.T) {
 	f := newWrapperFixture(t, config.Commands{Test: "echo configured"}, nil)
 	f.sctx.Shared = &pipeline.RunShared{}

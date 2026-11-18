@@ -363,7 +363,7 @@ Pushes the validated branch to the configured push target.
 - Without fork routing, successful run-start validation selects the upstream URL from the working clone; when it matches the gate worktree's `origin`, the worktree URL is used so embedded credentials retained outside the database can authenticate. If validation fails, the run continues with its prior routing.
 - With GitHub fork routing, the push target is `repos.fork_url`
 - Immediately before remote mutation, reloads the durable review-approved commit and refuses to push when that binding is missing, malformed, or unreachable
-- Requires the commit proposed for push to equal or descend from the review-approved commit, allowing commits made by later pipeline steps without authorizing unrelated history
+- On ordinary runs, requires the commit proposed for push to equal or descend from the review-approved commit, allowing commits made by later pipeline steps without authorizing unrelated history; [adopted CI repairs](/no-mistakes/reference/cli/#no-mistakes-axi-respond) follow the stricter candidate restriction
 - Re-reads the push target via `git ls-remote` before pushing
 - On GitHub, refuses before uploading anything or refreshing an attestation when a commit it would publish carries a file larger than 100 MiB, and names each such file and its size. GitHub refuses that push only after receiving the whole upload. The commits checked are those the push target's current head and the worktree's remote-tracking refs do not already reach
 - Before pushing a non-base branch, refreshes an existing PR attestation using the [pre-push attestation protocol](#pipeline-step-attestation), which owns provider coverage, snapshot selection, and failure behavior.
@@ -381,7 +381,8 @@ Any other out-of-band commit stops the push instead of being overwritten.
 Pre-skipping or later skipping Review leaves no approval binding, so Push fails closed unless Push is also skipped.
 With Push skipped, Test, Document, Lint, and PR can still run.
 
-This step never requires approval - it runs automatically after review, test, document, and lint pass.
+This step normally runs automatically after review, test, document, and lint pass.
+An adopted CI repair can instead park at a publication credential or validation hold; the [CI adoption reference](/no-mistakes/reference/cli/#no-mistakes-axi-respond) owns its restrictions and explicit reselection command.
 
 ## PR
 
@@ -528,7 +529,8 @@ Monitors PR health after creation and auto-fixes CI failures. Mergeability polli
 - CodeRabbit publisher identity follows the immutable app ID on GitHub.com/GHES or GitLab numeric account ID in [`ci.required_reviews`](/no-mistakes/reference/repo-config/#cirequired_reviews). GitHub comments require bot account ID `136622811` and either login `coderabbitai` (GitHub GraphQL) or `coderabbitai[bot]` (REST). GitLab uses timestamp-bound comments and is a weaker guarantee. Comment bodies are never completion evidence. Greptile retains its existing app-slug and login matching. Resolved threads and unrelated authors are excluded; malformed or unreadable comments cannot clear an opted-in completion requirement
 - After a repair is published, the step reports that it is monitoring again, so its status returns from `fixing` to `running` and `checks-passed` can surface for the repaired head
 - States the configured repair policy in the step log before the first poll, so a run's log says which of the two paths a repair would take without cross-referencing the config in force at the time
-- Settles the local gate mirror before atomically recording the published head and push binding, so a publication that stalls part way records nothing: the run stays on its pre-repair head and the next fix attempt re-enters the same path, finds the remote already at that commit, and completes it
+- Settles the local gate mirror before atomically recording the published head and push binding; until that write succeeds, the durable head and binding remain unchanged.
+  The [CI adoption reference](/no-mistakes/reference/cli/#no-mistakes-axi-respond) owns the supported operator path and refusal conditions for a retained unpublished repair
 - Whenever a repair revalidates - either because the setting requires it or because continuity cannot be proven - restarts at Review only: Intent and Rebase keep their results, steps already skipped for the run stay skipped, the run id is unchanged, and the durable auto-fix attempt count carries across. Earlier cycles remain in the run's round history; the step's own status shows the latest cycle. The fresh Review cycle does not inherit the superseded cycle's outstanding finding carry set
 - The one exception is opt-in [`ci.carry_review_on_replay`](/no-mistakes/reference/repo-config/#cicarry_review_on_replay): a rebase repair proven to be a pure replay of the reviewed commits onto the base tip it targeted keeps the review approval, moved to the replayed head, and restarts at Test instead; the step log names the reviewed head, the base, and the replayed head, or, when the proof fails, why
 - Bounds that CI-fix agent with [`agent_timeout`](/no-mistakes/reference/global-config/#agent_timeout): a silent turn is cancelled at that stall budget, a still-working one continues past that budget only when its still-working cap is set, cancellation fails the attempt with a timeout diagnostic rather than leaving the run active indefinitely, and a late successful return after cancellation is not committed

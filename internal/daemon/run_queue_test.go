@@ -566,7 +566,10 @@ func TestMaxConcurrentRuns_RecoveredParkedRunsShareCap(t *testing.T) {
 		run := insertParkedQueueTestRun(t, p, d, repo, branch, head)
 		ids = append(ids, run.ID)
 	}
-	plans, _ := m.recoverableParkedRuns(context.Background())
+	plans, _, err := m.recoverableParkedRuns(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(plans) != 2 {
 		t.Fatalf("recoverable plans = %d, want two parked runs", len(plans))
 	}
@@ -586,7 +589,10 @@ func TestMaxConcurrentRuns_RecoveredParkedRunsShareCap(t *testing.T) {
 	}
 	m = NewRunManager(d, p, m.steps)
 	t.Cleanup(m.Shutdown)
-	plans, _ = m.recoverableParkedRuns(context.Background())
+	plans, _, err = m.recoverableParkedRuns(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(plans) != 2 {
 		t.Fatalf("recoverable plans after shutdown = %d, want two", len(plans))
 	}
@@ -695,7 +701,10 @@ func TestMaxConcurrentRuns_CancelRecoveredRunPreservesUnpublishedHead(t *testing
 			if err := d.UpdateRunHeadSHA(run.ID, fixed); err != nil {
 				t.Fatal(err)
 			}
-			plans, _ := m.recoverableParkedRuns(context.Background())
+			plans, _, err := m.recoverableParkedRuns(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
 			if len(plans) != 2 {
 				t.Fatalf("recoverable plans = %d, want two", len(plans))
 			}

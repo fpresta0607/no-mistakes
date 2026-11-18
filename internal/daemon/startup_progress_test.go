@@ -276,7 +276,7 @@ func TestStartupProgressCreditsEachCompletedRecoveryCheck(t *testing.T) {
 	manager := NewRunManager(database, p, nil)
 	manager.startup = newStartupProgress(p.PIDFile(), daemonPIDFile{PID: 4242, StartedAt: time.Now().UTC()}, runs)
 
-	plans, _ := manager.recoverableParkedRuns(t.Context())
+	plans, _, _ := manager.recoverableParkedRuns(t.Context())
 	actual, err := readDaemonPIDFile(p.PIDFile())
 
 	if err != nil {
