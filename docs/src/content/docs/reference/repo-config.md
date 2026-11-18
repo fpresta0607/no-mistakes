@@ -797,7 +797,7 @@ Before staging an automatic Review, Test, Document, Lint, or CI repair, an opera
 
 A protected-path refusal always requires an explicit response, including under AXI `--yes` and TUI yolo mode. CI does not retry its fixer, and automatic gate reconciliation cannot clear the refusal, even if the PR closes. Approval is rejected because it would skip unfinished work: inspect and resolve the reported edit, then use `no-mistakes axi respond --action fix` to retry the step, including its commit and publication. When the refused commit was Review's last allowed fix round under [`review.max_fix_rounds`](#reviewmax_fix_rounds), fix is refused too, so only skip or abort remain. Deliberate skip and abort behavior is unchanged.
 
-For CI, that explicit fix finishes the retained repair before normal monitoring can report `checks-passed`, even if forge checks turned green while parked or the response selects only an added finding. It uses the existing [repair revalidation policy](#cirevalidate_repairs), including mandatory revalidation from Review for a rebased conflict repair, and the existing publication guards. If the retained repair cannot finish, the refusal remains available for another explicit fix response.
+For CI, that explicit fix finishes the retained repair before normal monitoring can report `checks-passed`, even if forge checks turned green while parked or the response selects only an added finding. It uses the existing [repair revalidation policy](#cirevalidate_repairs), including mandatory revalidation from Review for a rebased conflict repair, and the existing publication guards. Under [`rebase.strategy: merge`](#rebasestrategy), a CI base merge checks only what its resolution changed against git's own automatic merge, a refused merge stays in progress, and because a conflicted protected path always differs from that automatic merge, the fix also accepts the merge once you resolve and commit it yourself in the run worktree (see [Pipeline Steps](/no-mistakes/reference/pipeline-steps/)). If the retained repair cannot finish, the refusal remains available for another explicit fix response.
 
 This is a staging guard, not an agent filesystem sandbox or a check on semantic intent. It does not inspect changes already committed by the author or an agent, and it does not infer whether an unprotected edit belongs to a finding. With an empty list, automatic staging keeps its existing behavior. `ignore_patterns` only filters checks and does not prevent staging.
 
@@ -979,9 +979,10 @@ Continuity is proven when the repaired head is the run's durably review-approved
 
 CI repair publication uses the same settlement order as Push. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns the publication and retry behavior.
 
-**Merge-conflict repairs always revalidate, under either setting.**
+**Merge-conflict repairs always revalidate under the default [`rebase.strategy`](#rebasestrategy), under either setting.**
 These agent repairs are not carved out - they simply always land in the cannot-be-proven half.
 The CI fix agent rebases a conflict repair, so the repaired head is never a descendant of the reviewed head; resolving a conflict changes the commit's patch-id; and no content-based guard can separate "rebased and resolved" from "dropped the work".
+Under `rebase.strategy: merge` the pipeline merges the base in instead, so the repaired head descends from the reviewed head and the repair lands in the provable half like an ordinary one.
 Revalidating is what keeps that safe: the rewritten head is not published until Review has approved it, so the reviewed commits stay on the remote in the meantime.
 The opt-in [`ci.carry_review_on_replay`](#cicarry_review_on_replay) narrows only where that revalidation starts, and only for a rebase it can prove replayed the reviewed commits unchanged with no conflict: such a repair still revalidates, from Test.
 
@@ -992,7 +993,7 @@ The tradeoff `true` buys is cost against an unreviewed repair:
 | | `false` (default) | `true` |
 |---|---|---|
 | Ordinary repair that builds on the reviewed head | published immediately, one agent round | revalidated: one agent round plus a full Review, Test, Document, Lint, Push, PR pass |
-| Merge-conflict repair | revalidated | revalidated |
+| Merge-conflict repair | revalidated; published immediately under `rebase.strategy: merge` | revalidated |
 | Ordinary repair is reviewed before it reaches the PR | no | yes |
 | Steps that re-run when a repair revalidates | Review onward; Intent and Rebase do not | same |
 | Run identity | unchanged; a restart is a same-run rewind | same |
@@ -1062,7 +1063,7 @@ GitHub reports `BEHIND` only when the base branch requires branches to be up to 
 A PR that is behind a base without that rule reads `CLEAN`, merges as it is, and is unaffected by this key.
 
 - **`false` (default)** keeps the monitor's behavior from before the key existed: the PR reports `checks-passed` and waits for a human to bring it up to date.
-- **`true`** withholds `checks-passed` from such a PR. Once a second poll still sees it green and `BEHIND` at the same base tip, it takes the merge-conflict repair: rebase onto the PR base, revalidate from Review, and re-push through Push. A base that moves between those polls keeps the monitor waiting instead.
+- **`true`** withholds `checks-passed` from such a PR. Once a second poll still sees it green and `BEHIND` at the same base tip, it takes the merge-conflict repair: rebase onto the PR base, revalidate from Review, and re-push through Push, or, under [`rebase.strategy: merge`](#rebasestrategy), merge the PR base in and publish that merge as a fast-forward. A base that moves between those polls keeps the monitor waiting instead.
 
 Off by default because every rebase rewrites the head, so it always revalidates from Review (see [`ci.revalidate_repairs`](#cirevalidate_repairs)) and costs another full Review, Test, Document, and Lint pass each time the base advances.
 Each one also spends an [`auto_fix.ci`](#auto_fix) attempt.
@@ -1086,7 +1087,7 @@ ci:
   carry_review_on_replay: true
 ```
 
-A merge-conflict repair, or a [`ci.rebase_behind`](#cirebase_behind) rebase, rewrites every branch commit, so continuity with the reviewed head cannot be shown by ancestry and the repair [revalidates from Review](#cirevalidate_repairs). Often the rebase changed nothing the reviewer looked at: the base moved, the branch's own commits replayed on top of it unchanged, and the full Review pass only re-approves the same diff.
+Under the default [`rebase.strategy`](#rebasestrategy), a merge-conflict repair, or a [`ci.rebase_behind`](#cirebase_behind) rebase, rewrites every branch commit, so continuity with the reviewed head cannot be shown by ancestry and the repair [revalidates from Review](#cirevalidate_repairs). Often the rebase changed nothing the reviewer looked at: the base moved, the branch's own commits replayed on top of it unchanged, and the full Review pass only re-approves the same diff.
 
 - **`false` (default)** keeps that behavior exactly: every rebase repair revalidates from Review.
 - **`true`** first checks whether the repaired head is a **pure replay** of the reviewed head onto the base tip the repair targeted. If it is, the run's review approval moves to the replayed head and validation restarts at **Test**: Test, Document, Lint, Push, PR, and CI all run again against the new base, and only Review is not repeated. If it is not, the repair revalidates from Review as it would with the key off.
@@ -1184,7 +1185,11 @@ The two differ in what survives the integration, which matters in three places:
 | Cost | none | one merge commit per integration |
 
 Integration publishes as a fast-forward under `merge`.
-A merge-conflict repair by the CI fix agent is the exception: it rebases onto the base branch whichever strategy is set, so that repair still force-pushes and still revalidates in full.
+That includes the CI step's repair of a pull request that conflicts with its base, or is behind it under [`ci.rebase_behind`](#cirebase_behind).
+Under `merge` the pipeline starts that merge itself with `git merge --no-ff` of the base tip, the CI fix agent only resolves its conflicts, additively as below, and the pipeline concludes it with [`commit.fix_message`](#commitfix_message) and the configured trailers.
+It refuses a merge whose two parents are not exactly the recorded head and that base tip, and puts the recorded head back.
+The repaired head then descends from the reviewed head, so the repair publishes and keeps monitoring like any other provable repair (see [`ci.revalidate_repairs`](#cirevalidate_repairs)).
+Under `rebase` that repair rebases, force-pushes, and revalidates from Review.
 
 **Continuity.** The CI step publishes a repair without a full revalidation cycle only when it can prove the repaired head continues the reviewed head (see [`ci.revalidate_repairs`](#cirevalidate_repairs)). Under `merge` that proof is plain ancestry, because the reviewed head is a parent. Under `rebase` there is nothing to prove it with.
 

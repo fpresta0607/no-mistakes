@@ -44,14 +44,8 @@ const githubMaxFileBytes = 100 << 20
 // left a whole Chrome build in the worktree, `git add -A` committed its 302 MB
 // chrome.dll, and the push could never succeed (#1076).
 func stagePipelineChanges(sctx *pipeline.StepContext, before, unnamed []string) error {
-	leftBehind := make(map[string]bool, len(before))
-	for _, file := range before {
-		leftBehind[file] = true
-	}
-	isUnnamed := make(map[string]bool, len(unnamed))
-	for _, file := range unnamed {
-		isUnnamed[file] = true
-	}
+	leftBehind := pathSet(before)
+	isUnnamed := pathSet(unnamed)
 	if len(sctx.Config.ProtectedPaths) > 0 {
 		// Disable renames so both source and destination are checked, and list
 		// individual untracked files so a protected path inside a new directory
@@ -81,6 +75,27 @@ func stagePipelineChanges(sctx *pipeline.StepContext, before, unnamed []string) 
 	if err := unstageUnnamedNewFiles(sctx, unnamed); err != nil {
 		return err
 	}
+	if err := stageWorktree(sctx, before, unnamed, nil); err != nil {
+		return err
+	}
+	return unstageSubmodulePointerMoves(sctx)
+}
+
+func pathSet(paths []string) map[string]bool {
+	set := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		set[path] = true
+	}
+	return set
+}
+
+// stageWorktree is the catch-all staging stagePipelineChanges and a CI base
+// merge share: every change in the worktree except the untracked files before
+// and unnamed list, untracked files over githubMaxFileBytes, and the excluded
+// paths, each left out and the first three named in the step log.
+func stageWorktree(sctx *pipeline.StepContext, before, unnamed, excluded []string) error {
+	leftBehind := pathSet(before)
+	isUnnamed := pathSet(unnamed)
 	untracked, err := untrackedFiles(sctx)
 	if err != nil {
 		return err
@@ -112,22 +127,19 @@ func stagePipelineChanges(sctx *pipeline.StepContext, before, unnamed []string) 
 	if len(oversized) > 0 {
 		sctx.Log(fmt.Sprintf("left untracked files larger than GitHub's 100 MiB limit out of the commit: %s", strings.Join(oversized, ", ")))
 	}
-	if len(notMade) == 0 && len(notNamed) == 0 && len(oversized) == 0 {
-		if _, err := stepGitRun(sctx, "add", "-A"); err != nil {
-			return err
-		}
-		return unstageSubmodulePointerMoves(sctx)
+	left := append(append(append(notMade, notNamed...), oversized...), excluded...)
+	if len(left) == 0 {
+		_, err := stepGitRun(sctx, "add", "-A")
+		return err
 	}
 	// The exclusions go on standard input: a step can leave hundreds of files
 	// behind, and as arguments their paths would overrun Windows' command line.
 	pathspecs := []string{"."}
-	for _, file := range append(append(notMade, notNamed...), oversized...) {
+	for _, file := range left {
 		pathspecs = append(pathspecs, ":(exclude,literal)"+file)
 	}
-	if _, err := stepGitRunInput(sctx, strings.Join(pathspecs, "\x00"), "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul"); err != nil {
-		return err
-	}
-	return unstageSubmodulePointerMoves(sctx)
+	_, err = stepGitRunInput(sctx, strings.Join(pathspecs, "\x00"), "add", "-A", "--pathspec-from-file=-", "--pathspec-file-nul")
+	return err
 }
 
 // untrackedFiles lists the files `git add -A` would stage that git does not
