@@ -348,7 +348,8 @@ func TestCIStep_MergeStrategyProtectedPathsCoverOnlyTheResolution(t *testing.T) 
 // A conflicted protected path differs from git's automatic merge, which holds
 // the conflict markers, in every real resolution, so the pipeline refuses to
 // conclude it. The operator concludes that merge in the run worktree instead,
-// and the retry records it only when its first parent is the recorded head.
+// and the retry records it only when its first parent is the recorded head and
+// the strategy is still merge; under rebase it stays refused as non-linear.
 func TestCIStep_MergeStrategyRetryRecordsAnOperatorConcludedMerge(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -369,6 +370,13 @@ func TestCIStep_MergeStrategyRetryRecordsAnOperatorConcludedMerge(t *testing.T) 
 				gitCmd(t, f.dir, "commit", "-q", "--no-edit")
 				reversed := gitCmd(t, f.dir, "commit-tree", "HEAD^{tree}", "-p", f.baseTip, "-p", f.reviewedHead, "-m", "reversed merge")
 				gitCmd(t, f.dir, "reset", "-q", "--hard", reversed)
+			},
+		},
+		{
+			name: "operator_merge_under_the_rebase_strategy",
+			conclude: func(t *testing.T, f *mergeRepairFixture) {
+				gitCmd(t, f.dir, "commit", "-q", "--no-edit")
+				f.sctx.Config.Rebase.Strategy = config.RebaseStrategyRebase
 			},
 		},
 	} {

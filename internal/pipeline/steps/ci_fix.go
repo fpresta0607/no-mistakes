@@ -739,15 +739,17 @@ func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext) (ciRepairR
 		}
 		return s.recordRepair(sctx, merged)
 	}
-	// An operator who resolves a refused protected path concludes the retained
-	// merge in the run worktree, as for every other refused repair, and that
-	// merge is theirs to record.
-	merged, err := operatorConcludedCIMerge(sctx)
-	if err != nil {
-		return ciRepairResult{}, err
-	}
-	if merged != "" {
-		return s.recordRepair(sctx, merged)
+	// Under rebase.strategy: merge, an operator who resolves a refused protected
+	// path concludes the retained merge in the run worktree, as for every other
+	// refused repair, and that merge is theirs to record.
+	if mergesMovedBase(sctx) {
+		merged, err := operatorConcludedCIMerge(sctx)
+		if err != nil {
+			return ciRepairResult{}, err
+		}
+		if merged != "" {
+			return s.recordRepair(sctx, merged)
+		}
 	}
 	// The retained changes outlived the invocation that made them, so no
 	// producer is known here and the commit carries no trailers. Which
