@@ -523,6 +523,8 @@ func hangSubscribe(ctx context.Context, _ json.RawMessage) (ipc.StreamFunc, erro
 	}, nil
 }
 
+// startIPCServer binds the endpoint before it returns, so callers dial once with
+// no readiness deadline; only the accept loop runs in the background.
 func startIPCServer(t *testing.T, srv *ipc.Server, socketPath string) {
 	t.Helper()
 	if err := srv.Listen(socketPath); err != nil {
@@ -534,7 +536,7 @@ func startIPCServer(t *testing.T, srv *ipc.Server, socketPath string) {
 		srv.Close()
 		select {
 		case <-errCh:
-		case <-time.After(time.Second):
+		case <-time.After(5 * time.Second):
 			t.Error("fake daemon did not stop")
 		}
 	})
@@ -542,16 +544,11 @@ func startIPCServer(t *testing.T, srv *ipc.Server, socketPath string) {
 
 func dialReady(t *testing.T, socketPath string) *ipc.Client {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		client, err := ipc.Dial(socketPath)
-		if err == nil {
-			return client
-		}
-		time.Sleep(10 * time.Millisecond)
+	client, err := ipc.Dial(socketPath)
+	if err != nil {
+		t.Fatalf("dial fake daemon: %v", err)
 	}
-	t.Fatal("IPC server did not become ready")
-	return nil
+	return client
 }
 
 func setDriveGetRunTimeout(t *testing.T, d time.Duration) {
