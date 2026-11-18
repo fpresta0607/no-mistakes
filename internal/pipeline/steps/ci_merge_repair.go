@@ -169,6 +169,28 @@ func commitCIMerge(sctx *pipeline.StepContext, target, summary string, producer 
 	return merged, nil
 }
 
+// operatorConcludedCIMerge returns the head when it is a merge commit with
+// exactly two parents whose first is the recorded head, and "" otherwise.
+func operatorConcludedCIMerge(sctx *pipeline.StepContext) (string, error) {
+	head, err := stepGitHeadSHA(sctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve the retried repair's head: %w", err)
+	}
+	if head == sctx.Run.HeadSHA {
+		return "", nil
+	}
+	parents, err := stepGitRun(sctx, "rev-list", "--parents", "-n", "1", head)
+	if err != nil {
+		return "", fmt.Errorf("read the retried repair's parents: %w", err)
+	}
+	fields := strings.Fields(parents)
+	if len(fields) != 3 || fields[1] != sctx.Run.HeadSHA {
+		return "", nil
+	}
+	sctx.Log(fmt.Sprintf("recording the base merge %s concluded in the run worktree", shortObjectID(head)))
+	return head, nil
+}
+
 func unmergedPaths(sctx *pipeline.StepContext) ([]string, error) {
 	out, err := stepGitRunRaw(sctx, "diff", "--name-only", "-z", "--diff-filter=U")
 	if err != nil {

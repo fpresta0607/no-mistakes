@@ -344,3 +344,64 @@ func TestCIStep_MergeStrategyProtectedPathsCoverOnlyTheResolution(t *testing.T) 
 		t.Errorf("merged .github/base.yml = %q, want the base's file", got)
 	}
 }
+
+// A conflicted protected path differs from git's automatic merge, which holds
+// the conflict markers, in every real resolution, so the pipeline refuses to
+// conclude it. The operator concludes that merge in the run worktree instead,
+// and the retry records it only when its first parent is the recorded head.
+func TestCIStep_MergeStrategyRetryRecordsAnOperatorConcludedMerge(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name          string
+		conclude      func(t *testing.T, f *mergeRepairFixture)
+		wantPublished bool
+	}{
+		{
+			name: "operator_commits_the_retained_merge",
+			conclude: func(t *testing.T, f *mergeRepairFixture) {
+				gitCmd(t, f.dir, "commit", "-q", "--no-edit")
+			},
+			wantPublished: true,
+		},
+		{
+			name: "operator_merges_the_reviewed_head_into_the_base",
+			conclude: func(t *testing.T, f *mergeRepairFixture) {
+				gitCmd(t, f.dir, "commit", "-q", "--no-edit")
+				reversed := gitCmd(t, f.dir, "commit-tree", "HEAD^{tree}", "-p", f.baseTip, "-p", f.reviewedHead, "-m", "reversed merge")
+				gitCmd(t, f.dir, "reset", "-q", "--hard", reversed)
+			},
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newMergeRepairFixture(t, conflictingBase, resolveConflict)
+			f.sctx.Config.ProtectedPaths = []string{"feature.txt"}
+			_, err := f.repair(t, ciTargetsFor(nil, true))
+			var refusal *pipeline.ProtectedPathError
+			if !errors.As(err, &refusal) || refusal.Path != "feature.txt" {
+				t.Fatalf("merge repair error = %v, want a protected-path refusal of the conflicted feature.txt", err)
+			}
+			tc.conclude(t, f)
+
+			repair, err := (&CIStep{}).retryProtectedPathRepair(f.sctx)
+
+			if tc.wantPublished {
+				if err != nil {
+					t.Fatalf("retry the operator's merge: %v\nlog:\n%s", err, f.log())
+				}
+				merged := f.assertPublishedMerge(t, repair)
+				if got := gitCmd(t, f.dir, "show", merged+":feature.txt"); got != "feature\nbase version" {
+					t.Errorf("merged feature.txt = %q, want the operator's resolution", got)
+				}
+				return
+			}
+			if !errors.Is(err, errAgentCommitsNotLinear) {
+				t.Fatalf("retry error = %v, want the non-linear refusal", err)
+			}
+			if f.sctx.Run.HeadSHA != f.reviewedHead || f.remoteHead(t) != f.reviewedHead {
+				t.Errorf("recorded head %s, remote %s; want both still on the reviewed head %s", f.sctx.Run.HeadSHA, f.remoteHead(t), f.reviewedHead)
+			}
+		})
+	}
+}
