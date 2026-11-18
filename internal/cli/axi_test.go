@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1652,6 +1653,126 @@ func TestAxiStatusRunBlockShowsTestOutputDirs(t *testing.T) {
 			}
 			if tc.isShown && !strings.Contains(out.String(), "/operator/logs") {
 				t.Fatalf("run block does not name the directory:\n%s", out.String())
+			}
+		})
+	}
+}
+
+func TestAxiRunRefusesABadAgentEnvBeforeAnythingIsPushed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		arg  string
+		want string
+	}{
+		{"name_outside_the_list", "FOO=bar", `--agent-env name "FOO" is not accepted; accepted names: PIP_UPLOADED_PRIOR_TO, UV_EXCLUDE_NEWER, npm_config_before`},
+		{"name_in_the_wrong_case", "uv_exclude_newer=7 days", `"uv_exclude_newer" is not accepted`},
+		{"no_equals", "UV_EXCLUDE_NEWER", "NAME=VALUE"},
+		{"empty_value", "npm_config_before=", "nonempty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newAxiTimeoutFixture(t, axiTimeoutOpts{})
+			var activeLookups int
+			fx.setGetActive(func(context.Context) (*ipc.RunInfo, error) {
+				activeLookups++
+				return nil, nil
+			})
+
+			out, err := executeCmd("axi", "run", "--agent-env", tc.arg, "--intent", "x")
+
+			var ee *exitError
+			if !errors.As(err, &ee) || ee.code != 2 {
+				t.Fatalf("axi run --agent-env %q error = %v, want usage exit 2\n%s", tc.arg, err, out)
+			}
+			// The error rides a quoted TOON value, so its inner quotes are escaped.
+			if want := strings.Trim(strconv.Quote(tc.want), `"`); !strings.Contains(out, want) {
+				t.Fatalf("output does not contain %q:\n%s", want, out)
+			}
+			if activeLookups != 0 {
+				t.Fatalf("the run looked for an active run %d times before refusing the flag", activeLookups)
+			}
+		})
+	}
+}
+
+func TestAxiRunRefusesARepeatedAgentEnvName(t *testing.T) {
+	newAxiTimeoutFixture(t, axiTimeoutOpts{})
+
+	out, err := executeCmd("axi", "run", "--agent-env", "UV_EXCLUDE_NEWER=a", "--agent-env", "UV_EXCLUDE_NEWER=b", "--intent", "x")
+
+	var ee *exitError
+	if !errors.As(err, &ee) || ee.code != 2 || !strings.Contains(out, `UV_EXCLUDE_NEWER\" is given more than once`) {
+		t.Fatalf("repeated --agent-env = %v, want usage exit 2 naming the name\n%s", err, out)
+	}
+}
+
+func TestAxiRunReattachKeepsTheRecordedAgentEnvAndIgnoresTheFlag(t *testing.T) {
+	fx := newAxiTimeoutFixture(t, axiTimeoutOpts{})
+	fx.setGetActive(func(context.Context) (*ipc.RunInfo, error) {
+		run := fx.running()
+		run.AgentEnv = map[string]string{"UV_EXCLUDE_NEWER": "2026-11-01T00:00:00Z"}
+		return run, nil
+	})
+	fx.setGetRun(func(context.Context, int) (*ipc.RunInfo, error) { return fx.completed(), nil })
+
+	out, err := executeCmd("axi", "run", "--agent-env", "UV_EXCLUDE_NEWER=2026-11-02T00:00:00Z", "--wait", "5s")
+
+	if err != nil {
+		t.Fatalf("reattach with --agent-env was refused: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "outcome: passed") {
+		t.Fatalf("reattach did not follow the active run:\n%s", out)
+	}
+}
+
+func TestRequireRunRecordedAgentEnv(t *testing.T) {
+	requested := map[string]string{"UV_EXCLUDE_NEWER": "7 days"}
+	for _, tc := range []struct {
+		name      string
+		recorded  map[string]string
+		isRefused bool
+	}{
+		{"recorded_exactly", map[string]string{"UV_EXCLUDE_NEWER": "7 days"}, false},
+		{"dropped_by_an_older_daemon", nil, true},
+		{"recorded_with_another_value", map[string]string{"UV_EXCLUDE_NEWER": "8 days"}, true},
+		{"recorded_with_an_extra_name", map[string]string{"UV_EXCLUDE_NEWER": "7 days", "npm_config_before": "x"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := requireRunRecordedAgentEnv(&ipc.RunInfo{ID: "run", AgentEnv: tc.recorded}, requested)
+
+			if tc.isRefused != (err != nil) {
+				t.Fatalf("requireRunRecordedAgentEnv() = %v, want refused=%v", err, tc.isRefused)
+			}
+			if err != nil && err.Error() != "the daemon did not record --agent-env; restart it on this build" {
+				t.Fatalf("refusal = %q", err)
+			}
+		})
+	}
+	if err := requireRunRecordedAgentEnv(nil, requested); err == nil {
+		t.Fatal("a missing run was accepted")
+	}
+}
+
+func TestAxiStatusRunBlockShowsAgentEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		env     map[string]string
+		isShown bool
+	}{
+		{"with_pairs", map[string]string{"UV_EXCLUDE_NEWER": "7 days", "npm_config_before": "2026-11-01"}, true},
+		{"without_pairs", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&out)
+
+			emitDoc(cmd, runObjectField(runViewFromIPC(&ipc.RunInfo{ID: "run", AgentEnv: tc.env})))
+
+			if got := strings.Contains(out.String(), "agent_env"); got != tc.isShown {
+				t.Fatalf("agent_env shown = %v, want %v:\n%s", got, tc.isShown, out.String())
+			}
+			if tc.isShown && (!strings.Contains(out.String(), "UV_EXCLUDE_NEWER") || !strings.Contains(out.String(), "7 days")) {
+				t.Fatalf("run block does not show the pairs:\n%s", out.String())
 			}
 		})
 	}

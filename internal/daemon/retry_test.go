@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -215,6 +216,8 @@ type retryFixtureOptions struct {
 	findings *string
 	// prText is the caller-supplied PR text the failed source run carried.
 	prText db.RunPRText
+	// agentEnv is the --agent-env pairs the failed source run started with.
+	agentEnv map[string]string
 }
 
 func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
@@ -243,7 +246,7 @@ func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
 		}
 		launchNonce, validationGeneration = "retry-launch-nonce", "retry-generation"
 	}
-	source, err := d.InsertLaunchedRun(repo.ID, "main", submitted, submitted, &db.RunIntent{Summary: "keep it", Source: db.RunIntentSourceAgent, Score: 1}, launchNonce, validationGeneration, "", "", false, opts.plan, opts.prText, nil, opts.assertion, proof, profiles...)
+	source, err := d.InsertLaunchedRun(repo.ID, "main", submitted, submitted, &db.RunIntent{Summary: "keep it", Source: db.RunIntentSourceAgent, Score: 1}, launchNonce, validationGeneration, "", "", false, opts.plan, opts.prText, nil, opts.agentEnv, opts.assertion, proof, profiles...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -704,6 +707,24 @@ func TestRetryInheritsTheSuppliedPRText(t *testing.T) {
 	run := waitForRunTerminalState(t, f.d, result.RunID)
 	if run.PRTitle == nil || *run.PRTitle != text.Title || run.PRBody == nil || *run.PRBody != text.Body {
 		t.Fatalf("retried run PR text = %v / %v", run.PRTitle, run.PRBody)
+	}
+}
+
+func TestRetryCarriesTheSourceRunsAgentEnv(t *testing.T) {
+	pairs := map[string]string{"UV_EXCLUDE_NEWER": "7 days"}
+	f := newRetryFixture(t, retryFixtureOptions{agentEnv: pairs})
+	if !reflect.DeepEqual(f.source.AgentEnv, pairs) {
+		t.Fatalf("source run carries %v, want its recorded pair", f.source.AgentEnv)
+	}
+	result, err := f.retry(t, f.source.ID)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+
+	run := waitForRunTerminalState(t, f.d, result.RunID)
+
+	if !reflect.DeepEqual(run.AgentEnv, pairs) {
+		t.Fatalf("retried run carries %v, want the source run's %v", run.AgentEnv, pairs)
 	}
 }
 

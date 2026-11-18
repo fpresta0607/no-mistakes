@@ -14,6 +14,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
@@ -183,6 +184,9 @@ func stepEnvironment(sctx *pipeline.StepContext) []string {
 	}
 	if sctx.ForgeContext != nil && !sctx.ForgeContext.Environment.Empty() {
 		env = sctx.ForgeContext.Environment.Apply(env)
+	}
+	if sctx.Run != nil && len(sctx.Run.AgentEnv) > 0 {
+		env = runenv.Overlay{Set: sctx.Run.AgentEnv}.Apply(env)
 	}
 	return env
 }

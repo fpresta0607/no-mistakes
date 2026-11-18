@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -121,6 +122,7 @@ type runView struct {
 	PiProfile          *agentcfg.PiProfile
 	VerificationPlan   *verificationplan.Snapshot
 	TestOutputDirs     []string
+	AgentEnv           map[string]string
 	// QuotaRouting is the run's parsed quota-aware ordering record, nil when
 	// the feature was off for this run.
 	QuotaRouting *quotarouting.Record
@@ -161,6 +163,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		PiProfile:          r.PiProfile,
 		VerificationPlan:   r.VerificationPlan,
 		TestOutputDirs:     r.TestOutputDirs,
+		AgentEnv:           r.AgentEnv,
 		RetryOf:            r.RetryOf,
 		RetriedBy:          r.RetriedBy,
 	}
@@ -208,6 +211,7 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) (runView,
 		PiProfile:          r.PiProfile,
 		VerificationPlan:   r.VerificationPlan,
 		TestOutputDirs:     r.TestOutputDirs,
+		AgentEnv:           r.AgentEnv,
 		ID:                 r.ID,
 		Branch:             r.Branch,
 		Status:             string(r.Status),
@@ -549,6 +553,18 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	}
 	if len(rv.TestOutputDirs) > 0 {
 		fields = append(fields, toon.Field{Key: "test_output_dirs", Value: rv.TestOutputDirs})
+	}
+	if len(rv.AgentEnv) > 0 {
+		names := make([]string, 0, len(rv.AgentEnv))
+		for name := range rv.AgentEnv {
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		agentEnvFields := make([]toon.Field, 0, len(names))
+		for _, name := range names {
+			agentEnvFields = append(agentEnvFields, toon.Field{Key: name, Value: rv.AgentEnv[name]})
+		}
+		fields = append(fields, toon.Field{Key: "agent_env", Value: toon.NewObject(agentEnvFields...)})
 	}
 	if rv.PiProfile != nil {
 		fields = append(fields, toon.Field{Key: "pi_profile", Value: toon.NewObject(

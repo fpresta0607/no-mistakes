@@ -287,7 +287,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		} else if evidenceRoot, err = m.newRunEvidenceRoot(global); err != nil {
 			return "", err
 		}
-		ag, _, err := newResolvedPipelineAgent(ctx, cfg, roles, evidenceRoot, forgeEnvironment(forge), quotaRecord)
+		ag, _, err := newResolvedPipelineAgent(ctx, cfg, roles, evidenceRoot, runEnvironment(forge, &snapshot.Run), quotaRecord)
 		if err != nil {
 			return "", err
 		}

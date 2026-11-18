@@ -541,7 +541,7 @@ func (m *RunManager) prepareCIExecutor(ctx context.Context, run *db.Run, publica
 	if err != nil {
 		return nil, err
 	}
-	ag, err := m.newRunPipelineAgent(ctx, run, cfg, pipelineEvidenceRoot(m.paths, cfg, run), exec.LookPath, forgeEnvironment(forge), quotaRecord)
+	ag, err := m.newRunPipelineAgent(ctx, run, cfg, pipelineEvidenceRoot(m.paths, cfg, run), exec.LookPath, runEnvironment(forge, run), quotaRecord)
 	if err != nil {
 		return nil, err
 	}
