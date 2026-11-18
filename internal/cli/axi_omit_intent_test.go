@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -133,24 +132,7 @@ func olderDaemonFixture(t *testing.T, probe func() (interface{}, error), configu
 	for _, setup := range configure {
 		setup(srv)
 	}
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(p.Socket()) }()
-	t.Cleanup(func() {
-		srv.Close()
-		select {
-		case <-errCh:
-		case <-time.After(time.Second):
-			t.Error("fake daemon did not stop")
-		}
-	})
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if client, dialErr := ipc.Dial(p.Socket()); dialErr == nil {
-			client.Close()
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	startIPCServer(t, srv, p.Socket())
 	chdir(t, local)
 	return launched
 }

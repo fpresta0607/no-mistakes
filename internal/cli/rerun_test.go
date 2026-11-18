@@ -14,7 +14,6 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/custody"
-	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -220,19 +219,7 @@ func TestRerunSendsOnlyCleanCallerHead(t *testing.T) {
 				requests <- params
 				return &ipc.RerunResult{RunID: "rerun-1"}, nil
 			})
-			done := make(chan error, 1)
-			go func() { done <- srv.Serve(p.Socket()) }()
-			t.Cleanup(func() { srv.Close(); <-done })
-			deadline := time.Now().Add(3 * time.Second)
-			for {
-				if alive, _ := daemon.IsRunning(p); alive {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatal("test IPC server did not become ready")
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
+			startIPCServer(t, srv, p.Socket())
 			cmd := newRerunCmd()
 			cmd.SetArgs([]string{"--intent", "keep the caller's changes"})
 			var out bytes.Buffer
