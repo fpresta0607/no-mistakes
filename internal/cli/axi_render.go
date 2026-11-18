@@ -752,7 +752,7 @@ func gateFieldsForRun(gate stepView, runID string) []toon.Field {
 		}, help...)
 	}
 	if pipeline.HasProtectedPathRefusal(gate.FindingsJSON) {
-		next := "Have the operator inspect and resolve the reported protected-path edit through the repository's authorized workflow, then run `" + respond + " --action fix` to retry the refused step, including its commit and publication."
+		next := "Have the operator inspect and resolve the reported protected-path edit through the repository's authorized workflow, then run `" + respond + " --action fix --findings <ids>`, naming every finding below, to retry the refused step, including its commit and publication."
 		if pipeline.HasReviewFixRoundLimit(gate.FindingsJSON) {
 			next = "The total Review fix-round budget is exhausted, so a fix request is refused and cannot retry the refused step. Skip this step or run `no-mistakes axi abort" + runFlag(runID) + "` to stop the run. A new run gets a new budget; changing config does not extend this run."
 		}
@@ -766,7 +766,7 @@ func gateFieldsForRun(gate stepView, runID string) []toon.Field {
 	}
 	skip := "Run `" + respond + " --action skip` to skip this step"
 	if pipeline.HasSafetyRefusal(gate.FindingsJSON) && gate.Name == string(types.StepRebase) {
-		skip = "Skip is rejected: the refused conflict resolution may still be in progress in the run worktree, and the steps after rebase would commit and publish it unproven. Run `" + respond + " --action fix` to finish it, or `no-mistakes axi abort" + runFlag(runID) + "` to stop the run"
+		skip = "Skip is rejected: the refused conflict resolution may still be in progress in the run worktree, and the steps after rebase would commit and publish it unproven. Run `" + respond + " --action fix --findings " + types.FindingIDAgentSafetyRefusal + "` to finish it, or `no-mistakes axi abort" + runFlag(runID) + "` to stop the run"
 	}
 	if pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON) {
 		help = []string{

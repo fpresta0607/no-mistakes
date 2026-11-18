@@ -514,7 +514,7 @@ func TestRenderDriveResult_ProtectedPathGateHelp(t *testing.T) {
 				want: []string{
 					"explicit operator response", "Approve is rejected",
 					"operator inspect and resolve", "repository's authorized workflow",
-					"no-mistakes axi respond --action fix`", "retry the refused step",
+					"no-mistakes axi respond --action fix --findings <ids>`", "retry the refused step",
 					"including its commit and publication",
 				},
 				absent: []string{"--action approve", "do not edit files yourself"},
@@ -560,6 +560,39 @@ func TestRenderDriveResult_ProtectedPathGateHelp(t *testing.T) {
 					}
 				}
 			})
+		}
+	}
+}
+
+// A Rebase gate held by a native safety refusal may keep the refused rebase or
+// merge in progress, so its help names fix with the one finding the gate shows
+// (a bare fix is refused by axi respond) and abort, and never offers skip.
+func TestRenderDriveResult_RebaseSafetyRefusalHelpOffersFixAndAbortOnly(t *testing.T) {
+	findings := findingsJSON(t, []types.Finding{{ID: types.FindingIDAgentSafetyRefusal, Severity: "error", Action: types.ActionAskUser, Description: "This content was flagged for possible cybersecurity risk."}}, "Native safety refusal")
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+	if err := renderDriveResult(cmd, &ipc.RunInfo{
+		ID: "run-1", Status: types.RunRunning,
+		Steps: []ipc.StepResultInfo{{StepName: types.StepRebase, Status: types.StepStatusAwaitingApproval, FindingsJSON: &findings}},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Help []string `toon:"help"`
+	}
+	if err := toon.Unmarshal(buf.Bytes(), &doc); err != nil {
+		t.Fatalf("decode emitted gate help: %v\n%s", err, buf.String())
+	}
+	help := strings.Join(doc.Help, "\n")
+	for _, want := range []string{"Skip is rejected", "no-mistakes axi respond --action fix --findings agent-safety-refusal`", "no-mistakes axi abort"} {
+		if !strings.Contains(help, want) {
+			t.Errorf("gate help missing %q:\n%s", want, help)
+		}
+	}
+	for _, absent := range []string{"--action skip", "--action approve", "--action fix`"} {
+		if strings.Contains(help, absent) {
+			t.Errorf("gate help includes inappropriate guidance %q:\n%s", absent, help)
 		}
 	}
 }
