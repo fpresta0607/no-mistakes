@@ -283,9 +283,29 @@ func TestCIStep_MergeStrategyRepairRefusesToMergeOverUncommittedChanges(t *testi
 }
 
 // A merge moves a gitlink in the index but not the submodule's checkout, so
-// staging the checkout would silently revert the base's submodule bump.
+// staging the checkout would silently revert the base's submodule bump. That
+// leaves the run worktree's checkout behind the recorded gitlink, which a hard
+// reset never touches, so the next merge round must not refuse it as an
+// uncommitted change.
 func TestCIStep_MergeStrategyRepairKeepsTheBasesSubmoduleBump(t *testing.T) {
 	t.Parallel()
+	for _, tc := range []struct {
+		name                    string
+		isCheckoutOnTheBasesTip bool
+	}{
+		{name: "checkout_on_the_recorded_pointer"},
+		{name: "checkout_off_the_recorded_pointer", isCheckoutOnTheBasesTip: true},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assertMergeKeepsTheBasesSubmoduleBump(t, tc.isCheckoutOnTheBasesTip)
+		})
+	}
+}
+
+func assertMergeKeepsTheBasesSubmoduleBump(t *testing.T, isCheckoutOnTheBasesTip bool) {
+	t.Helper()
 	sub := t.TempDir()
 	gitCmd(t, sub, "init", "-b", "main")
 	writeFile(t, sub, "a.txt", "a\n")
@@ -315,8 +335,16 @@ func TestCIStep_MergeStrategyRepairKeepsTheBasesSubmoduleBump(t *testing.T) {
 		gitCmd(t, dir, "checkout", "main")
 		gitCmd(t, filepath.Join(dir, "sub"), "checkout", "-q", newPointer)
 	}, nil)
-	// The run worktree's submodule checkout is still the reviewed one.
-	gitCmd(t, filepath.Join(f.dir, "sub"), "checkout", "-q", oldPointer)
+	// The run worktree's submodule checkout is the reviewed one, or one a
+	// previous merge round left off the recorded gitlink.
+	checkout := oldPointer
+	if isCheckoutOnTheBasesTip {
+		checkout = newPointer
+	}
+	gitCmd(t, filepath.Join(f.dir, "sub"), "checkout", "-q", checkout)
+	if status := gitCmd(t, f.dir, "status", "--porcelain", "--untracked-files=no"); isCheckoutOnTheBasesTip != (status != "") {
+		t.Fatalf("run worktree status = %q, want the submodule checkout to differ from the recorded gitlink only in the off-pointer case", status)
+	}
 
 	repair, err := f.repair(t, ciFixTargets{BehindBase: true})
 	if err != nil {
