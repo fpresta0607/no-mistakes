@@ -479,7 +479,12 @@ func runAxiRunWithPRText(cmd *cobra.Command, autoYes bool, skipSteps []types.Ste
 	}
 	if runID == "" {
 		if err := env.d.RefuseUnlinkedValidation(env.repo.ID, branch); err != nil {
-			return emitError(cmd, 1, err.Error())
+			// A child that ended with its PR recorded open is decided by the
+			// daemon's push admission, which reads the live PR state first.
+			child, lookupErr := env.d.TerminalAuthoredChildWithOpenPR(env.repo.ID, branch)
+			if lookupErr != nil || child == nil {
+				return emitError(cmd, 1, err.Error())
+			}
 		}
 		if err := configErrorForFreshAxiRun(env, runID); err != nil {
 			return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)

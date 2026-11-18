@@ -1623,7 +1623,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err != nil {
 			return nil, err
 		}
-		if err := refuseUnadmittableRefUpdates(d, repoID, p.Updates); err != nil {
+		if err := mgr.refuseUnadmittableRefUpdates(ctx, repoID, p.Updates); err != nil {
 			return nil, err
 		}
 		return &ipc.AdmitPushResult{Context: gateContextResult(result)}, nil

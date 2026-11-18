@@ -74,16 +74,7 @@ func (manager *RunManager) HandleRefreshPR(ctx context.Context, request ipc.Refr
 	if !hasTestException {
 		return nil, fmt.Errorf("PR refresh requires a recorded Test exception")
 	}
-	globalConfig, err := config.LoadGlobal(manager.paths.ConfigFile())
-	if err != nil {
-		return nil, err
-	}
-	// Only global forge routing is used. No repo command, agent or validation is launched.
-	cfg := config.MergeForRemote(globalConfig, &config.RepoConfig{}, repo.UpstreamURL)
-	forge, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
-	if err == nil {
-		err = forgecontext.RefuseProviderPluginOverlap(ctx, forge, cfg.ProviderPlugins, repo.UpstreamURL)
-	}
+	cfg, forge, err := manager.globalForgeRouting(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
@@ -95,6 +86,24 @@ func (manager *RunManager) HandleRefreshPR(ctx context.Context, request ipc.Refr
 		return nil, err
 	}
 	return &ipc.RefreshPRResult{RunID: run.ID, HeadSHA: run.HeadSHA, PRURL: *run.PRURL, Updated: isUpdated}, nil
+}
+
+// globalForgeRouting resolves forge routing from global config alone, so a
+// forge read made outside a run launches no repo command, agent or validation.
+func (manager *RunManager) globalForgeRouting(ctx context.Context, repo *db.Repo) (*config.Config, *forgecontext.Context, error) {
+	globalConfig, err := config.LoadGlobal(manager.paths.ConfigFile())
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg := config.MergeForRemote(globalConfig, &config.RepoConfig{}, repo.UpstreamURL)
+	forge, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
+	if err == nil {
+		err = forgecontext.RefuseProviderPluginOverlap(ctx, forge, cfg.ProviderPlugins, repo.UpstreamURL)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	return cfg, forge, nil
 }
 
 func validatePRRefreshIdentity(run *db.Run, repo *db.Repo, request ipc.RefreshPRParams) error {

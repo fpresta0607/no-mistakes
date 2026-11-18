@@ -15,6 +15,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -123,6 +124,54 @@ func TestGatePushToAnAuthoredLineageBranchIsRefusedBeforeTheRefMoves(t *testing.
 	}
 	if got := gateRef("refs/heads/feature"); got != ordinaryHead {
 		t.Fatalf("admitted push left the gate branch at %q, want %s", got, ordinaryHead)
+	}
+}
+
+// TestAxiRunLeavesARecordedOpenPRToDaemonAdmission covers the CLI half of
+// issue #194: axi run's own pre-push check reads only the recorded PR state,
+// so it refused a branch whose newest authored child ended with its PR open
+// before the daemon's push admission could read the live PR. That case is now
+// left to the daemon; every other unended lineage still refuses before a push.
+func TestAxiRunLeavesARecordedOpenPRToDaemonAdmission(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		hasOpenPR bool
+		isRefused bool
+	}{
+		{name: "child ended with its PR recorded open", hasOpenPR: true},
+		{name: "child ended without a PR", isRefused: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Arrange
+			fx := newAxiTimeoutFixture(t, axiTimeoutOpts{})
+			fx.setGetActive(func(context.Context) (*ipc.RunInfo, error) { return nil, nil })
+			database, err := db.Open(paths.WithRoot(os.Getenv("NM_HOME")).DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = database.Close() })
+			repos, err := database.GetRepos()
+			if err != nil || len(repos) != 1 {
+				t.Fatalf("registered repos = %v, %v", repos, err)
+			}
+			child := seedFailedAuthoredChild(t, database, repos[0].ID, "feature/timeout", fx.head)
+			if test.hasOpenPR {
+				if err := database.UpdateRunPRURL(child, "https://github.com/test/repo/pull/42"); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.UpdateRunPRState(child, "open"); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// Act
+			out, err := executeCmd("axi", "run", "--intent", "x")
+
+			// Assert
+			if isRefused := err != nil && strings.Contains(out, "validation-only authored lineage"); isRefused != test.isRefused {
+				t.Fatalf("pre-push lineage refusal = %v, want %v: %v\n%s", isRefused, test.isRefused, err, out)
+			}
+		})
 	}
 }
 
