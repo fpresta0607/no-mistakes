@@ -195,10 +195,13 @@ func (c *nativeAgentCommand) terminate() {
 
 // waitAfterParseError reaps the agent after its output failed to parse and
 // returns the parse error. A WaitDelay expiry is attached to it rather than
-// substituted for it, so the real cause is never hidden.
+// substituted for it, so the real cause is never hidden. Only stdout, which the
+// parser abandoned, is closed: stderr stays open until its reader drains what
+// the agent wrote before it was stopped, such as a safety refusal (issue #184),
+// and WaitDelay still bounds a descendant that holds it open.
 func (c *nativeAgentCommand) waitAfterParseError(parseErr error) error {
 	c.terminate()
-	c.closePipes()
+	_ = c.stdout.Close()
 	if waitErr := c.wait(); errors.Is(waitErr, exec.ErrWaitDelay) {
 		return fmt.Errorf("%w (%v)", parseErr, waitErr)
 	}
