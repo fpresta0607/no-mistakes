@@ -366,7 +366,7 @@ That monitor is live by default; only the opt-in
 Never treat "no CI checks reported" alone as green.
 
 With automatic CI repair enabled, a PR that falls behind the default branch or hits a merge conflict after checks pass - commonly because another PR merged first - needs **no command from you**: never hand-rebase.
-When that live CI monitor sees an actual conflict it **rebases onto the base, resolves it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push**.
+When that live CI monitor sees an actual conflict it **rebases onto the base, resolves it, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push**; under `rebase.strategy: merge` it merges the base in instead and publishes that merge as a fast-forward.
 On GitHub, a clean PR whose base requires branches to be up to date (`mergeStateStatus: BEHIND`) still reports `checks-passed` and waits for a human to bring it up to date; only when the repository opts into `ci.rebase_behind` does the monitor give it the same rebase, once its checks are green and the base has held still for one poll.
 A PR that is merely behind a base without that rule needs nothing, since the platform merges it.
 For a published GitHub CI merge conflict parked with automatic CI repair disabled, run `no-mistakes axi sync` to reach the exact published head, then `no-mistakes axi handback`.

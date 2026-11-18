@@ -242,6 +242,7 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 	failingNames := targets.checkNames()
 	mergeConflict := targets.MergeConflict
 	rebase := mergeConflict || targets.BehindBase
+	merging := rebase && mergesMovedBase(sctx)
 	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
 		return ciRepairResult{}, err
 	}
@@ -269,10 +270,34 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 		}
 	}
 
+	var mergeConflicts []string
+	if merging {
+		if !rebaseBaseResolved {
+			return ciRepairResult{}, fmt.Errorf("merge the base branch: the tip of %q could not be fetched", baseBranch)
+		}
+		if mergeConflicts, err = startCIMerge(sctx, rebaseBaseSHA); err != nil {
+			return ciRepairResult{}, err
+		}
+	}
+	// abandonMerge puts the recorded head back when the round ends before the
+	// merge it started is concluded, so no half-done merge outlives it.
+	abandonMerge := func(cause error) error {
+		if !merging {
+			return cause
+		}
+		return restorePreMergeHead(ctx, sctx, sctx.Run.HeadSHA, cause)
+	}
+
 	// Build prompt based on what issues are present
 	var promptIntro string
 	var promptRules string
 	switch {
+	case merging && len(failingNames) > 0:
+		promptIntro = "The following CI checks have failed, and the pipeline has started merging the base branch into the PR. Diagnose and fix the CI issues, and resolve that merge's conflicts."
+		promptRules = ciFailingCheckFixRules
+	case merging:
+		promptIntro = "The PR must take in its base branch, so the pipeline has started merging the base branch into it. Resolve that merge's conflicts."
+		promptRules = ciBaseMergeFixRules
 	case len(failingNames) > 0 && mergeConflict:
 		promptIntro = "The following CI checks have failed and the PR has merge conflicts with the base branch. Diagnose and fix the CI issues, then rebase onto the base branch and resolve the merge conflicts."
 		promptRules = ciFailingCheckFixRules
@@ -314,7 +339,9 @@ Context:
 	)
 	prompt += "\n" + fixSummaryRules(sctx, s.Name())
 	prompt += "\n- Keep detailed diagnosis and verification evidence in your explanatory output, which is recorded in the run log, rather than in summary."
-	if rebase {
+	if merging {
+		prompt += ciBaseMergePromptSection(rebaseBaseSHA, mergeConflicts)
+	} else if rebase {
 		prompt += fmt.Sprintf("\n- rebase target commit: %s", rebaseBaseSHA)
 	}
 	if logOutput != "" {
@@ -342,7 +369,7 @@ CI logs:
 
 	before, err := untrackedFiles(sctx)
 	if err != nil {
-		return ciRepairResult{}, err
+		return ciRepairResult{}, abandonMerge(err)
 	}
 	sctx.Log("running agent to fix CI issues...")
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
@@ -355,14 +382,14 @@ CI logs:
 		if !errors.Is(err, context.Canceled) && !errors.Is(err, pipeline.ErrAgentTimeout) {
 			err = fmt.Errorf("%w: %w", errCIFixAgentCrash, err)
 		}
-		return ciRepairResult{}, fmt.Errorf("agent CI fix: %w", err)
+		return ciRepairResult{}, abandonMerge(fmt.Errorf("agent CI fix: %w", err))
 	}
 	logRepairResult(sctx, result)
 
 	conclusion, conclusionErr := extractCIFixConclusion(result)
 	if conclusionErr != nil {
 		if errors.Is(conclusionErr, errRejectedCommitSummary) {
-			return ciRepairResult{}, fmt.Errorf("validate CI fix summary: %w", conclusionErr)
+			return ciRepairResult{}, abandonMerge(fmt.Errorf("validate CI fix summary: %w", conclusionErr))
 		}
 		sctx.Log(fmt.Sprintf("warning: could not parse CI repair conclusion: %v", conclusionErr))
 	}
@@ -370,7 +397,12 @@ CI logs:
 		s.replayBase = rebaseBaseSHA
 		defer func() { s.replayBase = "" }()
 	}
-	repair, err := s.commitRepair(sctx, conclusion.Summary, result, before)
+	var repair ciRepairResult
+	if merging {
+		repair, err = s.concludeCIMerge(sctx, rebaseBaseSHA, conclusion.Summary, result, before)
+	} else {
+		repair, err = s.commitRepair(sctx, conclusion.Summary, result, before)
+	}
 	if mergeConflict && rebaseBaseResolved {
 		repair.ConflictBaseSHA = rebaseBaseSHA
 	}
@@ -698,6 +730,15 @@ func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext) (ciRepairR
 	}
 	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
 	sctx.Log("retrying retained CI repair after protected-path refusal")
+	// A refused base merge is retained in progress (concludeCIMerge), and only
+	// the pipeline concludes it.
+	if mergeInProgress(sctx.Ctx, sctx.WorkDir) {
+		merged, err := commitCIMerge(sctx, "", "", nil, nil)
+		if err != nil {
+			return ciRepairResult{}, err
+		}
+		return s.recordRepair(sctx, merged)
+	}
 	// The retained changes outlived the invocation that made them, so no
 	// producer is known here and the commit carries no trailers. Which
 	// untracked files that invocation wrote is no longer known either, and the
@@ -720,21 +761,7 @@ func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, produc
 	if err := sctx.AssertValidationSource(); err != nil {
 		return ciRepairResult{}, err
 	}
-	render := func() (string, error) {
-		repairSummary := summary
-		if repairSummary == "" {
-			repairSummary = "repair failing checks"
-		}
-		message, err := sctx.Config.Commit.RenderFixMessageForBranch(types.StepCI, repairSummary, sctx.Run.Branch)
-		if err != nil {
-			return "", fmt.Errorf("render CI repair commit message: %w", err)
-		}
-		message, err = withCommitTrailers(sctx, message, producer)
-		if err != nil {
-			return "", fmt.Errorf("render CI repair commit trailers: %w", err)
-		}
-		return message, nil
-	}
+	render := func() (string, error) { return ciRepairMessage(sctx, summary, producer) }
 	if err := conformAgentCommits(sctx, types.StepCI, render); err != nil {
 		return ciRepairResult{}, err
 	}
@@ -784,6 +811,23 @@ func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, produc
 	}
 
 	return s.recordRepair(sctx, headSHA)
+}
+
+// ciRepairMessage renders the message of a CI repair commit: commit.fix_message
+// over the repair's summary, then the configured trailers.
+func ciRepairMessage(sctx *pipeline.StepContext, summary string, producer *agent.Result) (string, error) {
+	if summary == "" {
+		summary = "repair failing checks"
+	}
+	message, err := sctx.Config.Commit.RenderFixMessageForBranch(types.StepCI, summary, sctx.Run.Branch)
+	if err != nil {
+		return "", fmt.Errorf("render CI repair commit message: %w", err)
+	}
+	message, err = withCommitTrailers(sctx, message, producer)
+	if err != nil {
+		return "", fmt.Errorf("render CI repair commit trailers: %w", err)
+	}
+	return message, nil
 }
 
 // ciHeadAwaitsRecording reports whether a fix round that committed nothing
