@@ -511,3 +511,75 @@ func TestIntentStepPropagatesSafetyRefusal(t *testing.T) {
 		t.Fatalf("Execute() error = %v, want the refusal", err)
 	}
 }
+
+// A conflict resolver that ends in a native safety refusal keeps the rebase or
+// merge in progress with its partial resolution, as the operator must inspect it
+// before deciding, and the operator's fix finishes that kept resolution rather
+// than starting another integration over it.
+func TestRebaseStep_RefusedConflictResolutionIsKeptForTheOperator(t *testing.T) {
+	t.Parallel()
+	for _, strategy := range []string{config.RebaseStrategyRebase, config.RebaseStrategyMerge} {
+		t.Run(strategy, func(t *testing.T) {
+			t.Parallel()
+			f := newMergeFixture(t, true)
+			inProgress := rebaseInProgress
+			if strategy == config.RebaseStrategyMerge {
+				inProgress = mergeInProgress
+			}
+			isRefusing := true
+			ag := &mockAgent{name: "codex", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				if isRefusing {
+					writeFixtureFile(t, f.dir, "shared.txt", "main line\npartial\n")
+					return nil, errors.Join(agent.ErrSafetyRefusal, errors.New(nativeSafetyRefusal))
+				}
+				if !inProgress(context.Background(), f.dir) {
+					t.Errorf("the fix found no %s in progress to finish", strategy)
+				}
+				writeFixtureFile(t, f.dir, "shared.txt", "main line\nfeature line\n")
+				fixtureGit(t, f.dir, "add", "shared.txt")
+				if strategy == config.RebaseStrategyMerge {
+					fixtureGit(t, f.dir, "commit", "--no-edit")
+				} else {
+					fixtureGit(t, f.dir, "rebase", "--continue")
+				}
+				return &agent.Result{Output: json.RawMessage(`{"summary":"finished the kept resolution"}`)}, nil
+			}}
+			sctx := f.context(t, ag, strategy)
+			sctx.Fixing = true
+
+			_, err := (&RebaseStep{}).Execute(sctx)
+
+			if !agent.IsSafetyRefusal(err) {
+				t.Fatalf("Execute() error = %v, want the refusal", err)
+			}
+			if !inProgress(context.Background(), f.dir) {
+				t.Fatalf("the refused %s was aborted", strategy)
+			}
+			if got, err := os.ReadFile(filepath.Join(f.dir, "shared.txt")); err != nil || string(got) != "main line\npartial\n" {
+				t.Fatalf("the refused partial resolution was lost: %q, %v", got, err)
+			}
+
+			isRefusing = false
+			_, err = (&RebaseStep{}).Execute(sctx)
+
+			if err != nil {
+				t.Fatalf("the operator's fix did not finish the kept %s: %v", strategy, err)
+			}
+			if len(ag.calls) != 2 || !strings.Contains(ag.calls[1].Prompt, "already in progress") {
+				t.Fatalf("the fix did not continue the kept resolution: calls=%d", len(ag.calls))
+			}
+			if inProgress(context.Background(), f.dir) {
+				t.Fatalf("the %s is still in progress after the fix", strategy)
+			}
+			head := gitCmd(t, f.dir, "rev-parse", "HEAD")
+			if !isAncestor(context.Background(), f.dir, f.mainSHA, head) || sctx.Run.HeadSHA != head {
+				t.Fatalf("head %s (run head %s) does not integrate origin/main %s", head, sctx.Run.HeadSHA, f.mainSHA)
+			}
+			if strategy == config.RebaseStrategyMerge {
+				if got := parents(t, f.dir, head); len(got) != 2 || got[0] != f.headSHA || got[1] != f.mainSHA {
+					t.Fatalf("finished merge parents = %v, want [%s %s]", got, f.headSHA, f.mainSHA)
+				}
+			}
+		})
+	}
+}

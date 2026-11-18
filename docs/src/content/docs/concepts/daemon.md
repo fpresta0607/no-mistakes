@@ -163,7 +163,10 @@ When a push arrives via the post-receive hook:
 
 An unresolved [`protected_paths`](/no-mistakes/reference/repo-config/#protected_paths) refusal preserves the index and working files across daemon shutdown, cancellation by a newer push, and crash recovery, including when trusted-config loading fails and the run cannot resume. This retention does not weaken recovery validation or keep a terminal run active: orphan-process cleanup and test-evidence expiry still apply. Successful completion of the refused step releases this protection; deliberate operator skip and abort retain their existing cleanup behavior.
 
-An operator abort of an unresolved refusal still discards the checkout at the run's original submitted head, but never adopted or later committed source.
+An unresolved [native agent safety refusal](/no-mistakes/reference/pipeline-steps/) preserves the index and working files the same way, and also keeps the run's step logs and evidence from expiry, since the operator inspects them before deciding.
+The same completion, skip and abort release it.
+
+An operator abort of an unresolved protected-path refusal still discards the checkout at the run's original submitted head, but never adopted or later committed source.
 Otherwise, terminal cleanup of a run that [terminal continuation](/no-mistakes/reference/cli/#continue-validation-of-preserved-terminal-source) could still accept preserves staged or unstaged tracked changes, untracked files, and unreadable nonempty checkouts.
 Source retention ends once continuation can never accept or replay the run: a completed or custody-returned run, a continuation successor, or one a newer run superseded on its branch, follows ordinary cleanup and the [`worktree` retention bound](/no-mistakes/reference/global-config/#worktree) even when it left untracked pipeline artifacts.
 A run's own continuation successor supersedes it once that successor has left pending or recorded a step, because only an untouched pending successor's acceptance can still be replayed against the run's checkout.

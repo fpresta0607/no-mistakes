@@ -270,6 +270,10 @@ func reapEvidence(d *db.DB, root string, policy evidenceReapPolicy, now time.Tim
 				slog.Debug("skipping evidence cleanup", "run_id", runID, "reason", reason)
 				continue
 			}
+			if reason := safetyRefusalCleanupReason(d, run); reason != "" {
+				slog.Debug("skipping evidence cleanup", "run_id", runID, "reason", reason)
+				continue
+			}
 			path := filepath.Join(root, runID)
 			if pinned := run.EvidencePath(); pinned != "" && worktrees.Canonical(pinned) != worktrees.Canonical(path) {
 				continue

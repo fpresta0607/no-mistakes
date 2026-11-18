@@ -142,7 +142,7 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 				retErr = fmt.Errorf("%w: %s", retErr, detail)
 			}
 			if isNativeSafetyRefusal(codexErr) || isNativeSafetyRefusal(string(stderrBuf)) {
-				retErr = fmt.Errorf("%w: %w", ErrSafetyRefusal, retErr)
+				retErr = NewSafetyRefusal(retErr, SessionRef{ID: threadID, Agent: a.Name()})
 			}
 			emitAgentExited(opts, "codex", pid, retErr)
 			return partialResult(), retErr
@@ -180,7 +180,7 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 			retErr = fmt.Errorf("codex reported: %s", detail)
 		}
 		if isRefusal {
-			retErr = fmt.Errorf("%w: %w", ErrSafetyRefusal, retErr)
+			retErr = NewSafetyRefusal(retErr, SessionRef{ID: threadID, Agent: a.Name()})
 		}
 		emitAgentExited(opts, "codex", pid, retErr)
 		return partialResult(), retErr

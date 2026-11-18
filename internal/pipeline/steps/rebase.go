@@ -450,32 +450,44 @@ func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string
 }
 
 // rebaseWithAgent performs a rebase and uses the agent to resolve any conflicts.
+// A rebase already in progress is one a refused resolution kept for the
+// operator (see keepRefusedResolution), so the operator's fix finishes it
+// instead of starting another over it.
 func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef string) error {
-	skip, err := shouldSkipRebase(ctx, sctx, targetRef)
-	if err != nil {
-		return err
+	if mergeInProgress(ctx, sctx.WorkDir) {
+		return fmt.Errorf("a merge is in progress in %s; finish or abort it before rebasing onto %s", sctx.WorkDir, targetRef)
 	}
-	if skip {
-		return nil
-	}
+	situation := fmt.Sprintf("The rebase of the current branch onto %s has conflicts.", targetRef)
+	if rebaseInProgress(ctx, sctx.WorkDir) {
+		sctx.Log("finishing the rebase kept in progress after a refused conflict resolution...")
+		situation = keptResolutionSituation("rebase")
+	} else {
+		skip, err := shouldSkipRebase(ctx, sctx, targetRef)
+		if err != nil {
+			return err
+		}
+		if skip {
+			return nil
+		}
 
-	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
-	if _, err := git.Run(ctx, sctx.WorkDir, "-c", "rerere.enabled=false", "rebase", targetRef); err == nil {
-		return nil
-	}
+		sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
+		if _, err := git.Run(ctx, sctx.WorkDir, "-c", "rerere.enabled=false", "rebase", targetRef); err == nil {
+			return nil
+		}
 
-	if len(rebaseConflictFiles(ctx, sctx.WorkDir)) == 0 {
-		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
-		return fmt.Errorf("rebase onto %s failed (no conflicts detected)", targetRef)
+		if len(rebaseConflictFiles(ctx, sctx.WorkDir)) == 0 {
+			_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
+			return fmt.Errorf("rebase onto %s failed (no conflicts detected)", targetRef)
+		}
+		sctx.Log("conflicts detected, asking agent to resolve...")
 	}
-	sctx.Log("conflicts detected, asking agent to resolve...")
 	conflictFiles := rebaseConflictFiles(ctx, sctx.WorkDir)
 
 	prompt := fmt.Sprintf(
-		`Resolve git rebase conflicts. The rebase of the current branch onto %s has conflicts.
+		`Resolve git rebase conflicts. %s
 
 Current conflicted files:
-- %s
+%s
 
 Instructions:
 - Find all conflicting files and resolve the conflict markers (<<<<<<< ======= >>>>>>>).
@@ -486,8 +498,8 @@ Instructions:
 - Preserve the intent of both the current branch changes and the upstream changes.
 - Return JSON with a single "summary" field describing what you resolved.
 - Keep the summary under 10 words.`,
-		targetRef,
-		strings.Join(conflictFiles, "\n- "),
+		situation,
+		conflictFileList(conflictFiles),
 	)
 	prompt += "\n" + agent.MemoryFilesConflictRule
 	if sctx.PreviousFindings != "" {
@@ -497,13 +509,16 @@ Instructions:
 	prompt += executionContextPromptSection(sctx.WorkDir)
 	prompt = testguidance.LateRepairPrompt(string(types.StepRebase), prompt)
 
-	_, err = sctx.RunAgentContext(ctx, agent.RunOpts{
+	_, err := sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
 		JSONSchema: commitSummarySchema,
 		OnChunk:    sctx.LogChunk,
 	})
 	if err != nil {
+		if agent.IsSafetyRefusal(err) {
+			return keepRefusedResolution(sctx, "rebase", err)
+		}
 		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
 		return fmt.Errorf("agent resolve conflicts: %w", err)
 	}
@@ -582,45 +597,67 @@ func tryMerge(ctx context.Context, sctx *pipeline.StepContext, targetRef string)
 // is in the way, and a rebase leaves no evidence that anything was deleted. A
 // merge commit does, so the prompt asks for the resolution that commit can
 // actually be audited against: keep what both sides introduced.
+//
+// A merge already in progress is one a refused resolution kept for the
+// operator (see keepRefusedResolution), so the operator's fix finishes it and
+// proves it against the merge's own MERGE_HEAD instead of starting another.
 func mergeWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef string) error {
-	skip, err := shouldSkipRebase(ctx, sctx, targetRef)
-	if err != nil {
-		return err
+	if rebaseInProgress(ctx, sctx.WorkDir) {
+		return fmt.Errorf("a rebase is in progress in %s; finish or abort it before merging %s", sctx.WorkDir, targetRef)
 	}
-	if skip {
-		return nil
+	isResuming := mergeInProgress(ctx, sctx.WorkDir)
+	if !isResuming {
+		skip, err := shouldSkipRebase(ctx, sctx, targetRef)
+		if err != nil {
+			return err
+		}
+		if skip {
+			return nil
+		}
 	}
 
 	// Snapshot what the merge must prove before it runs. The target is pinned
 	// to a SHA here rather than checked by refname afterwards because an agent
 	// that fetches while resolving can advance the ref under us and fail a
-	// merge that actually landed.
+	// merge that actually landed. A merge in progress has not moved HEAD, and
+	// its MERGE_HEAD is the target it started with.
 	preMergeHead, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
 		return fmt.Errorf("get pre-merge head: %w", err)
 	}
-	targetSHA, err := git.Run(ctx, sctx.WorkDir, "rev-parse", targetRef)
-	if err != nil {
-		return fmt.Errorf("get target head %s: %w", targetRef, err)
-	}
+	situation := fmt.Sprintf("Merging %s into the current branch has conflicts.", targetRef)
+	var targetSHA string
+	if isResuming {
+		targetSHA, err = git.Run(ctx, sctx.WorkDir, "rev-parse", "MERGE_HEAD")
+		if err != nil {
+			return fmt.Errorf("get the target of the merge in progress: %w", err)
+		}
+		sctx.Log("finishing the merge kept in progress after a refused conflict resolution...")
+		situation = keptResolutionSituation("merge")
+	} else {
+		targetSHA, err = git.Run(ctx, sctx.WorkDir, "rev-parse", targetRef)
+		if err != nil {
+			return fmt.Errorf("get target head %s: %w", targetRef, err)
+		}
 
-	sctx.Log(fmt.Sprintf("merging %s...", targetRef))
-	if _, err := git.Run(ctx, sctx.WorkDir, mergeArgs(targetRef)...); err == nil {
-		return nil
-	}
+		sctx.Log(fmt.Sprintf("merging %s...", targetRef))
+		if _, err := git.Run(ctx, sctx.WorkDir, mergeArgs(targetRef)...); err == nil {
+			return nil
+		}
 
+		if len(rebaseConflictFiles(ctx, sctx.WorkDir)) == 0 {
+			_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
+			return fmt.Errorf("merge %s failed (no conflicts detected)", targetRef)
+		}
+		sctx.Log("conflicts detected, asking agent to resolve...")
+	}
 	conflictFiles := rebaseConflictFiles(ctx, sctx.WorkDir)
-	if len(conflictFiles) == 0 {
-		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
-		return fmt.Errorf("merge %s failed (no conflicts detected)", targetRef)
-	}
-	sctx.Log("conflicts detected, asking agent to resolve...")
 
 	prompt := fmt.Sprintf(
-		`Resolve git merge conflicts. Merging %s into the current branch has conflicts.
+		`Resolve git merge conflicts. %s
 
 Current conflicted files:
-- %s
+%s
 
 Instructions:
 - Find all conflicting files and resolve the conflict markers (<<<<<<< ======= >>>>>>>).
@@ -632,8 +669,8 @@ Instructions:
 - Preserve the intent of both the current branch changes and the upstream changes.
 - Return JSON with a single "summary" field describing what you resolved.
 - Keep the summary under 10 words.`,
-		targetRef,
-		strings.Join(conflictFiles, "\n- "),
+		situation,
+		conflictFileList(conflictFiles),
 	)
 	prompt += "\n" + agent.MemoryFilesConflictRule
 	if sctx.PreviousFindings != "" {
@@ -650,6 +687,9 @@ Instructions:
 		OnChunk:    sctx.LogChunk,
 	})
 	if err != nil {
+		if agent.IsSafetyRefusal(err) {
+			return keepRefusedResolution(sctx, "merge", err)
+		}
 		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
 		return fmt.Errorf("agent resolve conflicts: %w", err)
 	}
@@ -697,6 +737,30 @@ Instructions:
 	}
 
 	return nil
+}
+
+// keepRefusedResolution leaves a conflict resolution that ended in a native
+// safety refusal exactly where the resolver stopped. Aborting it, as any other
+// resolver failure does, would discard the work the operator must inspect
+// before deciding; the refusal parks the step, and a fix finishes what is kept.
+func keepRefusedResolution(sctx *pipeline.StepContext, operation string, err error) error {
+	sctx.Log(fmt.Sprintf("the %s and its partial conflict resolution are kept in progress for the operator; inspect them with `git -C %s status`", operation, sctx.WorkDir))
+	return fmt.Errorf("agent resolve conflicts: %w", err)
+}
+
+// keptResolutionSituation tells a fix round's resolver that it continues a
+// resolution kept after a refusal rather than starting one.
+func keptResolutionSituation(operation string) string {
+	return fmt.Sprintf("A %s of the current branch is already in progress with conflicts, and an earlier resolution of them was stopped part way; its edits are still in the worktree. Continue from them rather than starting the %s again.", operation, operation)
+}
+
+// conflictFileList renders the conflicted files for a resolver prompt. A kept
+// resolution may have none left unmerged and only need concluding.
+func conflictFileList(files []string) string {
+	if len(files) == 0 {
+		return "(none left unmerged; conclude the operation)"
+	}
+	return "- " + strings.Join(files, "\n- ")
 }
 
 // restorePreMergeHead puts the worktree back on the reviewed head before a
