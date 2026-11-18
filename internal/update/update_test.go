@@ -1019,7 +1019,7 @@ func fakeNixStoreBinary(t *testing.T) (storeBinary, profileLink string) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(storeBinary, profileLink); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlink unavailable: %v", err)
 	}
 	previous := nixStoreDir
 	nixStoreDir = store
