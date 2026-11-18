@@ -372,8 +372,8 @@ type RerunParams struct {
 	// TestOutputDirs are given to the new run only; the selected run's own
 	// directories are never inherited.
 	TestOutputDirs []string `json:"test_output_dirs,omitempty"`
-	// AgentEnv are given to the new run only; the selected run's own pairs
-	// are never inherited.
+	// AgentEnv, when set, replaces the selected run's pairs whole; when empty,
+	// the new run inherits the selected run's pairs.
 	AgentEnv map[string]string `json:"agent_env,omitempty"`
 	// PRTitle and PRBody each replace the selected run's supplied value when
 	// set; an unset field inherits it.
