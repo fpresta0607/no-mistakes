@@ -52,7 +52,13 @@ func reviewAnchoredGate(sctx *pipeline.StepContext) string {
 // patch, an extra commit on top - is not a pure replay. So is any git error
 // while checking: the cost of a wrong yes is an unreviewed diff reaching the
 // PR, so the proof fails closed.
-func pureReplayGap(sctx *pipeline.StepContext, reviewedHead, base, replayedHead string) string {
+//
+// shouldIgnoreContext compares the patches without their context lines. Only a
+// caller whose replayed commits were themselves reviewed sets it: their moved
+// context was read by Review, so only the changed lines must stay identical.
+// Carrying an approval to a replay Review never read keeps the context in the
+// identity, because a base edit beside a reviewed hunk was never reviewed.
+func pureReplayGap(sctx *pipeline.StepContext, reviewedHead, base, replayedHead string, shouldIgnoreContext bool) string {
 	base = strings.TrimSpace(base)
 	if base == "" {
 		return "the rebase target could not be resolved"
@@ -81,7 +87,7 @@ func pureReplayGap(sctx *pipeline.StepContext, reviewedHead, base, replayedHead 
 	}
 	parent := resolvedBase
 	for i := range reviewed {
-		if reason := replayedCommitGap(sctx, reviewed[i], replayed[i], parent); reason != "" {
+		if reason := replayedCommitGap(sctx, reviewed[i], replayed[i], parent, shouldIgnoreContext); reason != "" {
 			return reason
 		}
 		parent = replayed[i]
@@ -122,7 +128,7 @@ func linearChain(sctx *pipeline.StepContext, from, to string) ([]string, error) 
 }
 
 // replayedCommitGap proves one pair of a pure replay; see pureReplayGap.
-func replayedCommitGap(sctx *pipeline.StepContext, reviewed, replayed, newParent string) string {
+func replayedCommitGap(sctx *pipeline.StepContext, reviewed, replayed, newParent string, shouldIgnoreContext bool) string {
 	wantTree, err := stepGitRun(sctx, "merge-tree", "--write-tree", "--merge-base="+reviewed+"^", newParent, reviewed)
 	if err != nil {
 		return fmt.Sprintf("reviewed commit %s does not replay onto %s without a conflict", shortObjectID(reviewed), shortObjectID(newParent))
@@ -131,11 +137,11 @@ func replayedCommitGap(sctx *pipeline.StepContext, reviewed, replayed, newParent
 	if err != nil || firstLine(wantTree) != gotTree {
 		return fmt.Sprintf("commit %s is not the conflict-free replay of reviewed commit %s", shortObjectID(replayed), shortObjectID(reviewed))
 	}
-	reviewedID, err := commitPatchID(sctx, reviewed)
+	reviewedID, err := commitPatchID(sctx, reviewed, shouldIgnoreContext)
 	if err != nil || reviewedID == "" {
 		return fmt.Sprintf("reviewed commit %s has no patch identity", shortObjectID(reviewed))
 	}
-	replayedID, err := commitPatchID(sctx, replayed)
+	replayedID, err := commitPatchID(sctx, replayed, shouldIgnoreContext)
 	if err != nil || replayedID != reviewedID {
 		return fmt.Sprintf("commit %s is not patch-identical to reviewed commit %s", shortObjectID(replayed), shortObjectID(reviewed))
 	}
@@ -146,8 +152,13 @@ func replayedCommitGap(sctx *pipeline.StepContext, reviewed, replayed, newParent
 // against its parent, or "" for an empty commit. --verbatim keeps whitespace;
 // --binary and --full-index make binary content part of the identity, and
 // external diff drivers and textconv are off so local config cannot change it.
-func commitPatchID(sctx *pipeline.StepContext, commit string) (string, error) {
-	diff, err := stepGitRunRaw(sctx, "diff-tree", "-p", "--no-commit-id", "--full-index", "--binary", "--no-renames", "--no-ext-diff", "--no-textconv", commit)
+// shouldIgnoreContext diffs with -U0, so only the changed lines count.
+func commitPatchID(sctx *pipeline.StepContext, commit string, shouldIgnoreContext bool) (string, error) {
+	args := []string{"diff-tree", "-p", "--no-commit-id", "--full-index", "--binary", "--no-renames", "--no-ext-diff", "--no-textconv"}
+	if shouldIgnoreContext {
+		args = append(args, "-U0")
+	}
+	diff, err := stepGitRunRaw(sctx, append(args, commit)...)
 	if err != nil {
 		return "", err
 	}

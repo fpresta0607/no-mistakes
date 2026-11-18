@@ -815,6 +815,7 @@ By default, an ordinary handback requires genuine provider-structured failed che
 When Document committed after Test, explicitly use `axi handback --revalidate-publication` instead.
 That route requires completed steps and durable phase rounds numbered consecutively from 1, with verified reviewed, tested and published ancestry.
 If native Rebase rewrote the submitted commits, the completed Rebase record and the head recorded in Review round 1 must prove an exact, conflict-free replay of the preserved submitted source before that ancestry chain begins.
+Each rewritten commit must be the conflict-free replay of its submitted commit to exactly its recorded tree, with the same changed lines; a base edit that only moved the diff context around those lines still proves, because Review read the rewritten commit itself.
 Missing phase boundaries, unrelated source and rewrites that cannot be proved as an exact replay refuse.
 It pins those historical rounds, evidence, repair limits and spending in the native receipt without certifying the published descendant or changing the old evidence heads.
 Changed historical evidence refuses release, acceptance and recovery.

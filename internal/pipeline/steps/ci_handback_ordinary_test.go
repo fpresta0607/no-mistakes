@@ -30,6 +30,11 @@ type ordinaryCIHandbackFixture struct {
 func newOrdinaryCIHandbackFixture(t *testing.T) *ordinaryCIHandbackFixture {
 	t.Helper()
 	caller, base, published := setupGitRepo(t)
+	return newOrdinaryCIHandbackFixtureFromRepo(t, caller, base, published)
+}
+
+func newOrdinaryCIHandbackFixtureFromRepo(t *testing.T, caller, base, published string) *ordinaryCIHandbackFixture {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
