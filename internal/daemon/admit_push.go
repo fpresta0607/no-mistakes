@@ -25,6 +25,8 @@ func (m *RunManager) refuseUnadmittableRefUpdates(ctx context.Context, repoID st
 			return fmt.Errorf("malformed proposed ref update %q %q %q", update.Old, update.New, update.Ref)
 		}
 	}
+	ctx, cancel := context.WithTimeout(ctx, terminalPRReadTimeout)
+	defer cancel()
 	for _, update := range updates {
 		if err := m.refuseUnlinkedValidation(ctx, repoID, branchFromRef(update.Ref)); err != nil {
 			return fmt.Errorf("refuse %s before it moves: %w", update.Ref, err)

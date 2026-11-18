@@ -10,8 +10,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 )
 
-// terminalPRReadTimeout bounds the forge read a launch refusal may make.
-const terminalPRReadTimeout = 30 * time.Second
+// terminalPRReadTimeout bounds the forge reads one refusal decision may make.
+const terminalPRReadTimeout = 20 * time.Second
 
 // refuseUnlinkedValidation is the daemon's launch refusal for a branch with
 // validation-only authored lineage. db.RefuseUnlinkedValidation decides on the
