@@ -52,6 +52,34 @@ func TestReleaseWorkflowRunsReleasePleaseWithoutValidationGuards(t *testing.T) {
 	}
 }
 
+// A fork has no release for release-please to anchor on, so running it there
+// walks hundreds of commits through the GraphQL API on every push to main and
+// fails the run on any transient GitHub error (issue #186).
+func TestReleaseWorkflowRunsReleasePleaseOnlyInTheUpstreamRepository(t *testing.T) {
+	job := loadReleaseWorkflowDoc(t).Jobs["release-please"]
+	if job == nil {
+		t.Fatal("release workflow must define the release-please job")
+	}
+
+	for _, tc := range []struct {
+		repository string
+		wantRun    bool
+	}{
+		{repository: "kunchenguid/no-mistakes", wantRun: true},
+		{repository: "fpresta0607/no-mistakes", wantRun: false},
+	} {
+		t.Run(tc.repository, func(t *testing.T) {
+			got, err := evaluateWorkflowCondition(job.If, workflowConditionContext{Repository: tc.repository, EventName: "push"})
+			if err != nil {
+				t.Fatalf("evaluate release-please condition %q: %v", job.If, err)
+			}
+			if got != tc.wantRun {
+				t.Fatalf("release-please runs in %s = %t, want %t", tc.repository, got, tc.wantRun)
+			}
+		})
+	}
+}
+
 func TestReleaseWorkflowBuildStartsOnlyWhenReleaseIsCreated(t *testing.T) {
 	data, err := os.ReadFile(".github/workflows/release.yml")
 	if err != nil {

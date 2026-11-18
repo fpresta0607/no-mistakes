@@ -6,6 +6,7 @@ import (
 )
 
 type workflowConditionContext struct {
+	Repository     string
 	EventName      string
 	ReleaseTagName string
 	Cancelled      bool
@@ -94,6 +95,8 @@ func workflowConditionValue(expression string, context workflowConditionContext)
 		return strings.ReplaceAll(expression[1:len(expression)-1], "''", "'"), nil
 	}
 	switch expression {
+	case "github.repository":
+		return context.Repository, nil
 	case "github.event_name":
 		return context.EventName, nil
 	case "github.event.release.tag_name":

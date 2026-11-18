@@ -14,6 +14,7 @@ metadata:
 - Signing happens before tarball creation and checksum generation, and the verify gate fails the release closed on any missing or ambiguous signature, wrong Team ID, non-permanent identifier, content-based (`cdhash`) requirement, missing hardened runtime or timestamp, or wrong architecture.
 - Mechanics live in `.github/workflows/release.yml`; the contract is pinned by the root `TestReleaseWorkflow*` static tests in `workflow_release_signing_test.go`, and secret values are never recorded here or in any test fixture.
 - Notarization, stapling, a PKG, Homebrew, and universal binaries are intentionally out of scope for this phase.
+- The `release-please` job runs only when `github.repository` is `kunchenguid/no-mistakes`, so every other release job skips in a fork: a fork has no release for release-please to anchor on and would walk its whole recent history through the GraphQL API on every push (issue #186). Regression: `TestReleaseWorkflowRunsReleasePleaseOnlyInTheUpstreamRepository`.
 
 **Self-update channel manifest (`internal/update`)**
 
