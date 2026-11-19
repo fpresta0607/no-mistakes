@@ -47,9 +47,7 @@ func TestAxiTerminalValidationKeepsTheReturnedCandidateAndProvesTheNewSelection(
 		t.Fatalf("abort: %v\n%s", err, out)
 	}
 	parent := h.WaitForRun(branch, 30*time.Second)
-	if out, err := h.Run("daemon", "stop"); err != nil {
-		t.Fatalf("stop fixture daemon: %v\n%s", err, out)
-	}
+	h.DaemonLifecycleWhenIdle("stop")
 	root := paths.WithRoot(h.NMHome)
 	database, err := db.Open(root.DB())
 	if err != nil {

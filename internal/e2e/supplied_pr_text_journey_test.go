@@ -164,9 +164,7 @@ func TestSuppliedPRTextJourney(t *testing.T) {
 	// Rerun after a daemon restart inherits the stored text; a --pr-title
 	// passed to rerun replaces the inherited title in storage, but the PR
 	// already exists so it is not applied.
-	if out, err := h.Run("daemon", "restart"); err != nil {
-		t.Fatalf("daemon restart: %v\n%s", err, out)
-	}
+	h.DaemonLifecycleWhenIdle("restart")
 	const newTitle = "feat(widgets): Renamed by rerun"
 	if out, err := h.RunInDir(wt, "rerun", "--pr-title", newTitle); err != nil || !strings.Contains(out, "Rerun started") {
 		t.Fatalf("rerun --pr-title: %v\n%s", err, out)
