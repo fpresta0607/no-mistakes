@@ -311,7 +311,7 @@ Kill-switch injected into every pipeline agent subprocess so compact-adviser sta
 | Type    | always `1` for agent subprocesses    |
 | Default | injected; not a daemon-wide setting  |
 
-no-mistakes stamps `COMPACT_ADVISER_DISABLE=1` onto every spawned gate agent, including ACP aliases and managed agent servers that can load host plugins. Forge and profile overlays cannot drop the flag. The daemon process itself is unchanged; this is agent-child policy only, not a user-facing knob for the service environment.
+no-mistakes stamps `COMPACT_ADVISER_DISABLE=1` onto every spawned gate agent, including ACP aliases and managed agent servers that can load host plugins. Forge and profile overlays cannot drop the flag. This is agent-child policy only, not a user-facing knob for the service environment; the daemon drops it from its own environment (see [Environment the daemon sees](#environment-the-daemon-sees)).
 
 ## `NO_MISTAKES_UMAMI_HOST`
 
@@ -392,4 +392,5 @@ The daemon outlives whatever started it, so before that resolution it drops the 
 The folders `CFO_CODEX_GUARD` names are also removed from the front of `PATH`.
 No agent the daemon starts inherits them, so the worker's hooks never report those agents as that worker.
 `CFO_HOME`, `CFO_STATE_OVERRIDE`, and `CFO_PROJECTS_ROOT` name the harness installation rather than one worker, and stay.
+A gate agent's command can start the daemon on demand, so the daemon also drops the agent-only marks `NO_MISTAKES_GATE` and `COMPACT_ADVISER_DISABLE`: its step commands never carry either, and only the agents it spawns get them.
 On Windows the names match without regard to case.
