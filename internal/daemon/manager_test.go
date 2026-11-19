@@ -923,7 +923,7 @@ func TestPushReceivedConcurrentDifferentBranchRunsAvoidSharedConfigLock(t *testi
 			t.Fatalf("expected active run for %s", br)
 		}
 		if active.Status != types.RunRunning {
-			t.Fatalf("active run for %s status = %s, want running (error: %v)", br, active.Status, active.Error)
+			t.Fatalf("active run for %s status = %s, want running (error: %v)", br, active.Status, deref(active.Error))
 		}
 	}
 }
@@ -1038,10 +1038,10 @@ func TestRerunInheritsIntentAndClosingIssuesFromSelectedRun(t *testing.T) {
 	}
 	got := waitForRunTerminalState(t, d, rerun.RunID)
 	if got.Intent == nil || *got.Intent != selectedIntent {
-		t.Fatalf("intent = %v, want %q", got.Intent, selectedIntent)
+		t.Fatalf("intent = %v, want %q", deref(got.Intent), selectedIntent)
 	}
 	if got.IntentSource == nil || *got.IntentSource != db.RunIntentSourceRerun {
-		t.Fatalf("intent source = %v, want %q", got.IntentSource, db.RunIntentSourceRerun)
+		t.Fatalf("intent source = %v, want %q", deref(got.IntentSource), db.RunIntentSourceRerun)
 	}
 	if refs := strings.Join(got.ClosingIssueRefs, ","); refs != "42,owner/repo#9" {
 		t.Fatalf("closing issue references = %q, want inherited set", refs)
@@ -1148,7 +1148,7 @@ func TestRerunInheritsPRBaseBranchFromSelectedRun(t *testing.T) {
 	}
 	firstRun := waitForRunTerminalState(t, d, first.RunID)
 	if firstRun.PRBaseBranch == nil || *firstRun.PRBaseBranch != "epic/feature" {
-		t.Fatalf("first run PRBaseBranch = %#v, want epic/feature", firstRun.PRBaseBranch)
+		t.Fatalf("first run PRBaseBranch = %#v, want epic/feature", deref(firstRun.PRBaseBranch))
 	}
 
 	var rerun ipc.RerunResult
@@ -1162,7 +1162,7 @@ func TestRerunInheritsPRBaseBranchFromSelectedRun(t *testing.T) {
 	}
 	got := waitForRunTerminalState(t, d, rerun.RunID)
 	if got.PRBaseBranch == nil || *got.PRBaseBranch != "epic/feature" {
-		t.Fatalf("rerun PRBaseBranch = %#v, want inherited epic/feature", got.PRBaseBranch)
+		t.Fatalf("rerun PRBaseBranch = %#v, want inherited epic/feature", deref(got.PRBaseBranch))
 	}
 }
 
@@ -1411,7 +1411,7 @@ func TestRerunInheritsPRURLFromSelectedRun(t *testing.T) {
 	}
 	got := waitForRunTerminalState(t, d, rerun.RunID)
 	if got.PRURL == nil || *got.PRURL != prURL {
-		t.Fatalf("rerun PRURL = %#v, want inherited %s", got.PRURL, prURL)
+		t.Fatalf("rerun PRURL = %#v, want inherited %s", deref(got.PRURL), prURL)
 	}
 }
 
@@ -1458,7 +1458,7 @@ func TestRerunDoesNotInheritClosedPRURL(t *testing.T) {
 	}
 	got := waitForRunTerminalState(t, d, rerun.RunID)
 	if got.PRURL != nil && *got.PRURL != "" {
-		t.Fatalf("rerun PRURL = %#v, want no inherit of a closed PR", got.PRURL)
+		t.Fatalf("rerun PRURL = %#v, want no inherit of a closed PR", deref(got.PRURL))
 	}
 }
 
@@ -2042,7 +2042,7 @@ func TestStartRunHandsTheAdmittedTestOutputDirsToTheExecutor(t *testing.T) {
 		t.Fatalf("start run: %v", err)
 	}
 	if run := waitForRunTerminalState(t, database, runID); run.Status != types.RunCompleted {
-		t.Fatalf("run status = %s, error = %v", run.Status, run.Error)
+		t.Fatalf("run status = %s, error = %v", run.Status, deref(run.Error))
 	}
 
 	select {
@@ -2108,7 +2108,7 @@ func TestFreshLaunchReplayRefusesDifferentTestOutputDirs(t *testing.T) {
 		t.Fatalf("fresh launch: %v", err)
 	}
 	if run := waitForRunTerminalState(t, database, receipt.RunID); run.Status != types.RunCompleted {
-		t.Fatalf("run status = %s, error = %v", run.Status, run.Error)
+		t.Fatalf("run status = %s, error = %v", run.Status, deref(run.Error))
 	}
 
 	replayed, err := manager.HandleStartFreshRun(context.Background(), params)

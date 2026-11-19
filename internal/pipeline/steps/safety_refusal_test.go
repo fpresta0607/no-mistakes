@@ -391,7 +391,7 @@ func TestSideBySide_RefusedLaneSurvivesADaemonRestart(t *testing.T) {
 	}
 	for _, record := range records {
 		if record.StepName == types.StepDocument && (record.FindingsJSON == nil || !pipeline.HasSafetyRefusal(*record.FindingsJSON)) {
-			t.Fatalf("Document parked on %v, want the native safety refusal", record.FindingsJSON)
+			t.Fatalf("Document parked on %v, want the native safety refusal", deref(record.FindingsJSON))
 		}
 	}
 }

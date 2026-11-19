@@ -32,7 +32,7 @@ func TestExecutorAutomaticSkipReasonRedactsCredentials(t *testing.T) {
 	}
 	reason := results[0].SkipReason
 	if reason == nil || strings.Contains(*reason, "secret") || !strings.Contains(*reason, "forge.example") {
-		t.Fatalf("skip cause should retain the host and redact credentials: %v", reason)
+		t.Fatalf("skip cause should retain the host and redact credentials: %v", derefString(reason))
 	}
 }
 
@@ -304,7 +304,7 @@ func TestExecutor_RestartsValidationFromRequestedStep(t *testing.T) {
 				t.Errorf("CI round triggers = [%s %s %s], want [initial auto_fix initial]", rounds[0].Trigger, rounds[1].Trigger, rounds[2].Trigger)
 			}
 			if rounds[0].SelectionSource == nil || *rounds[0].SelectionSource != db.RoundSelectionSourceAutoFix {
-				t.Errorf("observation round selection source = %v, want auto_fix so the attempt survives the restart", rounds[0].SelectionSource)
+				t.Errorf("observation round selection source = %v, want auto_fix so the attempt survives the restart", derefString(rounds[0].SelectionSource))
 			}
 			// The spent attempt is what a restarted or recovered executor
 			// restores: ResetStepsFrom leaves the round history alone.
@@ -748,7 +748,7 @@ func TestExecutor_StepOutcomePRURL_EmitsRunUpdated(t *testing.T) {
 		t.Fatal("expected run_completed event")
 	}
 	if completedEvent.PRURL == nil || *completedEvent.PRURL != prURL {
-		t.Errorf("expected run_completed PRURL %q, got %v", prURL, completedEvent.PRURL)
+		t.Errorf("expected run_completed PRURL %q, got %v", prURL, derefString(completedEvent.PRURL))
 	}
 }
 

@@ -2319,7 +2319,7 @@ func TestRecoverTerminalUnverifiedEqualTreeRewriteAdoptsLiveGateHead(t *testing.
 		t.Fatal("fixture does not reproduce the direct live-head containment conflict")
 	}
 	if f.run.ReviewApprovedHeadSHA == nil || *f.run.ReviewApprovedHeadSHA != recorded {
-		t.Fatalf("review authority = %#v, want %s", f.run.ReviewApprovedHeadSHA, recorded)
+		t.Fatalf("review authority = %#v, want %s", ptr(f.run.ReviewApprovedHeadSHA), recorded)
 	}
 	runsBefore := len(mustRuns(t, f.db, f.repo.ID))
 	remoteBefore := mustRun(t, f.remote, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads")

@@ -406,7 +406,7 @@ func TestCIStep_PartialPublicationRecordsNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	if run.HeadSHA != repairCommit || run.LastPushedSHA == nil || *run.LastPushedSHA != repairCommit {
-		t.Errorf("run did not record the settled publication: head=%s pushed=%v", run.HeadSHA, run.LastPushedSHA)
+		t.Errorf("run did not record the settled publication: head=%s pushed=%v", run.HeadSHA, deref(run.LastPushedSHA))
 	}
 }
 

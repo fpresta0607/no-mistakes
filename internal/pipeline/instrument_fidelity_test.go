@@ -196,7 +196,7 @@ func TestPerfRecording_ResumedSessionRecordsPerRoundDeltas(t *testing.T) {
 	assertPtr(t, "r2 finding count", r2.FindingCount, 2)
 	// Model identity.
 	if r2.Model != "gpt-5.6-sol" || r2.ModelProvider == nil || *r2.ModelProvider != "openai" {
-		t.Fatalf("model/provider = %q/%v", r2.Model, r2.ModelProvider)
+		t.Fatalf("model/provider = %q/%v", r2.Model, derefString(r2.ModelProvider))
 	}
 	// Cache creation is unknown (codex does not report it), not a fabricated 0.
 	if r2.CacheCreationTokens != nil {
@@ -283,7 +283,7 @@ func TestPerfRecording_FallbackRecordsReason(t *testing.T) {
 		t.Fatal("expected a fallback invocation row")
 	}
 	if fallback.FallbackReason == nil || *fallback.FallbackReason != db.FallbackReasonExit {
-		t.Fatalf("fallback reason = %v, want %q", fallback.FallbackReason, db.FallbackReasonExit)
+		t.Fatalf("fallback reason = %v, want %q", derefString(fallback.FallbackReason), db.FallbackReasonExit)
 	}
 }
 

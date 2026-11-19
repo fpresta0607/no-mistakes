@@ -105,7 +105,7 @@ func TestExecutor_GreenCIRunRecordsChecksPassedAndReleases(t *testing.T) {
 		t.Fatalf("run status after the merge observation = %s, want %s", after.Status, types.RunChecksPassed)
 	}
 	if after.PRState == nil || *after.PRState != "merged" {
-		t.Fatalf("PR state = %v, want the merge recorded as PR truth", after.PRState)
+		t.Fatalf("PR state = %v, want the merge recorded as PR truth", derefString(after.PRState))
 	}
 	afterStep := ciStepSnapshot(t, database, run.ID)
 	if afterStep.status != before.status || afterStep.durationMS != before.durationMS {

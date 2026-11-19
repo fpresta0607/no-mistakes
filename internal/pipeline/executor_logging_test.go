@@ -73,7 +73,7 @@ func TestExecutor_LogCallbackTouchesStepActivity(t *testing.T) {
 				t.Fatalf("get step result: %v", err)
 			}
 			if got.LastActivity == nil || !strings.Contains(*got.LastActivity, "heartbeat marker") {
-				t.Fatalf("last_activity = %v, want heartbeat marker", got.LastActivity)
+				t.Fatalf("last_activity = %v, want heartbeat marker", derefString(got.LastActivity))
 			}
 			return &StepOutcome{ExitCode: 0}, nil
 		},

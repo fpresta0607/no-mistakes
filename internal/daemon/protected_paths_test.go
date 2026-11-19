@@ -94,7 +94,7 @@ func TestProtectedPathRefusalCancellationCleanup(t *testing.T) {
 				time.Sleep(10 * time.Millisecond)
 			}
 			if action == "abort_response_with_reason" && (run.Error == nil || !strings.Contains(*run.Error, "protected edit rejected")) {
-				t.Fatalf("run error = %v, want the operator's reason recorded", run.Error)
+				t.Fatalf("run error = %v, want the operator's reason recorded", deref(run.Error))
 			}
 			workDir := p.WorktreeDir(repo.ID, result.RunID)
 			if action == "new_push" {
@@ -476,7 +476,7 @@ func TestProtectedPathRefusalParksBeforeManagerCleanup(t *testing.T) {
 					t.Fatal(err)
 				}
 				if run.Status != types.RunRunning && run.Status != types.RunPending {
-					t.Fatalf("refusal reached terminal cleanup: status=%s error=%v", run.Status, run.Error)
+					t.Fatalf("refusal reached terminal cleanup: status=%s error=%v", run.Status, deref(run.Error))
 				}
 				if run.AwaitingAgentSince != nil {
 					workDir := p.WorktreeDir(run.RepoID, run.ID)

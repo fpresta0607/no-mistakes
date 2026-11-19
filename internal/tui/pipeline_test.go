@@ -438,7 +438,7 @@ func TestModel_ApplyEvent_StepCompleted_FailedStoresError(t *testing.T) {
 		t.Fatalf("expected failed, got %s", m.steps[0].Status)
 	}
 	if m.steps[0].Error == nil || *m.steps[0].Error != errMsg {
-		t.Fatalf("expected step error %q, got %v", errMsg, m.steps[0].Error)
+		t.Fatalf("expected step error %q, got %v", errMsg, deref(m.steps[0].Error))
 	}
 	out := stripANSI(renderPipelineView(m.run, m.steps, 80, 0, 40))
 	if !strings.Contains(out, errMsg) {
@@ -483,7 +483,7 @@ func TestModel_ApplyEvent_RunCompleted_FailedStoresError(t *testing.T) {
 		t.Fatalf("expected failed status, got %s", m.run.Status)
 	}
 	if m.run.Error == nil || *m.run.Error != errMsg {
-		t.Fatalf("expected run error %q, got %v", errMsg, m.run.Error)
+		t.Fatalf("expected run error %q, got %v", errMsg, deref(m.run.Error))
 	}
 	out := stripANSI(renderPipelineView(m.run, m.steps, 80, 0, 40))
 	if !strings.Contains(out, "Error: step review failed: agent review: claude parse events") {
@@ -529,7 +529,7 @@ func TestModel_ApplyEvent_RunUpdated_PRURL(t *testing.T) {
 	})
 
 	if m.run.PRURL == nil || *m.run.PRURL != prURL {
-		t.Errorf("expected run PRURL %q, got %v", prURL, m.run.PRURL)
+		t.Errorf("expected run PRURL %q, got %v", prURL, deref(m.run.PRURL))
 	}
 }
 
@@ -546,7 +546,7 @@ func TestModel_ApplyEvent_RunCompleted_PRURL(t *testing.T) {
 	})
 
 	if m.run.PRURL == nil || *m.run.PRURL != prURL {
-		t.Errorf("expected run PRURL %q, got %v", prURL, m.run.PRURL)
+		t.Errorf("expected run PRURL %q, got %v", prURL, deref(m.run.PRURL))
 	}
 }
 
@@ -616,4 +616,13 @@ func TestRenderFooter_WithAvailableUpdate_ShowsIndicator(t *testing.T) {
 	if !strings.HasSuffix(strings.TrimRight(stripped, " "), "v1.2.3 available") {
 		t.Fatalf("expected update indicator at right edge, got: %s", stripped)
 	}
+}
+
+// deref returns the text a *string holds, or "" for nil, so a failure message
+// prints the text rather than the pointer's address.
+func deref(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }

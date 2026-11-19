@@ -144,7 +144,7 @@ func TestPreserveRunHeadAnchorsCrashWorkWhenTheSourceObservationStalls(t *testin
 		t.Fatal(err)
 	}
 	if observed.TerminalSourceState == nil || *observed.TerminalSourceState != "unreadable" {
-		t.Fatalf("stalled observation recorded %v, want unreadable", observed.TerminalSourceState)
+		t.Fatalf("stalled observation recorded %v, want unreadable", deref(observed.TerminalSourceState))
 	}
 }
 

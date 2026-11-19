@@ -90,10 +90,10 @@ func assertCompletedRerunFixture(t *testing.T, h *Harness, run *ipc.RunInfo, wan
 	}
 	intent := readRunIntent(t, h.NMHome, run.ID)
 	if intent.summary == nil || *intent.summary != wantIntent {
-		t.Fatalf("run %s intent=%v, want %q", run.ID, intent.summary, wantIntent)
+		t.Fatalf("run %s intent=%v, want %q", run.ID, deref(intent.summary), wantIntent)
 	}
 	if intent.source == nil || *intent.source != wantSource {
-		t.Fatalf("run %s intent_source=%v, want %q", run.ID, intent.source, wantSource)
+		t.Fatalf("run %s intent_source=%v, want %q", run.ID, deref(intent.source), wantSource)
 	}
 	t.Logf("persisted run %s: intent_source=%q intent=%q", run.ID, *intent.source, *intent.summary)
 }

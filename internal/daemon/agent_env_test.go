@@ -205,7 +205,7 @@ func TestStartRunGivesTheAgentEnvToTheRunStartedWithItAndToNoOtherRun(t *testing
 			t.Fatalf("%s: start run: %v", tc.name, err)
 		}
 		if run := waitForRunTerminalState(t, database, runID); run.Status != types.RunCompleted {
-			t.Fatalf("%s: run status = %s, error = %v", tc.name, run.Status, run.Error)
+			t.Fatalf("%s: run status = %s, error = %v", tc.name, run.Status, deref(run.Error))
 		}
 
 		if got := readCapturedAgentEnv(t, capturePath); got != tc.wantSeen {
@@ -264,7 +264,7 @@ func TestFreshLaunchReplayKeepsTheRecordedAgentEnv(t *testing.T) {
 		t.Fatalf("fresh launch: %v", err)
 	}
 	if run := waitForRunTerminalState(t, database, receipt.RunID); run.Status != types.RunCompleted {
-		t.Fatalf("run status = %s, error = %v", run.Status, run.Error)
+		t.Fatalf("run status = %s, error = %v", run.Status, deref(run.Error))
 	}
 
 	params.AgentEnv = map[string]string{"UV_EXCLUDE_NEWER": "2026-11-02T00:00:00Z"}
@@ -422,7 +422,7 @@ func TestValidationChildrenRunTheirAgentsWithThePredecessorsAgentEnv(t *testing.
 					t.Fatalf("launch the child: %v", err)
 				}
 				if child := waitForRunTerminalState(t, database, runID); child.Status != types.RunCompleted {
-					t.Fatalf("child status = %s, error = %v", child.Status, child.Error)
+					t.Fatalf("child status = %s, error = %v", child.Status, deref(child.Error))
 				}
 
 				if got := readCapturedAgentEnv(t, capturePath); got != tc.want {

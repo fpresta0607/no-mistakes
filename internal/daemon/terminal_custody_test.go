@@ -294,7 +294,7 @@ func TestTerminalCleanupPreservesCommittedCorrectionsBeforeAdoption(t *testing.T
 					t.Fatal(err)
 				}
 				if observed.Run.TerminalSourceState == nil || *observed.Run.TerminalSourceState != "clean:"+candidate {
-					t.Fatalf("committed correction has no exact clean observation: %+v", observed.Run.TerminalSourceState)
+					t.Fatalf("committed correction has no exact clean observation: %+v", deref(observed.Run.TerminalSourceState))
 				}
 				before.Run.TerminalSourceState = observed.Run.TerminalSourceState
 				if !reflect.DeepEqual(before, observed) {
@@ -461,7 +461,7 @@ func TestTerminalCleanupReleasesSourceContinuationCanNeverAccept(t *testing.T) {
 				t.Fatalf("cleanup scanned source no continuation can accept: %q", *current.TerminalSourceState)
 			}
 			if !test.shouldRemove && (current.TerminalSourceState == nil || *current.TerminalSourceState != "dirty:"+head) {
-				t.Fatalf("continuable source observation = %v, want dirty:%s", current.TerminalSourceState, head)
+				t.Fatalf("continuable source observation = %v, want dirty:%s", deref(current.TerminalSourceState), head)
 			}
 		})
 	}

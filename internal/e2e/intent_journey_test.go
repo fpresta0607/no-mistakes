@@ -74,7 +74,7 @@ func TestIntentJourney(t *testing.T) {
 		t.Errorf("runs.intent = %q, want it to contain 'Bar()'", *intent.summary)
 	}
 	if intent.source == nil || *intent.source != "claude" {
-		t.Errorf("runs.intent_source = %v, want 'claude'", intent.source)
+		t.Errorf("runs.intent_source = %v, want 'claude'", deref(intent.source))
 	}
 	if intent.score == nil || *intent.score <= 0 {
 		t.Errorf("runs.intent_score = %v, want > 0", intent.score)

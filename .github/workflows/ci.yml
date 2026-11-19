@@ -33,6 +33,9 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Vet formatted string pointers
+        run: make vet-stringptr
+
   test:
     name: ${{ matrix.name }}
     strategy:

@@ -58,10 +58,10 @@ func TestRunInsertAndUpdatePreserveBuildIdentity(t *testing.T) {
 		t.Fatalf("get run: %v", err)
 	}
 	if got.NoMistakesVersion == nil || *got.NoMistakesVersion != buildinfo.CurrentVersion() {
-		t.Fatalf("no-mistakes version = %v, want %q", got.NoMistakesVersion, buildinfo.CurrentVersion())
+		t.Fatalf("no-mistakes version = %v, want %q", deref(got.NoMistakesVersion), buildinfo.CurrentVersion())
 	}
 	if got.NoMistakesBuildSHA == nil || *got.NoMistakesBuildSHA != buildinfo.Commit {
-		t.Fatalf("no-mistakes build SHA = %v, want %q", got.NoMistakesBuildSHA, buildinfo.Commit)
+		t.Fatalf("no-mistakes build SHA = %v, want %q", deref(got.NoMistakesBuildSHA), buildinfo.Commit)
 	}
 }
 
@@ -377,13 +377,13 @@ func TestInsertRunWithIntent(t *testing.T) {
 		t.Fatalf("get run: %v", err)
 	}
 	if got.Intent == nil || *got.Intent != intent.Summary {
-		t.Fatalf("intent = %v, want %q", got.Intent, intent.Summary)
+		t.Fatalf("intent = %v, want %q", deref(got.Intent), intent.Summary)
 	}
 	if got.IntentSource == nil || *got.IntentSource != intent.Source {
-		t.Fatalf("intent source = %v, want %q", got.IntentSource, intent.Source)
+		t.Fatalf("intent source = %v, want %q", deref(got.IntentSource), intent.Source)
 	}
 	if got.PRBaseBranch == nil || *got.PRBaseBranch != "epic/feature" {
-		t.Fatalf("PRBaseBranch = %#v, want epic/feature", got.PRBaseBranch)
+		t.Fatalf("PRBaseBranch = %#v, want epic/feature", deref(got.PRBaseBranch))
 	}
 }
 
@@ -471,7 +471,7 @@ func TestClaimLaunchReceiptRejectsMismatchedPRBaseBranch(t *testing.T) {
 		t.Fatalf("matching base claim = %#v, claimed=%v, err=%v", first, claimed, err)
 	}
 	if first.PRBaseBranch == nil || *first.PRBaseBranch != prBaseBranch {
-		t.Fatalf("claimed PR base branch = %#v, want %q", first.PRBaseBranch, prBaseBranch)
+		t.Fatalf("claimed PR base branch = %#v, want %q", deref(first.PRBaseBranch), prBaseBranch)
 	}
 	replay, claimed, err := d.ClaimLaunchReceipt(repo.ID, "feature", "nonce-base", "head", generation, intentDigest, "", false)
 	if err != nil || claimed || replay == nil || replay.ID != run.ID {
@@ -646,7 +646,7 @@ func TestRunPRTextRoundTripAndClaimMatching(t *testing.T) {
 		t.Fatal(err)
 	}
 	if stored.PRTitle == nil || *stored.PRTitle != text.Title || stored.PRBody == nil || *stored.PRBody != text.Body {
-		t.Fatalf("stored PR text = %v / %v", stored.PRTitle, stored.PRBody)
+		t.Fatalf("stored PR text = %v / %v", deref(stored.PRTitle), deref(stored.PRBody))
 	}
 	plain, err := d.InsertRun(repo.ID, "other", "head", "base")
 	if err != nil {
@@ -933,10 +933,10 @@ func TestRecoverStaleRunsMarksCIMonitorInterrupted(t *testing.T) {
 		t.Fatal("a terminal interrupted monitor must not retain an active publisher")
 	}
 	if got.Error == nil || *got.Error != types.RunCIMonitorInterruptedReason {
-		t.Fatalf("run error = %v, want ci monitor interrupted message", got.Error)
+		t.Fatalf("run error = %v, want ci monitor interrupted message", deref(got.Error))
 	}
 	if got.PRURL == nil || *got.PRURL != prURL {
-		t.Fatalf("PR URL = %v, want %q", got.PRURL, prURL)
+		t.Fatalf("PR URL = %v, want %q", deref(got.PRURL), prURL)
 	}
 
 	step, err := d.GetStepResult(ciStep.ID)
@@ -976,7 +976,7 @@ func TestRecoverStaleRunsCIWithoutPRURLFallsBackToFailed(t *testing.T) {
 		t.Fatalf("run status = %q, want %q", got.Status, types.RunFailed)
 	}
 	if got.Error == nil || *got.Error != "daemon crashed" {
-		t.Fatalf("run error = %v, want daemon crashed", got.Error)
+		t.Fatalf("run error = %v, want daemon crashed", deref(got.Error))
 	}
 
 	step, err := d.GetStepResult(ciStep.ID)
@@ -1398,10 +1398,10 @@ func TestRunPushBindingIsForwardOnlyAndLegacyRowsStayNullable(t *testing.T) {
 		t.Fatalf("push binding = %#v", got)
 	}
 	if got.PushTargetFingerprint == nil || *got.PushTargetFingerprint != "digest-only" {
-		t.Fatalf("target fingerprint = %#v", got.PushTargetFingerprint)
+		t.Fatalf("target fingerprint = %#v", deref(got.PushTargetFingerprint))
 	}
 	if got.SubmittedHeadSHA == nil || *got.SubmittedHeadSHA != "submitted" {
-		t.Fatalf("submitted head was mutated: %#v", got.SubmittedHeadSHA)
+		t.Fatalf("submitted head was mutated: %#v", deref(got.SubmittedHeadSHA))
 	}
 }
 
@@ -1457,7 +1457,7 @@ func TestUpdateRunPRURL(t *testing.T) {
 	}
 	got, _ := d.GetRun(run.ID)
 	if got.PRURL == nil || *got.PRURL != prURL {
-		t.Errorf("pr url = %v, want %q", got.PRURL, prURL)
+		t.Errorf("pr url = %v, want %q", deref(got.PRURL), prURL)
 	}
 }
 
@@ -1487,7 +1487,7 @@ func TestUpdateRunPRStateFinalizesActiveTerminalOutcomes(t *testing.T) {
 
 			got, _ := d.GetRun(run.ID)
 			if got.Status != types.RunCompleted || got.PRState == nil || *got.PRState != state {
-				t.Fatalf("terminal PR run = status %s pr_state %v, want completed/%s", got.Status, got.PRState, state)
+				t.Fatalf("terminal PR run = status %s pr_state %v, want completed/%s", got.Status, deref(got.PRState), state)
 			}
 			if got.AwaitingAgentSince != nil || got.PushActive {
 				t.Fatalf("terminal PR run retained active markers: awaiting=%v push_active=%t", got.AwaitingAgentSince, got.PushActive)
@@ -1527,7 +1527,7 @@ func TestUpdateRunPRStateKeepsOpenRunActive(t *testing.T) {
 	}
 	got, _ := d.GetRun(run.ID)
 	if got.Status != types.RunRunning || got.PRState == nil || *got.PRState != "open" {
-		t.Fatalf("open PR run = status %s pr_state %v, want running/open", got.Status, got.PRState)
+		t.Fatalf("open PR run = status %s pr_state %v, want running/open", got.Status, deref(got.PRState))
 	}
 }
 
@@ -1548,7 +1548,7 @@ func TestUpdateRunPRStateIgnoresDuplicateAndDelayedRegressions(t *testing.T) {
 	}
 	got, _ := d.GetRun(run.ID)
 	if got.Status != types.RunCompleted || got.PRState == nil || *got.PRState != "merged" {
-		t.Fatalf("duplicate/delayed PR observations regressed run: status=%s pr_state=%v", got.Status, got.PRState)
+		t.Fatalf("duplicate/delayed PR observations regressed run: status=%s pr_state=%v", got.Status, deref(got.PRState))
 	}
 	active, _ := d.GetActiveRuns()
 	if len(active) != 0 {
@@ -1573,7 +1573,7 @@ func TestUpdateRunPRStateDoesNotRewriteAlreadyTerminalStatus(t *testing.T) {
 				t.Fatalf("status = %s, want preserved %s", got.Status, status)
 			}
 			if got.Error == nil || *got.Error != "original terminal outcome" {
-				t.Fatalf("terminal error changed: %v", got.Error)
+				t.Fatalf("terminal error changed: %v", deref(got.Error))
 			}
 		})
 	}
@@ -1629,7 +1629,7 @@ func TestUpdateRunReviewApprovedHeadSHAReplacesAuthority(t *testing.T) {
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
 	run, _ := d.InsertRun(repo.ID, "feature", "mutable", "base")
 	if run.ReviewApprovedHeadSHA != nil {
-		t.Fatalf("new run inferred review authority: %#v", run.ReviewApprovedHeadSHA)
+		t.Fatalf("new run inferred review authority: %#v", deref(run.ReviewApprovedHeadSHA))
 	}
 	if err := d.UpdateRunReviewApprovedHeadSHA(run.ID, "reviewed-1"); err != nil {
 		t.Fatal(err)
@@ -1642,7 +1642,7 @@ func TestUpdateRunReviewApprovedHeadSHAReplacesAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.ReviewApprovedHeadSHA == nil || *got.ReviewApprovedHeadSHA != "reviewed-2" {
-		t.Fatalf("review-approved head = %#v, want reviewed-2", got.ReviewApprovedHeadSHA)
+		t.Fatalf("review-approved head = %#v, want reviewed-2", deref(got.ReviewApprovedHeadSHA))
 	}
 	if got.HeadSHA != "mutable" {
 		t.Fatalf("review authority update mutated run head to %s", got.HeadSHA)
@@ -1665,7 +1665,7 @@ func TestUpdateRunHeadSHA(t *testing.T) {
 		t.Errorf("head sha = %q, want %q", got.HeadSHA, "xyz")
 	}
 	if got.ReviewApprovedHeadSHA == nil || *got.ReviewApprovedHeadSHA != "abc" {
-		t.Fatalf("ordinary head update cleared review authority: %#v", got.ReviewApprovedHeadSHA)
+		t.Fatalf("ordinary head update cleared review authority: %#v", deref(got.ReviewApprovedHeadSHA))
 	}
 }
 
@@ -1696,7 +1696,7 @@ func TestUpdateRunError(t *testing.T) {
 	}
 	got, _ := d.GetRun(run.ID)
 	if got.Error == nil || *got.Error != "something broke" {
-		t.Errorf("error = %v, want %q", got.Error, "something broke")
+		t.Errorf("error = %v, want %q", deref(got.Error), "something broke")
 	}
 	if got.Status != types.RunFailed {
 		t.Errorf("status = %q, want %q", got.Status, types.RunFailed)
@@ -1747,7 +1747,7 @@ func TestRecoverStaleRunsMarksRunsFailed(t *testing.T) {
 		t.Errorf("pending run status = %q, want %q", got.Status, types.RunFailed)
 	}
 	if got.Error == nil || *got.Error != "daemon crashed" {
-		t.Errorf("pending run error = %v, want %q", got.Error, "daemon crashed")
+		t.Errorf("pending run error = %v, want %q", deref(got.Error), "daemon crashed")
 	}
 
 	got, _ = d.GetRun(runningRun.ID)
@@ -2118,7 +2118,7 @@ func TestRecoverStaleRunsCompletedCI(t *testing.T) {
 					t.Fatalf("status = %s, want %s", got.Status, tc.want)
 				}
 				if tc.want == types.RunChecksPassed && got.Error != nil {
-					t.Fatalf("successful run error = %v", got.Error)
+					t.Fatalf("successful run error = %v", deref(got.Error))
 				}
 				if tc.completed {
 					after, err := d.GetStepResult(ci.ID)
@@ -2132,4 +2132,13 @@ func TestRecoverStaleRunsCompletedCI(t *testing.T) {
 			}
 		})
 	}
+}
+
+// deref returns the text a *string holds, or "" for nil, so a failure message
+// prints the text rather than the pointer's address.
+func deref(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }

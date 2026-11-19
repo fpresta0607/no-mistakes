@@ -193,7 +193,7 @@ func TestAxiRunLineageCheckReadsTheLivePR(t *testing.T) {
 				t.Fatal(err)
 			}
 			if run.PRState == nil || *run.PRState != test.wantRecorded {
-				t.Fatalf("recorded PR state = %v, want %q", run.PRState, test.wantRecorded)
+				t.Fatalf("recorded PR state = %v, want %q", deref(run.PRState), test.wantRecorded)
 			}
 		})
 	}
@@ -303,7 +303,7 @@ func TestAuthoredLineageEndsWhenTheChildsPRWasMergedAtAnotherHead(t *testing.T) 
 				t.Fatalf("child head = %s, want the seeded %s", run.HeadSHA, childHead)
 			}
 			if run.PRState == nil || *run.PRState != test.wantRecorded {
-				t.Fatalf("recorded PR state = %v, want %q", run.PRState, test.wantRecorded)
+				t.Fatalf("recorded PR state = %v, want %q", deref(run.PRState), test.wantRecorded)
 			}
 		})
 	}

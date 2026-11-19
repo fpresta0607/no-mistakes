@@ -110,10 +110,10 @@ func TestSubscribeMalformedEvent(t *testing.T) {
 		t.Fatalf("got %d events, want 2 (malformed should be skipped)", len(events))
 	}
 	if events[0].Status == nil || *events[0].Status != "first" {
-		t.Errorf("event 0 status = %v, want 'first'", events[0].Status)
+		t.Errorf("event 0 status = %v, want 'first'", deref(events[0].Status))
 	}
 	if events[1].Status == nil || *events[1].Status != "second" {
-		t.Errorf("event 1 status = %v, want 'second'", events[1].Status)
+		t.Errorf("event 1 status = %v, want 'second'", deref(events[1].Status))
 	}
 }
 
@@ -193,7 +193,7 @@ func TestSubscribeClient(t *testing.T) {
 			t.Errorf("event %d: runID=%q, want %q", i, event.RunID, "run123")
 		}
 		if event.Status == nil || *event.Status != wantStatus {
-			t.Errorf("event %d: status=%v, want %q", i, event.Status, wantStatus)
+			t.Errorf("event %d: status=%v, want %q", i, deref(event.Status), wantStatus)
 		}
 	}
 }
@@ -313,4 +313,13 @@ func TestSubscribeBoundedFramesDeliverThroughTerminalEvent(t *testing.T) {
 	if lastRev != 10 {
 		t.Fatalf("terminal StateRev = %d, want 10", lastRev)
 	}
+}
+
+// deref returns the text a *string holds, or "" for nil, so a failure message
+// prints the text rather than the pointer's address.
+func deref(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }

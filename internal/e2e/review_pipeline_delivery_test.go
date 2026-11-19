@@ -190,7 +190,7 @@ func TestReviewPipelineOwnedPRCriterionDoesNotPark(t *testing.T) {
 		}
 	}
 	if completed.PRURL == nil || *completed.PRURL != "https://github.com/example/no-mistakes/pull/99" {
-		t.Fatalf("PR URL = %v, want created PR URL", completed.PRURL)
+		t.Fatalf("PR URL = %v, want created PR URL", deref(completed.PRURL))
 	}
 	invocations := readGHStubInvocations(t, ghLog)
 	for _, want := range [][]string{{"pr", "create"}, {"pr", "view"}} {

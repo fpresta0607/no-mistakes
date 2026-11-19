@@ -40,7 +40,7 @@ func TestRunStartRefreshesCloneURLWithoutMutatingRemotes(t *testing.T) {
 		t.Fatalf("start run: %v", err)
 	}
 	if run := waitForRunTerminalState(t, database, runID); run.Status != types.RunCompleted {
-		t.Fatalf("run status = %s, error = %v", run.Status, run.Error)
+		t.Fatalf("run status = %s, error = %v", run.Status, deref(run.Error))
 	}
 
 	got := <-seen
@@ -147,7 +147,7 @@ func TestRunStartURLRefreshFailuresWarnSafelyAndContinueWithOldRegistration(t *t
 				t.Fatalf("ordinary run did not continue: %v\nlogs: %s", err, logs.String())
 			}
 			if run := waitForRunTerminalState(t, database, runID); run.Status != types.RunCompleted {
-				t.Fatalf("run status = %s, error = %v\nlogs: %s", run.Status, run.Error, logs.String())
+				t.Fatalf("run status = %s, error = %v\nlogs: %s", run.Status, deref(run.Error), logs.String())
 			}
 			pipelineRepo := <-seen
 			if pipelineRepo.UpstreamURL != before.UpstreamURL || pipelineRepo.ForkURL != before.ForkURL || pipelineRepo.URLsVerified {

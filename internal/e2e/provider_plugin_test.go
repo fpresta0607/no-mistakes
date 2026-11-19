@@ -65,7 +65,7 @@ func TestProviderPluginJourney(t *testing.T) {
 	}
 	wantURL := "https://" + pluginHost + "/" + repoPath + "/pulls/1"
 	if run.PRURL == nil || *run.PRURL != wantURL {
-		t.Fatalf("PR URL = %v, want %s", run.PRURL, wantURL)
+		t.Fatalf("PR URL = %v, want %s", deref(run.PRURL), wantURL)
 	}
 
 	state, err := fakeplugin.Load(statePath)

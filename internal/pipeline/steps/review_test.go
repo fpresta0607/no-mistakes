@@ -530,7 +530,7 @@ func TestReviewStep_ProgressWithoutTerminalCompletionCannotPublish(t *testing.T)
 		t.Fatal(err)
 	}
 	if run.ReviewApprovedHeadSHA != nil {
-		t.Fatalf("progress-only review gained approval authority: %#v", run.ReviewApprovedHeadSHA)
+		t.Fatalf("progress-only review gained approval authority: %#v", deref(run.ReviewApprovedHeadSHA))
 	}
 	if run.Error == nil {
 		t.Fatal("durable timeout error is nil")

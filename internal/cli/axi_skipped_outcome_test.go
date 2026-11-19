@@ -72,7 +72,7 @@ func TestAxiOutcomeProviderUnavailableSkips(t *testing.T) {
 	}
 	for _, result := range results {
 		if result.SkipReason == nil || !strings.Contains(*result.SkipReason, "glab") {
-			t.Fatalf("%s lost the provider skip cause: %v", result.StepName, result.SkipReason)
+			t.Fatalf("%s lost the provider skip cause: %v", result.StepName, deref(result.SkipReason))
 		}
 	}
 	chdir(t, dir)

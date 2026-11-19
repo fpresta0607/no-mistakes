@@ -250,7 +250,7 @@ func TestReviewLoop_RepairAtItsBudgetParksWithItsWorkKept(t *testing.T) {
 			<-r.done
 
 			if stored.Status != types.RunRunning || stored.Error != nil {
-				t.Fatalf("run = %s, error %v, want it parked and not failed", stored.Status, stored.Error)
+				t.Fatalf("run = %s, error %v, want it parked and not failed", stored.Status, deref(stored.Error))
 			}
 			if !strings.Contains(notice.Description, tc.wantBound) {
 				t.Errorf("notice = %q, want the bound %q that cut the turn", notice.Description, tc.wantBound)
