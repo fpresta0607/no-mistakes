@@ -75,7 +75,7 @@ func TestObserveTerminalPRStateProvesTheMergeAtTheLastPublishedHead(t *testing.T
 				t.Fatal(err)
 			}
 			if run.PRState == nil || *run.PRState != test.wantRecorded {
-				t.Fatalf("recorded PR state = %v, want %q", run.PRState, test.wantRecorded)
+				t.Fatalf("recorded PR state = %v, want %q", deref(run.PRState), test.wantRecorded)
 			}
 		})
 	}

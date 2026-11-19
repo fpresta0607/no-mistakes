@@ -50,7 +50,7 @@ func TestExecutor_FixEmitsFixReviewStatusWithoutStreamingTheDiff(t *testing.T) {
 	// Verify initial event has awaiting_approval status
 	initialEvent := waitForStepEvent(t, events, ipc.EventStepCompleted, types.StepReview)
 	if initialEvent.Status == nil || *initialEvent.Status != string(types.StepStatusAwaitingApproval) {
-		t.Errorf("expected awaiting_approval status, got %v", initialEvent.Status)
+		t.Errorf("expected awaiting_approval status, got %v", derefString(initialEvent.Status))
 	}
 
 	// Send fix action
@@ -62,7 +62,7 @@ func TestExecutor_FixEmitsFixReviewStatusWithoutStreamingTheDiff(t *testing.T) {
 	// oversized frame would break the whole subscription.
 	fixEvent := waitForEvent(t, events, ipc.EventStepCompleted, string(types.StepStatusFixReview))
 	if fixEvent.StepName == nil || *fixEvent.StepName != types.StepReview {
-		t.Errorf("fix_review event step = %v, want review", fixEvent.StepName)
+		t.Errorf("fix_review event step = %v, want review", derefString((*string)(fixEvent.StepName)))
 	}
 	if encoded, err := json.Marshal(fixEvent); err != nil {
 		t.Fatal(err)
@@ -252,7 +252,7 @@ func TestExecutor_FixReviewNoChanges(t *testing.T) {
 
 	fixEvent := waitForEvent(t, events, ipc.EventStepCompleted, string(types.StepStatusFixReview))
 	if fixEvent.Status == nil || *fixEvent.Status != string(types.StepStatusFixReview) {
-		t.Errorf("expected fix_review status, got %v", fixEvent.Status)
+		t.Errorf("expected fix_review status, got %v", derefString(fixEvent.Status))
 	}
 
 	exec.Respond(types.StepReview, types.ActionApprove, nil)
@@ -788,7 +788,7 @@ func TestExecutor_UserFixRecordsSelectedFindingIDsAndFixSummary(t *testing.T) {
 	}
 
 	if rounds[1].FixSummary == nil || *rounds[1].FixSummary != "fix the warning" {
-		t.Fatalf("expected fix_summary %q on round 2, got %v", "fix the warning", rounds[1].FixSummary)
+		t.Fatalf("expected fix_summary %q on round 2, got %v", "fix the warning", derefString(rounds[1].FixSummary))
 	}
 }
 
@@ -843,10 +843,10 @@ func TestExecutor_AutoFixRecordsSelectedFindingIDs(t *testing.T) {
 		t.Fatalf("expected only auto-fixable id to be recorded, got %v", ids)
 	}
 	if rounds[1].FixSummary == nil || *rounds[1].FixSummary != "apply cheap fix" {
-		t.Fatalf("expected fix_summary persisted on round 2, got %v", rounds[1].FixSummary)
+		t.Fatalf("expected fix_summary persisted on round 2, got %v", derefString(rounds[1].FixSummary))
 	}
 	if dbSteps[0].FindingsJSON == nil || !strings.Contains(*dbSteps[0].FindingsJSON, "review-2") {
-		t.Fatalf("expected the undecided ask-user finding to stay outstanding, got %v", dbSteps[0].FindingsJSON)
+		t.Fatalf("expected the undecided ask-user finding to stay outstanding, got %v", derefString(dbSteps[0].FindingsJSON))
 	}
 
 	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {

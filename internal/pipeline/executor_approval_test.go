@@ -290,7 +290,7 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 		t.Fatalf("recovered run = status %s awaiting %v, want completed and unparked", resumed.Status, resumed.AwaitingAgentSince)
 	}
 	if resumed.ReviewApprovedHeadSHA == nil || *resumed.ReviewApprovedHeadSHA != "2222222222222222222222222222222222222222" {
-		t.Fatalf("recovered rereview approval = %#v", resumed.ReviewApprovedHeadSHA)
+		t.Fatalf("recovered rereview approval = %#v", derefString(resumed.ReviewApprovedHeadSHA))
 	}
 }
 
@@ -347,7 +347,7 @@ func TestExecutor_ResumePromotesDurableReviewedCandidateOnApproval(t *testing.T)
 		t.Fatal(err)
 	}
 	if got.ReviewApprovedHeadSHA == nil || *got.ReviewApprovedHeadSHA != reviewedHead {
-		t.Fatalf("recovered approval = %#v, want %s", got.ReviewApprovedHeadSHA, reviewedHead)
+		t.Fatalf("recovered approval = %#v, want %s", derefString(got.ReviewApprovedHeadSHA), reviewedHead)
 	}
 }
 

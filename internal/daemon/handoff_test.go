@@ -205,7 +205,7 @@ func TestHandleHandoffPRCloseRefusesAndContinues(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Status != types.RunCompleted || got.PRState == nil || *got.PRState != "closed" {
-		t.Fatalf("run = status %s, PR state %v; want completed/closed", got.Status, got.PRState)
+		t.Fatalf("run = status %s, PR state %v; want completed/closed", got.Status, deref(got.PRState))
 	}
 }
 

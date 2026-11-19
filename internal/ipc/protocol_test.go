@@ -293,13 +293,13 @@ func TestRunInfoRoundTrip(t *testing.T) {
 		t.Errorf("mismatch: got %+v", got)
 	}
 	if got.PRURL == nil || *got.PRURL != prURL {
-		t.Errorf("pr_url = %v, want %q", got.PRURL, prURL)
+		t.Errorf("pr_url = %v, want %q", deref(got.PRURL), prURL)
 	}
 	if got.SubmittedHeadSHA == nil || *got.SubmittedHeadSHA != submittedHead {
-		t.Errorf("submitted_head_sha = %v, want %q", got.SubmittedHeadSHA, submittedHead)
+		t.Errorf("submitted_head_sha = %v, want %q", deref(got.SubmittedHeadSHA), submittedHead)
 	}
 	if got.PRBaseBranch != nil {
-		t.Errorf("pr_base_branch = %v, want nil when omitted", got.PRBaseBranch)
+		t.Errorf("pr_base_branch = %v, want nil when omitted", deref(got.PRBaseBranch))
 	}
 }
 
@@ -401,7 +401,7 @@ func TestEventTypes(t *testing.T) {
 			}
 			if tt.event.Error != nil {
 				if got.Error == nil || *got.Error != *tt.event.Error {
-					t.Errorf("error = %v, want %q", got.Error, *tt.event.Error)
+					t.Errorf("error = %v, want %q", deref(got.Error), *tt.event.Error)
 				}
 			}
 		})
@@ -534,3 +534,12 @@ func TestRPCErrorError(t *testing.T) {
 
 func ptrStr(s string) *string                      { return &s }
 func ptrStepName(s types.StepName) *types.StepName { return &s }
+
+// deref returns the text a *string holds, or "" for nil, so a failure message
+// prints the text rather than the pointer's address.
+func deref(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}

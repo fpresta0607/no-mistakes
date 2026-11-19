@@ -780,7 +780,7 @@ func TestPushStep_TargetsForkWhenConfigured(t *testing.T) {
 		t.Fatalf("fork push binding = %#v", dbRun)
 	}
 	if dbRun.PushTargetFingerprint == nil || strings.Contains(*dbRun.PushTargetFingerprint, fork) {
-		t.Fatalf("push target fingerprint persisted a URL: %#v", dbRun.PushTargetFingerprint)
+		t.Fatalf("push target fingerprint persisted a URL: %#v", deref(dbRun.PushTargetFingerprint))
 	}
 }
 

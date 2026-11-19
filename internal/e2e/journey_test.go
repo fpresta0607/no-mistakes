@@ -1927,7 +1927,7 @@ func assertReviewWarningRun(t *testing.T, h *Harness) {
 		t.Fatal("expected GetRun IPC to include review step")
 	}
 	if fetchedReviewStep.FindingsJSON == nil || *fetchedReviewStep.FindingsJSON != *reviewStep.FindingsJSON {
-		t.Fatalf("GetRun IPC findings JSON = %v, want %q", fetchedReviewStep.FindingsJSON, *reviewStep.FindingsJSON)
+		t.Fatalf("GetRun IPC findings JSON = %v, want %q", deref(fetchedReviewStep.FindingsJSON), *reviewStep.FindingsJSON)
 	}
 	if !sawPromptContainingAll(h.AgentInvocations(), "Review the code changes", "branch: review-warning") {
 		t.Fatal("review-warning run should call the agent for review")

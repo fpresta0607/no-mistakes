@@ -160,7 +160,7 @@ func TestLoadRepo_PRTitleFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.PR.TitleFormat == nil || *cfg.PR.TitleFormat != "{{.Branch}}: {{.Title}}" {
-		t.Fatalf("pr.title_format = %v, want configured format", cfg.PR.TitleFormat)
+		t.Fatalf("pr.title_format = %v, want configured format", deref(cfg.PR.TitleFormat))
 	}
 }
 
@@ -195,7 +195,7 @@ func TestEffectiveRepoConfig_TitleFormatIsPushedReadable(t *testing.T) {
 
 	got := EffectiveRepoConfig(pushed, trusted, false)
 	if got.PR.TitleFormat == nil || *got.PR.TitleFormat != pushedFormat {
-		t.Fatalf("effective title_format = %v, want pushed format", got.PR.TitleFormat)
+		t.Fatalf("effective title_format = %v, want pushed format", deref(got.PR.TitleFormat))
 	}
 	if got.PR.BaseBranch != "develop" {
 		t.Fatalf("effective base_branch = %q, want trusted branch", got.PR.BaseBranch)

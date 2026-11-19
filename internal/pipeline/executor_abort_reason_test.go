@@ -71,7 +71,7 @@ func TestExecutor_AbortAtGateRecordsTheReasonAndStartsNoFixRound(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Status != types.RunFailed || got.Error == nil || *got.Error != "step review: "+wantStep {
-		t.Fatalf("run = %s / %v, want failed with the reason in its error", got.Status, got.Error)
+		t.Fatalf("run = %s / %v, want failed with the reason in its error", got.Status, derefString(got.Error))
 	}
 	steps, err := database.GetStepsByRun(run.ID)
 	if err != nil {
@@ -90,7 +90,7 @@ func TestExecutor_AbortAtGateRecordsTheReasonAndStartsNoFixRound(t *testing.T) {
 		t.Fatalf("%q is not recognised as an operator abort", *review.Error)
 	}
 	if review.FindingsJSON == nil || !strings.Contains(*review.FindingsJSON, "journal-version-deduplication") {
-		t.Fatalf("the rejected gate's findings were not kept: %v", review.FindingsJSON)
+		t.Fatalf("the rejected gate's findings were not kept: %v", derefString(review.FindingsJSON))
 	}
 	rounds, err := database.GetRoundsByStep(review.ID)
 	if err != nil {
@@ -100,7 +100,7 @@ func TestExecutor_AbortAtGateRecordsTheReasonAndStartsNoFixRound(t *testing.T) {
 		t.Fatalf("rounds = %d, want the one the gate parked on (no fix round)", len(rounds))
 	}
 	if rounds[0].SelectionSource == nil || *rounds[0].SelectionSource != db.RoundSelectionSourceUserDeclined {
-		t.Fatalf("selection_source = %v, want the round recorded as declined", rounds[0].SelectionSource)
+		t.Fatalf("selection_source = %v, want the round recorded as declined", derefString(rounds[0].SelectionSource))
 	}
 	if n := executed.Load(); n != 1 {
 		t.Fatalf("review ran %d times, want 1: a rejection must not start a fix round", n)
@@ -124,7 +124,7 @@ func TestExecutor_AbortAtGateWithoutAReasonKeepsTheExistingError(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Error == nil || *got.Error != "step review: aborted by user" {
-		t.Fatalf("run error = %v", got.Error)
+		t.Fatalf("run error = %v", derefString(got.Error))
 	}
 }
 
@@ -228,7 +228,7 @@ func TestExecutor_RecoveredGateAbortRecordsTheReason(t *testing.T) {
 	}
 	for _, s := range steps {
 		if s.StepName == types.StepTest && (s.Status != types.StepStatusFailed || s.Error == nil || *s.Error != "aborted by user: "+abortReason) {
-			t.Fatalf("recovered step = %s / %v", s.Status, s.Error)
+			t.Fatalf("recovered step = %s / %v", s.Status, derefString(s.Error))
 		}
 	}
 	got, err := database.GetRun(run.ID)
@@ -236,6 +236,6 @@ func TestExecutor_RecoveredGateAbortRecordsTheReason(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Status != types.RunFailed || got.Error == nil || !strings.Contains(*got.Error, abortReason) {
-		t.Fatalf("recovered run = %s / %v", got.Status, got.Error)
+		t.Fatalf("recovered run = %s / %v", got.Status, derefString(got.Error))
 	}
 }

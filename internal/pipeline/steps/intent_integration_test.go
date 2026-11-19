@@ -147,10 +147,10 @@ func TestIntentStep_Integration_AttachesSummaryToRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.Intent == nil || !strings.Contains(*got.Intent, "Bar()") {
-		t.Errorf("Intent not attached: %+v", got.Intent)
+		t.Errorf("Intent not attached: %+v", deref(got.Intent))
 	}
 	if got.IntentSource == nil || *got.IntentSource != "claude" {
-		t.Errorf("IntentSource = %v", got.IntentSource)
+		t.Errorf("IntentSource = %v", deref(got.IntentSource))
 	}
 	if got.IntentScore == nil || *got.IntentScore <= 0 {
 		t.Errorf("IntentScore = %v", got.IntentScore)
@@ -284,7 +284,7 @@ func TestIntentStep_Integration_DeletedFilesDoNotDiluteIntentMatch(t *testing.T)
 		t.Fatal("intent not attached")
 	}
 	if got.IntentSource == nil || *got.IntentSource != "claude" {
-		t.Fatalf("intent source = %v, want claude", got.IntentSource)
+		t.Fatalf("intent source = %v, want claude", deref(got.IntentSource))
 	}
 	if got.IntentScore == nil || *got.IntentScore < 1 {
 		t.Fatalf("intent score = %v, want full active.go match", got.IntentScore)

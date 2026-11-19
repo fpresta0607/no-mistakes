@@ -24,7 +24,7 @@ func TestExecutor_RecordsCompletedReviewApprovedHead(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got.ReviewApprovedHeadSHA == nil || *got.ReviewApprovedHeadSHA != reviewedHead {
-		t.Fatalf("review-approved head = %#v, want %s", got.ReviewApprovedHeadSHA, reviewedHead)
+		t.Fatalf("review-approved head = %#v, want %s", derefString(got.ReviewApprovedHeadSHA), reviewedHead)
 	}
 }
 
@@ -56,7 +56,7 @@ func TestExecutor_FullRereviewReplacesApprovalWithoutAuthorizingParkedRound(t *t
 		t.Fatal(err)
 	}
 	if parked.ReviewApprovedHeadSHA != nil {
-		t.Fatalf("parked review gained approval authority: %#v", parked.ReviewApprovedHeadSHA)
+		t.Fatalf("parked review gained approval authority: %#v", derefString(parked.ReviewApprovedHeadSHA))
 	}
 	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"r1"}); err != nil {
 		t.Fatal(err)
@@ -75,7 +75,7 @@ func TestExecutor_FullRereviewReplacesApprovalWithoutAuthorizingParkedRound(t *t
 		t.Fatal(err)
 	}
 	if got.ReviewApprovedHeadSHA == nil || *got.ReviewApprovedHeadSHA != rereviewedHead {
-		t.Fatalf("rereview approval = %#v, want %s", got.ReviewApprovedHeadSHA, rereviewedHead)
+		t.Fatalf("rereview approval = %#v, want %s", derefString(got.ReviewApprovedHeadSHA), rereviewedHead)
 	}
 }
 
@@ -100,7 +100,7 @@ func TestExecutor_ParkedOrFailedReviewDoesNotAdvanceExistingApproval(t *testing.
 		waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 		got, _ := database.GetRun(run.ID)
 		if got.ReviewApprovedHeadSHA == nil || *got.ReviewApprovedHeadSHA != existingHead {
-			t.Fatalf("parked review advanced approval: %#v", got.ReviewApprovedHeadSHA)
+			t.Fatalf("parked review advanced approval: %#v", derefString(got.ReviewApprovedHeadSHA))
 		}
 		if err := exec.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
 			t.Fatal(err)
@@ -108,7 +108,7 @@ func TestExecutor_ParkedOrFailedReviewDoesNotAdvanceExistingApproval(t *testing.
 		<-done
 		got, _ = database.GetRun(run.ID)
 		if got.ReviewApprovedHeadSHA == nil || *got.ReviewApprovedHeadSHA != existingHead {
-			t.Fatalf("aborted review advanced approval: %#v", got.ReviewApprovedHeadSHA)
+			t.Fatalf("aborted review advanced approval: %#v", derefString(got.ReviewApprovedHeadSHA))
 		}
 	})
 
@@ -124,7 +124,7 @@ func TestExecutor_ParkedOrFailedReviewDoesNotAdvanceExistingApproval(t *testing.
 		}
 		got, _ := database.GetRun(run.ID)
 		if got.ReviewApprovedHeadSHA == nil || *got.ReviewApprovedHeadSHA != existingHead {
-			t.Fatalf("failed review advanced approval: %#v", got.ReviewApprovedHeadSHA)
+			t.Fatalf("failed review advanced approval: %#v", derefString(got.ReviewApprovedHeadSHA))
 		}
 	})
 }

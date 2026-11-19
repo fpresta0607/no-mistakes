@@ -50,7 +50,7 @@ func TestSafetyRefusalBoundsGateAndEventsWhileKeepingFullLog(t *testing.T) {
 				continue
 			}
 			if event.Findings == nil || !HasSafetyRefusal(*event.Findings) || !strings.Contains(*event.Findings, "truncated") {
-				t.Fatalf("gate findings = %v, want a bounded refusal", event.Findings)
+				t.Fatalf("gate findings = %v, want a bounded refusal", derefString(event.Findings))
 			}
 			steps, err := database.GetStepsByRun(run.ID)
 			if err != nil || len(steps) != 1 {

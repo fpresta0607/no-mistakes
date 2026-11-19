@@ -26,13 +26,13 @@ func TestUpdateRunIntent_RoundTrip(t *testing.T) {
 
 	got, _ = d.GetRun(run.ID)
 	if got.Intent == nil || *got.Intent != "user wanted to add foo" {
-		t.Errorf("intent = %v, want %q", got.Intent, "user wanted to add foo")
+		t.Errorf("intent = %v, want %q", deref(got.Intent), "user wanted to add foo")
 	}
 	if got.IntentSource == nil || *got.IntentSource != "claude" {
-		t.Errorf("intent source = %v, want claude", got.IntentSource)
+		t.Errorf("intent source = %v, want claude", deref(got.IntentSource))
 	}
 	if got.IntentSessionID == nil || *got.IntentSessionID != "abc-123" {
-		t.Errorf("intent session = %v, want abc-123", got.IntentSessionID)
+		t.Errorf("intent session = %v, want abc-123", deref(got.IntentSessionID))
 	}
 	if got.IntentScore == nil || *got.IntentScore != 0.85 {
 		t.Errorf("intent score = %v, want 0.85", got.IntentScore)
@@ -52,7 +52,7 @@ func TestRunIntentCheckIsPinnedAndImmutable(t *testing.T) {
 	}
 	got, err := d.GetRun(run.ID)
 	if err != nil || got.IntentCheckJSON == nil || *got.IntentCheckJSON != policy {
-		t.Fatalf("pinned intent policy = %v, err = %v", got.IntentCheckJSON, err)
+		t.Fatalf("pinned intent policy = %v, err = %v", deref(got.IntentCheckJSON), err)
 	}
 	if err := d.SetRunIntentCheck(run.ID, `{"mode":"off"}`); err == nil {
 		t.Fatal("intent policy was overwritten")

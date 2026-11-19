@@ -120,7 +120,7 @@ func TestProviderPlugin_PRStepCreatesPRThroughPlugin(t *testing.T) {
 		t.Fatal(err)
 	}
 	if run.PRURL == nil || *run.PRURL != "https://git.example.com/team/repo/pulls/1" {
-		t.Fatalf("persisted PR URL = %v", run.PRURL)
+		t.Fatalf("persisted PR URL = %v", deref(run.PRURL))
 	}
 	ops := strings.Join(pluginOperations(t, logPath), ",")
 	if !strings.HasPrefix(ops, "status,pr find,pr create") {
@@ -185,7 +185,7 @@ func TestProviderPlugin_PRStepUpdatesExistingPR(t *testing.T) {
 		t.Fatal(err)
 	}
 	if run.PRURL == nil || *run.PRURL != "https://git.example.com/team/repo/pulls/7" {
-		t.Fatalf("persisted PR URL = %v", run.PRURL)
+		t.Fatalf("persisted PR URL = %v", deref(run.PRURL))
 	}
 	ops := pluginOperations(t, logPath)
 	for _, op := range ops {

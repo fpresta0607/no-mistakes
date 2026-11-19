@@ -369,7 +369,7 @@ func TestRecoverStaleRunsOnStartup(t *testing.T) {
 		t.Errorf("stale run status = %q, want %q", run.Status, types.RunFailed)
 	}
 	if run.Error == nil || *run.Error != "daemon crashed during execution" {
-		t.Errorf("stale run error = %v, want %q", run.Error, "daemon crashed during execution")
+		t.Errorf("stale run error = %v, want %q", deref(run.Error), "daemon crashed during execution")
 	}
 
 	// Verify the stale step was marked as failed.
@@ -430,7 +430,7 @@ func TestRecoverOnStartup_FinalizesLegacyTerminalPRRun(t *testing.T) {
 				t.Fatal(err)
 			}
 			if got.Status != types.RunCompleted || got.PRState == nil || *got.PRState != state {
-				t.Fatalf("startup reconciliation = status %s pr_state %v, want completed/%s", got.Status, got.PRState, state)
+				t.Fatalf("startup reconciliation = status %s pr_state %v, want completed/%s", got.Status, deref(got.PRState), state)
 			}
 			gotCI, err := database.GetStepResult(ci.ID)
 			if err != nil {
@@ -566,7 +566,7 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 		t.Fatal("recovered run remained parked after approval")
 	}
 	if completed.ReviewApprovedHeadSHA == nil || *completed.ReviewApprovedHeadSHA != headSHA {
-		t.Fatalf("recovered review approval = %#v, want %s", completed.ReviewApprovedHeadSHA, headSHA)
+		t.Fatalf("recovered review approval = %#v, want %s", deref(completed.ReviewApprovedHeadSHA), headSHA)
 	}
 	// The executor marks the run terminal before its owner goroutine performs
 	// worktree cleanup. Wait for that cleanup rather than assuming it completed
@@ -1068,7 +1068,7 @@ func TestRecoverOnStartup_FinalizesCommittedCI(t *testing.T) {
 				t.Fatal(err)
 			}
 			if got.Status != types.RunChecksPassed || got.PRState == nil || *got.PRState != state {
-				t.Fatalf("startup reconciliation = status %s pr_state %v, want checks_passed/%s", got.Status, got.PRState, state)
+				t.Fatalf("startup reconciliation = status %s pr_state %v, want checks_passed/%s", got.Status, deref(got.PRState), state)
 			}
 			gotCI, err := database.GetStepResult(ci.ID)
 			if err != nil {

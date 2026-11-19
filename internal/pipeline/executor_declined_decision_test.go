@@ -79,10 +79,10 @@ func TestExecutor_GateResolutionsWithoutASelectionRecordTheDecline(t *testing.T)
 			}
 			r := rounds[0]
 			if r.SelectionSource == nil || *r.SelectionSource != db.RoundSelectionSourceUserDeclined {
-				t.Fatalf("selection_source = %v, want %q", r.SelectionSource, db.RoundSelectionSourceUserDeclined)
+				t.Fatalf("selection_source = %v, want %q", derefString(r.SelectionSource), db.RoundSelectionSourceUserDeclined)
 			}
 			if r.SelectedFindingIDs == nil || *r.SelectedFindingIDs != db.DeclinedSelectionJSON {
-				t.Fatalf("selected_finding_ids = %v, want %q", r.SelectedFindingIDs, db.DeclinedSelectionJSON)
+				t.Fatalf("selected_finding_ids = %v, want %q", derefString(r.SelectedFindingIDs), db.DeclinedSelectionJSON)
 			}
 			// The decline must be derivable as the complement, which needs the
 			// round's findings to stay intact.
@@ -174,10 +174,10 @@ func TestExecutor_RecoveredGateResolutionsWithoutASelectionRecordTheDecline(t *t
 				t.Fatalf("expected 1 round, got %d", len(rounds))
 			}
 			if rounds[0].SelectionSource == nil || *rounds[0].SelectionSource != db.RoundSelectionSourceUserDeclined {
-				t.Fatalf("selection_source = %v, want %q", rounds[0].SelectionSource, db.RoundSelectionSourceUserDeclined)
+				t.Fatalf("selection_source = %v, want %q", derefString(rounds[0].SelectionSource), db.RoundSelectionSourceUserDeclined)
 			}
 			if rounds[0].SelectedFindingIDs == nil || *rounds[0].SelectedFindingIDs != db.DeclinedSelectionJSON {
-				t.Fatalf("selected_finding_ids = %v, want %q", rounds[0].SelectedFindingIDs, db.DeclinedSelectionJSON)
+				t.Fatalf("selected_finding_ids = %v, want %q", derefString(rounds[0].SelectedFindingIDs), db.DeclinedSelectionJSON)
 			}
 		})
 	}
@@ -268,10 +268,10 @@ func TestExecutor_RecoveredIgnoreOnlyResponseUpdatesDeclinedRoundOrigin(t *testi
 		t.Fatalf("round origin = %q, want %q", recoveredRound.ResponseOrigin, "auto_yes")
 	}
 	if recoveredRound.SelectionSource == nil || *recoveredRound.SelectionSource != db.RoundSelectionSourceUserDeclined {
-		t.Fatalf("selection_source = %v, want %q", recoveredRound.SelectionSource, db.RoundSelectionSourceUserDeclined)
+		t.Fatalf("selection_source = %v, want %q", derefString(recoveredRound.SelectionSource), db.RoundSelectionSourceUserDeclined)
 	}
 	if recoveredRound.SelectedFindingIDs == nil || *recoveredRound.SelectedFindingIDs != db.DeclinedSelectionJSON {
-		t.Fatalf("selected_finding_ids = %v, want %q", recoveredRound.SelectedFindingIDs, db.DeclinedSelectionJSON)
+		t.Fatalf("selected_finding_ids = %v, want %q", derefString(recoveredRound.SelectedFindingIDs), db.DeclinedSelectionJSON)
 	}
 }
 
@@ -332,9 +332,9 @@ func TestExecutor_FixResolutionStillRecordsAUserSelection(t *testing.T) {
 	}
 	r := rounds[0]
 	if r.SelectionSource == nil || *r.SelectionSource != db.RoundSelectionSourceUser {
-		t.Fatalf("selection_source = %v, want %q", r.SelectionSource, db.RoundSelectionSourceUser)
+		t.Fatalf("selection_source = %v, want %q", derefString(r.SelectionSource), db.RoundSelectionSourceUser)
 	}
 	if r.SelectedFindingIDs == nil || *r.SelectedFindingIDs == db.DeclinedSelectionJSON {
-		t.Fatalf("selected_finding_ids = %v, want the selected id", r.SelectedFindingIDs)
+		t.Fatalf("selected_finding_ids = %v, want the selected id", derefString(r.SelectedFindingIDs))
 	}
 }

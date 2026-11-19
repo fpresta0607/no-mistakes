@@ -24,7 +24,7 @@ func TestInsertReviewStepRoundPersistsNonAuthoritativeCandidate(t *testing.T) {
 	}
 	gotRun, _ := d.GetRun(run.ID)
 	if gotRun.ReviewApprovedHeadSHA != nil {
-		t.Fatalf("round candidate granted approval authority: %#v", gotRun.ReviewApprovedHeadSHA)
+		t.Fatalf("round candidate granted approval authority: %#v", deref(gotRun.ReviewApprovedHeadSHA))
 	}
 }
 
@@ -71,7 +71,7 @@ func TestStepRoundInsertAndGet(t *testing.T) {
 		t.Errorf("trigger = %q, want %q", r.Trigger, "initial")
 	}
 	if r.FindingsJSON == nil || *r.FindingsJSON != findings {
-		t.Errorf("findings = %v, want %q", r.FindingsJSON, findings)
+		t.Errorf("findings = %v, want %q", deref(r.FindingsJSON), findings)
 	}
 	if r.DurationMS != 1200 {
 		t.Errorf("duration_ms = %d, want 1200", r.DurationMS)
@@ -80,13 +80,13 @@ func TestStepRoundInsertAndGet(t *testing.T) {
 		t.Error("expected non-zero created_at")
 	}
 	if r.SelectedFindingIDs != nil {
-		t.Errorf("expected nil selected_finding_ids on fresh insert, got %v", r.SelectedFindingIDs)
+		t.Errorf("expected nil selected_finding_ids on fresh insert, got %v", deref(r.SelectedFindingIDs))
 	}
 	if r.SelectionSource != nil {
-		t.Errorf("expected nil selection_source on fresh insert, got %v", r.SelectionSource)
+		t.Errorf("expected nil selection_source on fresh insert, got %v", deref(r.SelectionSource))
 	}
 	if r.FixSummary != nil {
-		t.Errorf("expected nil fix_summary on non-fix round, got %v", r.FixSummary)
+		t.Errorf("expected nil fix_summary on non-fix round, got %v", deref(r.FixSummary))
 	}
 }
 
@@ -101,7 +101,7 @@ func TestStepRoundNullFindings(t *testing.T) {
 		t.Fatalf("insert round: %v", err)
 	}
 	if r.FindingsJSON != nil {
-		t.Errorf("findings = %v, want nil", r.FindingsJSON)
+		t.Errorf("findings = %v, want nil", deref(r.FindingsJSON))
 	}
 }
 
@@ -133,7 +133,7 @@ func TestGetRoundsByStep(t *testing.T) {
 		t.Fatal("expected non-nil findings on round 1")
 	}
 	if rounds[0].FixSummary != nil {
-		t.Errorf("expected nil fix_summary on initial round, got %v", rounds[0].FixSummary)
+		t.Errorf("expected nil fix_summary on initial round, got %v", deref(rounds[0].FixSummary))
 	}
 	if rounds[1].Round != 2 {
 		t.Errorf("second round = %d, want 2", rounds[1].Round)
@@ -142,10 +142,10 @@ func TestGetRoundsByStep(t *testing.T) {
 		t.Errorf("second trigger = %q, want auto_fix", rounds[1].Trigger)
 	}
 	if rounds[1].FindingsJSON != nil {
-		t.Errorf("expected nil findings on round 2, got %v", rounds[1].FindingsJSON)
+		t.Errorf("expected nil findings on round 2, got %v", deref(rounds[1].FindingsJSON))
 	}
 	if rounds[1].FixSummary == nil || *rounds[1].FixSummary != fixSummary {
-		t.Errorf("second fix_summary = %v, want %q", rounds[1].FixSummary, fixSummary)
+		t.Errorf("second fix_summary = %v, want %q", deref(rounds[1].FixSummary), fixSummary)
 	}
 }
 
@@ -328,13 +328,13 @@ func TestSetStepRoundUserDecision(t *testing.T) {
 		t.Fatalf("expected 1 round, got %d", len(rounds))
 	}
 	if rounds[0].SelectedFindingIDs == nil || *rounds[0].SelectedFindingIDs != selected {
-		t.Errorf("selected_finding_ids = %v, want %q", rounds[0].SelectedFindingIDs, selected)
+		t.Errorf("selected_finding_ids = %v, want %q", deref(rounds[0].SelectedFindingIDs), selected)
 	}
 	if rounds[0].SelectionSource == nil || *rounds[0].SelectionSource != RoundSelectionSourceUser {
-		t.Errorf("selection_source = %v, want %q", rounds[0].SelectionSource, RoundSelectionSourceUser)
+		t.Errorf("selection_source = %v, want %q", deref(rounds[0].SelectionSource), RoundSelectionSourceUser)
 	}
 	if rounds[0].UserFindingsJSON == nil || *rounds[0].UserFindingsJSON != userFindings {
-		t.Errorf("user_findings_json = %v, want %q", rounds[0].UserFindingsJSON, userFindings)
+		t.Errorf("user_findings_json = %v, want %q", deref(rounds[0].UserFindingsJSON), userFindings)
 	}
 
 	if err := d.SetStepRoundUserDecision(r.ID, nil, RoundSelectionSourceUser, nil); err != nil {
@@ -345,12 +345,12 @@ func TestSetStepRoundUserDecision(t *testing.T) {
 		t.Fatalf("get rounds: %v", err)
 	}
 	if rounds[0].SelectedFindingIDs != nil {
-		t.Errorf("expected nil after clear, got %v", rounds[0].SelectedFindingIDs)
+		t.Errorf("expected nil after clear, got %v", deref(rounds[0].SelectedFindingIDs))
 	}
 	if rounds[0].SelectionSource != nil {
-		t.Errorf("expected nil selection_source after clear, got %v", rounds[0].SelectionSource)
+		t.Errorf("expected nil selection_source after clear, got %v", deref(rounds[0].SelectionSource))
 	}
 	if rounds[0].UserFindingsJSON != nil {
-		t.Errorf("expected nil user_findings_json after clear, got %v", rounds[0].UserFindingsJSON)
+		t.Errorf("expected nil user_findings_json after clear, got %v", deref(rounds[0].UserFindingsJSON))
 	}
 }

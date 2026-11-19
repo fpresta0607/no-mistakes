@@ -1185,7 +1185,7 @@ func TestAuthoredAdmissionContinuesAChildPublishedThroughEitherInitOrigin(t *tes
 			}
 			child := waitForRunTerminalState(t, database, first.Receipt.RunID)
 			if child.Status != types.RunCompleted || child.LastPushedSHA == nil || *child.LastPushedSHA != request.Request.CandidateSHA {
-				t.Fatalf("authored child did not publish its candidate: status=%s error=%v", child.Status, child.Error)
+				t.Fatalf("authored child did not publish its candidate: status=%s error=%v", child.Status, deref(child.Error))
 			}
 			// The terminal row lands before the manager releases the child's
 			// executor, and admission refuses a predecessor with a live executor.

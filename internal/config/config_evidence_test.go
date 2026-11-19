@@ -247,7 +247,7 @@ func TestEffectiveRepoConfig_EvidenceBranchTrustedOnly(t *testing.T) {
 		true,
 	)
 	if effective.Test.Evidence.Branch == nil || *effective.Test.Evidence.Branch != trusted {
-		t.Fatalf("effective branch = %v, want the trusted %q", effective.Test.Evidence.Branch, trusted)
+		t.Fatalf("effective branch = %v, want the trusted %q", deref(effective.Test.Evidence.Branch), trusted)
 	}
 	// The rest of test.evidence still comes from the pushed copy.
 	if effective.Test.Evidence.StoreInRepo == nil || !*effective.Test.Evidence.StoreInRepo {

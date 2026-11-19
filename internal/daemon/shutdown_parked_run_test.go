@@ -111,7 +111,7 @@ func TestShutdown_KeepsRunParkedAtApprovalGateForResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	if stopped.Status != types.RunRunning || stopped.AwaitingAgentSince == nil {
-		t.Fatalf("run after clean stop = status %s awaiting %v error %v, want running and still parked", stopped.Status, stopped.AwaitingAgentSince, stopped.Error)
+		t.Fatalf("run after clean stop = status %s awaiting %v error %v, want running and still parked", stopped.Status, stopped.AwaitingAgentSince, deref(stopped.Error))
 	}
 	if _, err := os.Stat(worktree); err != nil {
 		t.Fatalf("worktree of a parked run must survive a clean stop: %v", err)
@@ -209,7 +209,7 @@ func TestShutdown_KeepsLiveParkedRunForResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	if stopped.Status != types.RunRunning || stopped.AwaitingAgentSince == nil {
-		t.Fatalf("run after clean stop = status %s awaiting %v error %v, want running and still parked", stopped.Status, stopped.AwaitingAgentSince, stopped.Error)
+		t.Fatalf("run after clean stop = status %s awaiting %v error %v, want running and still parked", stopped.Status, stopped.AwaitingAgentSince, deref(stopped.Error))
 	}
 	if _, err := os.Stat(p.WorktreeDir(repo.ID, runID)); err != nil {
 		t.Fatalf("worktree of a parked run must survive a clean stop: %v", err)

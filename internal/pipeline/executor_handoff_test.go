@@ -71,7 +71,7 @@ func TestExecutor_HandoffAndPlainAbort(t *testing.T) {
 				t.Fatalf("handoff recorded as error: %s", *got.Error)
 			}
 			if tc.status == types.RunCancelled && (got.Error == nil || *got.Error != types.RunCancelReasonAbortedByUser) {
-				t.Fatalf("plain abort reason = %v", got.Error)
+				t.Fatalf("plain abort reason = %v", derefString(got.Error))
 			}
 			steps, err := database.GetStepsByRun(run.ID)
 			if err != nil {

@@ -401,7 +401,7 @@ func TestCIStep_CarryReviewOnReplay_BehindPRRestartsAtTest(t *testing.T) {
 		t.Fatal(err)
 	}
 	if run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != newHead {
-		t.Fatalf("review approval = %v, want it carried to %s", run.ReviewApprovedHeadSHA, newHead)
+		t.Fatalf("review approval = %v, want it carried to %s", deref(run.ReviewApprovedHeadSHA), newHead)
 	}
 	if remote := gitCmd(t, sctx.WorkDir, "ls-remote", "origin", "refs/heads/feature"); !strings.HasPrefix(remote, originalHead) {
 		t.Fatalf("rebased head was pushed before Test ran; remote = %q", remote)

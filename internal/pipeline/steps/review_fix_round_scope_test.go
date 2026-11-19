@@ -336,7 +336,7 @@ func TestReviewLoop_DeferredFindingKeepsPendingFindingUnverified(t *testing.T) {
 		t.Fatalf("a finding no repair was sent to close is not a check for this round: %s", reviews[2].Prompt)
 	}
 	if parked.FindingsJSON == nil || !strings.Contains(*parked.FindingsJSON, "original bug") {
-		t.Fatalf("unverified original finding disappeared: %+v", parked.FindingsJSON)
+		t.Fatalf("unverified original finding disappeared: %+v", deref(parked.FindingsJSON))
 	}
 }
 

