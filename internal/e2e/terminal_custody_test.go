@@ -77,7 +77,7 @@ func TestAxiTerminalCustodyContinuation(t *testing.T) {
 	if before.Run.Status != types.RunCancelled || before.Run.TerminalSourceState == nil || *before.Run.TerminalSourceState != "clean:"+before.Run.HeadSHA {
 		t.Fatalf("terminal source = %+v", before.Run)
 	}
-	if out := h.RestartDaemonWhenIdle(); !strings.Contains(out, "daemon restarted") {
+	if out := h.DaemonLifecycleWhenIdle("restart"); !strings.Contains(out, "daemon restarted") {
 		t.Fatalf("real isolated daemon restart:\n%s", out)
 	}
 	if err := os.WriteFile(filepath.Join(caller, "local-only.txt"), []byte("retained local source\n"), 0o644); err != nil {

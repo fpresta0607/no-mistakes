@@ -15,7 +15,7 @@ import (
 // the restart was refused as busy and the journey failed. Only that refusal
 // is waited out; any other outcome is the caller's to judge at once.
 func TestRestartWhenIdleWaitsOutOnlyTheBusyRefusal(t *testing.T) {
-	busy := "cannot atomically prepare daemon shutdown: " + daemonBusyRefusal + "; retry when idle or pass --force; refusing lifecycle operation"
+	busy := "cannot atomically prepare daemon shutdown: refusing shutdown because pipeline admission or execution is in progress; retry when idle or pass --force; refusing lifecycle operation"
 	exitStatus := errors.New("exit status 1")
 	for _, test := range []struct {
 		name        string
@@ -48,7 +48,7 @@ func TestRestartWhenIdleWaitsOutOnlyTheBusyRefusal(t *testing.T) {
 			}
 
 			// Act
-			out, err := restartWhenIdle(restart, timeout, time.Millisecond)
+			out, err := whenIdle(restart, timeout, time.Millisecond)
 
 			// Assert
 			if (err != nil) != test.wantErr {
