@@ -13,7 +13,13 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
+)
+
+const (
+	migrationAttempts  = 50
+	migrationRetryWait = 100 * time.Millisecond
 )
 
 var (
@@ -48,15 +54,30 @@ func Open(path string) (*DB, error) {
 	return &DB{sql: sqlDB}, nil
 }
 
-// migrate applies the schema and every migration statement in one IMMEDIATE
+// migrate applies the schema and every migration statement in one
 // transaction. Run as autocommit statements, a fresh file paid one WAL commit
-// and fsync per statement, about 150 per Open, which bound every test that
-// opens a database to the runner's disk latency (issue #215). IMMEDIATE takes
-// the write lock up front, under busy_timeout, so a concurrent opener waits
-// instead of failing a read-to-write upgrade mid-migration. A duplicate column
-// error is a prepare-time error, so SQLite keeps the transaction open past it.
-func migrate(ctx context.Context, conn *sql.Conn) (err error) {
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+// and fsync per statement, 72 per Open, which bound every test that opens a
+// database to the runner's disk latency (issue #215). The transaction is
+// deferred, so an Open of a database that is already migrated writes nothing
+// and never takes the write lock. A migration that does write upgrades its
+// read transaction, and SQLite fails that upgrade with SQLITE_BUSY at once
+// rather than under busy_timeout, so a busy attempt is rolled back and retried
+// whole, within migrationAttempts.
+func migrate(ctx context.Context, conn *sql.Conn) error {
+	for attempt := 1; ; attempt++ {
+		err := migrateOnce(ctx, conn)
+		if err == nil || !isBusyErr(err) || attempt == migrationAttempts {
+			return err
+		}
+		time.Sleep(migrationRetryWait)
+	}
+}
+
+// migrateOnce runs one migration attempt and rolls it back whole on failure.
+// A duplicate column error is a prepare-time error, so SQLite keeps the
+// transaction open past it.
+func migrateOnce(ctx context.Context, conn *sql.Conn) (err error) {
+	if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
 		return err
 	}
 	defer func() {
@@ -76,6 +97,13 @@ func migrate(ctx context.Context, conn *sql.Conn) (err error) {
 	}
 	_, err = conn.ExecContext(ctx, "COMMIT")
 	return err
+}
+
+// isBusyErr reports whether err carries SQLite's SQLITE_BUSY result code,
+// including its extended forms such as SQLITE_BUSY_SNAPSHOT.
+func isBusyErr(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqlite3.SQLITE_BUSY
 }
 
 // OpenReadOnly opens an existing database without creating or migrating it.

@@ -31,9 +31,9 @@ func TestOpenAndClose(t *testing.T) {
 	}
 }
 
-// Issue #215: run as autocommit statements, migrating a fresh file paid about
-// 150 WAL commits, each an fsync, so every test that opened a database was
-// bound by the runner's disk latency.
+// Issue #215: run as autocommit statements, migrating a fresh file paid 72 WAL
+// commits, each an fsync, so every test that opened a database was bound by
+// the runner's disk latency.
 func TestMigrateCommitsAFreshFileOnce(t *testing.T) {
 	ctx := context.Background()
 	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "state.sqlite")+"?_pragma=journal_mode(wal)")
@@ -600,5 +600,132 @@ func TestOpenWaitsForTransientMigrationLock(t *testing.T) {
 	}()
 	if _, err := locker.Exec("COMMIT"); err != nil {
 		t.Fatalf("commit exclusive lock: %v", err)
+	}
+}
+
+// migratedDatabaseMissingAnIndex returns a migrated database that lacks one
+// index a migration statement creates, so migrating it reads before it writes.
+func migratedDatabaseMissingAnIndex(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.sql.Exec(`DROP INDEX idx_runs_status_created_id`); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// holdWriteLock takes the database's write lock on another connection until
+// the returned release function runs.
+func holdWriteLock(t *testing.T, path string) (release func()) {
+	t.Helper()
+	locker, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := locker.Conn(context.Background())
+	if err != nil {
+		locker.Close()
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		conn.Close()
+		locker.Close()
+		t.Fatal(err)
+	}
+	released := false
+	release = func() {
+		if released {
+			return
+		}
+		released = true
+		if _, err := conn.ExecContext(context.Background(), "ROLLBACK"); err != nil {
+			t.Errorf("release write lock: %v", err)
+		}
+		conn.Close()
+		locker.Close()
+	}
+	t.Cleanup(release)
+	return release
+}
+
+func TestOpenOfAMigratedDatabaseTakesNoWriteLock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	holdWriteLock(t, path)
+
+	database, err = Open(path)
+
+	if err != nil {
+		t.Fatalf("Open of a migrated database while another connection holds the write lock: %v", err)
+	}
+	database.Close()
+}
+
+func TestOpenRetriesAMigrationThatMeetsALockUntilItIsReleased(t *testing.T) {
+	path := migratedDatabaseMissingAnIndex(t)
+	release := holdWriteLock(t, path)
+	done := make(chan error, 1)
+
+	go func() {
+		database, err := Open(path)
+		if err == nil {
+			err = database.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("Open returned while the write lock was held: %v", err)
+	case <-time.After(3 * migrationRetryWait):
+	}
+	release()
+
+	if err := <-done; err != nil {
+		t.Fatalf("Open after the write lock was released: %v", err)
+	}
+	check, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var indexes int
+	if err := check.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_runs_status_created_id'`).Scan(&indexes); err != nil {
+		t.Fatal(err)
+	}
+	if indexes != 1 {
+		t.Fatal("the retried migration did not create the missing index")
+	}
+}
+
+func TestOpenReturnsBusyWhenTheLockOutlastsTheMigrationRetries(t *testing.T) {
+	path := migratedDatabaseMissingAnIndex(t)
+	holdWriteLock(t, path)
+	started := time.Now()
+
+	database, err := Open(path)
+
+	if err == nil {
+		database.Close()
+		t.Fatal("Open migrated a database whose write lock was never released")
+	}
+	if !isBusyErr(err) {
+		t.Fatalf("Open error = %v, want SQLITE_BUSY", err)
+	}
+	if elapsed, retried := time.Since(started), (migrationAttempts-1)*migrationRetryWait; elapsed < retried {
+		t.Fatalf("Open gave up after %v, before retrying for %v", elapsed, retried)
 	}
 }
