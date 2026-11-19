@@ -9,6 +9,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
 func TestMakeBuildPrioritizesDotEnvUmamiWebsiteID(t *testing.T) {
@@ -273,6 +276,71 @@ func TestMakeNamesTheBinaryWithTheTargetExecutableSuffix(t *testing.T) {
 			}
 			if t.Failed() {
 				t.Logf("make -n install printed:\n%s", output)
+			}
+		})
+	}
+}
+
+func TestMakeInstallLeavesGitBashRunningTheInstalledBuildOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only Windows installs the binary under a suffixed name")
+	}
+
+	makePath, err := exec.LookPath("make")
+	if err != nil {
+		t.Skip("make not available")
+	}
+	gitBash, err := testgit.Bash()
+	if err != nil {
+		t.Skip(err)
+	}
+
+	for _, testCase := range []struct {
+		name                  string
+		hasSuffixlessLeftover bool
+	}{
+		{name: "suffixless leftover from an older install", hasSuffixlessLeftover: true},
+		{name: "no leftover", hasSuffixlessLeftover: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			workDir := writeTestMakeWorkspace(t)
+			if err := os.Mkdir(filepath.Join(workDir, "bin"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(workDir, "bin", "no-mistakes.exe"), []byte("#!/bin/sh\necho new-build\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			installDir := filepath.Join(t.TempDir(), "bin")
+			if err := os.Mkdir(installDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			leftover := filepath.Join(installDir, "no-mistakes")
+			if testCase.hasSuffixlessLeftover {
+				if err := os.WriteFile(leftover, []byte("#!/bin/sh\necho old-build\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			install := exec.Command(makePath, "-o", "build", "install")
+			install.Dir = workDir
+			install.Env = append(os.Environ(), "GOPATH="+filepath.Dir(installDir))
+			winproc.Harden(install)
+			if out, err := install.CombinedOutput(); err != nil {
+				t.Fatalf("make install failed: %v\n%s", err, out)
+			}
+
+			if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+				t.Errorf("make install should leave no suffixless %s, stat returned %v", leftover, err)
+			}
+			bareName := exec.Command(gitBash, "-c", "no-mistakes")
+			bareName.Env = append(os.Environ(), "PATH="+installDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+			winproc.Harden(bareName)
+			out, err := bareName.CombinedOutput()
+			if err != nil {
+				t.Fatalf("bare no-mistakes failed in Git Bash: %v\n%s", err, out)
+			}
+			if got := strings.TrimSpace(string(out)); got != "new-build" {
+				t.Fatalf("bare no-mistakes in Git Bash should run the installed build, got %q", got)
 			}
 		})
 	}
