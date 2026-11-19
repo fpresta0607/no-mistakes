@@ -91,6 +91,8 @@ func handleFakeCLI(mode string) {
 		fakeGitStaleDirtyStatusHandler(args)
 	case "git-hung-status":
 		fakeGitHungStatusHandler(args)
+	case "git-slow-submodule":
+		fakeGitSlowSubmoduleHandler(args)
 	case "git-commit-error":
 		fakeGitCommitErrorHandler(args)
 	case "git-remote-error":
@@ -357,6 +359,17 @@ func fakeGitStaleDirtyStatusHandler(args []string) {
 // status, the way a cold scan of a large checkout does after a reboot.
 func fakeGitHungStatusHandler(args []string) {
 	if len(args) >= 2 && args[0] == "status" && args[1] == "--porcelain" {
+		time.Sleep(time.Minute)
+		os.Exit(1)
+	}
+	fakeGitForward(args, os.Getenv("FAKE_CLI_REAL_GIT"))
+}
+
+// fakeGitSlowSubmoduleHandler outlives its caller's deadline on any
+// `git submodule` call, the way the shell script behind it does on a loaded
+// Windows host.
+func fakeGitSlowSubmoduleHandler(args []string) {
+	if len(args) >= 1 && args[0] == "submodule" {
 		time.Sleep(time.Minute)
 		os.Exit(1)
 	}

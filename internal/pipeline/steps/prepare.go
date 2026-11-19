@@ -63,16 +63,22 @@ func ensurePrepared(sctx *pipeline.StepContext, logStep types.StepName) error {
 		sctx.Log(fmt.Sprintf("preparing dependencies once for this worktree: %s", prepareCmd))
 		started := time.Now()
 		output, exitCode, commandErr := runRepositoryCommand(sctx, "prepare", prepareCmd)
+		prepareElapsed := time.Since(started)
 		if output != "" {
 			logCommandOutput(sctx, output, "Prepare", logStep)
 		}
 
+		cleanupStarted := time.Now()
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(sctx.Ctx), prepareCleanupTimeout)
 		cleanupErr := runPreparationCleanup(cleanupCtx, sctx.WorkDir, head, snapshot.submodules)
 		cancel()
+		cleanupElapsed := time.Since(cleanupStarted)
+
+		restoreStarted := time.Now()
 		restoreCtx, cancelRestore := context.WithTimeout(context.WithoutCancel(sctx.Ctx), prepareRestoreTimeout)
 		restoreErr := snapshot.restore(restoreCtx)
 		cancelRestore()
+		restoreElapsed := time.Since(restoreStarted)
 		if commandErr != nil {
 			commandErr = fmt.Errorf("run prepare command: %w", commandErr)
 		} else if exitCode != 0 {
@@ -85,7 +91,13 @@ func ensurePrepared(sctx *pipeline.StepContext, logStep types.StepName) error {
 			removeSnapshot = false
 			restoreErr = preparationRestoreError(snapshot, restoreErr)
 		}
-		sctx.Log(fmt.Sprintf("dependency preparation attempt completed in %s", time.Since(started).Round(time.Millisecond)))
+		sctx.Log(fmt.Sprintf(
+			"dependency preparation attempt completed in %s (prepare command %s, cleanup %s, restore %s)",
+			time.Since(started).Round(time.Millisecond),
+			prepareElapsed.Round(time.Millisecond),
+			cleanupElapsed.Round(time.Millisecond),
+			restoreElapsed.Round(time.Millisecond),
+		))
 		if err := errors.Join(commandErr, cleanupErr, restoreErr); err != nil {
 			return err
 		}
@@ -115,10 +127,10 @@ func cleanupPreparationChanges(ctx context.Context, workDir, originalHead string
 	if err := initializePreparationSubmodules(ctx, submodules); err != nil {
 		return err
 	}
-	if _, err := git.Run(ctx, workDir, "submodule", "foreach", "--recursive", "--quiet", "git reset --hard"); err != nil {
+	if err := runInInitializedSubmodules(ctx, workDir, "reset", "--hard"); err != nil {
 		return err
 	}
-	if _, err := git.Run(ctx, workDir, "submodule", "foreach", "--recursive", "--quiet", "git clean -ffd"); err != nil {
+	if err := runInInitializedSubmodules(ctx, workDir, "clean", "-ffd"); err != nil {
 		return err
 	}
 	if err := resetPreparedSubmodules(ctx, workDir); err != nil {
@@ -126,6 +138,29 @@ func cleanupPreparationChanges(ctx context.Context, workDir, originalHead string
 	}
 	if _, err := git.Run(ctx, workDir, "clean", "-ffd"); err != nil {
 		return err
+	}
+	return nil
+}
+
+// runInInitializedSubmodules is `git submodule foreach --recursive` without the
+// shell: on Git for Windows that command is a sh script, so each call costs a
+// whole MSYS process tree even in a repository with no submodules.
+func runInInitializedSubmodules(ctx context.Context, parentWorkDir string, args ...string) error {
+	registered, err := registeredSubmodulePaths(ctx, parentWorkDir)
+	if err != nil {
+		return err
+	}
+	for _, path := range registered {
+		if !submoduleWorktreeInitialized(parentWorkDir, path) {
+			continue
+		}
+		submoduleWorkDir := filepath.Join(parentWorkDir, path)
+		if _, err := git.Run(ctx, submoduleWorkDir, args...); err != nil {
+			return fmt.Errorf("%s submodule %s: %w", args[0], path, err)
+		}
+		if err := runInInitializedSubmodules(ctx, submoduleWorkDir, args...); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -280,6 +315,9 @@ func resetPreparedSubmodules(ctx context.Context, workDir string) error {
 }
 
 func registeredSubmodulePaths(ctx context.Context, workDir string) ([]string, error) {
+	if _, err := os.Lstat(filepath.Join(workDir, ".gitmodules")); errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	out, err := git.RunRaw(ctx, workDir, "config", "--null", "--file", ".gitmodules", "--get-regexp", `^submodule\..*\.path$`)
 	if err != nil {
 		if strings.Contains(err.Error(), "exit status 1") {
