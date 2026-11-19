@@ -185,8 +185,10 @@ func runAxiHome(cmd *cobra.Command) error {
 	defer env.close()
 
 	daemonState := "stopped"
-	if alive, _ := daemon.IsRunning(env.p); alive {
+	if alive, err := daemon.IsRunning(env.p); alive {
 		daemonState = "running"
+	} else if daemon.IsSlow(err) {
+		daemonState = "slow"
 	}
 	branch, _ := currentBranchForRunResolve(cmd.Context())
 	branchDisplay := branch

@@ -43,9 +43,11 @@ func newStatusCmd() *cobra.Command {
 			fmt.Fprintf(w, "  %s  %s\n", sDim.Render("  gate:"), p.RepoDir(repo.ID))
 
 			// Check daemon status.
-			alive, _ := daemon.IsRunning(p)
+			alive, err := daemon.IsRunning(p)
 			if alive {
 				fmt.Fprintf(w, "  %s  %s %s\n", sDim.Render("daemon:"), sGreen.Render("●"), "running")
+			} else if daemon.IsSlow(err) {
+				fmt.Fprintf(w, "  %s  %s %s\n", sDim.Render("daemon:"), sYellow.Render("●"), "running, slow to answer")
 			} else {
 				fmt.Fprintf(w, "  %s  %s %s\n", sDim.Render("daemon:"), sDim.Render("○"), "stopped")
 			}
