@@ -55,6 +55,8 @@ func cases(run Run, status *Status, count *int, text string) {
 	_ = fmt.Sprintf("error = %v", deref(run.Error))
 	_ = fmt.Sprintf("count = %v, text = %s", count, text)
 	_ = row{}.Scan(run.Error)
+	_, _ = fmt.Sscanf(text, "%s", &text)
+	_, _ = fmt.Scanf("%s", run.Error)
 }
 `,
 	"flagged/cases_test.go": `package flagged

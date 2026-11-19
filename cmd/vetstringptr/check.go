@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"strings"
 )
 
 // PRINT_FUNCTION_NAMES are the fmt, log and testing calls that format their
@@ -76,7 +77,8 @@ func formattedArgumentsStart(call *ast.CallExpr, info *types.Info) (int, bool) {
 	if element, ok := slice.Elem().Underlying().(*types.Interface); !ok || !element.Empty() {
 		return 0, false
 	}
-	hasFormatParameter := last > 0 && parameters.At(last-1).Name() == "format"
+	isScan := strings.Contains(strings.ToLower(function.Name()), "scan")
+	hasFormatParameter := last > 0 && parameters.At(last-1).Name() == "format" && !isScan
 	if !hasFormatParameter && !PRINT_FUNCTION_NAMES[function.Name()] {
 		return 0, false
 	}
