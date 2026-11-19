@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -28,19 +29,34 @@ func (sctx *StepContext) AssertValidationSource() error {
 		return fmt.Errorf("validation-only authored admission has no source repair authority")
 	}
 	head, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
-	if err != nil || head != event.Request.CandidateSHA {
+	if err != nil {
+		return fmt.Errorf("%w: validation-only authored commit could not be read; no commit or publication is authorized: %w", ErrValidationSourceUnverified, err)
+	}
+	if head != event.Request.CandidateSHA {
 		return fmt.Errorf("validation-only authored commit changed; no commit or publication is authorized")
 	}
 	tree, err := git.Run(sctx.Ctx, sctx.WorkDir, "rev-parse", "HEAD^{tree}")
-	if err != nil || tree != event.Request.CandidateTree {
+	if err != nil {
+		return fmt.Errorf("%w: validation-only authored tree could not be read; no commit or publication is authorized: %w", ErrValidationSourceUnverified, err)
+	}
+	if tree != event.Request.CandidateTree {
 		return fmt.Errorf("validation-only authored tree changed; no commit or publication is authorized")
 	}
 	status, err := git.Run(sctx.Ctx, sctx.WorkDir, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none")
-	if err != nil || status != "" {
+	if err != nil {
+		return fmt.Errorf("%w: validation-only authored source status could not be read; no commit or publication is authorized: %w", ErrValidationSourceUnverified, err)
+	}
+	if status != "" {
 		return fmt.Errorf("validation-only authored source is not clean; no commit or publication is authorized")
 	}
 	return nil
 }
+
+// ErrValidationSourceUnverified marks an AssertValidationSource refusal that
+// comes from git failing to read the source, not from git proving the commit,
+// tree or cleanliness changed. Every caller still refuses on it; only a parked
+// gate's reconciliation keeps the gate instead of failing the run (issue #222).
+var ErrValidationSourceUnverified = errors.New("validation source unverified")
 
 func validationOnlyAuthority(database *db.DB, runID string) (bool, error) {
 	family, err := database.ValidationFamily(runID)

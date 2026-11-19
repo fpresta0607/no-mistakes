@@ -383,6 +383,87 @@ func TestCIGateReconciliationPreservesTheGateWhenGitCannotCheckTheHead(t *testin
 	}
 }
 
+// TestCIGateReconciliationPreservesAValidationOnlyGateWhenGitCannotReadTheSource
+// is the issue #222 regression: in a validation-only run a source read git
+// could not complete is no evidence the authored source changed, so it keeps
+// the parked gate, while step entry still refuses it before doing work.
+func TestCIGateReconciliationPreservesAValidationOnlyGateWhenGitCannotReadTheSource(t *testing.T) {
+	t.Parallel()
+	// Arrange
+	sctx := authoredStageContext(t, nil, config.Commands{})
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	t.Cleanup(cancel)
+	sctx.Ctx = ctx
+
+	// Act
+	reconciled, err := (&CIStep{}).ReconcileApprovalGate(sctx)
+	_, entryErr := (&CIStep{}).Execute(sctx)
+
+	// Assert
+	if err == nil || !strings.Contains(err.Error(), "validation-only authored commit could not be read") {
+		t.Fatalf("CI gate reconciliation error = %v, want the unread validation source", err)
+	}
+	if errors.Is(err, pipeline.ErrFatalGateReconciliation) {
+		t.Fatalf("CI gate reconciliation classified a git failure as fatal: %v", err)
+	}
+	if reconciled {
+		t.Fatal("CI gate reconciliation resolved the gate without reading the source")
+	}
+	if entryErr == nil || !strings.Contains(entryErr.Error(), "validation-only authored commit could not be read") {
+		t.Fatalf("CI step entry error = %v, want a refusal on the unread validation source", entryErr)
+	}
+}
+
+// TestCIGateReconciliationFailsAValidationOnlyRunOnAProvenSourceChange keeps
+// the other half of issue #222: a change git proved is still fatal.
+func TestCIGateReconciliationFailsAValidationOnlyRunOnAProvenSourceChange(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		arrange func(t *testing.T, dir string)
+		want    string
+	}{
+		{
+			name: "authored commit changed",
+			arrange: func(t *testing.T, dir string) {
+				gitCmd(t, dir, "commit", "--allow-empty", "-m", "out-of-band commit")
+			},
+			want: "validation-only authored commit changed",
+		},
+		{
+			name: "authored source is not clean",
+			arrange: func(t *testing.T, dir string) {
+				if err := os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("out-of-band edit\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "validation-only authored source is not clean",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// Arrange
+			sctx := authoredStageContext(t, nil, config.Commands{})
+			tc.arrange(t, sctx.WorkDir)
+
+			// Act
+			reconciled, err := (&CIStep{}).ReconcileApprovalGate(sctx)
+
+			// Assert
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CI gate reconciliation error = %v, want one containing %q", err, tc.want)
+			}
+			if !errors.Is(err, pipeline.ErrFatalGateReconciliation) {
+				t.Fatalf("CI gate reconciliation error = %v, want fatal classification", err)
+			}
+			if reconciled {
+				t.Fatal("CI gate reconciliation resolved the gate after a proven source change")
+			}
+		})
+	}
+}
+
 func TestPostReviewStepEntryAllowsEqualAndPipelineDescendantHeads(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, recordedHead := setupGitRepo(t)
