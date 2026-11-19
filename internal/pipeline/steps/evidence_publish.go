@@ -94,7 +94,7 @@ func publishRunEvidence(sctx *pipeline.StepContext) *evidenceLinks {
 		return nil
 	}
 	if len(result.Withheld) > 0 {
-		sctx.Log(fmt.Sprintf("withheld %d test evidence file(s) that carry a captured agent prompt, citing them by label and digest instead", len(result.Withheld)))
+		sctx.Log(fmt.Sprintf("withheld %d test evidence file(s) that carry a captured agent prompt or a local path that cannot be rewritten, citing them by label and digest instead", len(result.Withheld)))
 	}
 	if result.CommitSHA == "" {
 		return nil
