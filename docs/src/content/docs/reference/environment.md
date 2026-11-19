@@ -311,7 +311,7 @@ Kill-switch injected into every pipeline agent subprocess so compact-adviser sta
 | Type    | always `1` for agent subprocesses    |
 | Default | injected; not a daemon-wide setting  |
 
-no-mistakes stamps `COMPACT_ADVISER_DISABLE=1` onto every spawned gate agent, including ACP aliases and managed agent servers that can load host plugins. Forge and profile overlays cannot drop the flag. The daemon process itself is unchanged; this is agent-child policy only, not a user-facing knob for the service environment.
+no-mistakes stamps `COMPACT_ADVISER_DISABLE=1` onto every spawned gate agent, including ACP aliases and managed agent servers that can load host plugins. Forge and profile overlays cannot drop the flag. This is agent-child policy only, not a user-facing knob for the service environment: the daemon drops `COMPACT_ADVISER_DISABLE` and `NO_MISTAKES_GATE` from the environment it was started with, so its step commands never carry either and only the agents it spawns do.
 
 ## `NO_MISTAKES_UMAMI_HOST`
 

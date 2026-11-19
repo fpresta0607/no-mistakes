@@ -127,8 +127,13 @@ func Run() (retErr error) {
 // so an orchestration harness's hooks inside those agents would otherwise
 // report as a worker long gone (#74). CFO_HOME, CFO_STATE_OVERRIDE and
 // CFO_PROJECTS_ROOT name the harness installation rather than one worker, and
-// a test command wrapper needs them, so they stay.
+// a test command wrapper needs them, so they stay. A gate agent can start the
+// daemon on demand, and every step command inherits the daemon's environment,
+// so the agent-only marks are dropped too; the daemon stamps them on its own
+// agents (#241).
 var launcherIdentityEnv = []string{
+	agent.GateRoleEnvVar,
+	agent.CompactAdviserDisableEnvVar,
 	"CLAUDECODE",
 	"CLAUDE_CODE_ENTRYPOINT",
 	"CLAUDE_CODE_ENTRY_POINT",

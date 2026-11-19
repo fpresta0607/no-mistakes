@@ -302,6 +302,76 @@ func TestPrepareDaemonEnvironment_DropsTheLaunchingWorkersIdentity(t *testing.T)
 	assertNoWorkerIdentity(t, "gate agent", agentEnv)
 }
 
+// A gate agent's command can start the daemon on demand. The daemon's step
+// commands inherit its environment, so a gate-agent mark it kept from that
+// launcher would make every step command read as an agent (#241). Only the
+// agents the daemon spawns carry the mark.
+func TestPrepareDaemonEnvironment_DropsTheLaunchingGateAgentsMark(t *testing.T) {
+	// Arrange
+	p := daemonEnvironmentTestPaths(t)
+	marks := []string{agent.GateRoleEnvVar, agent.CompactAdviserDisableEnvVar}
+	for _, key := range marks {
+		t.Setenv(key, "1")
+	}
+	oldApply := applyShellEnvToProcess
+	t.Cleanup(func() { applyShellEnvToProcess = oldApply })
+	var probed []string
+	applyShellEnvToProcess = func(...string) error {
+		probed = os.Environ()
+		return nil
+	}
+	findMarks := func(env []string) map[string]string {
+		found := map[string]string{}
+		for _, entry := range env {
+			name, value, _ := strings.Cut(entry, "=")
+			for _, key := range marks {
+				if name == key || runtime.GOOS == "windows" && strings.EqualFold(name, key) {
+					found[key] = value
+				}
+			}
+		}
+		return found
+	}
+
+	// Act
+	if err := prepareDaemonEnvironment(p); err != nil {
+		t.Fatal(err)
+	}
+	agentEnvFile := filepath.Join(t.TempDir(), "agent-env.json")
+	gateAgent, err := agent.New(types.AgentClaude, os.Args[0], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if _, err := gateAgent.Run(ctx, agent.RunOpts{
+		CWD:    t.TempDir(),
+		Prompt: "review",
+		Env:    []string{"NM_DAEMON_HELPER_PROCESS=agent-env", "NM_TEST_AGENT_ENV_FILE=" + agentEnvFile},
+	}); err != nil {
+		t.Fatalf("run gate agent: %v", err)
+	}
+	recorded, err := os.ReadFile(agentEnvFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var agentEnv []string
+	if err := json.Unmarshal(recorded, &agentEnv); err != nil {
+		t.Fatal(err)
+	}
+
+	// Assert
+	if found := findMarks(probed); len(found) != 0 {
+		t.Errorf("login shell probe carries the launcher's gate-agent marks %v", found)
+	}
+	if found := findMarks(os.Environ()); len(found) != 0 {
+		t.Errorf("daemon, and so every step command, carries the launcher's gate-agent marks %v", found)
+	}
+	if found := findMarks(agentEnv); found[agent.GateRoleEnvVar] != "1" || found[agent.CompactAdviserDisableEnvVar] != "1" {
+		t.Errorf("gate agent marks = %v, want both stamped 1", found)
+	}
+}
+
 func TestPrepareDaemonEnvironment_PreservesExistingNMHome(t *testing.T) {
 	p := daemonEnvironmentTestPaths(t)
 	t.Setenv("PATH", os.Getenv("PATH"))
