@@ -23,7 +23,10 @@ func TestCIStep_HandoffWakeRechecksGreenReadiness(t *testing.T) {
 	sctx.Run.PRURL = &prURL
 	sctx.Env = fakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`)
 	sctx.Config.CITimeout = time.Minute
-	wake := make(chan struct{}, 1)
+	// Unbuffered, so the send below completes only when the poll wait
+	// receives the wake: that proves the interrupt without also timing the
+	// recheck (a fake gh launch and a readiness write) the wake triggers.
+	wake := make(chan struct{})
 	sctx.CIWake = wake
 	firstReady := make(chan struct{})
 	readyCalls := 0
@@ -47,15 +50,22 @@ func TestCIStep_HandoffWakeRechecksGreenReadiness(t *testing.T) {
 		done <- struct{ err error }{err: err}
 	}()
 	<-firstReady
-	wake <- struct{}{}
 
+	// Well below the 30 s poll interval, so an uninterrupted wait cannot pass,
+	// and well above a loaded runner's process-launch cost.
+	deadline := time.After(20 * time.Second)
+	select {
+	case wake <- struct{}{}:
+	case <-deadline:
+		t.Fatal("handoff wake did not interrupt the CI poll wait")
+	}
 	select {
 	case result := <-done:
 		if !errors.Is(result.err, pipeline.ErrHandoff) {
 			t.Fatalf("handoff result error = %v, want ErrHandoff", result.err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("handoff wake did not interrupt the CI poll wait")
+	case <-deadline:
+		t.Fatal("handoff wake did not recheck green readiness")
 	}
 }
 
