@@ -76,7 +76,7 @@ func TestGiteaProviderJourney(t *testing.T) {
 		t.Fatalf("run did not complete: status=%s error=%v", run.Status, deref(run.Error))
 	}
 	if run.PRURL == nil || !strings.HasPrefix(*run.PRURL, "http://"+giteaHost+"/"+repoSlug+"/pulls/") {
-		t.Fatalf("PR URL = %v, want a Gitea pull URL under %s/%s", run.PRURL, giteaHost, repoSlug)
+		t.Fatalf("PR URL = %v, want a Gitea pull URL under %s/%s", deref(run.PRURL), giteaHost, repoSlug)
 	}
 
 	invocations := readTeaStubInvocations(t, teaLog)

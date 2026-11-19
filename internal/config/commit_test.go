@@ -251,7 +251,7 @@ func TestLoadGlobal_CommitFixMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Commit.FixMessage == nil || *cfg.Commit.FixMessage != source {
-		t.Fatalf("commit.fix_message = %v, want %q", cfg.Commit.FixMessage, source)
+		t.Fatalf("commit.fix_message = %v, want %q", deref(cfg.Commit.FixMessage), source)
 	}
 }
 
@@ -263,10 +263,10 @@ func TestLoadGlobal_CommitBranchReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Commit.BranchPattern == nil || *cfg.Commit.BranchPattern != `^PROJ/([0-9]+)$` {
-		t.Fatalf("commit.branch_pattern = %v, want configured pattern", cfg.Commit.BranchPattern)
+		t.Fatalf("commit.branch_pattern = %v, want configured pattern", deref(cfg.Commit.BranchPattern))
 	}
 	if cfg.Commit.BranchReplacement == nil || *cfg.Commit.BranchReplacement != "PROJ-${1}" {
-		t.Fatalf("commit.branch_replacement = %v, want configured replacement", cfg.Commit.BranchReplacement)
+		t.Fatalf("commit.branch_replacement = %v, want configured replacement", deref(cfg.Commit.BranchReplacement))
 	}
 }
 
@@ -326,7 +326,7 @@ func TestLoadRepo_CommitFixMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Commit.FixMessage == nil || *cfg.Commit.FixMessage != source {
-		t.Fatalf("commit.fix_message = %v, want %q", cfg.Commit.FixMessage, source)
+		t.Fatalf("commit.fix_message = %v, want %q", deref(cfg.Commit.FixMessage), source)
 	}
 }
 
@@ -640,4 +640,13 @@ func TestMergeForRemote_CommitTrailersRepositoryOverridePrecedence(t *testing.T)
 			}
 		})
 	}
+}
+
+// deref returns the text a *string holds, or "" for nil, so a failure message
+// prints the text rather than the pointer's address.
+func deref(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }

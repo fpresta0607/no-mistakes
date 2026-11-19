@@ -37,7 +37,7 @@ func TestRunToInfoIncludesImmutableSubmittedHead(t *testing.T) {
 		t.Fatalf("head = %q, want pipeline-fix-head", info.HeadSHA)
 	}
 	if info.SubmittedHeadSHA == nil || *info.SubmittedHeadSHA != "submitted-head" {
-		t.Fatalf("submitted head = %v, want submitted-head", info.SubmittedHeadSHA)
+		t.Fatalf("submitted head = %v, want submitted-head", deref(info.SubmittedHeadSHA))
 	}
 	step, err := d.InsertStepResult(run.ID, types.StepCI)
 	if err != nil {

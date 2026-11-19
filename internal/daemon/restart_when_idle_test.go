@@ -119,7 +119,7 @@ func TestScheduledRestartLetsTheExecutingRunFinishAndRunsHeldPushesAfterward(t *
 
 	close(release)
 	if run := waitForRunTerminalState(t, d, executing); run.Status != types.RunCompleted {
-		t.Fatalf("executing run ended %s (%v), want completed on the daemon it started on", run.Status, errText(run.Error))
+		t.Fatalf("executing run ended %s (%v), want completed on the daemon it started on", run.Status, deref(run.Error))
 	}
 	select {
 	case err := <-first:
@@ -137,7 +137,7 @@ func TestScheduledRestartLetsTheExecutingRunFinishAndRunsHeldPushesAfterward(t *
 	t.Cleanup(func() { stopParkedRunDaemon(t, p, second) })
 	heldRun := waitForBranchRun(t, d, repo.ID, "feature-b")
 	if run := waitForRunTerminalState(t, d, heldRun.ID); run.Status != types.RunCompleted {
-		t.Fatalf("held push ended %s (%v), want completed on the restarted daemon", run.Status, errText(run.Error))
+		t.Fatalf("held push ended %s (%v), want completed on the restarted daemon", run.Status, deref(run.Error))
 	}
 	if _, err := os.Stat(p.HeldPushesFile()); !os.IsNotExist(err) {
 		t.Fatalf("held pushes file should be removed once replayed, stat err = %v", err)
@@ -228,7 +228,7 @@ func waitForParked(t *testing.T, d *db.DB, runID string) {
 	t.Fatalf("run %s never parked at its gate", runID)
 }
 
-func errText(s *string) string {
+func deref(s *string) string {
 	if s == nil {
 		return ""
 	}

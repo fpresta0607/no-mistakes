@@ -24,7 +24,7 @@ LDFLAGS := -X github.com/kunchenguid/no-mistakes/internal/buildinfo.Version=$(VE
            -X github.com/kunchenguid/no-mistakes/internal/buildinfo.TelemetryHost=$(UMAMI_HOST) \
            -X github.com/kunchenguid/no-mistakes/internal/buildinfo.TelemetryWebsiteID=$(UMAMI_WEBSITE_ID)
 
-.PHONY: build dist install test e2e e2e-record lint fmt clean docs docs-build docs-preview demo skill skill-check winres winres-check
+.PHONY: build dist install test e2e e2e-record lint fmt clean docs docs-build docs-preview demo skill skill-check winres winres-check vet-stringptr
 
 DIST_DIR ?= dist
 # go build -o writes exactly the name it is given, and Windows shells only find
@@ -121,8 +121,17 @@ winres:
 winres-check:
 	go run ./cmd/genwinres --check
 
-lint: skill-check winres-check
+lint: skill-check winres-check vet-stringptr
 	go vet ./...
+
+# Fail when a *string reaches a formatting call such as t.Fatalf, which prints
+# the pointer's address instead of its text; go vet accepts that (issues #92
+# and #229). The e2e tag brings the tagged suites into the check.
+VET_STRINGPTR := bin/vetstringptr$(shell go env GOEXE)
+
+vet-stringptr:
+	go build -o $(VET_STRINGPTR) ./cmd/vetstringptr
+	go vet -tags e2e -vettool=$(VET_STRINGPTR) ./...
 
 fmt:
 	gofmt -w .

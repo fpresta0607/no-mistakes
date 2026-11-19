@@ -54,7 +54,7 @@ func TestFailStepWithCauseIsClearedByAPlainFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	if read, _ := d.GetStepResult(step.ID); read.FailureCause == nil || *read.FailureCause != StepFailureCauseAgentInvocation {
-		t.Fatalf("cause = %v, want %s", read.FailureCause, StepFailureCauseAgentInvocation)
+		t.Fatalf("cause = %v, want %s", deref(read.FailureCause), StepFailureCauseAgentInvocation)
 	}
 	if err := d.FailStep(step.ID, "aborted by user", 1); err != nil {
 		t.Fatal(err)

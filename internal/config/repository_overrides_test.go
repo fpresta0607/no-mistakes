@@ -26,16 +26,16 @@ func TestLoadGlobal_AcceptsPerRepositoryCommitAndTitleOverrides(t *testing.T) {
 		t.Fatalf("RepositoryOverrides keys = %v, want normalized remote key", cfg.RepositoryOverrides)
 	}
 	if override.Commit.BranchPattern == nil || *override.Commit.BranchPattern != `([A-Z]+-[0-9]+)` {
-		t.Fatalf("commit.branch_pattern = %v, want configured pattern", override.Commit.BranchPattern)
+		t.Fatalf("commit.branch_pattern = %v, want configured pattern", deref(override.Commit.BranchPattern))
 	}
 	if override.Commit.BranchReplacement == nil || *override.Commit.BranchReplacement != "${1}" {
-		t.Fatalf("commit.branch_replacement = %v, want configured replacement", override.Commit.BranchReplacement)
+		t.Fatalf("commit.branch_replacement = %v, want configured replacement", deref(override.Commit.BranchReplacement))
 	}
 	if override.Commit.FixMessage == nil || *override.Commit.FixMessage != "{{.Branch}}: {{.Summary}}" {
-		t.Fatalf("commit.fix_message = %v, want configured template", override.Commit.FixMessage)
+		t.Fatalf("commit.fix_message = %v, want configured template", deref(override.Commit.FixMessage))
 	}
 	if override.PR.TitleFormat == nil || *override.PR.TitleFormat != "{{.Branch}}: {{.Title}}" {
-		t.Fatalf("pr.title_format = %v, want configured template", override.PR.TitleFormat)
+		t.Fatalf("pr.title_format = %v, want configured template", deref(override.PR.TitleFormat))
 	}
 }
 

@@ -69,7 +69,7 @@ func TestCIStep_GreenChecksReleaseWithoutWaitingForTheMerge(t *testing.T) {
 		t.Fatal("green checks must not claim the trusted no_ci declaration")
 	}
 	if run.PRState == nil || *run.PRState != "open" {
-		t.Fatalf("PR state = %v, want open at the release point", run.PRState)
+		t.Fatalf("PR state = %v, want open at the release point", deref(run.PRState))
 	}
 
 	joined := strings.Join(logs, "\n")
@@ -199,4 +199,13 @@ func countGHStateReads(t *testing.T, logFile string) int {
 		}
 	}
 	return count
+}
+
+// deref returns the text a *string holds, or "" for nil, so a failure message
+// prints the text rather than the pointer's address.
+func deref(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }

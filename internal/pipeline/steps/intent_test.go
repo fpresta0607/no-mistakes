@@ -85,20 +85,20 @@ func TestIntentStep_SuccessPersistsAndAttaches(t *testing.T) {
 		t.Fatalf("expected non-skipped outcome on success, got %+v", outcome)
 	}
 	if sctx.Run.Intent == nil || *sctx.Run.Intent != "user added Bar()" {
-		t.Errorf("in-memory run.Intent = %v, want %q", sctx.Run.Intent, "user added Bar()")
+		t.Errorf("in-memory run.Intent = %v, want %q", deref(sctx.Run.Intent), "user added Bar()")
 	}
 	persisted, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
 		t.Fatalf("get run: %v", err)
 	}
 	if persisted.Intent == nil || *persisted.Intent != "user added Bar()" {
-		t.Errorf("db intent = %v, want %q", persisted.Intent, "user added Bar()")
+		t.Errorf("db intent = %v, want %q", deref(persisted.Intent), "user added Bar()")
 	}
 	if persisted.IntentSource == nil || *persisted.IntentSource != "claude" {
-		t.Errorf("db intent source = %v, want claude", persisted.IntentSource)
+		t.Errorf("db intent source = %v, want claude", deref(persisted.IntentSource))
 	}
 	if persisted.IntentSessionID == nil || *persisted.IntentSessionID != "s-1" {
-		t.Errorf("db intent session = %v, want s-1", persisted.IntentSessionID)
+		t.Errorf("db intent session = %v, want s-1", deref(persisted.IntentSessionID))
 	}
 	if persisted.IntentScore == nil || *persisted.IntentScore != 0.9 {
 		t.Errorf("db intent score = %v, want 0.9", persisted.IntentScore)
@@ -138,14 +138,14 @@ func TestIntentStep_SuccessSanitizesLoggedIntentOnly(t *testing.T) {
 		t.Fatalf("expected non-skipped outcome on success, got %+v", outcome)
 	}
 	if sctx.Run.Intent == nil || *sctx.Run.Intent != rawSummary {
-		t.Errorf("in-memory run.Intent = %v, want %q", sctx.Run.Intent, rawSummary)
+		t.Errorf("in-memory run.Intent = %v, want %q", deref(sctx.Run.Intent), rawSummary)
 	}
 	persisted, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
 		t.Fatalf("get run: %v", err)
 	}
 	if persisted.Intent == nil || *persisted.Intent != rawSummary {
-		t.Errorf("db intent = %v, want %q", persisted.Intent, rawSummary)
+		t.Errorf("db intent = %v, want %q", deref(persisted.Intent), rawSummary)
 	}
 
 	joined := strings.Join(logs, "\n")
@@ -259,7 +259,7 @@ func TestIntentStep_SlowExtractionPastOldTimeoutStillAttachesIntent(t *testing.T
 		t.Fatalf("get run: %v", err)
 	}
 	if persisted.Intent == nil || *persisted.Intent != "user wanted slow transcript summarization to finish" {
-		t.Fatalf("persisted intent = %v, want slow summarization intent", persisted.Intent)
+		t.Fatalf("persisted intent = %v, want slow summarization intent", deref(persisted.Intent))
 	}
 }
 
@@ -349,7 +349,7 @@ func TestIntentStep_InferredIntentCheckRejectsBeforePersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	if stored.Intent != nil || sctx.Run.Intent != nil {
-		t.Fatalf("rejected inferred intent was persisted or attached: stored=%v context=%v", stored.Intent, sctx.Run.Intent)
+		t.Fatalf("rejected inferred intent was persisted or attached: stored=%v context=%v", deref(stored.Intent), deref(sctx.Run.Intent))
 	}
 	for _, message := range logs {
 		if strings.Contains(message, "private-marker") {
@@ -385,7 +385,7 @@ func TestIntentStep_UsesSuppliedIntent(t *testing.T) {
 		t.Error("runIntent was called despite a supplied intent")
 	}
 	if sctx.Run.Intent == nil || *sctx.Run.Intent != supplied {
-		t.Errorf("supplied intent was mutated: %v", sctx.Run.Intent)
+		t.Errorf("supplied intent was mutated: %v", deref(sctx.Run.Intent))
 	}
 	found := false
 	for _, l := range logs {
@@ -396,4 +396,13 @@ func TestIntentStep_UsesSuppliedIntent(t *testing.T) {
 	if !found {
 		t.Errorf("missing supplied-intent log line; logs: %v", logs)
 	}
+}
+
+// deref returns the text a *string holds, or "" for nil, so a failure message
+// prints the text rather than the pointer's address.
+func deref(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }

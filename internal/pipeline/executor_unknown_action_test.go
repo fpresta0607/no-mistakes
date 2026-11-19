@@ -113,7 +113,7 @@ func TestExecutor_GateLoopFailsStepOnUnrecognizedAction(t *testing.T) {
 		t.Fatalf("review status = %q, want %q", dbSteps[0].Status, types.StepStatusFailed)
 	}
 	if dbSteps[0].Error == nil || !strings.Contains(*dbSteps[0].Error, "unrecognized approval action") {
-		t.Fatalf("review error = %v, want the unrecognized-action message", dbSteps[0].Error)
+		t.Fatalf("review error = %v, want the unrecognized-action message", derefString(dbSteps[0].Error))
 	}
 	if calls != 1 {
 		t.Fatalf("step executed %d times, want 1 (no re-park round)", calls)

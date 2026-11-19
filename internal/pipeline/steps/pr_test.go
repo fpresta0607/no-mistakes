@@ -98,7 +98,7 @@ func TestPRStep_UpdatesExistingPR(t *testing.T) {
 		t.Fatal(err)
 	}
 	if run.PRURL == nil || *run.PRURL != "https://github.com/test/repo/pull/42" {
-		t.Errorf("PR URL = %v, want https://github.com/test/repo/pull/42", run.PRURL)
+		t.Errorf("PR URL = %v, want https://github.com/test/repo/pull/42", deref(run.PRURL))
 	}
 }
 
@@ -236,7 +236,7 @@ func TestPRStep_BitbucketUpdatesExistingPR(t *testing.T) {
 		t.Fatal(err)
 	}
 	if run.PRURL == nil || *run.PRURL != "https://bitbucket.org/test/repo/pull-requests/42" {
-		t.Fatalf("PR URL = %v, want Bitbucket PR URL", run.PRURL)
+		t.Fatalf("PR URL = %v, want Bitbucket PR URL", deref(run.PRURL))
 	}
 }
 
@@ -306,7 +306,7 @@ func TestPRStep_BitbucketUpdatesExistingPRWithoutHTMLLink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if run.PRURL == nil || *run.PRURL != api.existingPRURL {
-		t.Fatalf("PR URL = %v, want %q", run.PRURL, api.existingPRURL)
+		t.Fatalf("PR URL = %v, want %q", deref(run.PRURL), api.existingPRURL)
 	}
 }
 
@@ -418,7 +418,7 @@ func TestPRStep_CreatesConfiguredDraftPR(t *testing.T) {
 		t.Fatal(err)
 	}
 	if run.PRURL == nil || *run.PRURL != "https://github.com/test/repo/pull/99" {
-		t.Fatalf("PR URL = %v, want https://github.com/test/repo/pull/99", run.PRURL)
+		t.Fatalf("PR URL = %v, want https://github.com/test/repo/pull/99", deref(run.PRURL))
 	}
 	for _, line := range strings.Split(ghLog, "\n") {
 		if strings.HasPrefix(line, "pr create ") {
@@ -686,7 +686,7 @@ func TestPRStep_ExistingPRAgainstDifferentBaseIsUpdatedNotDuplicated(t *testing.
 		t.Fatal(err)
 	}
 	if run.PRURL == nil || *run.PRURL != "https://github.com/test/repo/pull/42" {
-		t.Errorf("PR URL = %v, want the existing PR to remain https://github.com/test/repo/pull/42", run.PRURL)
+		t.Errorf("PR URL = %v, want the existing PR to remain https://github.com/test/repo/pull/42", deref(run.PRURL))
 	}
 }
 
@@ -858,7 +858,7 @@ func TestPRStep_BitbucketCreatesNewPR(t *testing.T) {
 		t.Fatal(err)
 	}
 	if run.PRURL == nil || *run.PRURL != api.createdPRURL {
-		t.Fatalf("PR URL = %v, want %q", run.PRURL, api.createdPRURL)
+		t.Fatalf("PR URL = %v, want %q", deref(run.PRURL), api.createdPRURL)
 	}
 }
 
@@ -923,7 +923,7 @@ func TestPRStep_BitbucketCreatesNewPRWithoutHTMLLink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if run.PRURL == nil || *run.PRURL != "https://bitbucket.org/test/repo/pull-requests/99" {
-		t.Fatalf("PR URL = %v, want derived Bitbucket PR URL", run.PRURL)
+		t.Fatalf("PR URL = %v, want derived Bitbucket PR URL", deref(run.PRURL))
 	}
 }
 

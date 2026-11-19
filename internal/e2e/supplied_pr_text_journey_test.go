@@ -129,7 +129,7 @@ func TestSuppliedPRTextJourney(t *testing.T) {
 	first := waitPublished(t, h, branch, "", "supplied create")
 	gotTitle, gotBody := readRunPRText(t, h.NMHome, first.ID)
 	if gotTitle == nil || *gotTitle != title || gotBody == nil || *gotBody != narrative {
-		t.Fatalf("persisted pr_title/pr_body = %v/%v", gotTitle, gotBody)
+		t.Fatalf("persisted pr_title/pr_body = %v/%v", deref(gotTitle), deref(gotBody))
 	}
 	pr := livePR(t, statePath, branch)
 	saveSuppliedEvidence(t, "02-create-pr.md", "TITLE: "+pr.Title+"\n\n"+pr.Body)
@@ -172,10 +172,10 @@ func TestSuppliedPRTextJourney(t *testing.T) {
 	second := waitPublished(t, h, branch, first.ID, "rerun")
 	gotTitle, gotBody = readRunPRText(t, h.NMHome, second.ID)
 	if gotTitle == nil || *gotTitle != newTitle {
-		t.Errorf("rerun pr_title = %v, want replaced %q", gotTitle, newTitle)
+		t.Errorf("rerun pr_title = %v, want replaced %q", deref(gotTitle), newTitle)
 	}
 	if gotBody == nil || *gotBody != narrative {
-		t.Errorf("rerun pr_body = %v, want inherited narrative", gotBody)
+		t.Errorf("rerun pr_body = %v, want inherited narrative", deref(gotBody))
 	}
 	pr = livePR(t, statePath, branch)
 	saveSuppliedEvidence(t, "03-rerun-pr.md", "TITLE: "+pr.Title+"\n\n"+pr.Body)
@@ -195,7 +195,7 @@ func TestSuppliedPRTextJourney(t *testing.T) {
 	third := waitPublished(t, h, branch, second.ID, "plain push")
 	gotTitle, gotBody = readRunPRText(t, h.NMHome, third.ID)
 	if gotTitle != nil || gotBody != nil {
-		t.Errorf("plain push run carries supplied text %v/%v", gotTitle, gotBody)
+		t.Errorf("plain push run carries supplied text %v/%v", deref(gotTitle), deref(gotBody))
 	}
 	pr = livePR(t, statePath, branch)
 	saveSuppliedEvidence(t, "04-plain-push-pr.md", "TITLE: "+pr.Title+"\n\n"+pr.Body)
@@ -232,7 +232,7 @@ func TestSuppliedPRTextJourney(t *testing.T) {
 	}
 	plain := waitPublished(t, h, plainBranch, "", "unconfigured")
 	if gt, gb := readRunPRText(t, h.NMHome, plain.ID); gt != nil || gb != nil {
-		t.Errorf("unconfigured run stored PR text %v/%v", gt, gb)
+		t.Errorf("unconfigured run stored PR text %v/%v", deref(gt), deref(gb))
 	}
 	pr = livePR(t, statePath, plainBranch)
 	saveSuppliedEvidence(t, "06-unconfigured-pr.md", "TITLE: "+pr.Title+"\n\n"+pr.Body)

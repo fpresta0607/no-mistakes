@@ -89,7 +89,7 @@ func TestExecutor_RecordsAnAgentInvocationFailureAsTheStepsCause(t *testing.T) {
 			}
 			got := steps[0].FailureCause != nil && *steps[0].FailureCause == db.StepFailureCauseAgentInvocation
 			if steps[0].Status != types.StepStatusFailed || got != tc.cause {
-				t.Fatalf("step status=%s agent-invocation cause=%v, want failed with cause=%v (error %v)", steps[0].Status, got, tc.cause, steps[0].Error)
+				t.Fatalf("step status=%s agent-invocation cause=%v, want failed with cause=%v (error %v)", steps[0].Status, got, tc.cause, derefString(steps[0].Error))
 			}
 		})
 	}

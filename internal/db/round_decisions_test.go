@@ -43,10 +43,10 @@ func TestSetStepRoundDeclined_RecordsAnExplicitEmptySelection(t *testing.T) {
 		t.Fatalf("rounds: %v %d", err, len(rounds))
 	}
 	if rounds[0].SelectionSource == nil || *rounds[0].SelectionSource != RoundSelectionSourceUserDeclined {
-		t.Fatalf("selection_source = %v, want %q", rounds[0].SelectionSource, RoundSelectionSourceUserDeclined)
+		t.Fatalf("selection_source = %v, want %q", deref(rounds[0].SelectionSource), RoundSelectionSourceUserDeclined)
 	}
 	if rounds[0].SelectedFindingIDs == nil || *rounds[0].SelectedFindingIDs != DeclinedSelectionJSON {
-		t.Fatalf("selected_finding_ids = %v, want %q", rounds[0].SelectedFindingIDs, DeclinedSelectionJSON)
+		t.Fatalf("selected_finding_ids = %v, want %q", deref(rounds[0].SelectedFindingIDs), DeclinedSelectionJSON)
 	}
 }
 
@@ -74,10 +74,10 @@ func TestSetStepRoundDeclined_NeverOverwritesARecordedSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rounds[0].SelectionSource == nil || *rounds[0].SelectionSource != RoundSelectionSourceAutoFix {
-		t.Fatalf("selection_source = %v, want the original %q", rounds[0].SelectionSource, RoundSelectionSourceAutoFix)
+		t.Fatalf("selection_source = %v, want the original %q", deref(rounds[0].SelectionSource), RoundSelectionSourceAutoFix)
 	}
 	if rounds[0].SelectedFindingIDs == nil || *rounds[0].SelectedFindingIDs != selected {
-		t.Fatalf("selected_finding_ids = %v, want the original %q", rounds[0].SelectedFindingIDs, selected)
+		t.Fatalf("selected_finding_ids = %v, want the original %q", deref(rounds[0].SelectedFindingIDs), selected)
 	}
 	if rounds[0].ResponseOrigin != types.ResponseOrigin("unknown") {
 		t.Fatalf("response_origin = %q, want the original %q", rounds[0].ResponseOrigin, "unknown")

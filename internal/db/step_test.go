@@ -168,7 +168,7 @@ func TestStartStep(t *testing.T) {
 		t.Error("expected non-nil last_activity_at")
 	}
 	if got.LastActivity == nil || *got.LastActivity != "step started" {
-		t.Errorf("last_activity = %v, want step started", got.LastActivity)
+		t.Errorf("last_activity = %v, want step started", deref(got.LastActivity))
 	}
 }
 
@@ -228,7 +228,7 @@ func TestStepActivity(t *testing.T) {
 		t.Fatalf("agent_pid = %v, want %d", got.AgentPID, pid)
 	}
 	if got.LastActivity == nil || *got.LastActivity != "codex started pid=12345" {
-		t.Fatalf("last_activity = %v, want codex start", got.LastActivity)
+		t.Fatalf("last_activity = %v, want codex start", deref(got.LastActivity))
 	}
 
 	if err := d.TouchStepActivity(step.ID, "log: still working"); err != nil {
@@ -239,7 +239,7 @@ func TestStepActivity(t *testing.T) {
 		t.Fatalf("touch should preserve agent_pid, got %v", got.AgentPID)
 	}
 	if got.LastActivity == nil || *got.LastActivity != "log: still working" {
-		t.Fatalf("last_activity = %v, want log activity", got.LastActivity)
+		t.Fatalf("last_activity = %v, want log activity", deref(got.LastActivity))
 	}
 
 	if err := d.SetStepAgentActivity(step.ID, "codex exited pid=12345 status=success", nil); err != nil {
@@ -271,7 +271,7 @@ func TestCompleteStep(t *testing.T) {
 		t.Errorf("duration = %v, want 1500", got.DurationMS)
 	}
 	if got.LogPath == nil || *got.LogPath != "/logs/run-1/review.log" {
-		t.Errorf("log path = %v, want /logs/run-1/review.log", got.LogPath)
+		t.Errorf("log path = %v, want /logs/run-1/review.log", deref(got.LogPath))
 	}
 	if got.CompletedAt == nil {
 		t.Error("expected non-nil completed_at")
@@ -301,7 +301,7 @@ func TestCompleteStepWithStatus(t *testing.T) {
 		t.Errorf("duration = %v, want 1500", got.DurationMS)
 	}
 	if got.LogPath == nil || *got.LogPath != "/logs/run-1/review.log" {
-		t.Errorf("log path = %v, want /logs/run-1/review.log", got.LogPath)
+		t.Errorf("log path = %v, want /logs/run-1/review.log", deref(got.LogPath))
 	}
 	if got.CompletedAt == nil {
 		t.Error("expected non-nil completed_at")
@@ -434,7 +434,7 @@ func TestCompleteReviewStepIsAtomic(t *testing.T) {
 	}
 	gotRun, _ := d.GetRun(run.ID)
 	if gotRun.ReviewApprovedHeadSHA != nil {
-		t.Fatalf("failed transaction created review authority: %#v", gotRun.ReviewApprovedHeadSHA)
+		t.Fatalf("failed transaction created review authority: %#v", deref(gotRun.ReviewApprovedHeadSHA))
 	}
 
 	if err := d.CompleteReviewStep(step.ID, run.ID, "approved", 0, 10, "review.log"); err != nil {
@@ -461,7 +461,7 @@ func TestFailStep(t *testing.T) {
 		t.Errorf("status = %q, want %q", got.Status, types.StepStatusFailed)
 	}
 	if got.Error == nil || *got.Error != "agent crashed" {
-		t.Errorf("error = %v, want %q", got.Error, "agent crashed")
+		t.Errorf("error = %v, want %q", deref(got.Error), "agent crashed")
 	}
 	if got.DurationMS == nil || *got.DurationMS != 1500 {
 		t.Errorf("duration_ms = %v, want 1500", got.DurationMS)
@@ -480,7 +480,7 @@ func TestSetStepFindings(t *testing.T) {
 	}
 	got, _ := d.GetStepResult(step.ID)
 	if got.FindingsJSON == nil || *got.FindingsJSON != findings {
-		t.Errorf("findings = %v, want %q", got.FindingsJSON, findings)
+		t.Errorf("findings = %v, want %q", deref(got.FindingsJSON), findings)
 	}
 }
 
@@ -500,7 +500,7 @@ func TestClearStepFindings(t *testing.T) {
 
 	got, _ := d.GetStepResult(step.ID)
 	if got.FindingsJSON != nil {
-		t.Errorf("findings = %v, want nil", got.FindingsJSON)
+		t.Errorf("findings = %v, want nil", deref(got.FindingsJSON))
 	}
 }
 

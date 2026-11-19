@@ -145,7 +145,7 @@ func TestRetryContinuesAFailedReviewFromThePreservedHead(t *testing.T) {
 		t.Fatalf("retried run = %+v, want completed from preserved head %s", retried, preserved)
 	}
 	if retried.Intent == nil || *retried.Intent != *failed.Intent || *retried.IntentSource != *failed.IntentSource {
-		t.Fatalf("retried run intent = %v/%v, want the failed run's %v/%v", retried.Intent, retried.IntentSource, *failed.Intent, *failed.IntentSource)
+		t.Fatalf("retried run intent = %v/%v, want the failed run's %v/%v", deref(retried.Intent), deref(retried.IntentSource), *failed.Intent, *failed.IntentSource)
 	}
 	if got := rebase.execCnt.Load(); got != 1 {
 		t.Errorf("rebase executed %d times, want once: the retry carries it", got)
@@ -706,7 +706,7 @@ func TestRetryInheritsTheSuppliedPRText(t *testing.T) {
 	}
 	run := waitForRunTerminalState(t, f.d, result.RunID)
 	if run.PRTitle == nil || *run.PRTitle != text.Title || run.PRBody == nil || *run.PRBody != text.Body {
-		t.Fatalf("retried run PR text = %v / %v", run.PRTitle, run.PRBody)
+		t.Fatalf("retried run PR text = %v / %v", deref(run.PRTitle), deref(run.PRBody))
 	}
 }
 

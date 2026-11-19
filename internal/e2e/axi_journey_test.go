@@ -1123,7 +1123,7 @@ func TestAxiAgentJourney(t *testing.T) {
 	}
 	storedIntent := readRunIntent(t, h.NMHome, completed.ID)
 	if storedIntent.source == nil || *storedIntent.source != "agent" {
-		t.Errorf("runs.intent_source = %v, want agent for explicit --intent", storedIntent.source)
+		t.Errorf("runs.intent_source = %v, want agent for explicit --intent", deref(storedIntent.source))
 	}
 	reviewPrompt := findInvocationContaining(h.AgentInvocations(), "Review the code changes and return structured findings")
 	if reviewPrompt == "" {
