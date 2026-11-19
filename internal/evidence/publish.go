@@ -2,6 +2,7 @@ package evidence
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io/fs"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
@@ -86,14 +88,16 @@ type Result struct {
 	// Files are the published paths relative to Dir, slash separated.
 	Files []string
 	// Withheld are the source paths, slash separated, that were not published
-	// because the file carries a captured agent prompt. CommitSHA is empty
+	// because the file carries a captured agent prompt, or an operator path in
+	// a form redaction cannot rewrite (redactEvidence). CommitSHA is empty
 	// when every file was withheld.
 	Withheld []string
 }
 
 // Publish copies every regular file under req.SourceDir onto the evidence
 // branch and pushes it, except a file that carries a captured agent prompt,
-// which it withholds and names in the result (hashEvidenceFile).
+// which it withholds and names in the result (hashEvidenceFile), as it does a
+// file naming an operator path it cannot rewrite.
 //
 // The commit is built with plumbing against a scratch index, so the caller's
 // worktree, index, and HEAD are never touched. The new commit's parent is the
@@ -230,28 +234,112 @@ func publishOnce(ctx context.Context, req Request, branch, dir string, files []c
 // a byte-order mark, and beside a stray NUL or invalid byte, none of which is
 // clean UTF-8.
 //
-// Clean UTF-8 text that is published gets the path redaction the PR title and
-// body get (the run's evidence directory, which SourceDir is, the run worktree
-// paths, then the operator's home), because captured command output carries
-// those absolute paths. Every other published file, binary and visual
-// artifacts among them, and the local file itself, are left untouched.
+// The same reach applies to the operator's paths (redactEvidence), because
+// captured command output carries them and whether a file is text is not
+// something its bytes settle. Every published file the redaction leaves alone,
+// binary and visual artifacts among them, and the local file itself, are left
+// untouched.
 func hashEvidenceFile(ctx context.Context, req Request, env []string, abs string) (blob string, isWithheld bool, err error) {
 	content, err := os.ReadFile(abs)
 	if err != nil {
 		return "", false, err
 	}
-	text := string(content)
-	if agent.CarriesCapturedPrompt(strings.ReplaceAll(text, "\x00", "")) {
+	if agent.CarriesCapturedPrompt(strings.ReplaceAll(string(content), "\x00", "")) {
 		return "", true, nil
 	}
-	if utf8.ValidString(text) && !strings.Contains(text, "\x00") {
-		if redacted := safepath.RedactPublished(text, req.RunWorktree, req.WorktreesRoot, req.SourceDir); redacted != text {
-			blob, err = git.RunWithInput(ctx, req.RepoDir, redacted, "hash-object", "-w", "--stdin")
-			return blob, false, err
-		}
+	redacted, isWithheld := redactEvidence(req, content)
+	if isWithheld {
+		return "", true, nil
+	}
+	if redacted != nil {
+		blob, err = git.RunWithInput(ctx, req.RepoDir, string(redacted), "hash-object", "-w", "--stdin")
+		return blob, false, err
 	}
 	blob, err = git.RunWithEnv(ctx, req.RepoDir, env, "hash-object", "-w", "--", abs)
 	return blob, false, err
+}
+
+// redactEvidence applies the path redaction the PR title and body get (the
+// run's evidence directory, which SourceDir is, the run worktree paths, then the
+// operator's home) to one evidence file. It returns the rewritten bytes, nil
+// when the file names none of those paths and is published as written, or
+// isWithheld when it names one in a form it cannot rewrite.
+//
+// Text is not told from a binary by a byte test: UTF-16 (what Windows
+// PowerShell 5.1 redirection writes), an OEM code page, a log cut mid-rune and
+// output holding a NUL (`find -print0`) all fail "clean UTF-8 with no NUL", and
+// a path in any of them reached the branch unredacted (issue #233). So the file
+// is judged by what it names:
+//
+//   - UTF-16 with a byte-order mark is decoded, redacted and encoded again.
+//   - Valid UTF-8 is redacted as it stands, a NUL byte among it or not.
+//   - Anything else is not known to be text, and redacting a binary would
+//     corrupt it, so it is withheld when the redaction would change it and
+//     published as written when it would not.
+//   - A path hidden from the redaction by interleaved NUL bytes (UTF-16 without
+//     a byte-order mark) is found on the NUL-stripped bytes and withheld, the
+//     view the captured-prompt check takes.
+func redactEvidence(req Request, content []byte) (redacted []byte, isWithheld bool) {
+	redact := func(text string) string {
+		return safepath.RedactPublished(text, req.RunWorktree, req.WorktreesRoot, req.SourceDir)
+	}
+	if units, byteOrder, ok := utf16WithByteOrderMark(content); ok {
+		decoded := string(utf16.Decode(units))
+		rewritten := redact(decoded)
+		if rewritten == decoded {
+			return nil, false
+		}
+		return encodeUTF16WithByteOrderMark([]rune(rewritten), byteOrder), false
+	}
+
+	text := string(content)
+	if utf8.ValidString(text) {
+		if rewritten := redact(text); rewritten != text {
+			redacted, text = []byte(rewritten), rewritten
+		}
+	} else if redact(text) != text {
+		return nil, true
+	}
+	if strings.Contains(text, "\x00") {
+		if stripped := strings.ReplaceAll(text, "\x00", ""); redact(stripped) != stripped {
+			return nil, true
+		}
+	}
+	return redacted, false
+}
+
+// utf16WithByteOrderMark reports whether content is UTF-16 introduced by a
+// byte-order mark, and returns its code units and byte order. An odd length is
+// not UTF-16.
+func utf16WithByteOrderMark(content []byte) ([]uint16, binary.AppendByteOrder, bool) {
+	if len(content) < 2 || len(content)%2 != 0 {
+		return nil, nil, false
+	}
+	var byteOrder interface {
+		binary.ByteOrder
+		binary.AppendByteOrder
+	}
+	switch {
+	case content[0] == 0xFF && content[1] == 0xFE:
+		byteOrder = binary.LittleEndian
+	case content[0] == 0xFE && content[1] == 0xFF:
+		byteOrder = binary.BigEndian
+	default:
+		return nil, nil, false
+	}
+	units := make([]uint16, 0, len(content)/2-1)
+	for i := 2; i < len(content); i += 2 {
+		units = append(units, byteOrder.Uint16(content[i:]))
+	}
+	return units, byteOrder, true
+}
+
+func encodeUTF16WithByteOrderMark(text []rune, byteOrder binary.AppendByteOrder) []byte {
+	encoded := byteOrder.AppendUint16(nil, 0xFEFF)
+	for _, unit := range utf16.Encode(text) {
+		encoded = byteOrder.AppendUint16(encoded, unit)
+	}
+	return encoded
 }
 
 // remoteTip returns the remote evidence branch head, fetched into the local

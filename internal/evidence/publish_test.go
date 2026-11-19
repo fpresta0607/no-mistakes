@@ -454,19 +454,21 @@ func TestPublish_ExcludedDirectoryAlonePublishesNothing(t *testing.T) {
 
 // Captured command output carries absolute paths under the operator's home, so
 // a text file gets the same home-directory redaction the PR body gets before it
-// reaches the branch. A binary artifact and the local file are left as written.
-// Each binary fixture trips exactly one of the two binary checks, so removing
-// either check fails this test.
+// reaches the branch. A binary artifact that names no such path and the local
+// file are left as written, however many NUL and invalid bytes the artifact
+// holds (issue #233).
 func TestPublish_RedactsHomePathsInTextEvidence(t *testing.T) {
 	remote, work := newRepoWithRemote(t)
 	binaries := map[string]string{
-		"nul-byte.bin": "valid utf-8 /home/alice/shot\x00 with a nul",
-		"invalid.bin":  "\x89PNG /home/alice/shot without a nul",
+		"nul-byte.bin": "\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x01\x00",
+		"invalid.bin":  "\xff\xfe\x01\x02\x03 not utf-16 \xc3\x28 and not text",
+		"video.bin":    "ftypmp42\x00\x00\x00\x00\xff\xd8\xff\xe0 a frame",
 	}
 	const text = "ran /home/alice/project/bin/tool\nwrote /Users/alice/out.json\n"
 	source := writeEvidence(t, t.TempDir(), map[string]string{
 		"nul-byte.bin": binaries["nul-byte.bin"],
 		"invalid.bin":  binaries["invalid.bin"],
+		"video.bin":    binaries["video.bin"],
 		"logs/run.txt": text,
 	})
 
@@ -488,6 +490,80 @@ func TestPublish_RedactsHomePathsInTextEvidence(t *testing.T) {
 	}
 	if local, err := os.ReadFile(filepath.Join(source, "logs", "run.txt")); err != nil || string(local) != text {
 		t.Errorf("local evidence = %q (%v), want it untouched", local, err)
+	}
+}
+
+// utf16Capture encodes text the way a Windows console redirection writes it.
+func utf16Capture(order binary.AppendByteOrder, withByteOrderMark bool, text string) string {
+	var encoded []byte
+	if withByteOrderMark {
+		encoded = order.AppendUint16(encoded, 0xFEFF)
+	}
+	for _, unit := range utf16.Encode([]rune(text)) {
+		encoded = order.AppendUint16(encoded, unit)
+	}
+	return string(encoded)
+}
+
+// Whether a file is text is not something "clean UTF-8 with no NUL" settles
+// (issue #233). A capture in any of these shapes used to reach the branch byte
+// for byte with the operator's paths spelled out: it is redacted like UTF-8
+// text when its encoding is known, and kept off the branch when it is not,
+// never published as written.
+func TestPublish_NeverPublishesAnOperatorPathInTextThatIsNotCleanUTF8(t *testing.T) {
+	const leaking = "ran /home/alice/project/bin/tool\nwrote /Users/alice/out.json\n"
+	const redacted = "ran ~/project/bin/tool\nwrote ~/out.json\n"
+	tests := []struct {
+		name       string
+		capture    string
+		want       string
+		isWithheld bool
+	}{
+		{name: "utf-16 little endian with a byte-order mark", capture: utf16Capture(binary.LittleEndian, true, leaking), want: utf16Capture(binary.LittleEndian, true, redacted)},
+		{name: "utf-16 big endian with a byte-order mark", capture: utf16Capture(binary.BigEndian, true, leaking), want: utf16Capture(binary.BigEndian, true, redacted)},
+		{name: "utf-8 holding a nul", capture: "a\x00b\x00" + leaking + "c\x00", want: "a\x00b\x00" + redacted + "c\x00"},
+		{name: "utf-16 without a byte-order mark", capture: utf16Capture(binary.LittleEndian, false, leaking), isWithheld: true},
+		{name: "oem code page text", capture: "caf\x82 " + leaking, isWithheld: true},
+		{name: "utf-8 cut in the middle of a character", capture: leaking + "cut \xe2\x82", isWithheld: true},
+		{name: "utf-8 with a nul and a utf-16 line", capture: "a\x00" + leaking + utf16Capture(binary.LittleEndian, false, "see /home/bob/x\n"), isWithheld: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			remote, work := newRepoWithRemote(t)
+			source := writeEvidence(t, t.TempDir(), map[string]string{
+				"logs/capture.log": tt.capture,
+				"logs/cli-run.txt": "it works\n",
+			})
+
+			result, err := Publish(context.Background(), baseRequest(remote, work, source))
+			if err != nil {
+				t.Fatalf("Publish: %v", err)
+			}
+			tree := runGit(t, remote, "ls-tree", "-r", "--name-only", result.CommitSHA)
+			if tt.isWithheld {
+				if got, want := strings.Join(result.Withheld, ","), "logs/capture.log"; got != want {
+					t.Errorf("withheld = %q, want %q", got, want)
+				}
+				if strings.Contains(tree, "capture.log") {
+					t.Errorf("the capture reached the evidence branch:\n%s", tree)
+				}
+			} else {
+				if len(result.Withheld) != 0 {
+					t.Errorf("withheld = %q, want nothing", result.Withheld)
+				}
+				cmd := exec.Command("git", "cat-file", "blob", result.CommitSHA+":.no-mistakes/evidence/fm/add-login/logs/capture.log")
+				cmd.Dir = remote
+				if out, err := cmd.Output(); err != nil || string(out) != tt.want {
+					t.Errorf("published capture = %q (%v), want %q", out, err, tt.want)
+				}
+			}
+			if got, want := runGit(t, remote, "cat-file", "-p", result.CommitSHA+":.no-mistakes/evidence/fm/add-login/logs/cli-run.txt"), "it works"; got != want {
+				t.Errorf("sibling evidence = %q, want %q", got, want)
+			}
+			if local, err := os.ReadFile(filepath.Join(source, "logs", "capture.log")); err != nil || string(local) != tt.capture {
+				t.Errorf("local evidence = %q (%v), want it untouched", local, err)
+			}
+		})
 	}
 }
 
