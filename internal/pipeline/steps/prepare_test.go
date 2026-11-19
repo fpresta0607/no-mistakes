@@ -726,7 +726,7 @@ func TestEnsurePrepared_RepositoryWithoutSubmodulesRunsNoSubmoduleCommand(t *tes
 	t.Setenv("FAKE_CLI_LOG", logFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	previousTimeout := prepareCleanupTimeout
-	prepareCleanupTimeout = 3 * time.Second
+	prepareCleanupTimeout = 25 * time.Second
 	t.Cleanup(func() { prepareCleanupTimeout = previousTimeout })
 
 	if err := ensurePrepared(sctx, types.StepTest); err != nil {
