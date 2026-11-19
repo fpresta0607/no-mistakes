@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -700,5 +701,187 @@ func TestStoredSnapshotsKeepEveryFieldTheyAreComparedOn(t *testing.T) {
 				t.Errorf("%s.%s is left out of stored snapshots", kind.Name(), field.Name)
 			}
 		}
+	}
+}
+
+// olderBuildAdmission records an admission the way a build whose Run had no
+// TestOutputDirs or AgentEnv wrote it: the stored snapshot and initial child
+// lack both keys, and the request is bound to the digest of those bytes.
+func olderBuildAdmission(t *testing.T) (*DB, ValidationAdmission, *ValidationAdmission) {
+	t.Helper()
+	database, proposal := admissionFixture(t)
+	if _, err := database.sql.Exec(`UPDATE runs SET test_output_dirs = NULL, agent_env = NULL WHERE id = ?`, proposal.Request.PredecessorID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := database.ReadTerminalSnapshot(proposal.Request.PredecessorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal.Snapshot, proposal.Request.SnapshotDigest = *snapshot, snapshot.Digest()
+	event, _, err := database.AcceptValidationAdmission(context.Background(), proposal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload string
+	if err := database.sql.QueryRow(`SELECT event_json FROM validation_admissions WHERE id = ?`, event.ID).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	const laterFields = `,"TestOutputDirs":null,"AgentEnv":null`
+	if count := strings.Count(payload, laterFields); count != 2 {
+		t.Fatalf("stored admission holds the later Run fields %d times, want the snapshot and the initial child", count)
+	}
+	payload = strings.ReplaceAll(payload, laterFields, "")
+	var stored struct{ Snapshot json.RawMessage }
+	if err := json.Unmarshal([]byte(payload), &stored); err != nil {
+		t.Fatal(err)
+	}
+	request := event.Request
+	request.SnapshotDigest = fmt.Sprintf("%x", sha256.Sum256(stored.Snapshot))
+	if request.SnapshotDigest == proposal.Snapshot.Digest() {
+		t.Fatal("older snapshot bytes hash like the current encoding; the fixture proves nothing")
+	}
+	recorded := `"snapshot_digest":"` + event.Request.SnapshotDigest + `"`
+	if strings.Count(payload, recorded) != 1 {
+		t.Fatal("stored admission does not hold its request's snapshot digest exactly once")
+	}
+	payload = strings.Replace(payload, recorded, `"snapshot_digest":"`+request.SnapshotDigest+`"`, 1)
+	rewriteStoredAdmission(t, database, event.ID, payload, request.Digest())
+	event.Request = request
+	return database, proposal, event
+}
+
+// rewriteStoredAdmission replaces a stored admission's payload and request
+// digest. The table refuses UPDATE, so the row is deleted and written again.
+func rewriteStoredAdmission(t *testing.T, database *DB, id, payload, requestDigest string) {
+	t.Helper()
+	var predecessorID, childID string
+	if err := database.sql.QueryRow(`SELECT predecessor_id, child_id FROM validation_admissions WHERE id = ?`, id).Scan(&predecessorID, &childID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.sql.Exec(`DELETE FROM validation_admissions WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.sql.Exec(`INSERT INTO validation_admissions (id, predecessor_id, child_id, request_digest, event_json) VALUES (?, ?, ?, ?, ?)`, id, predecessorID, childID, requestDigest, payload); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidationAdmissionAnOlderBuildRecordedStillReads(t *testing.T) {
+	database, proposal, recorded := olderBuildAdmission(t)
+
+	byPredecessor, predecessorErr := database.GetValidationAdmission(proposal.Request.PredecessorID)
+	byChild, childErr := database.GetValidationPredecessor(recorded.ChildID)
+	pending, pendingErr := database.PendingValidationAdmissions()
+
+	if predecessorErr != nil || byPredecessor == nil || byPredecessor.ID != recorded.ID {
+		t.Fatalf("GetValidationAdmission = %+v, %v", byPredecessor, predecessorErr)
+	}
+	if childErr != nil || byChild == nil || byChild.ID != recorded.ID || byChild.Request.SnapshotDigest != recorded.Request.SnapshotDigest {
+		t.Fatalf("GetValidationPredecessor = %+v, %v", byChild, childErr)
+	}
+	if pendingErr != nil || len(pending) != 1 || pending[0].ID != recorded.ID {
+		t.Fatalf("PendingValidationAdmissions = %+v, %v", pending, pendingErr)
+	}
+	if err := database.ValidatePendingAdmission(byChild); err != nil {
+		t.Fatalf("parked admitted child cannot start: %v", err)
+	}
+	if _, err := database.ValidationHistory(recorded.ChildID); err != nil {
+		t.Fatalf("validation history walk: %v", err)
+	}
+}
+
+func TestValidationAdmissionAdmitsTheChildOfAnOlderBuildsAdmission(t *testing.T) {
+	database, proposal, recorded := olderBuildAdmission(t)
+	if err := database.UpdateRunStatus(recorded.ChildID, types.RunCancelled); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := database.ReadTerminalSnapshot(recorded.ChildID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descendant := proposal
+	descendant.Snapshot = *snapshot
+	descendant.Request.PredecessorID, descendant.Request.SnapshotDigest = recorded.ChildID, snapshot.Digest()
+	descendant.Request.LaunchNonce = *snapshot.Run.LaunchNonce
+	descendant.Request.CandidateSHA = strings.Repeat("9", 40)
+
+	second, created, err := database.AcceptValidationAdmission(context.Background(), descendant)
+
+	if err != nil || !created {
+		t.Fatalf("child of an older build's admission refused: created=%v error=%v", created, err)
+	}
+	family, err := database.ValidationFamily(second.ChildID)
+	if err != nil || family.PredecessorID != recorded.ChildID {
+		t.Fatalf("descendant family = %+v %v", family, err)
+	}
+	if spending := family.Spending[types.StepReview]; spending.Automatic != 1 || spending.Manual != 2 {
+		t.Fatalf("descendant renewed or lost spending: %+v", spending)
+	}
+}
+
+func TestValidationAdmissionRefusesAStoredAdmissionChangedAfterItWasStored(t *testing.T) {
+	const bindingChanged, identityInconsistent = "predecessor snapshot or repository binding changed", "identity is inconsistent"
+	for _, test := range []struct {
+		name      string
+		isOlder   bool
+		original  string
+		changed   string
+		isRebound bool
+		wantError string
+	}{
+		{name: "snapshot field", original: `"IsAuthoredChild":false`, changed: `"IsAuthoredChild":true`, wantError: bindingChanged},
+		{name: "snapshot bytes that decode the same", original: `"IsAuthoredChild":false`, changed: `"IsAuthoredChild": false`, wantError: bindingChanged},
+		{name: "older build's snapshot field", isOlder: true, original: `"IsAuthoredChild":false`, changed: `"IsAuthoredChild":true`, wantError: bindingChanged},
+		{name: "request without its digest", original: `"reason":"Validate a complete declared authored candidate"`, changed: `"reason":"Validate something else"`, wantError: identityInconsistent},
+		{name: "request snapshot digest with its digest", isRebound: true, wantError: bindingChanged},
+		{name: "older build's request snapshot digest with its digest", isOlder: true, isRebound: true, wantError: bindingChanged},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var database *DB
+			var event *ValidationAdmission
+			if test.isOlder {
+				database, _, event = olderBuildAdmission(t)
+			} else {
+				var proposal ValidationAdmission
+				database, proposal = admissionFixture(t)
+				accepted, _, err := database.AcceptValidationAdmission(context.Background(), proposal)
+				if err != nil {
+					t.Fatal(err)
+				}
+				event = accepted
+			}
+			var payload string
+			if err := database.sql.QueryRow(`SELECT event_json FROM validation_admissions WHERE id = ?`, event.ID).Scan(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if test.isRebound {
+				test.original, test.changed = `"snapshot_digest":"`+event.Request.SnapshotDigest+`"`, `"snapshot_digest":"`+strings.Repeat("0", 64)+`"`
+			}
+			if strings.Count(payload, test.original) != 1 {
+				t.Fatalf("stored admission does not hold %s exactly once", test.original)
+			}
+			payload = strings.Replace(payload, test.original, test.changed, 1)
+			requestDigest := event.Request.Digest()
+			if test.isRebound {
+				var changed ValidationAdmission
+				if err := json.Unmarshal([]byte(payload), &changed); err != nil {
+					t.Fatal(err)
+				}
+				requestDigest = changed.Request.Digest()
+			}
+			rewriteStoredAdmission(t, database, event.ID, payload, requestDigest)
+
+			byPredecessor, predecessorErr := database.GetValidationAdmission(event.Request.PredecessorID)
+			byChild, childErr := database.GetValidationPredecessor(event.ChildID)
+
+			for _, read := range []struct {
+				event *ValidationAdmission
+				err   error
+			}{{byPredecessor, predecessorErr}, {byChild, childErr}} {
+				if read.event != nil || read.err == nil || !strings.Contains(read.err.Error(), test.wantError) {
+					t.Fatalf("changed admission read = %+v, %v; want %q", read.event, read.err, test.wantError)
+				}
+			}
+		})
 	}
 }

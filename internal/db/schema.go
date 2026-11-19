@@ -340,6 +340,7 @@ CREATE TABLE IF NOT EXISTS run_retries (
 // migrationStatements hold additive schema changes applied to databases that
 // were created before the referenced columns existed. Each statement must be
 // idempotent via its error being tolerated when the column already exists.
+// They run inside migrate's single transaction, so none may BEGIN or COMMIT.
 var migrationStatements = []string{
 	`CREATE TABLE IF NOT EXISTS review_scope_decisions (
 		id TEXT PRIMARY KEY,
@@ -554,14 +555,11 @@ var migrationStatements = []string{
 	// WHERE and ORDER BY (GetStepsByRun with its id tie-break, GetRoundsByStep,
 	// and the repo/branch and status run lookups), so the step and round
 	// lookups need no temporary sort. TestHistoryLookupsUseHistoryIndexes
-	// plans the real queries against these. The four run in one transaction so
-	// a fresh database pays one commit for them instead of four.
-	`BEGIN;
-CREATE INDEX IF NOT EXISTS idx_step_results_run_order_id ON step_results (run_id, step_order, id);
-CREATE INDEX IF NOT EXISTS idx_step_rounds_step_round ON step_rounds (step_result_id, round);
-CREATE INDEX IF NOT EXISTS idx_runs_repo_branch_created_id ON runs (repo_id, branch, created_at DESC, id DESC);
-CREATE INDEX IF NOT EXISTS idx_runs_status_created_id ON runs (status, created_at DESC, id DESC);
-COMMIT;`,
+	// plans the real queries against these.
+	`CREATE INDEX IF NOT EXISTS idx_step_results_run_order_id ON step_results (run_id, step_order, id)`,
+	`CREATE INDEX IF NOT EXISTS idx_step_rounds_step_round ON step_rounds (step_result_id, round)`,
+	`CREATE INDEX IF NOT EXISTS idx_runs_repo_branch_created_id ON runs (repo_id, branch, created_at DESC, id DESC)`,
+	`CREATE INDEX IF NOT EXISTS idx_runs_status_created_id ON runs (status, created_at DESC, id DESC)`,
 	// An earlier release's copy of idx_step_results_run_order_id, under another
 	// name. Left in place, a database that has it maintains both on every write.
 	`DROP INDEX IF EXISTS idx_step_results_run_order`,

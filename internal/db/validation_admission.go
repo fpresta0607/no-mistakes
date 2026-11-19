@@ -34,11 +34,19 @@ type ValidationAdmission struct {
 }
 
 func (snapshot TerminalSnapshot) ValidateAuthoredRequest(request authoredvalidation.Request) error {
+	return snapshot.validateAuthoredRequest(request, snapshot.Digest())
+}
+
+// validateAuthoredRequest binds request to the snapshot whose digest is
+// snapshotDigest. A stored admission passes the digest of the snapshot bytes it
+// was stored with, because re-encoding the decoded snapshot adds every field a
+// later build gave Run, StepResult or StepRound.
+func (snapshot TerminalSnapshot) validateAuthoredRequest(request authoredvalidation.Request, snapshotDigest string) error {
 	parent := &snapshot.Run
 	if err := request.Validate(); err != nil {
 		return err
 	}
-	if request.SnapshotDigest != snapshot.Digest() || request.PredecessorID != parent.ID || request.RepoID != parent.RepoID || request.Branch != parent.Branch {
+	if request.SnapshotDigest != snapshotDigest || request.PredecessorID != parent.ID || request.RepoID != parent.RepoID || request.Branch != parent.Branch {
 		return fmt.Errorf("authored admission predecessor snapshot or repository binding changed")
 	}
 	if !parent.Status.Terminal() || (parent.Status == types.RunCompleted && !snapshot.IsAuthoredChild) || parent.PushActive || parent.LaunchNonce == nil || parent.LaunchValidationGeneration == nil || parent.LaunchIntentDigest == nil || parent.LaunchAssertion == nil {
@@ -96,8 +104,8 @@ func (snapshot TerminalSnapshot) validateNativeRefusals() error {
 	return nil
 }
 
-func validateAdmissionBinding(event *ValidationAdmission) error {
-	if err := event.Snapshot.ValidateAuthoredRequest(event.Request); err != nil {
+func validateAdmissionBinding(event *ValidationAdmission, snapshotDigest string) error {
+	if err := event.Snapshot.validateAuthoredRequest(event.Request, snapshotDigest); err != nil {
 		return err
 	}
 	if err := event.AssertionProof.Check(event.Request.LaunchAssertion); err != nil {
@@ -120,10 +128,14 @@ func readValidationAdmission(row *sql.Row) (*ValidationAdmission, error) {
 	if err := json.Unmarshal([]byte(payload), &event); err != nil {
 		return nil, err
 	}
+	var stored struct{ Snapshot json.RawMessage }
+	if err := json.Unmarshal([]byte(payload), &stored); err != nil {
+		return nil, err
+	}
 	if event.ID != id || event.Request.PredecessorID != parentID || event.ChildID != childID || event.InitialChild.ID != childID || parentID == childID || event.Request.Digest() != digest {
 		return nil, fmt.Errorf("authored admission identity is inconsistent")
 	}
-	if err := validateAdmissionBinding(&event); err != nil {
+	if err := validateAdmissionBinding(&event, snapshotDigest(stored.Snapshot)); err != nil {
 		return nil, err
 	}
 	return &event, nil
@@ -145,7 +157,7 @@ func (d *DB) AcceptValidationAdmission(ctx context.Context, proposal ValidationA
 	if len(proposal.Request.SourceAnchors) == 0 {
 		proposal.Request.SourceAnchors = nil
 	}
-	if err := validateAdmissionBinding(&proposal); err != nil {
+	if err := validateAdmissionBinding(&proposal, proposal.Snapshot.Digest()); err != nil {
 		return nil, false, err
 	}
 	if proposal.ID != "" || proposal.ChildID != "" || proposal.CreatedAt != 0 || !reflect.DeepEqual(proposal.InitialChild, Run{}) {
