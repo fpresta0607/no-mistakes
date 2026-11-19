@@ -453,6 +453,10 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		e.mu.Unlock()
 		return RespondDispositions{}, errors.New(refusal)
 	}
+	if action == types.ActionSkip && step == types.StepRebase && e.waitingSafetyRefusal {
+		e.mu.Unlock()
+		return RespondDispositions{}, errors.New(rebaseSafetyRefusalSkipRefusal)
+	}
 	response := approvalResponse{
 		scopeDecision:      option.ScopeDecision,
 		origin:             option.Origin.OrUnknown(),

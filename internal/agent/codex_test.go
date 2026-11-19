@@ -410,6 +410,30 @@ printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"v
 	}
 }
 
+// A refusal that ends a fresh thread reports that thread on the error, which
+// every wrapper passes through, so the session manager can record it as it
+// keeps a resumed session's record.
+func TestCodexAgent_RefusalCarriesTheFreshThreadItEnded(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' '{"type":"thread.started","thread_id":"refused-thread"}'
+printf '%s\n' '{"type":"error","message":"This content was flagged for possible cybersecurity risk."}'
+exit 1
+`, strings.Join([]string{
+		"@echo off",
+		"echo {\"type\":\"thread.started\",\"thread_id\":\"refused-thread\"}",
+		"echo {\"type\":\"error\",\"message\":\"This content was flagged for possible cybersecurity risk.\"}",
+		"exit /b 1",
+	}, "\r\n"))
+
+	_, err := (&codexAgent{bin: bin}).Run(context.Background(), RunOpts{CWD: dir, Session: &SessionRef{}})
+
+	session, ok := RefusedSession(err)
+	if !IsSafetyRefusal(err) || !ok || session != (SessionRef{ID: "refused-thread", Agent: "codex"}) {
+		t.Fatalf("Run error = %v, refused session = %+v (%v), want the refusal carrying codex thread refused-thread", err, session, ok)
+	}
+}
+
 func TestCodexAgent_QuotedRefusalInNativeErrorIsOrdinaryFailure(t *testing.T) {
 	dir := t.TempDir()
 	bin := writeFakeCodex(t, dir, `#!/bin/sh

@@ -511,3 +511,129 @@ func TestIntentStepPropagatesSafetyRefusal(t *testing.T) {
 		t.Fatalf("Execute() error = %v, want the refusal", err)
 	}
 }
+
+// A conflict resolver that ends in a native safety refusal keeps the rebase or
+// merge in progress with its partial resolution, as the operator must inspect it
+// before deciding, and the operator's fix finishes that kept resolution rather
+// than starting another integration over it. Finishing it stands in for no
+// other target: a commit pushed to the branch while the gate was parked is
+// still integrated, the branch's own commits a kept rebase rewrote are not
+// rebased onto again, and origin/main must be in the finished head even when
+// the head the kept rebase started from already contained it.
+func TestRebaseStep_RefusedConflictResolutionIsKeptForTheOperator(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name                string
+		strategy            string
+		isRemoteAdvance     bool
+		isMainMergedLocally bool
+		wantCalls           int
+	}{
+		{name: "rebase", strategy: config.RebaseStrategyRebase, wantCalls: 2},
+		{name: "rebase onto the branch ahead on the remote with main merged locally", strategy: config.RebaseStrategyRebase, isMainMergedLocally: true, wantCalls: 3},
+		{name: "merge", strategy: config.RebaseStrategyMerge, wantCalls: 2},
+		{name: "merge with the branch advanced while parked", strategy: config.RebaseStrategyMerge, isRemoteAdvance: true, wantCalls: 2},
+	} {
+		strategy := tc.strategy
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newMergeFixture(t, true)
+			gitCmd(t, f.dir, "push", "origin", "feature")
+			pushCollaboratorCommit := func() string {
+				clone := t.TempDir()
+				gitCmd(t, clone, "clone", "--branch", "feature", f.upstream, ".")
+				writeFixtureFile(t, clone, "collaborator.txt", "collaborator line\n")
+				gitCmd(t, clone, "add", "collaborator.txt")
+				gitCmd(t, clone, "commit", "-m", "collaborator change")
+				gitCmd(t, clone, "push", "origin", "feature")
+				return gitCmd(t, clone, "rev-parse", "HEAD")
+			}
+			startHead := f.headSHA
+			if tc.isMainMergedLocally {
+				pushCollaboratorCommit()
+				fixtureGitAllowFail(t, f.dir, "merge", "--no-edit", "main")
+				writeFixtureFile(t, f.dir, "shared.txt", "main line\nfeature line\n")
+				fixtureGit(t, f.dir, "add", "shared.txt")
+				fixtureGit(t, f.dir, "commit", "--no-edit")
+				startHead = gitCmd(t, f.dir, "rev-parse", "HEAD")
+			}
+			inProgress := rebaseInProgress
+			if strategy == config.RebaseStrategyMerge {
+				inProgress = mergeInProgress
+			}
+			isRefusing := true
+			ag := &mockAgent{name: "codex", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				if isRefusing {
+					writeFixtureFile(t, f.dir, "shared.txt", "main line\npartial\n")
+					return nil, errors.Join(agent.ErrSafetyRefusal, errors.New(nativeSafetyRefusal))
+				}
+				if !inProgress(context.Background(), f.dir) {
+					t.Errorf("the fix found no %s in progress to finish", strategy)
+				}
+				writeFixtureFile(t, f.dir, "shared.txt", "main line\nfeature line\n")
+				fixtureGit(t, f.dir, "add", "shared.txt")
+				if strategy == config.RebaseStrategyMerge {
+					fixtureGit(t, f.dir, "commit", "--no-edit")
+				} else {
+					fixtureGit(t, f.dir, "rebase", "--continue")
+				}
+				return &agent.Result{Output: json.RawMessage(`{"summary":"finished the kept resolution"}`)}, nil
+			}}
+			sctx := f.context(t, ag, strategy)
+			sctx.Run.BaseSHA = f.headSHA
+			sctx.Run.HeadSHA = startHead
+			sctx.Fixing = true
+
+			_, err := (&RebaseStep{}).Execute(sctx)
+
+			if !agent.IsSafetyRefusal(err) {
+				t.Fatalf("Execute() error = %v, want the refusal", err)
+			}
+			if !inProgress(context.Background(), f.dir) {
+				t.Fatalf("the refused %s was aborted", strategy)
+			}
+			if got, err := os.ReadFile(filepath.Join(f.dir, "shared.txt")); err != nil || string(got) != "main line\npartial\n" {
+				t.Fatalf("the refused partial resolution was lost: %q, %v", got, err)
+			}
+
+			var collaboratorSHA string
+			if tc.isRemoteAdvance {
+				collaboratorSHA = pushCollaboratorCommit()
+			}
+
+			isRefusing = false
+			_, err = (&RebaseStep{}).Execute(sctx)
+
+			if err != nil {
+				t.Fatalf("the operator's fix did not finish the kept %s: %v", strategy, err)
+			}
+			if len(ag.calls) != tc.wantCalls || !strings.Contains(ag.calls[1].Prompt, "already in progress") {
+				t.Fatalf("the fix did not continue the kept resolution: calls=%d", len(ag.calls))
+			}
+			if inProgress(context.Background(), f.dir) {
+				t.Fatalf("the %s is still in progress after the fix", strategy)
+			}
+			head := gitCmd(t, f.dir, "rev-parse", "HEAD")
+			if !isAncestor(context.Background(), f.dir, f.mainSHA, head) || sctx.Run.HeadSHA != head {
+				t.Fatalf("head %s (run head %s) does not integrate origin/main %s", head, sctx.Run.HeadSHA, f.mainSHA)
+			}
+			if tc.isRemoteAdvance && !isAncestor(context.Background(), f.dir, collaboratorSHA, head) {
+				t.Fatalf("head %s dropped %s, pushed to the branch while the gate was parked", head, collaboratorSHA)
+			}
+			if tc.isMainMergedLocally {
+				if got := gitCmd(t, f.dir, "show", head+":collaborator.txt"); got != "collaborator line" {
+					t.Fatalf("head %s dropped the branch's remote commit: collaborator.txt = %q", head, got)
+				}
+			}
+			if strategy == config.RebaseStrategyMerge {
+				keptMerge := head
+				if tc.isRemoteAdvance {
+					keptMerge = gitCmd(t, f.dir, "rev-parse", head+"^1")
+				}
+				if got := parents(t, f.dir, keptMerge); len(got) != 2 || got[0] != f.headSHA || got[1] != f.mainSHA {
+					t.Fatalf("finished merge parents = %v, want [%s %s]", got, f.headSHA, f.mainSHA)
+				}
+			}
+		})
+	}
+}

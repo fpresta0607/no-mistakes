@@ -1088,7 +1088,7 @@ func removableOrphanWorktree(d *db.DB, wt orphanWorktree) bool {
 		slog.Warn("preserving run worktree: cannot read run", "run_id", wt.runID, "error", err)
 		return false
 	}
-	if reason := protectedPathCleanupReason(d, run); reason != "" {
+	if reason := refusalCleanupReason(d, run); reason != "" {
 		slog.Info("skipping worktree cleanup", "path", wt.dir, "reason", reason)
 		return false
 	}
@@ -1263,18 +1263,40 @@ func terminalWorktreeSourceReason(ctx context.Context, database *db.DB, runID, w
 	return ""
 }
 
-// protectedPathCleanupReason protects only the index and working files. It must
-// not be used as a process-liveness or test-evidence retention predicate.
-func protectedPathCleanupReason(d *db.DB, run *db.Run) string {
+// refusalCleanupReason protects only the index and working files of a run
+// held at an unresolved protected-path or native safety refusal. It must not
+// be used as a process-liveness or test-evidence retention predicate.
+func refusalCleanupReason(d *db.DB, run *db.Run) string {
+	return unresolvedRefusalReason(d, run, true, "preserving index and worktree")
+}
+
+// safetyRefusalCleanupReason keeps the step logs and evidence of a run held at
+// an unresolved native safety refusal, which the operator inspects before
+// deciding. A protected-path refusal keeps only its worktree, so it is not
+// covered here.
+func safetyRefusalCleanupReason(d *db.DB, run *db.Run) string {
+	return unresolvedRefusalReason(d, run, false, "preserving step logs and evidence")
+}
+
+func unresolvedRefusalReason(d *db.DB, run *db.Run, includeProtectedPaths bool, keeping string) string {
 	if run == nil || (run.Status == types.RunCancelled && run.Error != nil && *run.Error == types.RunCancelReasonAbortedByUser) {
 		return ""
 	}
 	results, err := d.GetStepsByRun(run.ID)
 	if err != nil {
-		return fmt.Sprintf("cannot read protected-path refusals for run %s: %v", run.ID, err)
+		return fmt.Sprintf("cannot read refusals for run %s: %v; %s", run.ID, err, keeping)
 	}
 	for _, step := range results {
-		if step.FindingsJSON == nil || !pipeline.HasProtectedPathRefusal(*step.FindingsJSON) || step.Status == types.StepStatusCompleted {
+		if step.FindingsJSON == nil || step.Status == types.StepStatusCompleted {
+			continue
+		}
+		var kind string
+		switch {
+		case pipeline.HasSafetyRefusal(*step.FindingsJSON):
+			kind = "native agent safety"
+		case includeProtectedPaths && pipeline.HasProtectedPathRefusal(*step.FindingsJSON):
+			kind = "protected-path"
+		default:
 			continue
 		}
 		if step.Status == types.StepStatusSkipped && (step.Error == nil || *step.Error != types.RunCIMonitorInterruptedReason) {
@@ -1283,7 +1305,7 @@ func protectedPathCleanupReason(d *db.DB, run *db.Run) string {
 		if step.Error != nil && types.IsUserAbortStepError(*step.Error) {
 			continue
 		}
-		return fmt.Sprintf("run %s has an unresolved protected-path refusal; preserving index and worktree", run.ID)
+		return fmt.Sprintf("run %s has an unresolved %s refusal; %s", run.ID, kind, keeping)
 	}
 	return ""
 }

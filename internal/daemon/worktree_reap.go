@@ -50,7 +50,7 @@ func worktreeReapPolicyFor(global *config.GlobalConfig) worktreeReapPolicy {
 // (see RunManager.cleanupRunEvidence) and at startup.
 //
 // It reuses defaultTreeOrphanWorktrees for directory discovery and
-// eligibility (see skipWorktreeCleanup and protectedPathCleanupReason), then
+// eligibility (see skipWorktreeCleanup and refusalCleanupReason), then
 // applies the same two-rule bound reapEvidence applies to evidence: an
 // eligible directory older than the retention window is removed, and whatever
 // survives is trimmed to the run ceiling, oldest first. Unlike evidence, an

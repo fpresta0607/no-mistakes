@@ -10,6 +10,12 @@ import (
 
 const safetyRefusalFindingID = types.FindingIDAgentSafetyRefusal
 
+// rebaseSafetyRefusalSkipRefusal is why skip is rejected at a Rebase safety
+// refusal: the refused resolver's rebase or merge may still be in progress in
+// the run worktree, and the steps after Rebase would commit and publish it
+// without the proof only a fix applies.
+const rebaseSafetyRefusalSkipRefusal = "cannot skip rebase at a native agent safety refusal: the refused conflict resolution may still be in progress in the run worktree, and the steps after rebase would commit and publish it unproven; use fix to finish it, or abort the run"
+
 // HasSafetyRefusal identifies a native refusal requiring an explicit decision.
 func HasSafetyRefusal(findingsJSON string) bool {
 	return hasFindingID(findingsJSON, safetyRefusalFindingID)

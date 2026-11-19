@@ -94,7 +94,11 @@ func (rs *RunSessions) Run(ctx context.Context, a agent.Agent, role SessionRole,
 		rs.remember(role, result.SessionID, sessionProvider(a, result))
 		return result, nil
 	}
-	if storedID == "" || ctx.Err() != nil || agent.IsSafetyRefusal(err) || (result != nil && result.ResumeRetryable != nil && !*result.ResumeRetryable) {
+	if agent.IsSafetyRefusal(err) {
+		rs.rememberRefused(role, err)
+		return nil, err
+	}
+	if storedID == "" || ctx.Err() != nil || (result != nil && result.ResumeRetryable != nil && !*result.ResumeRetryable) {
 		return nil, err
 	}
 
@@ -116,10 +120,20 @@ func (rs *RunSessions) Run(ctx context.Context, a agent.Agent, role SessionRole,
 	}
 	result, err = a.Run(ctx, opts)
 	if err != nil {
+		rs.rememberRefused(role, err)
 		return nil, err
 	}
 	rs.remember(role, result.SessionID, sessionProvider(a, result))
 	return result, nil
+}
+
+// rememberRefused records the session a native safety refusal ended, so a
+// fresh session's refusal leaves the same record a resumed session's keeps and
+// the operator's later decision can find it.
+func (rs *RunSessions) rememberRefused(role SessionRole, err error) {
+	if refused, ok := agent.RefusedSession(err); ok {
+		rs.remember(role, refused.ID, refused.Agent)
+	}
 }
 
 func (rs *RunSessions) id(role SessionRole) agent.SessionRef {
