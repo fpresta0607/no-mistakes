@@ -173,6 +173,89 @@ func TestRecoveredSafetyRefusalRejectsAnswer(t *testing.T) {
 	}
 }
 
+// A refused conflict resolver leaves its rebase or merge in progress for the
+// operator. Skipping that Rebase gate would hand the half-finished integration
+// to the steps after Rebase, whose next commit concludes and publishes it
+// unproven, so skip is refused on the live and the recovered gate, and the gate
+// stays parked for the fix its help names.
+func TestRebaseSafetyRefusalRejectsSkip(t *testing.T) {
+	for _, path := range []string{"live", "recovered"} {
+		t.Run(path, func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			var rebaseCalls atomic.Int32
+			rebase := &adaptiveCallStep{name: types.StepRebase, fn: func(*StepContext) (*StepOutcome, error) {
+				rebaseCalls.Add(1)
+				return nil, errors.Join(agent.ErrSafetyRefusal, errors.New("codex exited: This content was flagged for possible cybersecurity risk."))
+			}}
+			review := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) { return &StepOutcome{}, nil }}
+			if path == "recovered" {
+				if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+					t.Fatal(err)
+				}
+				step, err := database.InsertStepResult(run.ID, types.StepRebase)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := database.StartStep(step.ID); err != nil {
+					t.Fatal(err)
+				}
+				findings := `{"findings":[{"id":"agent-safety-refusal","severity":"error","description":"refused","action":"ask-user"}]}`
+				if _, err := database.InsertStepRound(step.ID, 1, "initial", &findings, nil, 1); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := database.InsertStepResult(run.ID, types.StepReview); err != nil {
+					t.Fatal(err)
+				}
+				if run, err = database.GetRun(run.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			executor := NewExecutor(database, p, &config.Config{}, nil, []Step{rebase, review}, nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() {
+				if path == "recovered" {
+					done <- executor.Resume(ctx, run, repo, t.TempDir())
+				} else {
+					done <- executor.Execute(ctx, run, repo, t.TempDir())
+				}
+			}()
+			t.Cleanup(func() { cancel(); <-done })
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				err := executor.Respond(types.StepTest, types.ActionApprove, nil)
+				if err != nil && strings.Contains(err.Error(), "step mismatch") {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("rebase gate did not park: %v", err)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			callsAtPark := rebaseCalls.Load()
+
+			err := executor.Respond(types.StepRebase, types.ActionSkip, nil)
+
+			if err == nil || !strings.Contains(err.Error(), "use fix to finish it, or abort the run") {
+				t.Fatalf("skip at a rebase safety refusal = %v, want a refusal naming fix and abort", err)
+			}
+			if err := executor.Respond(types.StepRebase, types.ActionFix, []string{types.FindingIDAgentSafetyRefusal}); err != nil {
+				t.Fatalf("the gate did not stay parked for fix after the refused skip: %v", err)
+			}
+			deadline = time.Now().Add(10 * time.Second)
+			for rebaseCalls.Load() == callsAtPark {
+				if time.Now().After(deadline) {
+					t.Fatal("the fix did not run the rebase step again")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		})
+	}
+}
+
 // stopCountingSideLanes stands in for the work a review started beside it.
 type stopCountingSideLanes struct{ stops atomic.Int32 }
 

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -243,6 +244,62 @@ func TestRunSessions_SafetyRefusalPreservesSessionWithoutFallback(t *testing.T) 
 	stored, err := database.GetRunAgentSessions(run.ID)
 	if err != nil || len(stored) != 1 || stored[0].SessionID != "sess-1" {
 		t.Fatalf("refusal lost the original session: %+v, %v", stored, err)
+	}
+}
+
+// freshRefusalAgent refuses every fresh session it starts, reporting the
+// session on the refusal as the codex adapter does, and fails every resume as
+// an ordinary stale-session error.
+type freshRefusalAgent struct{ calls int }
+
+func (a *freshRefusalAgent) Name() string { return "fake" }
+
+func (a *freshRefusalAgent) SupportsSessionResume() bool { return true }
+
+func (a *freshRefusalAgent) Close() error { return nil }
+
+func (a *freshRefusalAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	a.calls++
+	if opts.Session != nil && opts.Session.ID != "" {
+		return nil, errors.New("session not found")
+	}
+	refusal := errors.New("codex exited: exit status 1: This content was flagged for possible cybersecurity risk.")
+	return &agent.Result{SessionID: "refused-fresh"}, agent.NewSafetyRefusal(refusal, agent.SessionRef{ID: "refused-fresh", Agent: "fake"})
+}
+
+// A fresh session that ends in a native safety refusal is recorded like a
+// resumed session's refusal, including a fresh session started after a failed
+// resume, and through a wrapper that drops a failed call's result.
+func TestRunSessions_FreshSessionSafetyRefusalIsRecorded(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		storedID  string
+		wantCalls int
+	}{
+		{name: "fresh session", wantCalls: 1},
+		{name: "fresh session after a failed resume", storedID: "stale", wantCalls: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database, run := sessionTestDB(t)
+			if test.storedID != "" {
+				if err := database.UpsertRunAgentSession(run.ID, string(SessionRoleFixer), "fake", test.storedID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			inner := &freshRefusalAgent{}
+			wrapped := &timeoutAgent{inner: inner, timeout: time.Minute}
+			sessions := NewRunSessions(database, run.ID, wrapped, true)
+
+			_, err := sessions.Run(context.Background(), wrapped, SessionRoleFixer, agent.RunOpts{}, nil)
+
+			if !agent.IsSafetyRefusal(err) || inner.calls != test.wantCalls {
+				t.Fatalf("error = %v, calls = %d; want the refusal after %d call(s)", err, inner.calls, test.wantCalls)
+			}
+			stored, err := database.GetRunAgentSessions(run.ID)
+			if err != nil || len(stored) != 1 || stored[0].SessionID != "refused-fresh" || stored[0].Agent != "fake" || stored[0].Role != string(SessionRoleFixer) {
+				t.Fatalf("refused fresh session was not recorded: %+v, %v", stored, err)
+			}
+		})
 	}
 }
 

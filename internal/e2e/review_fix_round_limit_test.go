@@ -549,7 +549,7 @@ func TestReviewFixRoundLimit_ProtectedPathRefusalOnTheLastRoundOffersOnlySkipOrA
 	if !strings.Contains(findings, "review-fix-rounds-exhausted") {
 		t.Fatalf("refused last fix round did not exhaust the budget; findings:\n%s", findings)
 	}
-	if !strings.Contains(status, "skip") || !strings.Contains(status, "abort") || strings.Contains(status, "--action fix` to retry") {
+	if !strings.Contains(status, "skip") || !strings.Contains(status, "abort") || strings.Contains(status, "--action fix --findings <ids>`, naming every finding below") {
 		t.Fatalf("gate help does not offer only skip or abort:\n%s", status)
 	}
 
