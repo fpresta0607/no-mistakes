@@ -1,8 +1,10 @@
 package db
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -11,7 +13,13 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
+)
+
+const (
+	migrationAttempts  = 50
+	migrationRetryWait = 100 * time.Millisecond
 )
 
 var (
@@ -31,17 +39,71 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	sqlDB.SetMaxOpenConns(1)
-	if _, err := sqlDB.Exec(schemaSQL); err != nil {
+	ctx := context.Background()
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("migrate db: %w", err)
 	}
-	for _, stmt := range migrationStatements {
-		if _, err := sqlDB.Exec(stmt); err != nil && !isDuplicateColumnErr(err) {
-			sqlDB.Close()
-			return nil, fmt.Errorf("migrate db: %w", err)
-		}
+	err = migrate(ctx, conn)
+	conn.Close()
+	if err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("migrate db: %w", err)
 	}
 	return &DB{sql: sqlDB}, nil
+}
+
+// migrate applies the schema and every migration statement in one
+// transaction. Run as autocommit statements, a fresh file paid one WAL commit
+// and fsync per statement, 72 per Open, which bound every test that opens a
+// database to the runner's disk latency (issue #215). The transaction is
+// deferred, so an Open of a database that is already migrated writes nothing
+// and never takes the write lock. A migration that does write upgrades its
+// read transaction, and SQLite fails that upgrade with SQLITE_BUSY at once
+// rather than under busy_timeout, so a busy attempt is rolled back and retried
+// whole, within migrationAttempts.
+func migrate(ctx context.Context, conn *sql.Conn) error {
+	for attempt := 1; ; attempt++ {
+		err := migrateOnce(ctx, conn)
+		if err == nil || !isBusyErr(err) || attempt == migrationAttempts {
+			return err
+		}
+		time.Sleep(migrationRetryWait)
+	}
+}
+
+// migrateOnce runs one migration attempt and rolls it back whole on failure.
+// A duplicate column error is a prepare-time error, so SQLite keeps the
+// transaction open past it.
+func migrateOnce(ctx context.Context, conn *sql.Conn) (err error) {
+	if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			if _, rollbackErr := conn.ExecContext(ctx, "ROLLBACK"); rollbackErr != nil {
+				err = errors.Join(err, fmt.Errorf("rollback: %w", rollbackErr))
+			}
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, schemaSQL); err != nil {
+		return err
+	}
+	for _, stmt := range migrationStatements {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil && !isDuplicateColumnErr(err) {
+			return err
+		}
+	}
+	_, err = conn.ExecContext(ctx, "COMMIT")
+	return err
+}
+
+// isBusyErr reports whether err carries SQLite's SQLITE_BUSY result code,
+// including its extended forms such as SQLITE_BUSY_SNAPSHOT.
+func isBusyErr(err error) bool {
+	var sqliteErr *sqlite.Error
+	return errors.As(err, &sqliteErr) && sqliteErr.Code()&0xff == sqlite3.SQLITE_BUSY
 }
 
 // OpenReadOnly opens an existing database without creating or migrating it.
