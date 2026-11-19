@@ -26,6 +26,14 @@ const (
 	repairCutFindingOutput = `{"findings":[{"id":"f-1","severity":"error","file":"feature.txt","line":1,"description":"bug","action":"auto-fix"}],"summary":"1 issue","risk_level":"medium","risk_rationale":"r","risk_scope":"source-or-external","reviewed_paths":["feature.txt","feature2.txt"]}`
 	repairCutCleanOutput   = `{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"clean","risk_scope":"source-or-external","reviewed_paths":["feature.txt","feature2.txt","helper.txt"]}`
 	repairCutAskOutput     = `{"findings":[{"id":"f-2","severity":"warning","file":"helper.txt","line":1,"description":"a person's call","action":"ask-user"}],"summary":"1 issue","risk_level":"low","risk_rationale":"r","risk_scope":"source-or-external","reviewed_paths":["feature.txt","feature2.txt","helper.txt"]}`
+
+	// The streaming repair's budgets. The first chunk lands after
+	// repairCutFirstChunkDelay, past the cap's margin over the stall budget,
+	// so the earliest stall cut falls a second after the cap; the stall
+	// budget leaves the turn 2.5s to write its work and speak at all.
+	repairCutStallBudget     = 4 * time.Second
+	repairCutWorkingCap      = repairCutStallBudget + 500*time.Millisecond
+	repairCutFirstChunkDelay = 1500 * time.Millisecond
 )
 
 // repairCutLoop scripts a review whose first repair turn runs into its budget
@@ -88,17 +96,25 @@ func (l *repairCutLoop) cutTurn(ctx context.Context, t *testing.T, opts agent.Ru
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	// Each chunk ends a line, so the executor writes step activity to the
-	// database for every one. A paced stream keeps that synchronous path from
-	// stalling the turn on a slow runner past the idle window it must stay in.
+	// The stall watcher cuts a turn only once its latest output is a whole
+	// stall budget old, and output is observed before the executor's
+	// synchronous log sink runs. A first chunk later than the margin between
+	// the stall budget and the still-working cap therefore moves the earliest
+	// stall cut past the cap, however long a loaded runner then holds the
+	// stream in that sink.
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(repairCutFirstChunkDelay):
+	}
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 	for {
+		opts.OnChunk("repairing\n")
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-tick.C:
-			opts.OnChunk("repairing\n")
 		}
 	}
 }
@@ -213,7 +229,7 @@ func TestReviewLoop_RepairAtItsBudgetParksWithItsWorkKept(t *testing.T) {
 		{
 			name:      "a repair still producing output",
 			loop:      &repairCutLoop{isStreaming: true},
-			cfg:       &config.Config{ReviewAgentTimeout: 4 * time.Second, ReviewAgentWorkingTimeout: 5 * time.Second},
+			cfg:       &config.Config{ReviewAgentTimeout: repairCutStallBudget, ReviewAgentWorkingTimeout: repairCutWorkingCap},
 			wantBound: "still-working cap",
 		},
 	}
