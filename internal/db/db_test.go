@@ -1,11 +1,14 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"modernc.org/sqlite"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -25,6 +28,78 @@ func TestOpenAndClose(t *testing.T) {
 	d := openTestDB(t)
 	if d == nil {
 		t.Fatal("expected non-nil db")
+	}
+}
+
+// Issue #215: run as autocommit statements, migrating a fresh file paid about
+// 150 WAL commits, each an fsync, so every test that opened a database was
+// bound by the runner's disk latency.
+func TestMigrateCommitsAFreshFileOnce(t *testing.T) {
+	ctx := context.Background()
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "state.sqlite")+"?_pragma=journal_mode(wal)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	conn, err := raw.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	commits := 0
+	if err := conn.Raw(func(driverConn any) error {
+		hooks, ok := driverConn.(sqlite.HookRegisterer)
+		if !ok {
+			t.Fatalf("driver connection %T cannot register a commit hook", driverConn)
+		}
+		hooks.RegisterCommitHook(func() int32 {
+			commits++
+			return 0
+		})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := migrate(ctx, conn); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	if commits != 1 {
+		t.Fatalf("migrating a fresh file made %d commits, want 1", commits)
+	}
+}
+
+func TestOpenLeavesNoPartialSchemaWhenAMigrationFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE step_results (id TEXT PRIMARY KEY)`); err != nil {
+		legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if database, err := Open(path); err == nil {
+		database.Close()
+		t.Fatal("Open migrated a step_results table that has no run_id column")
+	}
+
+	check, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var tables int
+	if err := check.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'repos'`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 0 {
+		t.Fatal("a failed migration left the repos table behind")
 	}
 }
 
