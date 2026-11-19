@@ -1220,6 +1220,7 @@ Retention for leftover run-worktree directories under the default `<NM_HOME>/wor
 This budget is a safety net for eligible leftovers after run-finish cleanup; the daemon's [source and refusal retention rules](/no-mistakes/concepts/daemon/#what-it-does) determine which worktrees may be removed.
 
 This reap runs after every finished run and again at daemon startup, the same cadence `test.evidence.retention` uses. Only the default `<NM_HOME>/worktrees` tree is bounded; a checkout you placed with [`worktree_roots`](#worktree_roots) is your own directory, and only the directories no-mistakes' own run records name there are ever touched, per that section's rules.
+A `<repo id>` folder in that tree that is a junction or symbolic link to another place is bounded too, but there only the directories that repository's own run records name are removed, and the link stays.
 
 Global-only, for the same reason `test.evidence`'s local storage fields are: it governs this machine's local disk, so a repository does not get to set the retention budget for a directory every repository on the machine shares.
 

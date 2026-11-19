@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +15,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/procreap"
+	"github.com/kunchenguid/no-mistakes/internal/testlink"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -171,6 +175,130 @@ func TestReapWorktreesLocksEachBranchThroughSweepAndRemoval(t *testing.T) {
 		t.Fatal("cleanup did not release the branch lock after removal")
 	}
 	branchMutex.Unlock()
+}
+
+// repositoryFolderLinks makes <NM_HOME>/worktrees/<repo id> a link to target
+// in each form an operator who moves the folder by hand can leave behind.
+var repositoryFolderLinks = map[string]func(t *testing.T, link, target string){
+	"junction": testlink.Junction,
+	"symbolic link": func(t *testing.T, link, target string) {
+		t.Helper()
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("this account cannot create symbolic links: %v", err)
+		}
+	},
+}
+
+// TestReapWorktreesReachesALinkedRepositoryFolder pins issue #261: a
+// repository folder moved off NM_HOME by hand and left behind a junction was
+// reported as not a directory and skipped whole, so its finished runs were
+// never reaped whatever the retention said. Its runs are reaped now wherever
+// the link points, while everything there that no run of that repository
+// records as its worktree, and the link itself, stay.
+func TestReapWorktreesReachesALinkedRepositoryFolder(t *testing.T) {
+	targets := map[string]func(t *testing.T, home string) string{
+		"same volume":  func(t *testing.T, _ string) string { return t.TempDir() },
+		"other volume": testlink.OtherVolumeDir,
+	}
+	for linkName, makeLink := range repositoryFolderLinks {
+		for targetName, makeTarget := range targets {
+			t.Run(linkName+" on the "+targetName, func(t *testing.T) {
+				// Arrange
+				f := newWorktreeReapFixture(t)
+				repoFolder := filepath.Join(f.p.WorktreesDir(), f.repo.ID)
+				target := makeTarget(t, f.p.Root())
+				makeLink(t, repoFolder, target)
+				stale := f.seed("stale", types.RunFailed, 30*24*time.Hour)
+				fresh := f.seed("fresh", types.RunCompleted, time.Hour)
+				running := f.seed("running", types.RunRunning, 30*24*time.Hour)
+				placedElsewhere := f.seed("placed-elsewhere", types.RunFailed, 30*24*time.Hour)
+				if err := f.db.SetRunWorktreeDir(placedElsewhere, filepath.Join(t.TempDir(), placedElsewhere)); err != nil {
+					t.Fatal(err)
+				}
+				otherRepo, err := f.db.InsertRepoWithID("repo2", "/nonexistent/other", "https://example.com/owner/repo2", "main")
+				if err != nil {
+					t.Fatal(err)
+				}
+				otherRepoRun, err := f.db.InsertRun(otherRepo.ID, "other", "head-other", "base-other")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := f.db.UpdateRunStatus(otherRepoRun.ID, types.RunFailed); err != nil {
+					t.Fatal(err)
+				}
+				strangers := []string{otherRepoRun.ID, "not-a-run"}
+				long := time.Now().Add(-30 * 24 * time.Hour)
+				for _, name := range strangers {
+					dir := filepath.Join(target, name)
+					if err := os.MkdirAll(dir, 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chtimes(dir, long, long); err != nil {
+						t.Fatal(err)
+					}
+				}
+
+				// Act
+				NewRunManager(f.db, f.p, nil).reapWorktrees(worktreeReapPolicy{Retention: 14 * 24 * time.Hour}, time.Now())
+				cleanupOrphanWorktrees(f.db, f.p, nil)
+
+				// Assert
+				if f.exists(stale) {
+					t.Error("a finished run's worktree past the retention survived below a linked repository folder")
+				}
+				if !f.exists(fresh) {
+					t.Error("a worktree inside the retention window was removed")
+				}
+				if !f.exists(running) {
+					t.Error("a running run's worktree was removed")
+				}
+				if !f.exists(placedElsewhere) {
+					t.Error("a directory a run does not record as its worktree was removed through the link")
+				}
+				for _, name := range strangers {
+					if _, err := os.Stat(filepath.Join(target, name)); err != nil {
+						t.Errorf("%s, which no run of this repository records, was removed through the link: %v", name, err)
+					}
+				}
+				if _, err := os.Lstat(repoFolder); err != nil {
+					t.Errorf("the linked repository folder itself was removed: %v", err)
+				}
+			})
+		}
+	}
+}
+
+// TestDefaultTreeOrphanWorktreesReportsALinkItCannotFollow keeps the one
+// linked repository folder the reaper cannot reach from being skipped in
+// silence, which is how issue #261 went unnoticed.
+func TestDefaultTreeOrphanWorktreesReportsALinkItCannotFollow(t *testing.T) {
+	for linkName, makeLink := range repositoryFolderLinks {
+		t.Run(linkName, func(t *testing.T) {
+			// Arrange
+			f := newWorktreeReapFixture(t)
+			repoFolder := filepath.Join(f.p.WorktreesDir(), f.repo.ID)
+			target := filepath.Join(t.TempDir(), "moved")
+			if err := os.Mkdir(target, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			makeLink(t, repoFolder, target)
+			if err := os.Remove(target); err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			previousLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+			// Act
+			defaultTreeOrphanWorktrees(f.db, f.p)
+
+			// Assert
+			if !strings.Contains(logs.String(), "does not resolve to a directory") || !strings.Contains(logs.String(), f.repo.ID) {
+				t.Errorf("a linked repository folder that resolves to nothing was skipped without naming it; log:\n%s", logs.String())
+			}
+		})
+	}
 }
 
 // TestWorktreeReapPolicyForUsesGlobalConfigAndDefaults keeps the daemon's

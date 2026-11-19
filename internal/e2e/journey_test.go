@@ -2022,20 +2022,31 @@ func waitForStepStatus(t *testing.T, h *Harness, branch string, stepName types.S
 
 func assertSupersededRunCancellation(t *testing.T, h *Harness) {
 	t.Helper()
+	assertSupersededRunCancellationAfter(t, h, func() {})
+}
+
+// assertSupersededRunCancellationAfter calls whileTestRunning once the first
+// run's Test step reads running, then pushes the superseding change only after
+// that run's commands.test is holding. The step reads running before it starts
+// the command, so the command never changes under it: it keys on
+// superseded-run.txt, which only the superseding push adds, and it marks the
+// moment it holds (issue #213).
+func assertSupersededRunCancellationAfter(t *testing.T, h *Harness, whileTestRunning func()) {
+	t.Helper()
 	slowCommand := filepath.Join(h.BinDir, "nm-superseded-test-e2e")
-	// Keep the first run deterministically active even when the full e2e suite
-	// is CPU-saturated. Cancellation reaps the process group, so this does not
-	// add wall time on the passing path.
-	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 120\n"), 0o755); err != nil {
+	holding := filepath.Join(h.BinDir, "nm-superseded-test-holding")
+	// Cancellation reaps the process group, so the long sleep adds no wall time
+	// on the passing path.
+	script := "#!/bin/sh\nif [ -e superseded-run.txt ]; then exit 0; fi\n: > '" + holding + "'\nexec sleep 120\n"
+	if err := os.WriteFile(slowCommand, []byte(script), 0o755); err != nil {
 		t.Fatalf("write superseded slow test command: %v", err)
 	}
 	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-superseded-test-e2e\n  lint: true\n"
 	h.CommitChange("superseded-run", ".no-mistakes.yaml", config, "configure superseded slow test")
 	h.PushToGate("superseded-run")
 	first := waitForStepStatus(t, h, "superseded-run", types.StepTest, types.StepStatusRunning, 60*time.Second)
-	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatalf("replace superseded test command with fast version: %v", err)
-	}
+	whileTestRunning()
+	waitForTestCommandHolding(t, h, first.ID, holding, 60*time.Second)
 	h.CommitChange("superseded-run", "superseded-run.txt", "second push\n", "supersede active run")
 	h.PushToGate("superseded-run")
 	cancelled := waitForRunIDStatus(t, h, first.ID, types.RunCancelled, 60*time.Second)
@@ -2049,6 +2060,26 @@ func assertSupersededRunCancellation(t *testing.T, h *Harness) {
 	if second.Status != types.RunCompleted {
 		t.Fatalf("superseding run did not complete: status=%s error=%v", second.Status, deref(second.Error))
 	}
+}
+
+// waitForTestCommandHolding waits until the run's configured test command has
+// written its marker, and fails as soon as the run finishes without it.
+func waitForTestCommandHolding(t *testing.T, h *Harness, runID, marker string, timeout time.Duration) {
+	t.Helper()
+	timeout = h.timeout(timeout)
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(marker); err == nil {
+			return
+		}
+		if run := h.RunInfo(runID); run.Status.Terminal() {
+			h.dumpDebugState()
+			t.Fatalf("run %s finished (status=%s) before its configured test command held", runID, run.Status)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	h.dumpDebugState()
+	t.Fatalf("run %s's configured test command did not hold within %v", runID, timeout)
 }
 
 func assertDifferentBranchDoesNotCancelActiveRun(t *testing.T, h *Harness) {

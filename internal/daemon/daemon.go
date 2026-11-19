@@ -1017,6 +1017,15 @@ type orphanWorktree struct {
 // defaultTreeOrphanWorktrees walks <NM_HOME>/worktrees, which no-mistakes owns
 // outright, and returns the run worktrees no run still owns plus the repository
 // directories to drop once they are empty.
+//
+// A repository directory there can be a link (a Windows junction or a symbolic
+// link) left behind when an operator moved it to another volume by hand (issue
+// #261). Go reports such an entry as not a directory, so it is resolved here and
+// walked like any other, wherever it points: its runs are still this gate's
+// runs, created under this path. What the link reaches is not ours, though, so
+// only a directory a run of this repository records as its worktree is a
+// candidate there (see linkedRunWorktreeSkipReason), and the link itself is
+// never dropped - removing a junction ignores what its target still holds.
 func defaultTreeOrphanWorktrees(d *db.DB, p *paths.Paths) (removable []orphanWorktree, repoDirs []string) {
 	wtRoot := p.WorktreesDir()
 	entries, err := os.ReadDir(wtRoot)
@@ -1024,10 +1033,17 @@ func defaultTreeOrphanWorktrees(d *db.DB, p *paths.Paths) (removable []orphanWor
 		return nil, nil // directory may not exist yet
 	}
 	for _, repoEntry := range entries {
-		if !repoEntry.IsDir() {
-			continue
-		}
 		repoPath := filepath.Join(wtRoot, repoEntry.Name())
+		isLinked := !repoEntry.IsDir()
+		if isLinked {
+			if repoEntry.Type().IsRegular() {
+				continue
+			}
+			if info, err := os.Stat(repoPath); err != nil || !info.IsDir() {
+				slog.Warn("skipping linked repository folder in the worktrees directory: it does not resolve to a directory", "path", repoPath, "error", err)
+				continue
+			}
+		}
 		runEntries, err := os.ReadDir(repoPath)
 		if err != nil {
 			continue
@@ -1042,13 +1058,44 @@ func defaultTreeOrphanWorktrees(d *db.DB, p *paths.Paths) (removable []orphanWor
 				repoID:  repoEntry.Name(),
 				runID:   runEntry.Name(),
 			}
+			if isLinked {
+				if reason := linkedRunWorktreeSkipReason(d, p, wt); reason != "" {
+					slog.Info("skipping worktree cleanup", "path", wt.dir, "reason", reason)
+					continue
+				}
+			}
 			if removableOrphanWorktree(d, wt) {
 				removable = append(removable, wt)
 			}
 		}
-		repoDirs = append(repoDirs, repoPath)
+		if !isLinked {
+			repoDirs = append(repoDirs, repoPath)
+		}
 	}
 	return removable, repoDirs
+}
+
+// linkedRunWorktreeSkipReason says why a directory reached through a linked
+// repository directory is not one of this gate's run worktrees, or "" when it
+// is: a recorded run of that repository names exactly this path as the
+// directory its worktree was created in. Unlike the rest of the default tree, a
+// directory no run records is never removed here, since the link's target is a
+// place no-mistakes does not own.
+func linkedRunWorktreeSkipReason(d *db.DB, p *paths.Paths, wt orphanWorktree) string {
+	run, err := d.GetRun(wt.runID)
+	if err != nil {
+		return fmt.Sprintf("failed to look up run %s: %v", wt.runID, err)
+	}
+	if run == nil {
+		return "no run records this directory below a linked repository folder"
+	}
+	if run.RepoID != wt.repoID {
+		return fmt.Sprintf("run %s belongs to repository %s", run.ID, run.RepoID)
+	}
+	if recorded := worktrees.RecordedDir(p, run.WorktreePath(), run.RepoID, run.ID); recorded != wt.dir {
+		return fmt.Sprintf("run %s records its worktree at %s", run.ID, recorded)
+	}
+	return ""
 }
 
 // recordedOrphanWorktrees names the leftover worktrees of runs the operator
