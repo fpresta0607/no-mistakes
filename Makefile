@@ -59,6 +59,12 @@ dist:
 
 install: build
 	mkdir -p $(dir $(INSTALL_BIN))
+ifeq ($(OS),Windows_NT)
+# Git Bash runs a suffixless no-mistakes ahead of no-mistakes.exe, so one an
+# older install left here would shadow this build. Its rm also deletes
+# name.exe when name is missing, so the removal runs before the copy.
+	rm -f $(dir $(INSTALL_BIN))no-mistakes
+endif
 	install -m 755 bin/$(BIN_NAME) $(INSTALL_BIN)
 	$(INSTALL_BIN) daemon stop
 	$(INSTALL_BIN) daemon start
