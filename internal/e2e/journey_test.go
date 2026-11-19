@@ -329,10 +329,7 @@ func runHappyPath(t *testing.T, agentName string) {
 	}
 	t.Logf("rerun outcome: %s %s", rerun.ID, rerun.Status)
 
-	out, err = h.Run("daemon", "stop")
-	if err != nil {
-		t.Fatalf("nm daemon stop: %v\n%s", err, out)
-	}
+	out = h.DaemonLifecycleWhenIdle("stop")
 	assertDaemonStopOutput(t, out)
 	assertDaemonStatusNotRunning(t, h)
 	assertStatusInitializedStopped(t, h)
