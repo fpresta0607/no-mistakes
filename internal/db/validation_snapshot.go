@@ -19,6 +19,10 @@ type TerminalSnapshot struct {
 
 func (snapshot TerminalSnapshot) Digest() string {
 	payload, _ := json.Marshal(snapshot)
+	return snapshotDigest(payload)
+}
+
+func snapshotDigest(payload []byte) string {
 	return fmt.Sprintf("%x", sha256.Sum256(payload))
 }
 

@@ -472,6 +472,7 @@ The input is one operator-owned UTF-8 JSON object, at most 64 KiB, with these fi
 | `reason` | A nonempty explicit reason, at most 4096 bytes |
 
 The daemon checks the authenticated caller, registered Git identity, exact clean source, immutable predecessor history, launch selection and publication facts before accepting the child.
+A recorded admission is verified against the predecessor snapshot bytes it was stored with, so one recorded by an earlier version keeps reading after an upgrade adds run, step or round fields, while any later change to those bytes or to its recorded request is refused.
 The gate branch may still name a head bound by an earlier immutable authored admission or terminal adoption, including the adopted root's original submitted head.
 Terminal-adoption links must retain their recorded source and recovery anchors; unrelated Git ancestry supplies no ownership evidence.
 An unresolved native agent safety refusal or unreadable findings anywhere in that immutable lineage refuses admission.
