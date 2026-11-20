@@ -142,6 +142,15 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	// EOF, early-child-exit, cancellation, and WaitDelay cleanup paths.
 	cmd.Stdin = strings.NewReader(opts.Prompt)
 	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
+	if opts.RequireCompletedChildren {
+		// Claude Code cancels a SessionEnd hook at its 1.5s default bound and exits
+		// while the cancelled hook is still being torn down inside the agent's
+		// process group or job, which the owned-children check then refuses as work
+		// the agent left running (issue #257). Bounding the hooks by the result grace
+		// lets them finish before claude exits; a hook slower than the grace is
+		// stopped with claude there anyway.
+		cmd.Env = append(cmd.Env, "CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS="+strconv.FormatInt(claudeResultGrace.Milliseconds(), 10))
+	}
 	shellenv.ConfigureShellCommand(cmd)
 
 	var stderrBuf []byte

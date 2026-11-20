@@ -1079,6 +1079,30 @@ func TestClaudeAgent_BackgroundWorkAfterResult(t *testing.T) {
 	})
 }
 
+// Issue #257: Claude Code cancels a SessionEnd hook at its 1.5s default bound
+// and exits while the hook's process tree is still alive in the agent's group,
+// which the completed-children check refuses. The turn must bound the hooks by
+// the result grace so a slow hook finishes before claude exits.
+func TestClaudeAgent_SessionEndHookFinishesBeforeTheCompletionCheck(t *testing.T) {
+	t.Setenv("NM_CLAUDE_STDIN_HELPER", "result-then-session-end-hook")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	res, err := newClaudeStdinHelperAgent(t).runOnce(ctx, RunOpts{
+		Prompt:                   "test",
+		CWD:                      t.TempDir(),
+		JSONSchema:               json.RawMessage(`{"type":"object","required":["ok"]}`),
+		RequireCompletedChildren: true,
+	})
+
+	if err != nil {
+		t.Fatalf("err = %v, want the finished result", err)
+	}
+	if string(res.Output) != `{"ok":true}` {
+		t.Fatalf("output = %s, want the result", res.Output)
+	}
+}
+
 func TestClaudeAgent_NonzeroExitWithoutUsableResultStillFails(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -1204,6 +1228,33 @@ func TestClaudeStdinHelper(t *testing.T) {
 		return
 	case "background-child":
 		time.Sleep(30 * time.Second)
+		return
+	case "result-then-session-end-hook":
+		// Emulates Claude Code's SessionEnd bound: wait for the hook up to
+		// CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS (1500ms when unset), then exit
+		// leaving a still-running hook behind, as claude does when it cancels one.
+		emitClaudeHelperResult()
+		hook := exec.Command(os.Args[0], "-test.run=^TestClaudeStdinHelper$")
+		hook.Env = append(os.Environ(), "NM_CLAUDE_STDIN_HELPER=session-end-hook")
+		if err := hook.Start(); err != nil {
+			os.Exit(2)
+		}
+		bound := 1500 * time.Millisecond
+		if v, err := strconv.Atoi(os.Getenv("CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS")); err == nil {
+			bound = time.Duration(v) * time.Millisecond
+		}
+		hookDone := make(chan struct{})
+		go func() {
+			_ = hook.Wait()
+			close(hookDone)
+		}()
+		select {
+		case <-hookDone:
+		case <-time.After(bound):
+		}
+		return
+	case "session-end-hook":
+		time.Sleep(6 * time.Second)
 		return
 	case "result-then-fail":
 		emitClaudeHelperResult()
