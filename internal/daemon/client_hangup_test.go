@@ -34,6 +34,55 @@ func serveTestIPC(t *testing.T, server *ipc.Server) string {
 	return socket
 }
 
+type admissionOutcome struct {
+	runID string
+	err   error
+}
+
+// admitAfterClientHangsUp serves admit as method, holds the branch lock while
+// a real IPC client calls it and gives up, releases the lock only once the
+// server has seen the hang-up, and returns what the admission then did.
+func admitAfterClientHangsUp(t *testing.T, manager *RunManager, repoID, method string, admit func(context.Context) (string, error)) admissionOutcome {
+	t.Helper()
+	admitted := make(chan context.Context, 1)
+	outcomes := make(chan admissionOutcome, 1)
+	server := ipc.NewServer()
+	server.Handle(method, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
+		admitted <- ctx
+		runID, err := admit(ctx)
+		outcomes <- admissionOutcome{runID: runID, err: err}
+		return map[string]string{"run_id": runID}, err
+	})
+	socket := serveTestIPC(t, server)
+	branchLock := manager.branchMutex(repoID, "feature")
+	branchLock.Lock()
+	isLocked := true
+	t.Cleanup(func() {
+		if isLocked {
+			branchLock.Unlock()
+		}
+	})
+	client, err := ipc.Dial(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gaveUp := client.CallWithTimeout(method, struct{}{}, nil, 200*time.Millisecond)
+	_ = client.Close()
+	if !ipc.IsCallTimeout(gaveUp) {
+		t.Fatalf("client call = %v, want it to give up waiting", gaveUp)
+	}
+	admission := <-admitted
+	for wait := time.Now().Add(10 * time.Second); !ipc.ClientGone(admission) && time.Now().Before(wait); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !ipc.ClientGone(admission) {
+		t.Fatal("the server never saw the client hang up")
+	}
+	branchLock.Unlock()
+	isLocked = false
+	return <-outcomes
+}
+
 // An admission whose client gave up while it waited for its branch lock used to
 // create its run anyway once the lock came free, then fail writing the reply, so
 // the client could not tell whether it had happened and a retry superseded the
@@ -59,55 +108,15 @@ func TestAdmissionWhoseClientHungUpCreatesNoRunAndARetryCreatesOne(t *testing.T)
 					LaunchNonce: nonce, ValidationGeneration: generation,
 				})
 			}
-			type outcome struct {
-				runID string
-				err   error
-			}
-			admitted := make(chan context.Context, 1)
-			outcomes := make(chan outcome, 1)
-			server := ipc.NewServer()
-			server.Handle(method, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
-				admitted <- ctx
-				runID, err := admit(ctx)
-				outcomes <- outcome{runID: runID, err: err}
-				return map[string]string{"run_id": runID}, err
-			})
-			socket := serveTestIPC(t, server)
-			branchLock := manager.branchMutex(repository.ID, "feature")
-			branchLock.Lock()
-			isLocked := true
-			t.Cleanup(func() {
-				if isLocked {
-					branchLock.Unlock()
-				}
-			})
 			before, err := database.GetRunsByRepo(repository.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			client, err := ipc.Dial(socket)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			// Act
-			gaveUp := client.CallWithTimeout(method, struct{}{}, nil, 200*time.Millisecond)
-			_ = client.Close()
-			admission := <-admitted
-			for wait := time.Now().Add(10 * time.Second); !ipc.ClientGone(admission) && time.Now().Before(wait); {
-				time.Sleep(5 * time.Millisecond)
-			}
-			if !ipc.ClientGone(admission) {
-				t.Fatal("the server never saw the client hang up")
-			}
-			branchLock.Unlock()
-			isLocked = false
-			stopped := <-outcomes
+			stopped := admitAfterClientHangsUp(t, manager, repository.ID, method, admit)
 
 			// Assert
-			if !ipc.IsCallTimeout(gaveUp) {
-				t.Fatalf("client call = %v, want it to give up waiting", gaveUp)
-			}
 			if !errors.Is(stopped.err, errAdmissionClientGone) || stopped.runID != "" {
 				t.Fatalf("admission after the client left = (%q, %v), want a stop with no run", stopped.runID, stopped.err)
 			}
@@ -126,6 +135,32 @@ func TestAdmissionWhoseClientHungUpCreatesNoRunAndARetryCreatesOne(t *testing.T)
 				t.Fatalf("retried run = %+v after %d step executions", run, step.execCnt.Load())
 			}
 		})
+	}
+}
+
+// A plain push carries no launch nonce and its post-receive hook never
+// retries, so its run is still created after the hook gave up waiting:
+// stopping it would leave a moved gate ref that no run ever validates.
+func TestPlainPushWhoseHookHungUpStillCreatesItsRun(t *testing.T) {
+	// Arrange
+	step := &mockPassStep{name: types.StepReview}
+	manager, root, database, repository, head, _, _ := launchAssertionFixture(t, func() []pipeline.Step { return []pipeline.Step{step} })
+	admit := func(ctx context.Context) (string, error) {
+		return manager.HandlePushReceived(ctx, &ipc.PushReceivedParams{
+			Gate: root.RepoDir(repository.ID), Ref: "refs/heads/feature", Old: head, New: head,
+			Intent: "pushed while the hook gave up",
+		})
+	}
+
+	// Act
+	admitted := admitAfterClientHangsUp(t, manager, repository.ID, ipc.MethodPushReceived, admit)
+
+	// Assert
+	if admitted.err != nil || admitted.runID == "" {
+		t.Fatalf("plain push after its hook left = (%q, %v), want its run created", admitted.runID, admitted.err)
+	}
+	if run := waitForRunTerminalState(t, database, admitted.runID); run.Status != types.RunCompleted || step.execCnt.Load() != 1 {
+		t.Fatalf("plain push run = %+v after %d step executions", run, step.execCnt.Load())
 	}
 }
 
