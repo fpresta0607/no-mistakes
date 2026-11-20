@@ -491,7 +491,7 @@ This command grants no authority to install the candidate or operate another run
 
 An exact repeated request returns the same admission and child.
 An admission whose caller stopped waiting before acceptance records nothing.
-The daemon gives up one second before the caller's own deadline, so the refusal naming the stage that spent the time reaches the caller.
+The daemon gives up after two minutes or one second before the caller's own deadline, whichever comes first, so the refusal naming the stage that spent the time reaches the caller.
 A fresh accepted admission schedules its child for execution.
 An untouched, unscheduled pending acceptance left by an interrupted admission or daemon restart remains idle until the exact request is explicitly replayed and revalidated.
 A progressed child is observed or recovered through its existing execution; a cancelled child is never restarted by replay.
