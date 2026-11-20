@@ -62,6 +62,7 @@ This error always means a genuinely live daemon: the lock it reports cannot go s
 Manage that daemon with `no-mistakes daemon status` and `no-mistakes daemon stop` instead of deleting the lock file - deleting the file does not release the lock and only weakens the guard.
 
 If the socket exists and the process is running but stuck or unresponsive, `no-mistakes` bounds the connection wait with [`daemon_connect_timeout`](/no-mistakes/reference/global-config/#daemon_connect_timeout) and fails fast with an error naming the socket path instead of silently starting a second daemon.
+If the error says the daemon `is running but slow to answer`, or `axi`, `status` or `doctor` show it as slow, it is busy, not down: retry once it answers instead of restarting it, which would end every run it is serving (see [Starting and stopping](/no-mistakes/concepts/daemon/#starting-and-stopping)).
 Ordinary `no-mistakes daemon stop` requires a successful `prepare_shutdown` acknowledgement; if the daemon cannot answer, it refuses before stopping a service or using a PID fallback.
 If an ordinary stop succeeds, run `no-mistakes daemon start` to start the replacement.
 For an unresponsive or older daemon that cannot acknowledge shutdown, follow the owner's [explicit-force, containment and bootstrap prerequisites](/no-mistakes/concepts/daemon/#starting-and-stopping) before choosing a forced stop.

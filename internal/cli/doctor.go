@@ -108,7 +108,7 @@ func newDoctorCmd() *cobra.Command {
 				}
 
 				if p != nil {
-					alive, _ := daemon.IsRunning(p)
+					alive, runningErr := daemon.IsRunning(p)
 					if alive {
 						// A daemon holding pushes for a restart must not look idle.
 						if status, err := daemon.RestartStatus(p); err == nil && status.Pending {
@@ -116,6 +116,8 @@ func newDoctorCmd() *cobra.Command {
 						} else {
 							ok("daemon        ", "running")
 						}
+					} else if daemon.IsSlow(runningErr) {
+						warn("daemon        ", "running, slow to answer health")
 					} else {
 						warn("daemon        ", "stopped")
 					}

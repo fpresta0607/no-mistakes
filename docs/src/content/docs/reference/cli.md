@@ -1349,7 +1349,7 @@ Displays:
 
 - Repo path, upstream URL, and fork URL when configured
 - Gate path
-- Daemon status (running/stopped, PID)
+- Daemon status (running, slow to answer, or stopped, and PID)
 - Active run details: ID, branch, status, head SHA, start time
 
 ## no-mistakes runs
