@@ -59,6 +59,9 @@ var renameDaemonPIDFile = os.Rename
 // `no-mistakes daemon run` entrypoint used by managed and detached services.
 func Run() (retErr error) {
 	startupStarted := time.Now()
+	// First, so nothing the daemon does or starts waits at an inherited low
+	// priority; it is logged once the lifecycle log is open.
+	raisedPriority, priorityErr := raiseInheritedPriority()
 	p, err := paths.New()
 	if err != nil {
 		return fmt.Errorf("resolve paths: %w", err)
@@ -87,6 +90,11 @@ func Run() (retErr error) {
 	}
 	defer lifecycleLog.Close()
 	initLogger(lifecycleLog, "info")
+	if priorityErr != nil {
+		slog.Warn("daemon priority not raised to normal", "raised", raisedPriority, "error", priorityErr)
+	} else if raisedPriority != "" {
+		slog.Info("daemon priority raised to normal", "inherited", raisedPriority)
+	}
 	defer func() {
 		if retErr != nil && !errors.Is(retErr, ErrRestartForUpdate) {
 			slog.Error("daemon failed", "error", retErr)
