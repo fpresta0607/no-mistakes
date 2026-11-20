@@ -65,7 +65,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 	}
 	enterStage("waiting for the branch lock")
 	var result *ipc.ValidateAuthoredResult
-	_, err := m.withBranchLock(request.RepoID, request.Branch, func() (string, error) {
+	_, err := m.withBranchLock(request.RepoID, request.Branch, func() (_ string, err error) {
 		enterStage("reading the predecessor")
 		if m.shuttingDown.Load() {
 			return "", fmt.Errorf("daemon is shutting down")
@@ -338,6 +338,14 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		} else if event.Gates != gates || !reflect.DeepEqual(event.Steps, stepNames) || !samePath(event.WorktreeRoot, filepath.Dir(layout.Dir(repo.ID, repo.WorkingPath, event.ChildID))) {
 			return "", fmt.Errorf("accepted authored stage sequence or worktree placement changed")
 		}
+		// From here the child is accepted and unscheduled: a setup failure, such
+		// as a worktree that cannot be created, fails it rather than leaving a
+		// pending run that never starts and holds the branch (#250).
+		defer func() {
+			if err != nil && !isScheduled {
+				err = m.failUnstartedAuthoredChild(event.ChildID, err)
+			}
+		}()
 		child, err := m.db.GetRun(event.ChildID)
 		if err != nil || child == nil || child.WorktreeDir == nil {
 			return "", fmt.Errorf("accepted authored child has no registered worktree")
@@ -386,6 +394,24 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		return nil, fmt.Errorf("authored admission ran out of its %s deadline while %s (%s into that stage): %w", authoredAdmissionTimeout, stageNames[stage], deadline.Sub(stageStarts[stage]).Round(time.Millisecond), err)
 	}
 	return result, err
+}
+
+// failUnstartedAuthoredChild records setupErr on an accepted child that was
+// never scheduled and returns the error its admission reports. Only an
+// untouched pending child is failed, so the child stays recoverable through
+// terminal validation of its unchanged head.
+func (m *RunManager) failUnstartedAuthoredChild(childID string, setupErr error) error {
+	reason := fmt.Sprintf("authored admission setup failed before the child started: %v", setupErr)
+	if err := m.db.FailPendingValidationAdmission(childID, reason); err != nil {
+		slog.Warn("authored child left as it was after its setup failed", "run_id", childID, "setup_error", setupErr, "error", err)
+		return setupErr
+	}
+	if child, err := m.db.GetRun(childID); err == nil && child != nil {
+		status := string(types.RunFailed)
+		m.broadcast(ipc.Event{Type: ipc.EventRunCompleted, RunID: childID, RepoID: child.RepoID, Branch: &child.Branch, Status: &status, Error: &reason, PRURL: child.PRURL})
+	}
+	m.closeSubscribers(childID)
+	return fmt.Errorf("%w; accepted child %s failed before it started, validate its unchanged head with no-mistakes axi validate-terminal", setupErr, childID)
 }
 
 func (m *RunManager) proveAuthoredGateLineage(ctx context.Context, snapshot *db.TerminalSnapshot, gateDir, gateHead string) error {

@@ -272,6 +272,86 @@ func TestAuthoredAdmissionDeadlineAfterAcceptanceIsNotBlamedOnTheChecksBeforeIt(
 	if !isAccepted {
 		t.Fatal("the admission was not accepted before the deadline, so this does not exercise the stage after acceptance")
 	}
+	for _, run := range runs {
+		if run.Status == types.RunPending {
+			t.Fatalf("run %s stayed pending after its worktree setup ran out of time (#250)", run.ID)
+		}
+	}
+}
+
+// An accepted child whose `git worktree add` failed used to stay pending with no
+// step ever started, holding its branch with nothing marking it recoverable
+// (#250). It now fails with the reason, and terminal validation of its
+// unchanged head starts it again.
+func TestAuthoredAdmissionWorktreeFailureFailsTheChildRecoverably(t *testing.T) {
+	// Arrange
+	var calls atomic.Int32
+	manager, database, repo, params, gate := authoredAdmissionFixture(t, func() []pipeline.Step {
+		var result []pipeline.Step
+		for _, step := range steps.AllSteps() {
+			result = append(result, &authoredFixtureStep{name: step.Name(), calls: &calls})
+		}
+		return result
+	})
+	hooks := filepath.Join(gate, "hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hook := filepath.Join(hooks, "post-checkout")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\necho 'checkout refused by fixture' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Act
+	_, err := manager.validateAuthored(context.Background(), params, os.Getpid())
+
+	// Assert
+	if err == nil || !strings.Contains(err.Error(), "validate-terminal") {
+		t.Fatalf("admission error = %v, want it to name the failed child's recovery", err)
+	}
+	runs, err := database.GetRunsByRepo(repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var child *db.Run
+	for _, run := range runs {
+		if run.ID != params.Request.PredecessorID {
+			child = run
+		}
+	}
+	if child == nil {
+		t.Fatal("the admission was not accepted before git worktree add, so this does not exercise the stage after acceptance")
+	}
+	if child.Status != types.RunFailed || child.Error == nil || !strings.Contains(*child.Error, "authored admission setup failed before the child started") || calls.Load() != 0 {
+		t.Fatalf("child after a failed git worktree add = %+v calls=%d, want it failed with the setup reason and never started", child, calls.Load())
+	}
+	replayed, err := manager.validateAuthored(context.Background(), params, os.Getpid())
+	if err != nil || replayed.Started || replayed.Receipt.RunID != child.ID {
+		t.Fatalf("exact replay restarted the failed child: %+v %v", replayed, err)
+	}
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := database.ReadTerminalSnapshot(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	params.Request.PredecessorID, params.Request.SnapshotDigest, params.Request.LaunchNonce = child.ID, snapshot.Digest(), *child.LaunchNonce
+	params.Request.TerminalGeneration, params.Request.AcceptUnknownSource = "after-worktree-failure", true
+	params.Request.LaunchAssertion.Apply = true
+	params.Request.SourceAnchors, err = branchsync.TerminalValidationAnchors(context.Background(), database, gate, repo.WorkingPath, child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := manager.validateAuthored(context.Background(), params, os.Getpid())
+	if err != nil || !recovered.Started {
+		t.Fatalf("terminal validation of the failed child: %+v %v", recovered, err)
+	}
+	successor := waitForRunTerminalState(t, database, recovered.Receipt.RunID)
+	manager.wg.Wait()
+	if successor.Status != types.RunCompleted || successor.HeadSHA != child.HeadSHA || calls.Load() != int32(len(steps.AllSteps())) {
+		t.Fatalf("terminal validation did not validate the failed child's head: %+v calls=%d", successor, calls.Load())
+	}
 }
 
 func TestAuthoredAdmissionRefusesAnInheritedPRWithoutPushBinding(t *testing.T) {
