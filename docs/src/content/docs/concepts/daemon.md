@@ -34,7 +34,9 @@ On Windows the daemon runs without a console window. The Task Scheduler task sta
 The Windows task runs the daemon at Task Scheduler priority 4, so the daemon and every git, agent and test command it starts run with normal processor, disk and memory priority, like a command run from a terminal.
 Task Scheduler's default of 7 would start all of them below normal on the processor with low disk and memory priority, which starves the gate on a busy host.
 Every start of a stopped daemon, from `daemon start`, `daemon restart`, `no-mistakes update` or a command that starts a missing daemon on demand, registers the task again, so a task registered at another priority is corrected then.
-A daemon that is already running keeps the priority it was started with, and so does the version a `--when-idle` restart starts, so run `no-mistakes daemon restart` to move a running daemon to the new priority.
+Whatever starts it, the daemon's first step raises a processor, disk or memory priority it inherited below normal to normal, before it starts any command, so a detached start, a `--when-idle` restart, or `daemon run` from a below-normal process runs at normal too, and a higher priority is left as it is.
+A below-normal daemon on a busy host waited seconds for a processor and answered even its health check that late.
+A daemon that is already running keeps the priority it was started with until its next start.
 The daemon sets no processor affinity, so on a host with efficiency cores Windows places its commands the way it places a terminal's.
 A mask that kept them off efficiency cores would be specific to each host, would be inherited by every command, and would leave those cores unused even when the performance cores are saturated.
 
