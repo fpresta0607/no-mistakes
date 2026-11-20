@@ -375,6 +375,16 @@ func (d *DB) PendingValidationAdmissions() ([]*ValidationAdmission, error) {
 }
 
 func (d *DB) CancelPendingValidationAdmission(runID string) error {
+	return d.endPendingValidationAdmission(runID, types.RunCancelled, types.RunCancelReasonAbortedByUser)
+}
+
+// FailPendingValidationAdmission ends an untouched pending acceptance whose
+// setup failed before it was scheduled, so it never stays pending (#250).
+func (d *DB) FailPendingValidationAdmission(runID, reason string) error {
+	return d.endPendingValidationAdmission(runID, types.RunFailed, reason)
+}
+
+func (d *DB) endPendingValidationAdmission(runID string, status types.RunStatus, reason string) error {
 	event, err := d.GetValidationPredecessor(runID)
 	if err != nil {
 		return err
@@ -385,7 +395,7 @@ func (d *DB) CancelPendingValidationAdmission(runID string) error {
 	if err := d.ValidatePendingAdmission(event); err != nil {
 		return err
 	}
-	result, err := d.sql.Exec(`UPDATE runs SET status = ?, error = ?, updated_at = ? WHERE id = ? AND status = 'pending' AND NOT EXISTS(SELECT 1 FROM step_results WHERE run_id = runs.id)`, types.RunCancelled, types.RunCancelReasonAbortedByUser, now(), runID)
+	result, err := d.sql.Exec(`UPDATE runs SET status = ?, error = ?, updated_at = ? WHERE id = ? AND status = 'pending' AND NOT EXISTS(SELECT 1 FROM step_results WHERE run_id = runs.id)`, status, reason, now(), runID)
 	if err != nil {
 		return err
 	}
@@ -394,7 +404,7 @@ func (d *DB) CancelPendingValidationAdmission(runID string) error {
 		return err
 	}
 	if count != 1 {
-		return fmt.Errorf("pending authored admission changed before cancellation")
+		return fmt.Errorf("pending authored admission changed before it could be marked %s", status)
 	}
 	return nil
 }
