@@ -9,6 +9,10 @@ import (
 
 var errAdmissionClosed = errors.New("daemon is shutting down")
 
+// errAdmissionClientGone stops an admission whose client hung up before it
+// created anything. No client reads it; it names the stop in the daemon log.
+var errAdmissionClientGone = errors.New("the client hung up before the admission created a run; nothing was started")
+
 func (m *RunManager) beginAdmission() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
