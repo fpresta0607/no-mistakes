@@ -608,7 +608,7 @@ func daemonIsRunningViaIPC(p *paths.Paths) (bool, error) {
 			return false, nil
 		}
 		if ipc.IsConnectTimeout(err) {
-			return false, err
+			return false, slowIfAlive(p, err)
 		}
 		if statErr != nil {
 			return false, fmt.Errorf("check daemon socket: %w", statErr)
@@ -622,9 +622,59 @@ func daemonIsRunningViaIPC(p *paths.Paths) (bool, error) {
 
 	var result ipc.HealthResult
 	if err := client.CallWithTimeout(ipc.MethodHealth, &ipc.HealthParams{}, &result, ipc.ConnectTimeout(p.Socket())); err != nil {
+		if ipc.IsCallTimeout(err) {
+			return false, slowIfAlive(p, err)
+		}
 		return false, err
 	}
 	return result.Status == "ok", nil
+}
+
+// SlowDaemonError reports a daemon whose recorded process is alive but which
+// did not answer a health check within daemon_connect_timeout. It is busy, not
+// stopped, and restarting it would end every run it is serving (#245).
+type SlowDaemonError struct {
+	PID int
+	Err error
+}
+
+func (e *SlowDaemonError) Error() string {
+	return fmt.Sprintf("daemon (pid %d) is running but slow to answer: %v; it is busy, not stopped, so retry shortly (restarting it would end its live runs)", e.PID, e.Err)
+}
+
+func (e *SlowDaemonError) Unwrap() error { return e.Err }
+
+// IsSlow reports whether err is a health probe miss on a live daemon.
+func IsSlow(err error) bool {
+	var slow *SlowDaemonError
+	return errors.As(err, &slow)
+}
+
+// slowIfAlive turns a health probe timeout into a SlowDaemonError when the PID
+// file names a live process with the recorded start time. A legacy record with
+// no start time cannot prove that identity without another health check, so it
+// keeps the timeout as it is.
+func slowIfAlive(p *paths.Paths, probeErr error) error {
+	record, err := readDaemonPIDFile(p.PIDFile())
+	if err != nil || record.StartedAt.IsZero() {
+		return probeErr
+	}
+	running, err := daemonProcessRunning(record.PID)
+	if err != nil || !running {
+		return probeErr
+	}
+	startedAt, err := daemonProcessStartTime(record.PID)
+	if err != nil {
+		return probeErr
+	}
+	diff := startedAt.Sub(record.StartedAt.UTC())
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > orphanStartTimeTolerance {
+		return probeErr
+	}
+	return &SlowDaemonError{PID: record.PID, Err: probeErr}
 }
 
 // Stop sends a shutdown request to the running daemon and waits for it to exit.
@@ -1053,6 +1103,9 @@ func EnsureDaemon(p *paths.Paths) error {
 	defer releaseStartup()
 	alive, err := daemonHealthCheck(p)
 	if err != nil {
+		if IsSlow(err) {
+			return err
+		}
 		return fmt.Errorf("%w (run 'no-mistakes daemon start' to recover)", err)
 	}
 	if alive {
