@@ -41,6 +41,11 @@ var authoredPRCommandOutput = (*exec.Cmd).Output
 // included. It is a variable so a test can spend it without waiting minutes.
 var authoredAdmissionTimeout = 2 * time.Minute
 
+// authoredReplyMargin is how long before its client's own deadline an authored
+// admission gives up, so the refusal that names the stage reaches the client
+// instead of a reply nobody reads (#249).
+const authoredReplyMargin = time.Second
+
 func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAuthoredParams, operator int) (*ipc.ValidateAuthoredResult, error) {
 	request := params.Request
 	if len(request.SourceAnchors) == 0 {
@@ -52,7 +57,11 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 	if err := request.Validate(); err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, authoredAdmissionTimeout)
+	timeout := authoredAdmissionTimeout
+	if clientDeadline, ok := ipc.RequestDeadline(ctx); ok {
+		timeout = min(timeout, time.Until(clientDeadline)-authoredReplyMargin)
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	// Each stage is named as it starts, so an admission that runs out of its
 	// deadline reports where the time went instead of naming whichever call
@@ -318,6 +327,11 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil || !maps.Equal(anchors, confirmedAnchors) {
 			return "", fmt.Errorf("terminal recovery anchors changed before acceptance: %v", err)
 		}
+		// A new admission's last point to stop with nothing recorded: past it the
+		// accepted child is what a repeated request observes.
+		if event == nil && ipc.ClientGone(ctx) {
+			return "", errAdmissionClientGone
+		}
 		enterStage("accepting the admission and preparing its worktree")
 		if event == nil {
 			var plan *verificationplan.Snapshot
@@ -383,7 +397,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		for stage > 0 && stageStarts[stage].After(deadline) {
 			stage--
 		}
-		return nil, fmt.Errorf("authored admission ran out of its %s deadline while %s (%s into that stage): %w", authoredAdmissionTimeout, stageNames[stage], deadline.Sub(stageStarts[stage]).Round(time.Millisecond), err)
+		return nil, fmt.Errorf("authored admission ran out of its %s deadline while %s (%s into that stage): %w", timeout.Round(time.Millisecond), stageNames[stage], deadline.Sub(stageStarts[stage]).Round(time.Millisecond), err)
 	}
 	return result, err
 }

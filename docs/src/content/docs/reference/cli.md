@@ -352,6 +352,7 @@ The nonce is scoped to the repository and branch.
 The first successful receipt claim returns `created`; subsequent matching claims return `reused` for that same run, including after the gate or pipeline head advances.
 A conflicting submitted head, validation generation, intent, or [pinned Pi profile](/no-mistakes/reference/global-config/#per-run-pi-profiles) is refused.
 A different nonce creates a distinct run rather than reattaching to a same-head run; both post-receive creation and the up-to-date-push fallback follow this contract.
+A launch whose caller stopped waiting before it cancelled an active run or created its own stops there and records nothing, so a retry with the same nonce creates the one run; a launch already past that point finishes, and the retry reattaches to its run.
 The up-to-date-push fallback preserves the latest same-head run's PR URL unless its recorded PR state is closed or merged, including when an explicit `--base-branch` retargets that PR.
 An explicit `--base-branch` is persisted on creation and must match the stored per-run base on replay; omitting it on replay preserves the stored base.
 A supplied `--pr-title` or `--pr-body-file` is bound the same way: a replay must supply the same text as the run, or none when the run has none.
@@ -489,6 +490,8 @@ The output and subsequent status include `authored_validation`, cumulative per-s
 This command grants no authority to install the candidate or operate another run.
 
 An exact repeated request returns the same admission and child.
+An admission whose caller stopped waiting before acceptance records nothing.
+The daemon gives up one second before the caller's own deadline, so the refusal naming the stage that spent the time reaches the caller.
 A fresh accepted admission schedules its child for execution.
 An untouched, unscheduled pending acceptance left by an interrupted admission or daemon restart remains idle until the exact request is explicitly replayed and revalidated.
 A progressed child is observed or recovered through its existing execution; a cancelled child is never restarted by replay.

@@ -2108,6 +2108,15 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}
 	}
 
+	// The last point a launch can stop and leave nothing behind: a client that
+	// already gave up gets no superseded run and no new one it cannot learn
+	// of (#249). Past here the launch finishes even if its client goes, so a
+	// retry with the same launch nonce finds the whole run.
+	if ipc.ClientGone(ctx) {
+		trackStartFailure("client_gone")
+		return "", errAdmissionClientGone
+	}
+
 	// Cancel any active run only after an asserted launch has proved its source
 	// and effective selections. Reuse these exact resolved configs during setup.
 	m.cancelActiveRuns(repo.ID, branch)

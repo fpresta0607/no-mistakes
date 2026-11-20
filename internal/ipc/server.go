@@ -2,6 +2,7 @@ package ipc
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -156,10 +157,30 @@ func (s *Server) handleConn(conn net.Conn) {
 	scanner.Buffer(make([]byte, 0, MaxFrameBytes), MaxFrameBytes)
 	encoder := json.NewEncoder(conn)
 
+	// One reader owns the connection, so a client that hangs up while its
+	// request is still being handled is seen at once, not only when the reply
+	// write fails after the handler finished (#249).
+	lines := make(chan []byte)
+	clientGone := make(chan struct{})
+	stopped := make(chan struct{})
+	defer close(stopped)
+	go func() {
+		defer close(lines)
+		defer close(clientGone)
+		for scanner.Scan() {
+			select {
+			case lines <- bytes.Clone(scanner.Bytes()):
+			case <-stopped:
+				return
+			}
+		}
+	}()
+
 	// Bind OS-authenticated peer identity to every request on this connection.
 	// Handlers use it for process-ancestry authorization; it is never accepted
 	// from request parameters or environment variables.
 	ctx := withPeerPID(context.Background(), authenticatedPeerPID(conn))
+	ctx = context.WithValue(ctx, clientGoneContextKey{}, (<-chan struct{})(clientGone))
 	// Create a context that cancels when the server shuts down.
 	ctx, cancel := context.WithCancel(ctx)
 	go func() {
@@ -171,8 +192,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	}()
 	defer cancel()
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	for line := range lines {
 		if len(line) == 0 {
 			continue
 		}
@@ -211,7 +231,7 @@ func (s *Server) handleConn(conn net.Conn) {
 			peerClosed := make(chan struct{})
 			go func() {
 				defer close(peerClosed)
-				for scanner.Scan() {
+				for range lines {
 				}
 				cancel()
 			}()
@@ -232,6 +252,27 @@ func (s *Server) handleConn(conn net.Conn) {
 			slog.Error("write response", "error", err)
 			return
 		}
+	}
+}
+
+type clientGoneContextKey struct{}
+
+// ClientGone reports whether the client that sent this request has hung up.
+// It does not cancel the request's context: a handler that changes state
+// checks it at the last point it can still stop without leaving anything
+// behind, and past that point finishes its work, so the outcome is recorded
+// where a retrying client finds it. A context that did not come from a served
+// request never reports a gone client.
+func ClientGone(ctx context.Context) bool {
+	gone, ok := ctx.Value(clientGoneContextKey{}).(<-chan struct{})
+	if !ok {
+		return false
+	}
+	select {
+	case <-gone:
+		return true
+	default:
+		return false
 	}
 }
 
