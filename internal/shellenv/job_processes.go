@@ -1,5 +1,7 @@
 package shellenv
 
+import "strings"
+
 // jobProcessState is what could be established about a process that a
 // Windows job still lists after its leader exited.
 type jobProcessState int
@@ -32,12 +34,14 @@ type jobProcess struct {
 
 // offendingJobProcesses returns the entries that make a leader's clean exit
 // unverified: a process that is really still running, or one that could not be
-// inspected. Two kinds of entry are not returned. An entry that has already
+// inspected. Three kinds of entry are not returned. An entry that has already
 // exited is a stale listing. The operating system's console host that the
 // leader itself started (its parent is the leader) is not a child the leader
 // owns: a console child gets a headless console host that joins the job and can
-// briefly outlive it. Both are excluded by identity, never by waiting them
-// out. Anything that cannot be proven to be one of the two is returned, which
+// briefly outlive it. The MSVC toolchain's telemetry helper is not unfinished
+// work: link.exe starts it and it outlives the link that started it (issue
+// #259). All three are excluded by identity, never by waiting them out.
+// Anything that cannot be proven to be one of the three is returned, which
 // keeps the check fail-closed.
 func offendingJobProcesses(procs []jobProcess, leaderPID uint32) []jobProcess {
 	var offenders []jobProcess
@@ -45,11 +49,44 @@ func offendingJobProcesses(procs []jobProcess, leaderPID uint32) []jobProcess {
 		switch {
 		case p.state == jobProcessExited:
 		case p.state == jobProcessRunning && p.systemConsoleHost && p.parentPID == leaderPID:
+		case p.state == jobProcessRunning && isMSVCTelemetryHelper(p.imagePath):
 		default:
 			offenders = append(offenders, p)
 		}
 	}
 	return offenders
+}
+
+// msvcTelemetryHelperPath is the tail of the telemetry helper's image path in
+// an MSVC toolchain, from the toolchain root to the file:
+// VC\Tools\MSVC\<version>\bin\Host<arch>\<arch>\vctip.exe. An empty
+// component matches any non-empty one, and "Host" matches as a prefix.
+var msvcTelemetryHelperPath = []string{"VC", "Tools", "MSVC", "", "bin", "Host", "", "vctip.exe"}
+
+// isMSVCTelemetryHelper reports whether imagePath is vctip.exe inside an MSVC
+// toolchain's bin directory. The whole directory shape is required, so a
+// vctip.exe anywhere else is still a child.
+func isMSVCTelemetryHelper(imagePath string) bool {
+	parts := strings.Split(imagePath, `\`)
+	if len(parts) <= len(msvcTelemetryHelperPath) {
+		return false
+	}
+	parts = parts[len(parts)-len(msvcTelemetryHelperPath):]
+	for i, want := range msvcTelemetryHelperPath {
+		got := parts[i]
+		switch {
+		case got == "":
+			return false
+		case want == "":
+		case want == "Host":
+			if len(got) <= len(want) || !strings.EqualFold(got[:len(want)], want) {
+				return false
+			}
+		case !strings.EqualFold(got, want):
+			return false
+		}
+	}
+	return true
 }
 
 func liveJobProcesses(procs []jobProcess, leaderPID uint32) int {

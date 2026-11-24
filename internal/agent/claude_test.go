@@ -1205,6 +1205,17 @@ func TestClaudeStdinHelper(t *testing.T) {
 	case "background-child":
 		time.Sleep(30 * time.Second)
 		return
+	case "result-after-toolchain-link":
+		// Issue #259: a build whose linker left its telemetry helper running,
+		// then a result and a clean exit. TestClaudeToolchainLinkHelper is
+		// the linker.
+		link := exec.Command(os.Args[0], "-test.run=^TestClaudeToolchainLinkHelper$")
+		link.Env = append(os.Environ(), "NM_CLAUDE_STDIN_HELPER=toolchain-link")
+		if err := link.Run(); err != nil {
+			os.Exit(2)
+		}
+		emitClaudeHelperResult()
+		return
 	case "result-then-fail":
 		emitClaudeHelperResult()
 		os.Exit(1)
