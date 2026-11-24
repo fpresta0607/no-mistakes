@@ -494,6 +494,7 @@ An admission whose caller stopped waiting before acceptance records nothing.
 The daemon gives up after two minutes or one second before the caller's own deadline, whichever comes first, so the refusal naming the stage that spent the time reaches the caller.
 A fresh accepted admission schedules its child for execution.
 An untouched, unscheduled pending acceptance left by an interrupted admission or daemon restart remains idle until the exact request is explicitly replayed and revalidated.
+A setup failure after acceptance, such as a worktree that cannot be created, instead fails the never-started child with that reason, so it does not stay pending; validate its unchanged head with [terminal validation](#no-mistakes-axi-validate-terminal).
 A progressed child is observed or recovered through its existing execution; a cancelled child is never restarted by replay.
 Later authored descendants must preserve the same controller policy assertion, historical uncertainty and zero repair authority.
 Continuing from a published predecessor requires a GitHub repository with the predecessor's PR open.
@@ -552,6 +553,7 @@ Current staged, tracked, untracked and submodule changes still refuse admission.
 The successor uses only its explicit selection, without inheriting an old per-run profile or quota-routing order or changing shared configuration.
 An identical admission observes the same child, including after restart; changing any bound input refuses.
 A fresh accepted admission schedules its child; explicit replay is required only for an untouched, unscheduled pending acceptance left by an interrupted admission or daemon restart.
+A setup failure after acceptance fails the never-started child instead, and the next terminal validation starts from it.
 A cancelled child is never restarted by replay.
 Use `validate-authored` for a later authored commit and `validate-terminal` for the next unchanged terminal child; both retain the same historical controller assertion, uncertainty and zero repair authority.
 These commands grant no authority to install a binary, upgrade a daemon, edit a database, cancel another run or adopt a live fleet candidate.
