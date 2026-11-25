@@ -48,6 +48,12 @@ func RecoveryLocalRef(runID string) string {
 	return "refs/no-mistakes/recover-local/" + runID
 }
 
+// RecoverySourceRef keeps a commit of a terminal run's dirty managed source
+// reachable once recovery returns custody and the managed worktree can go.
+func RecoverySourceRef(runID string) string {
+	return "refs/no-mistakes/recover-source/" + runID
+}
+
 // RecoveryGateRef keeps an independently moved gate head reachable before a
 // keep-local recovery changes the gate branch.
 func RecoveryGateRef(runID string) string {

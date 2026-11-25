@@ -651,7 +651,7 @@ func (s *Service) BindRecoveryArchive(ctx context.Context, archiveRef string) St
 //     gate's run-specific recovery ref and fetched into that anchor. Legacy terminal
 //     heads that still exist as unreferenced gate objects are anchored before
 //     recovery continues. A recorded head the terminal run never verified is
-//     accepted in exactly two shapes. Either the live gate branch is a
+//     accepted in exactly three shapes. Either the live gate branch is a
 //     non-descendant equal-tree rewrite of it: the recorded head is the exact
 //     reviewed result, that reviewed result preserves the local work, and both
 //     commits have the same final tree (the live rewrite is not merged with
@@ -662,7 +662,11 @@ func (s *Service) BindRecoveryArchive(ctx context.Context, archiveRef string) St
 //     submitted head, and the review authority are all its ancestors - the
 //     reviewed result plus the pipeline's own later commits, stranded by a
 //     later step's non-code failure. The branch ref may independently lag or
-//     advance.
+//     advance. Or the recorded head is the run's own anchored dirty head
+//     (recordedHeadIsTheRunsAnchoredDirtyHead, issue #262): terminalization
+//     recorded it with its dirty managed source and pinned it at the run's
+//     recovery ref, and the managed source is committed and anchored at the
+//     run's recovery source ref before the head is stamped.
 //   - The only possible worktree mutation is a guarded move of a clean checked-out
 //     branch: a strict fast-forward, or an anchored move to a proven-containing
 //     head performed by Git operations that refuse on their own rather than by a
@@ -754,6 +758,11 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 			}
 		case recordedHeadExtendsLiveGateBranch(ctx, s.GateDir, state, run, gateHead):
 			if blocked, ok := s.verifyRecordedHeadExtendingGateBranch(ctx, state, run, gateHead); !ok {
+				return blocked
+			}
+			verifiedHead = run.HeadSHA
+		case recordedHeadIsTheRunsAnchoredDirtyHead(ctx, s.GateDir, run):
+			if blocked, ok := s.verifyAnchoredDirtyTerminalHead(ctx, state, run); !ok {
 				return blocked
 			}
 			verifiedHead = run.HeadSHA
