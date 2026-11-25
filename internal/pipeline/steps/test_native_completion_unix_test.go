@@ -164,11 +164,24 @@ func TestTestNativeEarlyResultChildCompletion(t *testing.T) {
 
 			switch mode {
 			case "early-exit", "early-exit-redirected", "early-repair":
-				if got.err == nil || !strings.Contains(got.err.Error(), "native check completion is unverified") {
-					t.Fatalf("early structured success was not refused: %#v %v", got.outcome, got.err)
+				if got.err != nil || got.outcome == nil || !got.outcome.NeedsApproval {
+					t.Fatalf("early structured success did not park: %#v %v", got.outcome, got.err)
 				}
-				if got.outcome != nil && !got.outcome.NeedsApproval {
-					t.Fatal("premature check was accepted")
+				findings, err := types.ParseFindingsJSON(got.outcome.Findings)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if findings.Verdict == types.TestVerdictGo {
+					t.Fatal("premature check kept its early go verdict")
+				}
+				var notice *types.Finding
+				for i := range findings.Items {
+					if findings.Items[i].ID == types.FindingIDTestAgentLeftWork {
+						notice = &findings.Items[i]
+					}
+				}
+				if notice == nil || notice.Action != types.ActionAskUser || !strings.Contains(notice.Description, "native check completion is unverified") {
+					t.Fatalf("park does not carry the left-work refusal: %s", got.outcome.Findings)
 				}
 				if _, err := os.Stat(completed); err == nil {
 					t.Fatal("required child completed before the refusal")

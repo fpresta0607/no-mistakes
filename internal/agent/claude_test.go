@@ -1069,6 +1069,11 @@ func TestClaudeAgent_BackgroundWorkAfterResult(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "background work outlived the result") || !namesChild.MatchString(err.Error()) {
 			t.Fatalf("err = %v, want the background-work refusal naming the owned children", err)
 		}
+		// The Test step parks on this refusal instead of failing the run
+		// (issues #319, #363, #416), so it must stay recognisable.
+		if !errors.Is(err, ErrCompletionUnverified) {
+			t.Fatalf("err = %v, want it to match ErrCompletionUnverified", err)
+		}
 		if took > 5*time.Second {
 			t.Fatalf("took %s, want a prompt failure inside the budget", took)
 		}

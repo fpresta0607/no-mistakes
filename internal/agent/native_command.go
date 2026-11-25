@@ -21,6 +21,11 @@ import (
 // deferred group terminate.
 const ownedChildrenSettleWindow = 2 * time.Second
 
+// ErrCompletionUnverified marks a RequireCompletedChildren turn whose result
+// does not count: work the agent started was still running when it ended, or
+// the probe could not tell. The group is stopped after the probe either way.
+var ErrCompletionUnverified = errors.New("native check completion is unverified")
+
 type nativeAgentCommand struct {
 	cmd            *exec.Cmd
 	stdout         *nativeAgentPipe
@@ -135,16 +140,16 @@ func startNativeAgentCommand(cmd *exec.Cmd, desktop string, activity func(), req
 			err = nil
 			active, members, probeErr := shellenv.ShellCommandGroupActive(cmd, ownedChildrenSettleWindow)
 			if probeErr != nil {
-				err = fmt.Errorf("native check completion is unverified: %w", probeErr)
+				err = fmt.Errorf("%w: %w", ErrCompletionUnverified, probeErr)
 				if members != "" {
 					err = fmt.Errorf("%w; last observed %s", err, members)
 				}
 			} else if active {
-				msg := "native check completion is unverified: agent exited with active owned children"
+				msg := "agent exited with active owned children"
 				if members != "" {
 					msg += ": " + members
 				}
-				err = errors.New(msg)
+				err = fmt.Errorf("%w: %s", ErrCompletionUnverified, msg)
 			}
 		}
 		started.terminate()
