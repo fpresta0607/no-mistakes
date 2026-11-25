@@ -826,7 +826,8 @@ Missing phase boundaries, unrelated source and rewrites that cannot be proved as
 It pins those historical rounds, evidence, repair limits and spending in the native receipt without certifying the published descendant or changing the old evidence heads.
 Changed historical evidence refuses release, acceptance and recovery.
 Resume uses the same `--resume --receipt <id>` command and requires fresh Review and Test before publication; it cannot renew repair authority or replace the run.
-For this route, publication refuses before attestation or remote mutation if a later Document, Lint or formatting commit leaves that final head without exact fresh Review and Test evidence.
+For this route, a Document, Lint or formatting commit the resumed run makes after its fresh Test publishes on top of it, the same reviewed, tested and published ancestry release accepts.
+Publication refuses before attestation or remote mutation unless the accepted correction, the fresh Review head, the fresh Test head and the final head form that ancestry chain.
 An ordinary caller may be clean and genuinely divergent; release anchors its original head and the exact published head in both repositories without moving its branch.
 Follow `branch_sync.next_action.command` to integrate that preserved published output additively before committing the correction.
 Behind callers use the existing guarded synchronization first; dirty callers retain their work and refuse release.

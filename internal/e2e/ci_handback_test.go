@@ -512,8 +512,23 @@ func ordinaryCIHandbackRevalidatesAuthoredCorrection(t *testing.T, hasDocumentCo
 	if mustGit(h.UpstreamDir, "rev-parse", "refs/heads/"+branch) != parked.HeadSHA {
 		t.Fatal("author correction published before revalidation")
 	}
+	resumedDocumentAction := ""
+	if hasDocumentCommit {
+		// The resumed run's Document step commits again after its fresh Review
+		// and Test, which is what issue #288 refused at Push.
+		resumedDocumentAction = `  - match: "report only what you could not resolve.\n\nContext:\n- branch: feature/ordinary-handback"
+    text: "document the corrected feature"
+    edits:
+      - path: "README.md"
+        old: "Accurate feature usage.\n"
+        new: "Accurate feature usage.\nThe corrected fixture expectation is documented.\n"
+    structured:
+      findings: []
+      summary: "document the corrected fixture expectation"
+`
+	}
 	if err := os.WriteFile(h.Scenario, []byte(`actions:
-  - text: clean validation
+`+resumedDocumentAction+`  - text: clean validation
     structured:
       findings: []
       summary: clean
@@ -570,7 +585,7 @@ func ordinaryCIHandbackRevalidatesAuthoredCorrection(t *testing.T, hasDocumentCo
 		}
 	}
 	for _, head := range []string{submitted, parked.HeadSHA, correction} {
-		mustGit(operator, "merge-base", "--is-ancestor", head, final.HeadSHA)
+		mustGit(h.UpstreamDir, "merge-base", "--is-ancestor", head, final.HeadSHA)
 	}
 	for _, original := range []struct {
 		step   string
@@ -585,8 +600,25 @@ func ordinaryCIHandbackRevalidatesAuthoredCorrection(t *testing.T, hasDocumentCo
 	if err != nil || after.ID != before.ID || after.SubmittedHeadSHA == nil || *after.SubmittedHeadSHA != *before.SubmittedHeadSHA || *after.PushGeneration != *before.PushGeneration+1 || final.PRURL == nil || *final.PRURL != *parked.PRURL {
 		t.Fatalf("identity/publication history changed: %#v %v", after, err)
 	}
+	reviewedHead := final.HeadSHA
+	if hasDocumentCommit {
+		if !strings.Contains(mustGit(h.UpstreamDir, "show", final.HeadSHA+":README.md"), "The corrected fixture expectation is documented.") {
+			t.Fatalf("resumed Document step did not commit after the fresh Review and Test: %#v", final)
+		}
+		reviewedHead = mustGit(h.UpstreamDir, "rev-parse", final.HeadSHA+"^")
+		pushLog, err := os.ReadFile(filepath.Join(h.NMHome, "logs", final.ID, "push.log"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(pushLog), "no pull request found") {
+			t.Fatalf("push attestation missed the open PR:\n%s", pushLog)
+		}
+		if body := livePRBody(t, statePath, branch); !strings.Contains(body, `"head_sha":"`+final.HeadSHA+`"`) {
+			t.Fatalf("open PR is not attested for the published Document commit:\n%s", body)
+		}
+	}
 	finalCI, _ := findStep(final.Steps, types.StepCI)
-	if !final.CIReady || after.CIReadyAt == nil || finalCI.RoundStartedAt == nil || ci.RoundStartedAt == nil || *finalCI.RoundStartedAt <= *ci.RoundStartedAt || *after.CIReadyAt < *finalCI.RoundStartedAt || after.LastPushedSHA == nil || *after.LastPushedSHA != final.HeadSHA || after.ReviewApprovedHeadSHA == nil || *after.ReviewApprovedHeadSHA != final.HeadSHA || finalCI.FixRoundCount != 0 || finalCI.AutoFixLimit != 0 || mustGit(h.UpstreamDir, "rev-parse", "refs/heads/"+branch) != final.HeadSHA {
+	if !final.CIReady || after.CIReadyAt == nil || finalCI.RoundStartedAt == nil || ci.RoundStartedAt == nil || *finalCI.RoundStartedAt <= *ci.RoundStartedAt || *after.CIReadyAt < *finalCI.RoundStartedAt || after.LastPushedSHA == nil || *after.LastPushedSHA != final.HeadSHA || after.ReviewApprovedHeadSHA == nil || *after.ReviewApprovedHeadSHA != reviewedHead || finalCI.FixRoundCount != 0 || finalCI.AutoFixLimit != 0 || mustGit(h.UpstreamDir, "rev-parse", "refs/heads/"+branch) != final.HeadSHA {
 		t.Fatalf("new published head lacks green CI or gained repair allowance: %#v", final)
 	}
 	if out, err := h.RunInDir(operator, "axi", "abort", "--run", final.ID); err != nil || !strings.Contains(out, "cancelled") {

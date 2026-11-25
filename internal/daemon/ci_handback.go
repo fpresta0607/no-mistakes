@@ -43,20 +43,27 @@ func (m *RunManager) HandleCIHandback(ctx context.Context, params ipc.CIHandback
 		}
 		if params.Resume && receipt != nil && receipt.AcceptedHead != nil {
 			run, err := m.db.GetRun(params.RunID)
-			if err != nil || run == nil || run.Status != types.RunRunning || run.RepoID != params.RepoID || run.Branch != params.Branch || run.HeadSHA != *receipt.AcceptedHead || params.HeadSHA != *receipt.AcceptedHead || receipt.ID != params.ReceiptID || params.PublishedHead != receipt.ReleasedHead || params.PushGeneration != receipt.PushGeneration || params.RoundID != receipt.RoundID || run.PushActive || run.CustodyReturnedAt != nil || run.PRURL == nil || *run.PRURL != receipt.PRURL || run.PRState == nil || *run.PRState != "open" {
+			if err != nil || run == nil || run.Status != types.RunRunning || run.RepoID != params.RepoID || run.Branch != params.Branch || params.HeadSHA != *receipt.AcceptedHead || receipt.ID != params.ReceiptID || params.PublishedHead != receipt.ReleasedHead || params.PushGeneration != receipt.PushGeneration || params.RoundID != receipt.RoundID || run.PushActive || run.CustodyReturnedAt != nil || run.PRURL == nil || *run.PRURL != receipt.PRURL || run.PRState == nil || *run.PRState != "open" {
 				return "", fmt.Errorf("accepted CI handback identity changed; no validation was restarted")
 			}
 			if run.LastPushedSHA == nil || run.PushGeneration == nil {
 				return "", fmt.Errorf("accepted CI handback publication binding is missing")
 			}
 			isOriginalPublication := *run.LastPushedSHA == receipt.ReleasedHead && *run.PushGeneration == receipt.PushGeneration
-			isAcceptedPublication := *run.LastPushedSHA == *receipt.AcceptedHead && *run.PushGeneration == receipt.PushGeneration+1
+			isAcceptedPublication := *run.LastPushedSHA == run.HeadSHA && *run.PushGeneration == receipt.PushGeneration+1
 			if !isOriginalPublication && !isAcceptedPublication {
 				return "", fmt.Errorf("accepted CI handback publication generation changed")
 			}
 			repo, err := m.db.GetRepo(run.RepoID)
 			if err != nil || repo == nil || run.PushTargetFingerprint == nil || *run.PushTargetFingerprint != receipt.TargetFingerprint || receipt.TargetFingerprint != branchsync.TargetFingerprint(repo.PushURL()) || run.PushRef == nil || *run.PushRef != receipt.PushRef {
 				return "", fmt.Errorf("accepted CI handback target changed")
+			}
+			// The resumed run's own Document, Lint or formatting commits move its
+			// head past the accepted correction (issue #288), never off it.
+			if run.HeadSHA != *receipt.AcceptedHead {
+				if _, err := git.Run(ctx, m.paths.RepoDir(repo.ID), "merge-base", "--is-ancestor", *receipt.AcceptedHead, run.HeadSHA); err != nil {
+					return "", fmt.Errorf("accepted CI handback identity changed; no validation was restarted")
+				}
 			}
 			caller, err := git.FindGitRoot(params.CallerDir)
 			if err != nil {

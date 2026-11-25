@@ -148,6 +148,11 @@ func verifyCIHandbackValidationHeads(sctx *pipeline.StepContext, run *db.Run, va
 	return nil
 }
 
+// verifyCIHandbackPublication binds a revalidated handback's publication to the
+// Review and Test this resumed run did itself. Document and Lint run after
+// them, so their commits are published on top of the tested head exactly as
+// handback-time revalidation already accepts them (issue #288): the chain
+// accepted, freshly reviewed, freshly tested, published must be ancestry.
 func verifyCIHandbackPublication(sctx *pipeline.StepContext, receipt *db.CIHandback, head string) error {
 	if receipt.Source == nil || receipt.Source.Validation == nil {
 		return nil
@@ -156,9 +161,10 @@ func verifyCIHandbackPublication(sctx *pipeline.StepContext, receipt *db.CIHandb
 		return err
 	}
 	run, err := sctx.DB.GetRun(receipt.RunID)
-	if err != nil || run == nil || run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != head {
-		return fmt.Errorf("CI handback publication requires fresh Review of the exact final head")
+	if err != nil || run == nil || run.ReviewApprovedHeadSHA == nil || receipt.AcceptedHead == nil {
+		return fmt.Errorf("CI handback publication requires fresh Review of the final head")
 	}
+	reviewedHead := *run.ReviewApprovedHeadSHA
 	results, err := sctx.DB.GetStepsByRun(receipt.RunID)
 	if err != nil {
 		return err
@@ -178,8 +184,8 @@ func verifyCIHandbackPublication(sctx *pipeline.StepContext, receipt *db.CIHandb
 			}
 		}
 		if result.StepName == types.StepReview {
-			if result.Status != types.StepStatusCompleted || len(rounds) <= originalCount || rounds[len(rounds)-1].ReviewedHeadSHA == nil || *rounds[len(rounds)-1].ReviewedHeadSHA != head {
-				return fmt.Errorf("CI handback publication requires fresh Review of the exact final head")
+			if result.Status != types.StepStatusCompleted || len(rounds) <= originalCount || rounds[len(rounds)-1].ReviewedHeadSHA == nil || *rounds[len(rounds)-1].ReviewedHeadSHA != reviewedHead {
+				return fmt.Errorf("CI handback publication requires fresh Review of the final head")
 			}
 			continue
 		}
@@ -187,12 +193,18 @@ func verifyCIHandbackPublication(sctx *pipeline.StepContext, receipt *db.CIHandb
 			break
 		}
 		evidence, err := types.ParseFindingsJSON(*result.FindingsJSON)
-		if err == nil && evidence.TestedHeadSHA == head {
-			return nil
+		if err != nil || evidence.TestedHeadSHA == "" {
+			break
 		}
-		break
+		heads := []string{*receipt.AcceptedHead, reviewedHead, evidence.TestedHeadSHA, head}
+		for index := 1; index < len(heads); index++ {
+			if _, err := stepGitRun(sctx, "merge-base", "--is-ancestor", heads[index-1], heads[index]); err != nil {
+				return fmt.Errorf("CI handback publication requires accepted, freshly reviewed, freshly tested and published ancestry")
+			}
+		}
+		return nil
 	}
-	return fmt.Errorf("CI handback publication requires fresh Test of the exact final head")
+	return fmt.Errorf("CI handback publication requires fresh Test of the final head")
 }
 
 func CIHandbackManagedHead(sctx *pipeline.StepContext, receipt *db.CIHandback) (string, error) {
