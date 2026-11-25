@@ -36,14 +36,15 @@ type nativeAgentCommand struct {
 	// isLeaderStopped records that stopLeader ended the agent process itself,
 	// so its exit is judged by what it left running, like a clean exit.
 	isLeaderStopped atomic.Bool
-	// cliProcessesMu guards cliProcesses and isReaped.
+	// cliProcessesMu guards cliProcesses and isRecordClosed.
 	cliProcessesMu sync.Mutex
 	// cliProcesses are the agent CLI's own processes beside the leader, from
 	// recordCLIProcesses; stopLeader stops them with the leader.
 	cliProcesses *shellenv.ShellCommandMembers
-	// isReaped records that the command has been waited for and its group
-	// terminated, so nothing is recorded any more.
-	isReaped bool
+	// isRecordClosed records that a record was attempted, whether or not it
+	// succeeded, or that the command was reaped, so nothing is recorded any
+	// more.
+	isRecordClosed bool
 }
 
 func writeNativeAgentStdin(stdin io.WriteCloser, prompt string) <-chan error {
@@ -192,13 +193,15 @@ func (c *nativeAgentCommand) waitForPipes(waitErr error) error {
 // besides the leader as the agent CLI's own (issue #277): the real CLI under an
 // npm shim or the Windows desktop helper, and the stdio MCP servers it started.
 // Call it when the agent reports it has started and before it can have started
-// any work, so nothing recorded can be that work. Only the first call records.
+// any work, so nothing recorded can be that work. Only the first call records;
+// after a failed one the leader is stopped alone.
 func (c *nativeAgentCommand) recordCLIProcesses() error {
 	c.cliProcessesMu.Lock()
 	defer c.cliProcessesMu.Unlock()
-	if c.isReaped || c.cliProcesses != nil {
+	if c.isRecordClosed {
 		return nil
 	}
+	c.isRecordClosed = true
 	members, err := shellenv.RecordShellCommandMembers(c.cmd)
 	if err != nil {
 		return err
@@ -210,7 +213,7 @@ func (c *nativeAgentCommand) recordCLIProcesses() error {
 func (c *nativeAgentCommand) releaseCLIProcesses() {
 	c.cliProcessesMu.Lock()
 	defer c.cliProcessesMu.Unlock()
-	c.isReaped = true
+	c.isRecordClosed = true
 	if c.cliProcesses != nil {
 		c.cliProcesses.Release()
 		c.cliProcesses = nil

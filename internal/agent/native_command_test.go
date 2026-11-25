@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -75,5 +76,50 @@ func TestWaitAfterParseErrorKeepsStderrTheAgentAlreadyWrote(t *testing.T) {
 	}
 	if !errors.Is(waitErr, context.Canceled) {
 		t.Fatalf("waitAfterParseError = %v, want the parse error", waitErr)
+	}
+}
+
+// Issue #277: Claude Code emits init again for each query it starts in the
+// same process, so a record that failed at the first init must not be retried
+// at a later one, when it would take work the agent started for the CLI's own
+// and stop it at the result grace.
+func TestRecordCLIProcessesIsNotRetriedAfterAFailure(t *testing.T) {
+	// Arrange
+	cmd := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^TestClaudeStdinHelper$")
+	cmd.Env = append(os.Environ(), "NM_CLAUDE_STDIN_HELPER=init-result-with-background-child")
+	shellenv.ConfigureShellCommand(cmd)
+	command := &nativeAgentCommand{cmd: cmd}
+	if err := command.recordCLIProcesses(); err == nil {
+		t.Fatal("recordCLIProcesses() before the start succeeded, want a failed record")
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := shellenv.StartShellCommand(cmd); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		shellenv.TerminateShellCommandGroup(cmd)
+		_ = cmd.Wait()
+	})
+	lines := bufio.NewScanner(stdout)
+	for lines.Scan() && !strings.Contains(lines.Text(), `"type":"result"`) {
+	}
+
+	// Act
+	if err := command.recordCLIProcesses(); err != nil {
+		t.Fatalf("recordCLIProcesses() after a failed one = %v, want nothing recorded", err)
+	}
+	command.stopLeader()
+	_ = cmd.Wait()
+
+	// Assert
+	active, _, err := shellenv.ShellCommandGroupActive(cmd, ownedChildrenSettleWindow)
+	if err != nil {
+		t.Fatalf("ShellCommandGroupActive() error = %v", err)
+	}
+	if !active {
+		t.Fatal("the work the agent started after init was stopped with the leader, want it left for the owned-children probe")
 	}
 }
