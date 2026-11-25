@@ -158,8 +158,35 @@ func TestCIHandbackPostDocumentPublicationRequiresExplicitRevalidation(t *testin
 	}
 	gitCmd(t, sctx.WorkDir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "later document commit")
 	later := gitCmd(t, sctx.WorkDir, "rev-parse", "HEAD")
-	if err := publishRunHead(sctx, later, "", nil); err == nil || !strings.Contains(err.Error(), "fresh Review") {
-		t.Fatalf("later commit reused exact-head proof: %v", err)
+	if err := verifyCIHandbackPublication(sctx, receipt, later); err != nil {
+		t.Fatalf("Document's commit after the fresh Test was refused publication (issue #288): %v", err)
+	}
+	for _, result := range stepsBefore {
+		if result.StepName == types.StepTest {
+			evidence := `{"findings":[],"tested_head_sha":"` + later + `"}`
+			if err := sctx.DB.SetStepFindings(result.ID, evidence); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := sctx.DB.InsertStepRound(result.ID, 3, "initial", &evidence, nil, 13); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := verifyCIHandbackPublication(sctx, receipt, accepted.AcceptedHead); err == nil || !strings.Contains(err.Error(), "ancestry") {
+		t.Fatalf("a final head without its fresh tested head reached publication: %v", err)
+	}
+	for _, result := range stepsBefore {
+		if result.StepName == types.StepReview {
+			if _, err := sctx.DB.InsertReviewStepRound(result.ID, 4, "initial", result.FindingsJSON, nil, before.HeadSHA, 14); err != nil {
+				t.Fatal(err)
+			}
+			if err := sctx.DB.CompleteReviewStep(result.ID, sctx.Run.ID, before.HeadSHA, 0, 14, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := verifyCIHandbackPublication(sctx, receipt, later); err == nil || !strings.Contains(err.Error(), "ancestry") {
+		t.Fatalf("a fresh Review without the accepted correction authorized publication: %v", err)
 	}
 }
 

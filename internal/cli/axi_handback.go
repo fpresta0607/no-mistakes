@@ -133,7 +133,9 @@ func newAxiHandbackCmd() *cobra.Command {
 				}
 				request.PublishedHead, request.PushGeneration, request.RoundID = receipt.ReleasedHead, receipt.PushGeneration, receipt.RoundID
 				isAcceptedReplay = receipt.AcceptedHead != nil
-				if receipt.AcceptedHead != nil && *receipt.AcceptedHead == head && stored.HeadSHA == head {
+				// The daemon proves the run head is the accepted correction or the
+				// run's own later commit on it.
+				if receipt.AcceptedHead != nil && *receipt.AcceptedHead == head {
 					binding.CurrentHead, binding.PublishedHead, binding.PushGeneration = receipt.ReleasedHead, receipt.ReleasedHead, receipt.PushGeneration
 				}
 			}
