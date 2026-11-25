@@ -138,6 +138,15 @@ const FindingIDTestAgentTimeout = "test-agent-timeout"
 // publish the work.
 const FindingIDTestAgentUnvalidatedWork = "test-agent-unvalidated-work"
 
+// FindingIDTestAgentLeftWork is the Test-step park when an evidence or repair
+// turn ended while work the agent started was still running. Its result does
+// not count, and the processes were stopped with the turn. Like
+// FindingIDTestAgentTimeout it is not a product defect, it rides with
+// FindingIDTestAgentUnvalidatedWork when the turn left work no Test turn
+// validated, and TestOverrideReason treats an approval of it as a Test
+// exception.
+const FindingIDTestAgentLeftWork = "test-agent-left-work"
+
 // FindingIDTestLiveCheckBudget is the informational note a Test step records
 // when its live check was stopped at test_live_check_budget and the step
 // completed with what the live check had written down. It never parks.

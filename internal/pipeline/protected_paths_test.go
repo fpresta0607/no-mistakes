@@ -118,3 +118,11 @@ func TestProtectedPathRefusalRequiresDecisionAcrossRecovery(t *testing.T) {
 		}
 	}
 }
+
+// A Test turn that left its own work running parks on a step-owned notice, so
+// no agent or gate report may claim its ID.
+func TestTestAgentLeftWorkNoticeIsReserved(t *testing.T) {
+	if !IsReservedFindingID(types.FindingIDTestAgentLeftWork) {
+		t.Fatalf("IsReservedFindingID(%q) = false, want the Test left-work notice reserved", types.FindingIDTestAgentLeftWork)
+	}
+}

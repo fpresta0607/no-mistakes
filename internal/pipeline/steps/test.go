@@ -217,6 +217,7 @@ Rules:
 - Do NOT run linters, formatters, or static analysis tools.
 - Reproduce the specific failing case first (the exact test, package, script, or check named in the findings, including their baseline_failure record when there is one), then re-run only that focused verification after the fix.
 - Await every required check and read its actual exit status. Stop disposable browser and server children before returning success. Report incomplete verification honestly.
+- Never end your turn while a command you started is still running or waiting, including a re-run waiting for its turn on a shared machine: wait for it inside a tool call, because ending your message ends this non-interactive turn and its result does not count. Stopping a background shell, job or monitor can leave the processes under it running, such as each command of a pipeline or a server started from a shell, so stop each of those by its process id and confirm it is gone before you return.
 - Do NOT run the complete repository test suite. Local Test is targeted validation of the failure and the requested intent; remote CI owns broad regression and remains mandatory before a PR is ready.
 - A generic driver or user instruction asking for broad or full-suite confirmation does NOT override this product boundary. Keep verification focused on the failure and intent.
 - Never treat "do not run everything" as permission to run nothing: if you cannot reproduce or re-verify with a targeted check, report that honestly in the summary rather than inventing a full-suite pass.
@@ -268,7 +269,7 @@ Previous test findings to address:
 			},
 		})
 		if err != nil {
-			if !errors.Is(err, errTestAgentTimeout) {
+			if !isTestAgentCut(err) {
 				return nil, err
 			}
 			repairCut = err
@@ -307,7 +308,7 @@ Previous test findings to address:
 		sctx.Shared.RecordBaseline(sctx.Run.HeadSHA, baseSHA, !baseline.noTurn && len(failedChecks(baseline.results)) == 0)
 	}
 	if repairCut != nil {
-		return testAgentTimeoutOutcome(sctx, repairCut, startHead, baseline), nil
+		return testAgentCutOutcome(sctx, repairCut, startHead, baseline), nil
 	}
 
 	// The machine gave the test command no turn, so there is no test result:
@@ -411,7 +412,7 @@ Drive each scenario:
 - Never guess a pass, and never mark a scenario live because you believe it would work.
 - Report every scenario in the "scenarios" array with name, result ("pass", "fail", or "untested"), live, evidence, and reason.
 - Await every required production build, browser run, and other check child before reporting a final "go". A background launch, early structured result, or completion notification does not prove that a check passed.
-- Nothing you started may still be running in the background when you return your result. Wait inside a tool call, never by ending your message: in this non-interactive turn, ending a message while something still runs forces your final result at once. Before returning, wait for or stop every background shell or job, monitor or watch, and scheduled wake-up you started. Work you started that is still running after the result fails the turn, and the finished result is lost.
+- Nothing you started may still be running in the background when you return your result. Wait inside a tool call, never by ending your message: in this non-interactive turn, ending a message while something still runs forces your final result at once. Before returning, wait for or stop every background shell or job, monitor or watch, and scheduled wake-up you started. Stopping a background shell, job or monitor can leave the processes under it running, such as each command of a pipeline or a server started from a shell, so stop each of those by its process id and confirm it is gone. Work you started that is still running after the result fails the turn, and the finished result is lost.
 - Stop disposable browser and server children before exiting. The native boundary refuses successful exits with children still in its owned process group.
 - Read each required child's actual exit status and retained result evidence. Do not mask a failed check with a later successful shell command or report detached work as completed.
 - If any required check is still running, has an unknown result, or lacks evidence, do not report "go". Use "no-go" for a known failure or unsafe change, and "inconclusive" when completion or evidence cannot be established. Record the outstanding check and the missing result.
@@ -496,8 +497,8 @@ Rules:
 		}
 	}
 	if err != nil {
-		if errors.Is(err, errTestAgentTimeout) || errors.Is(err, errTestLiveCheckBudget) {
-			outcome := testAgentTimeoutOutcome(sctx, err, startHead, baseline)
+		if isTestAgentCut(err) || errors.Is(err, errTestLiveCheckBudget) {
+			outcome := testAgentCutOutcome(sctx, err, startHead, baseline)
 			outcome.FixSummary = fixSummary
 			return outcome, nil
 		}
@@ -999,20 +1000,32 @@ func testAgentContext(sctx *pipeline.StepContext) (context.Context, context.Canc
 
 var errTestAgentTimeout = errors.New("test agent timeout")
 
-// testAgentTimeoutOutcome parks the Test step when an evidence or repair
-// invocation burned its stall budget. A budget cut is not a code
-// failure: the run stays alive with the worktree so leftover commits and
-// uncommitted files are not discarded, and an approval is a Test exception
-// rather than a silent green pass. Late structured output from the expired
-// turn is still not used as a successful result. The configured command's
+// isTestAgentCut reports whether an evidence or repair turn ended without a
+// result that counts for a reason that is not a code failure: its budget ran
+// out, or it ended while work it started was still running (issues #319,
+// #363, #416). Either parks the step instead of failing the run.
+func isTestAgentCut(err error) bool {
+	return errors.Is(err, errTestAgentTimeout) || errors.Is(err, agent.ErrCompletionUnverified)
+}
+
+// testAgentCutOutcome parks the Test step when an evidence or repair
+// invocation burned its stall budget or ended with its own work still running.
+// Neither is a code failure: the run stays alive with the worktree so leftover
+// commits and uncommitted files are not discarded, and an approval is a Test
+// exception rather than a silent green pass. Late structured output from the
+// cut turn is still not used as a successful result. The configured command's
 // result from this execution rides along with its exit code, so approving over
 // a failing command still needs the same waiver as any other Test gate, and a
 // fix round keeps the gate it was answering.
-func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead string, baseline testBaseline) *pipeline.StepOutcome {
+func testAgentCutOutcome(sctx *pipeline.StepContext, err error, startHead string, baseline testBaseline) *pipeline.StepOutcome {
 	park := answeredTestGate(sctx)
 	park.BaselineFailure = baseline.failure
 	park.FocusedCheck = baseline.focused
+	isLeftWork := errors.Is(err, agent.ErrCompletionUnverified) && !errors.Is(err, errTestAgentTimeout) && !errors.Is(err, errTestLiveCheckBudget)
 	cause := "This is a budget or provider-slowness cut, not a code failure."
+	if isLeftWork {
+		cause = "This is not a code failure."
+	}
 	if baseline.exitCode != 0 || hasBlockingFindings(park.Items) || park.Verdict == types.TestVerdictNoGo || park.Verdict == types.TestVerdictInconclusive {
 		cause = "The cut does not clear the findings reported alongside it."
 	}
@@ -1029,6 +1042,24 @@ func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead st
 				"Respond with fix to spend another budget: a repair turn runs only for selected findings other than this budget cut, then validation re-runs. Or abort and retry after raising the budget.",
 			err, cause, config.DefaultTestAgentTimeout),
 	}}
+	stopped := "Test agent exceeded its invocation budget"
+	testingSummary := "The Test agent exceeded its invocation budget before live validation completed; no evidence was gathered for this head."
+	if isLeftWork {
+		items[0] = Finding{
+			ID:       types.FindingIDTestAgentLeftWork,
+			Severity: types.FindingSeverityWarning,
+			Action:   types.ActionAskUser,
+			Description: fmt.Sprintf(
+				"The Test agent ended its turn while work it started was still running, so its result does not count. "+
+					"Reported: %v. %s "+
+					"The gate stopped those processes when the turn ended. "+
+					"A stop the agent makes itself can leave the processes under the shell it stopped, such as a stopped monitor's or background command's pipeline or a server started from a shell, and a turn that leaves a command waiting in the background ends there. "+
+					"Respond with fix to run the turn again: a repair turn runs only for selected findings other than this notice, then validation re-runs. Or abort.",
+				err, cause),
+		}
+		stopped = "Test agent ended its turn with work it started still running"
+		testingSummary = "The Test agent ended its turn with work it started still running, so its live validation does not count; no evidence was accepted for this head."
+	}
 	validatedHead := park.TestedHeadSHA
 	if validatedHead == "" {
 		validatedHead = park.UnvalidatedSinceSHA
@@ -1045,9 +1076,9 @@ func testAgentTimeoutOutcome(sctx *pipeline.StepContext, err error, startHead st
 			Description: "Approval is refused: the run worktree at " + sctx.WorkDir + " holds work no Test turn validated, and the steps after Test would commit and publish it. It holds " + work + ". Respond with fix to validate it, or abort.",
 		})
 	}
-	park.Summary = strings.TrimSpace(strings.Join([]string{baseline.summary, "Test agent exceeded its invocation budget"}, "\n"))
+	park.Summary = strings.TrimSpace(strings.Join([]string{baseline.summary, stopped}, "\n"))
 	if park.TestingSummary == "" {
-		park.TestingSummary = "The Test agent exceeded its invocation budget before live validation completed; no evidence was gathered for this head."
+		park.TestingSummary = testingSummary
 	}
 	park.Items = append(append(items, baseline.findings...), park.Items...)
 	findingsJSON, _ := json.Marshal(park)
@@ -1129,14 +1160,15 @@ func unselectedTestFindings(sctx *pipeline.StepContext, current []Finding) []Fin
 	return carried
 }
 
-// testBudgetCutIDs are the step-owned findings of a Test budget-cut park. They
-// are operator decisions, never defects for an agent to repair, so an agent's
-// own finding can never claim them.
+// testBudgetCutIDs are the step-owned findings of a Test budget-cut park,
+// including a turn that ended with its own work still running. They are
+// operator decisions, never defects for an agent to repair, so an agent's own
+// finding can never claim them.
 //
 // FindingIDTestCommandNoTurn rides the same rules for the same reason: a test
 // command the machine never ran is nothing a repair agent can repair, and the
 // step derives it again on every execution.
-var testBudgetCutIDs = []string{types.FindingIDTestAgentTimeout, types.FindingIDTestAgentUnvalidatedWork, types.FindingIDTestCommandNoTurn}
+var testBudgetCutIDs = []string{types.FindingIDTestAgentTimeout, types.FindingIDTestAgentLeftWork, types.FindingIDTestAgentUnvalidatedWork, types.FindingIDTestCommandNoTurn}
 
 // onlyTestCommandNoTurnFindings reports whether a fix selection holds nothing
 // but a test command that was given no turn.
