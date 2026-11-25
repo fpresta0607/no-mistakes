@@ -22,7 +22,7 @@ func TestCIWorkflowRunsTestsOnAllSupportedDesktopPlatforms(t *testing.T) {
 	}
 
 	want := map[string]int{
-		"ubuntu-latest":  1,
+		"ubuntu-latest":  3,
 		"macos-latest":   3,
 		"windows-latest": 23,
 	}
@@ -273,13 +273,13 @@ func TestCIWorkflow_UnixStepFailsClosedWhenTheRemainderPackageSetIsEmpty(t *test
 		{
 			name:      "resolved listing",
 			goList:    unixResolvedGoList,
-			wantTests: append([]string{unixRemainderInvocation}, unixShardInvocations...),
+			wantTests: []string{unixRemainderInvocation},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tests, err, output := runUnixTestStep(t, bash, step, "", tc.goList, tc.goListExit)
+			tests, err, output := runUnixTestStep(t, bash, step, "rest", tc.goList, tc.goListExit)
 			if tc.wantFailure {
 				if err == nil {
 					t.Fatalf("the Unix test step exited 0 after go list %q (exit %s); it must fail instead of running a narrowed suite\n%s", tc.goList, tc.goListExit, output)
@@ -320,15 +320,15 @@ var unixDaemonShardInvocations = []string{
 	"test -race -timeout=20m -skip ^Test[A-R] ./internal/daemon",
 }
 
-var unixShardInvocations = slices.Concat(unixStepsShardInvocations, unixDaemonShardInvocations)
-
-// The macOS leg is capacity-bound: splitting its binaries on one runner moved
-// work between them but finished the step no sooner, within minutes of the job
-// cap (issue #170), and with all eight shard binaries on one runner the shards
-// row still took up to 1200s per shard on a slow runner (issue #237). So each
-// Unix OS runs the whole step on one row, or splits it into exactly one
-// remainder row, one pipeline/steps shards row and one daemon shards row, and
-// macos-latest splits it.
+// The Unix legs are capacity-bound: splitting the macOS binaries on one runner
+// moved work between them but finished the step no sooner, within minutes of
+// the job cap (issue #170), and with all eight shard binaries on one runner the
+// shards row still took up to 1200s per shard on a slow runner (issue #237).
+// ubuntu-latest ran every part on one runner in 30m58s of its 40m cap, the
+// remainder running on long after the shards ended, so the same stretch would
+// cancel it with no failing test (issue #280). So each Unix OS splits the step
+// into exactly one remainder row, one pipeline/steps shards row and one daemon
+// shards row.
 func TestCIWorkflow_UnixRowsRunEachPartExactlyOnce(t *testing.T) {
 	t.Parallel()
 
@@ -343,7 +343,7 @@ func TestCIWorkflow_UnixRowsRunEachPartExactlyOnce(t *testing.T) {
 		parts[row["os"]] = append(parts[row["os"]], row["unix_part"])
 	}
 	want := map[string][]string{
-		"ubuntu-latest": {""},
+		"ubuntu-latest": {"daemon", "rest", "steps"},
 		"macos-latest":  {"daemon", "rest", "steps"},
 	}
 	if len(parts) != len(want) {
@@ -358,8 +358,9 @@ func TestCIWorkflow_UnixRowsRunEachPartExactlyOnce(t *testing.T) {
 	}
 }
 
-// A split row must run only its own part, and a part the step does not know
-// must fail rather than run nothing or everything.
+// A split row must run only its own part, and a missing part or one the step
+// does not know must fail rather than run nothing or everything: a row with no
+// part once ran every part on one runner (issue #280).
 func TestCIWorkflow_UnixStepRunsOnlyItsRowsPart(t *testing.T) {
 	t.Parallel()
 
@@ -378,17 +379,6 @@ func TestCIWorkflow_UnixStepRunsOnlyItsRowsPart(t *testing.T) {
 		wantFailure bool
 	}{
 		{
-			name:      "rest runs only the remainder",
-			part:      "rest",
-			goList:    unixResolvedGoList,
-			wantTests: []string{unixRemainderInvocation},
-		},
-		{
-			name:        "rest still fails closed on an empty listing",
-			part:        "rest",
-			wantFailure: true,
-		},
-		{
 			name:       "steps runs only the steps package shards and needs no listing",
 			part:       "steps",
 			goListExit: "1",
@@ -399,6 +389,12 @@ func TestCIWorkflow_UnixStepRunsOnlyItsRowsPart(t *testing.T) {
 			part:       "daemon",
 			goListExit: "1",
 			wantTests:  unixDaemonShardInvocations,
+		},
+		{
+			name:        "a row with no part runs nothing",
+			part:        "",
+			goList:      unixResolvedGoList,
+			wantFailure: true,
 		},
 		{
 			name:        "an unknown part runs nothing",
