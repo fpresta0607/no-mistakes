@@ -21,7 +21,7 @@ const ReviewQuestionsUnreadableFindingID = "review-questions-unreadable"
 // IsReservedFindingID reports whether an ID carries pipeline-owned semantics.
 func IsReservedFindingID(id string) bool {
 	switch id {
-	case protectedPathFindingID, types.FindingIDTestAgentTimeout, types.FindingIDTestAgentUnvalidatedWork, ReviewQuestionsUnreadableFindingID, types.FindingIDReviewFixRoundsExhausted, types.FindingIDRepairAgentBudget:
+	case protectedPathFindingID, types.FindingIDTestAgentTimeout, types.FindingIDTestAgentLeftWork, types.FindingIDTestAgentUnvalidatedWork, ReviewQuestionsUnreadableFindingID, types.FindingIDReviewFixRoundsExhausted, types.FindingIDRepairAgentBudget:
 		return true
 	default:
 		return false

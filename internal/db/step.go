@@ -392,6 +392,9 @@ func (s *StepResult) testExceptionCondition() string {
 		if item.ID == types.FindingIDTestAgentTimeout {
 			return "test agent invocation budget exhausted"
 		}
+		if item.ID == types.FindingIDTestAgentLeftWork {
+			return "test agent ended with work it started still running"
+		}
 	}
 	return ""
 }
