@@ -654,3 +654,80 @@ func TestManagerCIHandbackCrashRecovery(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleCIHandbackAcceptedReplayBindsTheRunHeadToTheAcceptedCorrection(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		publish func(t *testing.T, fixture *ciHandbackRecoveryFixture, binding db.PushBinding)
+		refusal string
+	}{
+		{"descendant published at the next generation", func(t *testing.T, fixture *ciHandbackRecoveryFixture, binding db.PushBinding) {
+			binding.HeadSHA = commitOnManaged(t, fixture, fixture.followup, "document the correction")
+			if err := fixture.manager.db.UpdateRunPublication(fixture.run.ID, binding); err != nil {
+				t.Fatal(err)
+			}
+		}, ""},
+		{"head that left the accepted correction", func(t *testing.T, fixture *ciHandbackRecoveryFixture, binding db.PushBinding) {
+			binding.HeadSHA = commitOnManaged(t, fixture, fixture.published, "unrelated to the correction")
+			if err := fixture.manager.db.UpdateRunPublication(fixture.run.ID, binding); err != nil {
+				t.Fatal(err)
+			}
+		}, "accepted CI handback identity changed"},
+		{"descendant head that is not the published head", func(t *testing.T, fixture *ciHandbackRecoveryFixture, binding db.PushBinding) {
+			binding.HeadSHA = commitOnManaged(t, fixture, fixture.followup, "document the correction")
+			if err := fixture.manager.db.UpdateRunPublication(fixture.run.ID, binding); err != nil {
+				t.Fatal(err)
+			}
+			if err := fixture.manager.db.UpdateRunHeadSHA(fixture.run.ID, commitOnManaged(t, fixture, binding.HeadSHA, "unpublished lint fix")); err != nil {
+				t.Fatal(err)
+			}
+		}, "accepted CI handback publication generation changed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Arrange
+			fixture := newCIHandbackRecoveryFixture(t, false, false)
+			database := fixture.manager.db
+			if err := database.AcceptCIHandback(fixture.receipt, fixture.followup, fixture.repo); err != nil {
+				t.Fatal(err)
+			}
+			test.publish(t, fixture, db.PushBinding{TargetKind: "upstream", TargetFingerprint: fixture.receipt.TargetFingerprint, Ref: fixture.receipt.PushRef})
+			receipt, err := database.LatestCIHandback(fixture.run.ID)
+			if err != nil || receipt == nil || receipt.AcceptedHead == nil {
+				t.Fatalf("accepted receipt = %#v, %v", receipt, err)
+			}
+			server := ipc.NewServer()
+			registerHandlers(server, fixture.manager, database, func() {})
+			client, err := ipc.Dial(serveTestIPC(t, server))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { client.Close() })
+			params := ipc.CIHandbackParams{RepoID: fixture.repo.ID, RunID: fixture.run.ID, Branch: fixture.run.Branch, CallerDir: fixture.repo.WorkingPath, HeadSHA: fixture.followup, Resume: true, PublishedHead: receipt.ReleasedHead, PushGeneration: receipt.PushGeneration, RoundID: receipt.RoundID, ReceiptID: receipt.ID}
+
+			// Act
+			var result ipc.CIHandbackResult
+			err = client.Call(ipc.MethodCIHandback, params, &result)
+
+			// Assert
+			if test.refusal != "" {
+				if err == nil || !strings.Contains(err.Error(), test.refusal) {
+					t.Fatalf("replay = %+v, %v; want a refusal naming %q", result, err, test.refusal)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("replay of a run head descending from the accepted correction: %v", err)
+			}
+			if result.RunID != fixture.run.ID || result.ReceiptID != receipt.ID || result.AcceptedHead != fixture.followup || result.ReleasedHead != fixture.published {
+				t.Fatalf("replay result = %+v; want the accepted receipt for run %s", result, fixture.run.ID)
+			}
+		})
+	}
+}
+
+func commitOnManaged(t *testing.T, fixture *ciHandbackRecoveryFixture, parent, message string) string {
+	t.Helper()
+	gitCmd(t, fixture.managed, "checkout", "--detach", parent)
+	gitCmd(t, fixture.managed, "-c", "user.name=test", "-c", "user.email=test@test.com", "commit", "--allow-empty", "-m", message)
+	return gitOutput(t, fixture.managed, "rev-parse", "HEAD")
+}
