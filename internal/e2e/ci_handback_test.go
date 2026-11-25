@@ -383,6 +383,19 @@ func ordinaryCIHandbackRevalidatesAuthoredCorrection(t *testing.T, hasDocumentCo
 	}
 	writeState := func(conclusion string) {
 		t.Helper()
+		// Only the checks are the test's to change; the PR record is what the
+		// pipeline last wrote, attestation included.
+		if live, err := os.ReadFile(statePath); err == nil {
+			var forge struct {
+				PRs json.RawMessage `json:"prs"`
+			}
+			if err := json.Unmarshal(live, &forge); err != nil {
+				t.Fatal(err)
+			}
+			state["prs"] = forge.PRs
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
 		status := "COMPLETED"
 		if conclusion == "" {
 			status = "IN_PROGRESS"
@@ -558,9 +571,24 @@ func ordinaryCIHandbackRevalidatesAuthoredCorrection(t *testing.T, hasDocumentCo
 		h.dumpDebugState()
 		t.Fatalf("bounded submission lost its accepted checkpoint: %v\n%s", err, out)
 	}
+	// Push and PR write the PR body; turn the checks green only once the fresh
+	// CI round has started so the test's write never races theirs.
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
+		monitoring := h.RunInfo(parked.ID)
+		step, _ := findStep(monitoring.Steps, types.StepCI)
+		if step.Status == types.StepStatusRunning && step.RoundStartedAt != nil && ci.RoundStartedAt != nil && *step.RoundStartedAt > *ci.RoundStartedAt {
+			break
+		}
+		if monitoring.Status != types.RunRunning || time.Now().After(deadline) {
+			h.dumpDebugState()
+			t.Fatalf("revalidation never reached a fresh CI round: %#v", monitoring)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 	writeState("SUCCESS")
 	final := h.RunInfo(parked.ID)
-	deadline := time.Now().Add(3 * time.Minute)
+	deadline = time.Now().Add(3 * time.Minute)
 	for !final.CIReady && final.Status == types.RunRunning && time.Now().Before(deadline) {
 		time.Sleep(250 * time.Millisecond)
 		final = h.RunInfo(parked.ID)
