@@ -433,8 +433,9 @@ is settled by `axi answer`, never by a verdict, so `--yes` stands aside
 there - as it does when the question history cannot be read end to end, which
 also parks for a human.
 
-A `test-agent-unvalidated-work` finding means a timed-out Test agent left
-commits or changes no Test turn validated. Approval is rejected, so `--yes`
+A `test-agent-unvalidated-work` finding means a Test agent cut at its budget,
+or one that ended with its own work still running (a `test-agent-left-work`
+park), left commits or changes no Test turn validated. Approval is rejected, so `--yes`
 stops at that gate without responding. Relay what the finding names and do
 not skip Test, which would publish that work. Ask the operator to choose:
 `--action fix` spends another agent budget to validate the work, or
