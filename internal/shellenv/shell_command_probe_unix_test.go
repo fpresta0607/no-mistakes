@@ -59,9 +59,10 @@ func TestShellCommandGroupActiveInitialProbeBudget(t *testing.T) {
 		window time.Duration
 		budget time.Duration
 	}{
-		{"zero window", 0, 100 * time.Millisecond},
-		{"expired window", -time.Second, 100 * time.Millisecond},
-		{"small positive window", time.Millisecond, time.Millisecond},
+		{"zero window", 0, groupSnapshotTimeout},
+		{"expired window", -time.Second, groupSnapshotTimeout},
+		{"small positive window", time.Millisecond, groupSnapshotTimeout},
+		{"window longer than a snapshot", groupSnapshotTimeout + 500*time.Millisecond, groupSnapshotTimeout + 500*time.Millisecond},
 		{"long window", 10 * time.Second, defaultWaitDelay},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,6 +79,28 @@ func TestShellCommandGroupActiveInitialProbeBudget(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestShellCommandGroupActiveZeroWindowNamesMemberFromSlowSnapshot is the
+// issue #285 regression: on a loaded macOS runner ps took longer than the
+// 100ms a zero-window call used to give its one snapshot, so the probe failed
+// with a deadline error instead of naming the member.
+func TestShellCommandGroupActiveZeroWindowNamesMemberFromSlowSnapshot(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		pgid := syscall.Getpgrp()
+		cmd := &exec.Cmd{Process: &os.Process{Pid: pgid}}
+		start := time.Now()
+		active, detail, err := shellCommandGroupActive(cmd, 0, func(context.Context) ([]byte, error) {
+			time.Sleep(500 * time.Millisecond)
+			return fmt.Appendf(nil, "%d S 4242 sleep 0.5\n", pgid), nil
+		})
+		if err != nil || !active || !strings.Contains(detail, "pid 4242 (sleep 0.5)") {
+			t.Fatalf("active=%t detail=%q err=%v; want the member from the slow snapshot named", active, detail, err)
+		}
+		if elapsed := time.Since(start); elapsed != 500*time.Millisecond {
+			t.Fatalf("zero-window call returned at %v; want right after its one snapshot", elapsed)
+		}
+	})
 }
 
 func TestShellCommandGroupActiveExpiredPSCannotCertifyEmptyGroup(t *testing.T) {
