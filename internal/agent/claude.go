@@ -188,13 +188,24 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 			})
 		}
 	}
-	err = parseClaudeEvents(ctx, io.TeeReader(started.stdout, &stdoutTail), opts.OnChunk, &usage, &result, onResult)
+	var onInit func()
+	if opts.RequireCompletedChildren {
+		// Claude reports init before it asks the model anything, so every
+		// process beside the leader by then is the CLI's own (issue #277).
+		onInit = func() {
+			if err := started.recordCLIProcesses(time.Now()); err != nil && opts.OnChunk != nil {
+				opts.OnChunk(fmt.Sprintf("could not record claude's own processes: %v", err))
+			}
+		}
+	}
+	err = parseClaudeEvents(ctx, io.TeeReader(started.stdout, &stdoutTail), opts.OnChunk, &usage, &result, onResult, onInit)
 	if graceTimer != nil && !graceTimer.Stop() {
 		// RequireCompletedChildren never counts a result as success while
 		// work the agent started is still running (#1449). The grace stopped
-		// only claude itself, so the owned-children probe sees that work if
-		// it is still running. A session kept open by nothing but queued
-		// notifications leaves none, and its result stands (issue #111). A
+		// only claude and the processes it ran before the agent could start
+		// any work, so the owned-children probe sees that work if it is still
+		// running. A session kept open by nothing but queued notifications
+		// leaves none, and its result stands (issues #111 and #277). A
 		// cancellation can stop that work before the probe, so it never does.
 		if opts.RequireCompletedChildren {
 			if waitErr := started.waitKeepingResult(true); waitErr != nil || ctx.Err() != nil {
@@ -579,7 +590,7 @@ const claudeStructuredOutputTool = "StructuredOutput"
 // parseClaudeEvents reads JSONL from the reader and dispatches events.
 // It accumulates token usage and captures the final result event.
 // onResult, when set, is called with each result event as it is parsed.
-func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, result **claudeResult, onResult func(*claudeResult)) error {
+func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, result **claudeResult, onResult func(*claudeResult), onInit func()) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), claudeScannerMaxTokenSize)
 	var textBuf string
@@ -614,6 +625,11 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 		}
 
 		switch event.Type {
+		case "system":
+			if event.Subtype == "init" && onInit != nil {
+				onInit()
+			}
+
 		case "assistant":
 			var msg claudeMessage
 			if err := json.Unmarshal(event.Message, &msg); err != nil {
