@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -104,7 +105,10 @@ func TestCIGateRunStopsBeforeItsStoreIsRemoved(t *testing.T) {
 		storePath = p.DB()
 	})
 	select {
-	case <-done:
+	case err := <-done:
+		if !errors.Is(err, pipeline.ErrParkedAtShutdown) {
+			t.Fatalf("Execute() error = %v, want ErrParkedAtShutdown from the fixture stopping the parked run", err)
+		}
 	default:
 		t.Fatal("the run was still executing after its test ended")
 	}
