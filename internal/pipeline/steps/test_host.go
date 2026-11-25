@@ -79,8 +79,14 @@ func prepareTestHost(sctx *pipeline.StepContext, scratch string) string {
 	}
 	sctx.Env = (runenv.Overlay{Set: settings, Unset: []string{"NO_MISTAKES_TEST_BASH"}}).Apply(sctx.Env)
 	sctx.Log(fmt.Sprintf("Test host scratch: %s (owned by this Test execution; evidence: %s; source: %s)", scratch, testEvidenceDir(sctx), sctx.Run.HeadSHA))
-	return guidance + testCommandWrapperGuidance(sctx)
+	return guidance + testLoadRunGuidance + testCommandWrapperGuidance(sctx)
 }
+
+// testLoadRunGuidance keeps load runs the operator's decision. A Test agent
+// once saturated every core of a shared machine with busy loops beside other
+// runs' tests on its own initiative and turned the result into a no-go finding
+// (issue #270).
+const testLoadRunGuidance = "\n- Start no load, stress or saturation run: no busy loops or extra processes to occupy processors or memory, no reduced or pinned processor count set against competing load, and no repeated or concurrent batches of runs meant to put pressure on the machine. Other work shares this machine, and such a run disturbs it. When you judge one necessary, do not start it: report it for the operator's decision, naming the run and why it is needed. In a live check, report the scenario that needs it as untested and add one warning finding with action \"ask-user\"; in a repair, add a \"needs_decision\" entry."
 
 // testCommandWrapperGuidance gives a Test agent the machine-local test wrapper's
 // words for the heavy work it starts by itself. A build an agent chose on its

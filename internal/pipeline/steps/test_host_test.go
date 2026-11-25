@@ -180,6 +180,66 @@ func TestTestHostDeepEvidenceUsesShortScratchForAnActualGitPush(t *testing.T) {
 	t.Logf("source=%s deep_incoming_chars=%d owned_scratch=%s real_git=%s push=passed", head, len(deepIncoming), scratch, testGitExecutable)
 }
 
+// A Test agent once saturated every core of a shared machine on its own and
+// turned the result into a no-go finding, so every Test agent turn is told to
+// start no load run and to hand one it judges necessary to the operator through
+// that turn's own decision route (issue #270).
+func TestTestStep_PromptLeavesLoadRunsToTheOperator(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		isFixing  bool
+		wantCalls int
+	}{
+		{"evidence_turn", false, 1},
+		{"fix_round", true, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// Arrange
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("test repair\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return &agent.Result{Output: json.RawMessage(`{"summary":"repair test failure","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			if tc.isFixing {
+				sctx.Fixing = true
+				sctx.PreviousFindings = `{"items":[{"id":"test-1","severity":"error","file":"fix.txt","description":"test failed"}]}`
+			}
+
+			// Act
+			if _, err := (&TestStep{}).Execute(sctx); err != nil {
+				t.Fatalf("test step failed: %v", err)
+			}
+
+			// Assert
+			if len(ag.calls) != tc.wantCalls {
+				t.Fatalf("agent calls = %d, want %d", len(ag.calls), tc.wantCalls)
+			}
+			for index, call := range ag.calls {
+				if got := strings.Count(call.Prompt, "Start no load, stress or saturation run"); got != 1 {
+					t.Errorf("prompt %d forbids load runs %d times, want 1:\n%s", index, got, call.Prompt)
+					continue
+				}
+				var rule string
+				for _, line := range strings.Split(call.Prompt, "\n") {
+					if strings.HasPrefix(line, "- Start no load, stress or saturation run") {
+						rule = line
+					}
+				}
+				for _, want := range []string{"do not start it: report it for the operator's decision", `warning finding with action "ask-user"`, `"needs_decision" entry`} {
+					if !strings.Contains(rule, want) {
+						t.Errorf("prompt %d load-run rule does not name %s:\n%s", index, want, rule)
+					}
+				}
+			}
+		})
+	}
+}
+
 // An operator-approved Test command writes its private outputs outside the
 // worktree, so every Test agent prompt names the operator's directories as the
 // one extra destination, and names nothing it was not given (issue #123).
