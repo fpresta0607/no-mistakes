@@ -2,6 +2,40 @@ package shellenv
 
 import "testing"
 
+const msvcTelemetryHelperImage = `C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\vctip.exe`
+
+func TestIsMSVCTelemetryHelper(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		imagePath string
+		want      bool
+	}{
+		{name: "build tools x64 host", imagePath: msvcTelemetryHelperImage, want: true},
+		{name: "x86 host targeting arm64", imagePath: `D:\VS\VC\Tools\MSVC\14.29.30133\bin\HostX86\arm64\vctip.exe`, want: true},
+		{name: "case differs", imagePath: `c:\vs\vc\tools\msvc\14.44.35207\BIN\HOSTX64\X64\VCTIP.EXE`, want: true},
+		{name: "empty path", imagePath: "", want: false},
+		{name: "bare file name", imagePath: "vctip.exe", want: false},
+		{name: "toolchain shape without a root", imagePath: `VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\vctip.exe`, want: false},
+		{name: "other toolchain binary", imagePath: `C:\VS\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\link.exe`, want: false},
+		{name: "vctip outside the toolchain", imagePath: `C:\work\target\debug\vctip.exe`, want: false},
+		{name: "missing version directory", imagePath: `C:\VS\VC\Tools\MSVC\bin\Hostx64\x64\vctip.exe`, want: false},
+		{name: "empty version directory", imagePath: `C:\VS\VC\Tools\MSVC\\bin\Hostx64\x64\vctip.exe`, want: false},
+		{name: "host directory without an architecture", imagePath: `C:\VS\VC\Tools\MSVC\14.44.35207\bin\Host\x64\vctip.exe`, want: false},
+		{name: "not a host directory", imagePath: `C:\VS\VC\Tools\MSVC\14.44.35207\bin\Tools\x64\vctip.exe`, want: false},
+		{name: "extra directory below the target", imagePath: `C:\VS\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\sub\vctip.exe`, want: false},
+		{name: "forward slashes are not an image path", imagePath: `C:/VS/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/vctip.exe`, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isMSVCTelemetryHelper(tt.imagePath); got != tt.want {
+				t.Fatalf("isMSVCTelemetryHelper(%q) = %v, want %v", tt.imagePath, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLiveJobProcesses(t *testing.T) {
 	t.Parallel()
 	const leader = 100
@@ -37,6 +71,20 @@ func TestLiveJobProcesses(t *testing.T) {
 		}, want: 1},
 		{name: "uninspectable console host candidate fails closed", procs: []jobProcess{
 			{pid: 700, parentPID: leader, state: jobProcessUnknown, systemConsoleHost: true},
+		}, want: 1},
+		{name: "msvc telemetry helper a finished link left", procs: []jobProcess{
+			{pid: leader, state: jobProcessExited},
+			{pid: 800, parentPID: 799, state: jobProcessRunning, imagePath: msvcTelemetryHelperImage},
+		}, want: 0},
+		{name: "msvc telemetry helper beside a running child", procs: []jobProcess{
+			{pid: 800, parentPID: 799, state: jobProcessRunning, imagePath: msvcTelemetryHelperImage},
+			{pid: 300, parentPID: leader, state: jobProcessRunning},
+		}, want: 1},
+		{name: "vctip outside an msvc toolchain is a child", procs: []jobProcess{
+			{pid: 801, parentPID: leader, state: jobProcessRunning, imagePath: `C:\work\target\vctip.exe`},
+		}, want: 1},
+		{name: "uninspectable msvc telemetry helper fails closed", procs: []jobProcess{
+			{pid: 802, state: jobProcessUnknown, imagePath: msvcTelemetryHelperImage},
 		}, want: 1},
 		{name: "several live children are all counted", procs: []jobProcess{
 			{pid: 300, state: jobProcessRunning},
