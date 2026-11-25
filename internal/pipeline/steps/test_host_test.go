@@ -222,10 +222,17 @@ func TestTestStep_PromptLeavesLoadRunsToTheOperator(t *testing.T) {
 			for index, call := range ag.calls {
 				if got := strings.Count(call.Prompt, "Start no load, stress or saturation run"); got != 1 {
 					t.Errorf("prompt %d forbids load runs %d times, want 1:\n%s", index, got, call.Prompt)
+					continue
 				}
-				for _, route := range []string{`warning finding with action "ask-user"`, `"needs_decision" entry`} {
-					if !strings.Contains(call.Prompt, "do not start it: report it for the operator's decision") || !strings.Contains(call.Prompt, route) {
-						t.Errorf("prompt %d does not route a necessary load run to the operator through %s:\n%s", index, route, call.Prompt)
+				var rule string
+				for _, line := range strings.Split(call.Prompt, "\n") {
+					if strings.HasPrefix(line, "- Start no load, stress or saturation run") {
+						rule = line
+					}
+				}
+				for _, want := range []string{"do not start it: report it for the operator's decision", `warning finding with action "ask-user"`, `"needs_decision" entry`} {
+					if !strings.Contains(rule, want) {
+						t.Errorf("prompt %d load-run rule does not name %s:\n%s", index, want, rule)
 					}
 				}
 			}
