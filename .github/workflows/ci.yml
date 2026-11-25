@@ -42,12 +42,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Each Unix leg is split across three runners by unix_part (see the
+          # Unix step): the go list remainder on one, the pipeline/steps shards
+          # on another and the daemon shards on the third.
           - os: ubuntu-latest
             name: test (ubuntu-latest)
-          # The macOS leg is split across three runners by unix_part (see the
-          # Unix step): the go list remainder on one, the pipeline/steps shards
-          # on another and the daemon shards on the third. ubuntu-latest runs
-          # every part.
+            unix_part: rest
+          - os: ubuntu-latest
+            name: test (ubuntu-steps)
+            unix_part: steps
+          - os: ubuntu-latest
+            name: test (ubuntu-daemon)
+            unix_part: daemon
           - os: macos-latest
             name: test (macos-latest)
             unix_part: rest
@@ -248,9 +254,11 @@ jobs:
       # and on a slow one all eight binaries ran long together: a steps and a
       # daemon shard hit the 20m budget with the tests then running a second
       # old or less while the other six passed at 689-1184s, and the job could
-      # run into its 40m cap (issues #237 and #218). A row with no unix_part
-      # runs every part on one runner, as ubuntu-latest does, and an unknown
-      # part fails the step.
+      # run into its 40m cap (issues #237 and #218). ubuntu-latest ran every
+      # part on one runner in 30m58s of the 40m cap, its remainder still
+      # running packages behind internal/cli (740s) and internal/db (432s)
+      # some 11 minutes after the slowest shard ended, so it is split the same
+      # way (issue #280). A missing or unknown part fails the step.
       # The remainder package set is computed once from go list filtered by
       # NM_CI_UNIX_SHARD_EXCLUDE, and the step fails closed when that listing
       # fails or leaves nothing, so a resolution failure cannot quietly run the
@@ -264,7 +272,6 @@ jobs:
           NM_CI_UNIX_PART: ${{ matrix.unix_part }}
         run: |
           case "$NM_CI_UNIX_PART" in
-            '') run_rest=1 run_steps=1 run_daemon=1 ;;
             rest) run_rest=1 run_steps= run_daemon= ;;
             steps) run_rest= run_steps=1 run_daemon= ;;
             daemon) run_rest= run_steps= run_daemon=1 ;;
