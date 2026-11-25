@@ -1308,6 +1308,7 @@ func TestClaudeStdinHelper(t *testing.T) {
 		if err := mcp.Start(); err != nil {
 			os.Exit(2)
 		}
+		time.Sleep(50 * time.Millisecond)
 		emitClaudeHelperInit()
 		emitClaudeHelperResult()
 		time.Sleep(30 * time.Second)

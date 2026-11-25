@@ -12,6 +12,7 @@ import (
 func TestShellCommandMembersKillStopsOnlyTheRecordedProcesses(t *testing.T) {
 	// Arrange
 	leader, pids := startMembersHelper(t, 2)
+	time.Sleep(50 * time.Millisecond)
 	members, err := RecordShellCommandMembers(leader, time.Now())
 	if err != nil {
 		t.Fatalf("RecordShellCommandMembers() error = %v", err)
