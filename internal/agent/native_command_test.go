@@ -89,7 +89,7 @@ func TestRecordCLIProcessesIsNotRetriedAfterAFailure(t *testing.T) {
 	cmd.Env = append(os.Environ(), "NM_CLAUDE_STDIN_HELPER=init-result-with-background-child")
 	shellenv.ConfigureShellCommand(cmd)
 	command := &nativeAgentCommand{cmd: cmd}
-	if err := command.recordCLIProcesses(); err == nil {
+	if err := command.recordCLIProcesses(time.Now()); err == nil {
 		t.Fatal("recordCLIProcesses() before the start succeeded, want a failed record")
 	}
 	stdout, err := cmd.StdoutPipe()
@@ -108,18 +108,20 @@ func TestRecordCLIProcessesIsNotRetriedAfterAFailure(t *testing.T) {
 	}
 
 	// Act
-	if err := command.recordCLIProcesses(); err != nil {
+	if err := command.recordCLIProcesses(time.Now()); err != nil {
 		t.Fatalf("recordCLIProcesses() after a failed one = %v, want nothing recorded", err)
 	}
 	command.stopLeader()
 	_ = cmd.Wait()
 
 	// Assert
-	active, _, err := shellenv.ShellCommandGroupActive(cmd, ownedChildrenSettleWindow)
-	if err != nil {
+	// A probe that times out on a slow runner after it saw the work still
+	// refuses on that work, as the turn's own probe does.
+	active, members, err := shellenv.ShellCommandGroupActive(cmd, ownedChildrenSettleWindow)
+	if err != nil && members == "" {
 		t.Fatalf("ShellCommandGroupActive() error = %v", err)
 	}
-	if !active {
+	if err == nil && !active {
 		t.Fatal("the work the agent started after init was stopped with the leader, want it left for the owned-children probe")
 	}
 }

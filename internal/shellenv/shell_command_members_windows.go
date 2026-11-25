@@ -4,6 +4,7 @@ package shellenv
 
 import (
 	"os/exec"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -17,17 +18,19 @@ type ShellCommandMembers struct {
 }
 
 // RecordShellCommandMembers records the running processes in cmd's job other
-// than its leader. A process that cannot be opened to be stopped is left out,
-// so it stays for the owned-children probe to judge.
-func RecordShellCommandMembers(cmd *exec.Cmd) (*ShellCommandMembers, error) {
+// than its leader that were created before startedBefore. A process that
+// cannot be opened to be stopped, or whose creation time cannot be read or is
+// not before startedBefore, is left out, so it stays for the owned-children
+// probe to judge.
+func RecordShellCommandMembers(cmd *exec.Cmd, startedBefore time.Time) (*ShellCommandMembers, error) {
 	job, ok := shellCommandJob(cmd)
 	if !ok || cmd.Process == nil {
 		return nil, errNoAssignedShellCommandJob
 	}
-	return job.recordMembers(uint32(cmd.Process.Pid))
+	return job.recordMembers(uint32(cmd.Process.Pid), startedBefore)
 }
 
-func (job *shellCommandJobState) recordMembers(leaderPID uint32) (*ShellCommandMembers, error) {
+func (job *shellCommandJobState) recordMembers(leaderPID uint32, startedBefore time.Time) (*ShellCommandMembers, error) {
 	job.mu.Lock()
 	defer job.mu.Unlock()
 	if job.isClosed || !job.isAssigned {
@@ -46,7 +49,7 @@ func (job *shellCommandJobState) recordMembers(leaderPID uint32) (*ShellCommandM
 		if err != nil {
 			continue
 		}
-		if !isRunningInJob(process, job.handle) {
+		if !isRunningInJob(process, job.handle) || !isCreatedBefore(process, startedBefore) {
 			_ = windows.CloseHandle(process)
 			continue
 		}
@@ -65,6 +68,14 @@ func isRunningInJob(process, job windows.Handle) bool {
 	var inJob int32
 	ret, _, _ := procIsProcessInJob.Call(uintptr(process), uintptr(job), uintptr(unsafe.Pointer(&inJob)))
 	return ret != 0 && inJob != 0
+}
+
+func isCreatedBefore(process windows.Handle, startedBefore time.Time) bool {
+	var created, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(process, &created, &exited, &kernel, &user); err != nil {
+		return false
+	}
+	return created.Nanoseconds() < startedBefore.UnixNano()
 }
 
 // Kill stops every recorded process that is still running.

@@ -189,20 +189,21 @@ func (c *nativeAgentCommand) waitForPipes(waitErr error) error {
 	}
 }
 
-// recordCLIProcesses records every process the command's group or job holds
-// besides the leader as the agent CLI's own (issue #277): the real CLI under an
-// npm shim or the Windows desktop helper, and the stdio MCP servers it started.
-// Call it when the agent reports it has started and before it can have started
-// any work, so nothing recorded can be that work. Only the first call records;
-// after a failed one the leader is stopped alone.
-func (c *nativeAgentCommand) recordCLIProcesses() error {
+// recordCLIProcesses records every process the command's group or job held
+// besides the leader before reportedAt as the agent CLI's own (issue #277): the
+// real CLI under an npm shim or the Windows desktop helper, and the stdio MCP
+// servers it started. reportedAt is when the agent's report that it has
+// started was read, before it can have started any work, so nothing recorded
+// can be that work however long the record itself takes. Only the first call
+// records; after a failed one the leader is stopped alone.
+func (c *nativeAgentCommand) recordCLIProcesses(reportedAt time.Time) error {
 	c.cliProcessesMu.Lock()
 	defer c.cliProcessesMu.Unlock()
 	if c.isRecordClosed {
 		return nil
 	}
 	c.isRecordClosed = true
-	members, err := shellenv.RecordShellCommandMembers(c.cmd)
+	members, err := shellenv.RecordShellCommandMembers(c.cmd, reportedAt)
 	if err != nil {
 		return err
 	}

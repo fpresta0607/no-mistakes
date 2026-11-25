@@ -1314,8 +1314,10 @@ func TestClaudeStdinHelper(t *testing.T) {
 		return
 	case "init-result-with-background-child":
 		// A background job the agent started after init, still running at
-		// the result.
+		// the result. No tool runs until the model has answered, which takes
+		// a round trip after init; the pause stands in for it.
 		emitClaudeHelperInit()
+		time.Sleep(300 * time.Millisecond)
 		child := exec.Command(os.Args[0], "-test.run=^TestClaudeStdinHelper$")
 		child.Env = append(os.Environ(), "NM_CLAUDE_STDIN_HELPER=background-child")
 		if err := child.Start(); err != nil {

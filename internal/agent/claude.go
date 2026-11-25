@@ -191,9 +191,9 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	var onInit func()
 	if opts.RequireCompletedChildren {
 		// Claude reports init before it asks the model anything, so every
-		// process beside the leader then is the CLI's own (issue #277).
+		// process beside the leader by then is the CLI's own (issue #277).
 		onInit = func() {
-			if err := started.recordCLIProcesses(); err != nil && opts.OnChunk != nil {
+			if err := started.recordCLIProcesses(time.Now()); err != nil && opts.OnChunk != nil {
 				opts.OnChunk(fmt.Sprintf("could not record claude's own processes: %v", err))
 			}
 		}
