@@ -102,7 +102,7 @@ func runRebasedDirtyFailure(t *testing.T) *rebasedDirtyFailure {
 		t.Fatal(err)
 	}
 	if recorded.Status != types.RunFailed || recorded.HeadSHA != rebased || recorded.TerminalHeadVerifiedAt != nil || recorded.TerminalSourceState == nil || *recorded.TerminalSourceState != "dirty:"+rebased {
-		t.Fatalf("terminal record = status %s head %s verified %v source %v, want failed at the unverified dirty rebased head %s", recorded.Status, recorded.HeadSHA, recorded.TerminalHeadVerifiedAt, recorded.TerminalSourceState, rebased)
+		t.Fatalf("terminal record = status %s head %s verified %v source %q, want failed at the unverified dirty rebased head %s", recorded.Status, recorded.HeadSHA, recorded.TerminalHeadVerifiedAt, deref(recorded.TerminalSourceState), rebased)
 	}
 	return &rebasedDirtyFailure{
 		gate: gate, caller: caller, managed: managed, submitted: submitted, rebased: rebased,
