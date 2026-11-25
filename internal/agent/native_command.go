@@ -36,6 +36,14 @@ type nativeAgentCommand struct {
 	// isLeaderStopped records that stopLeader ended the agent process itself,
 	// so its exit is judged by what it left running, like a clean exit.
 	isLeaderStopped atomic.Bool
+	// cliProcessesMu guards cliProcesses and isReaped.
+	cliProcessesMu sync.Mutex
+	// cliProcesses are the agent CLI's own processes beside the leader, from
+	// recordCLIProcesses; stopLeader stops them with the leader.
+	cliProcesses *shellenv.ShellCommandMembers
+	// isReaped records that the command has been waited for and its group
+	// terminated, so nothing is recorded any more.
+	isReaped bool
 }
 
 func writeNativeAgentStdin(stdin io.WriteCloser, prompt string) <-chan error {
@@ -139,6 +147,7 @@ func startNativeAgentCommand(cmd *exec.Cmd, desktop string, activity func(), req
 			}
 		}
 		started.terminate()
+		started.releaseCLIProcesses()
 		started.waitCh <- started.waitForPipes(err)
 	}()
 	return started, nil
@@ -179,11 +188,46 @@ func (c *nativeAgentCommand) waitForPipes(waitErr error) error {
 	}
 }
 
-// stopLeader kills the agent process alone and leaves the work it started in
-// its process group or job, so the owned-children probe decides whether that
-// work is still running, as it does for an agent that exited by itself.
+// recordCLIProcesses records every process the command's group or job holds
+// besides the leader as the agent CLI's own (issue #277): the real CLI under an
+// npm shim or the Windows desktop helper, and the stdio MCP servers it started.
+// Call it when the agent reports it has started and before it can have started
+// any work, so nothing recorded can be that work. Only the first call records.
+func (c *nativeAgentCommand) recordCLIProcesses() error {
+	c.cliProcessesMu.Lock()
+	defer c.cliProcessesMu.Unlock()
+	if c.isReaped || c.cliProcesses != nil {
+		return nil
+	}
+	members, err := shellenv.RecordShellCommandMembers(c.cmd)
+	if err != nil {
+		return err
+	}
+	c.cliProcesses = members
+	return nil
+}
+
+func (c *nativeAgentCommand) releaseCLIProcesses() {
+	c.cliProcessesMu.Lock()
+	defer c.cliProcessesMu.Unlock()
+	c.isReaped = true
+	if c.cliProcesses != nil {
+		c.cliProcesses.Release()
+		c.cliProcesses = nil
+	}
+}
+
+// stopLeader kills the agent process and the CLI processes recorded beside it,
+// and leaves the work the agent started in its process group or job, so the
+// owned-children probe decides whether that work is still running, as it does
+// for an agent that exited by itself.
 func (c *nativeAgentCommand) stopLeader() {
 	c.isLeaderStopped.Store(true)
+	c.cliProcessesMu.Lock()
+	if c.cliProcesses != nil {
+		c.cliProcesses.Kill()
+	}
+	c.cliProcessesMu.Unlock()
 	_ = c.cmd.Process.Kill()
 }
 

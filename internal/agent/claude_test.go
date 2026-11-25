@@ -120,6 +120,7 @@ func TestParseClaudeEvents_AssistantMessage(t *testing.T) {
 		&usage,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -158,6 +159,7 @@ func TestParseClaudeEvents_ResultEvent(t *testing.T) {
 		nil,
 		&usage,
 		&result,
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -203,6 +205,7 @@ func TestParseClaudeEvents_LargeAssistantEvent(t *testing.T) {
 		&usage,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -233,6 +236,7 @@ func TestParseClaudeEvents_MultipleEvents(t *testing.T) {
 		func(text string) { chunks = append(chunks, text) },
 		&usage,
 		&result,
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -272,6 +276,7 @@ func TestParseClaudeEvents_NoSeparatorForFirstMessage(t *testing.T) {
 		&usage,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -300,6 +305,7 @@ func TestParseClaudeEvents_NoSeparatorAfterToolOnlyEvent(t *testing.T) {
 		&usage,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -324,6 +330,7 @@ func TestParseClaudeEvents_DoesNotSeparateSplitAssistantReply(t *testing.T) {
 		strings.NewReader(events),
 		func(text string) { chunks = append(chunks, text) },
 		&usage,
+		nil,
 		nil,
 		nil,
 	)
@@ -351,6 +358,7 @@ func TestParseClaudeEvents_SkipsMalformedLines(t *testing.T) {
 		&usage,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -364,7 +372,7 @@ func TestParseClaudeEvents_CacheTokens(t *testing.T) {
 	events := `{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":30,"cache_creation_input_tokens":10},"content":[]}}
 `
 	var usage TokenUsage
-	err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, nil, nil)
+	err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -390,7 +398,7 @@ func TestParseClaudeEvents_MultipleContentBlocksUsage(t *testing.T) {
 	var text strings.Builder
 	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), func(chunk string) {
 		text.WriteString(chunk)
-	}, &usage, &result, nil); err != nil {
+	}, &usage, &result, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if usage.InputTokens != 31_000 || usage.OutputTokens != 500 ||
@@ -423,7 +431,7 @@ func TestParseClaudeEvents_CumulativeUsage(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var usage TokenUsage
-			if err := parseClaudeEvents(context.Background(), strings.NewReader(strings.Join(tc.events, "\n")), nil, &usage, nil, nil); err != nil {
+			if err := parseClaudeEvents(context.Background(), strings.NewReader(strings.Join(tc.events, "\n")), nil, &usage, nil, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			if usage.InputTokens != 31_000*tc.messages || usage.OutputTokens != 500*tc.messages ||
@@ -443,7 +451,7 @@ func TestParseClaudeEvents_ContextCancellation(t *testing.T) {
 	events := `{"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"text","text":"ok"}]}}
 `
 	var usage TokenUsage
-	err := parseClaudeEvents(ctx, strings.NewReader(events), nil, &usage, nil, nil)
+	err := parseClaudeEvents(ctx, strings.NewReader(events), nil, &usage, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected error from cancelled context")
 	}
@@ -455,7 +463,7 @@ func TestParseClaudeEvents_ErrorResult(t *testing.T) {
 	var usage TokenUsage
 	var result *claudeResult
 
-	err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &result, nil)
+	err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &result, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -547,7 +555,7 @@ func TestParseClaudeEvents_ResultCapturesRawEvent(t *testing.T) {
 	var usage TokenUsage
 	var result *claudeResult
 
-	err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &result, nil)
+	err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &result, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1079,6 +1087,56 @@ func TestClaudeAgent_BackgroundWorkAfterResult(t *testing.T) {
 	})
 }
 
+// Issue #277: the process no-mistakes starts is not always the Claude CLI. The
+// npm claude.cmd shim starts it as a child, and so does the Windows hidden
+// desktop helper every Test turn runs under; the CLI also keeps its stdio MCP
+// servers running beside it. At the result grace those are stopped with the
+// leader, while work started after the CLI reported init is still judged.
+func TestClaudeAgent_ResultGraceStopsTheCLIsOwnProcesses(t *testing.T) {
+	old := claudeResultGrace
+	claudeResultGrace = 200 * time.Millisecond
+	t.Cleanup(func() { claudeResultGrace = old })
+	for _, tc := range []struct {
+		name          string
+		cli           string
+		isWorkRefused bool
+	}{
+		{name: "a shim's CLI and the MCP server it started before init are stopped", cli: "init-mcp-held-result"},
+		{name: "work started after init is still refused", cli: "init-result-with-background-child", isWorkRefused: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Arrange
+			t.Setenv("NM_CLAUDE_STDIN_HELPER", "shim")
+			t.Setenv("NM_CLAUDE_STDIN_SHIM_TARGET", tc.cli)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+
+			// Act
+			res, err := newClaudeStdinHelperAgent(t).runOnce(ctx, RunOpts{
+				Prompt:                   "test",
+				CWD:                      t.TempDir(),
+				JSONSchema:               json.RawMessage(`{"type":"object","required":["ok"]}`),
+				RequireCompletedChildren: true,
+			})
+
+			// Assert
+			if tc.isWorkRefused {
+				namesChild := regexp.MustCompile(`(active owned children: |last observed )pid \d+`)
+				if err == nil || !strings.Contains(err.Error(), "background work outlived the result") || !namesChild.MatchString(err.Error()) {
+					t.Fatalf("err = %v, want the background-work refusal naming the agent's work", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want the finished result", err)
+			}
+			if string(res.Output) != `{"ok":true}` {
+				t.Fatalf("output = %s, want the result", res.Output)
+			}
+		})
+	}
+}
+
 // Issue #257: Claude Code cancels a SessionEnd hook at its 1.5s default bound
 // and exits while the hook's process tree is still alive in the agent's group,
 // which the completed-children check refuses. The turn must bound the hooks by
@@ -1229,6 +1287,43 @@ func TestClaudeStdinHelper(t *testing.T) {
 	case "background-child":
 		time.Sleep(30 * time.Second)
 		return
+	case "shim":
+		// Issue #277: npm's claude.cmd, like the Windows desktop helper, is
+		// not the CLI; it starts the CLI and waits for it.
+		cli := exec.Command(os.Args[0], "-test.run=^TestClaudeStdinHelper$")
+		cli.Env = append(os.Environ(), "NM_CLAUDE_STDIN_HELPER="+os.Getenv("NM_CLAUDE_STDIN_SHIM_TARGET"))
+		cli.Stdin = os.Stdin
+		cli.Stdout = os.Stdout
+		cli.Stderr = os.Stderr
+		if err := cli.Run(); err != nil {
+			os.Exit(2)
+		}
+		return
+	case "init-mcp-held-result":
+		// A stdio MCP server the CLI starts before init and that outlives a
+		// killed CLI, then a result while queued notifications hold the
+		// session open with nothing the agent started still running.
+		mcp := exec.Command(os.Args[0], "-test.run=^TestClaudeStdinHelper$")
+		mcp.Env = append(os.Environ(), "NM_CLAUDE_STDIN_HELPER=background-child")
+		if err := mcp.Start(); err != nil {
+			os.Exit(2)
+		}
+		emitClaudeHelperInit()
+		emitClaudeHelperResult()
+		time.Sleep(30 * time.Second)
+		return
+	case "init-result-with-background-child":
+		// A background job the agent started after init, still running at
+		// the result.
+		emitClaudeHelperInit()
+		child := exec.Command(os.Args[0], "-test.run=^TestClaudeStdinHelper$")
+		child.Env = append(os.Environ(), "NM_CLAUDE_STDIN_HELPER=background-child")
+		if err := child.Start(); err != nil {
+			os.Exit(2)
+		}
+		emitClaudeHelperResult()
+		time.Sleep(30 * time.Second)
+		return
 	case "result-after-toolchain-link":
 		// Issue #259: a build whose linker left its telemetry helper running,
 		// then a result and a clean exit. TestClaudeToolchainLinkHelper is
@@ -1294,6 +1389,10 @@ func TestClaudeStdinHelper(t *testing.T) {
 	default:
 		os.Exit(5)
 	}
+}
+
+func emitClaudeHelperInit() {
+	_, _ = io.WriteString(os.Stdout, `{"type":"system","subtype":"init","session_id":"helper-session"}`+"\n")
 }
 
 func emitClaudeHelperResult() {
@@ -1386,7 +1485,7 @@ func parseClaudeStream(t *testing.T, stream string) *claudeResult {
 	t.Helper()
 	var usage TokenUsage
 	var result *claudeResult
-	if err := parseClaudeEvents(context.Background(), strings.NewReader(stream), nil, &usage, &result, nil); err != nil {
+	if err := parseClaudeEvents(context.Background(), strings.NewReader(stream), nil, &usage, &result, nil, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result == nil {
