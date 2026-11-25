@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
@@ -53,6 +54,42 @@ func TestClaudeAgentRunsOnTheInvocationsHiddenDesktop(t *testing.T) {
 	}
 	if string(got) != desktop.Name() {
 		t.Errorf("the agent ran on desktop %q, want the invocation's hidden desktop %q", got, desktop.Name())
+	}
+}
+
+// Issue #277: on a hidden desktop the process no-mistakes starts is the desktop
+// helper, and Claude runs as its child, so stopping the leader alone at the
+// result grace left the CLI itself in the job and every Test turn held open
+// past its result failed.
+func TestClaudeAgentKeepsAHeldResultOnAHiddenDesktop(t *testing.T) {
+	// Arrange
+	old := claudeResultGrace
+	claudeResultGrace = 200 * time.Millisecond
+	t.Cleanup(func() { claudeResultGrace = old })
+	desktop, err := winproc.NewHiddenDesktop()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = desktop.Close() })
+	t.Setenv("NM_CLAUDE_STDIN_HELPER", "init-mcp-held-result")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// Act
+	res, err := newClaudeStdinHelperAgent(t).runOnce(ctx, RunOpts{
+		Prompt:                   "test",
+		CWD:                      t.TempDir(),
+		Desktop:                  desktop.Name(),
+		JSONSchema:               json.RawMessage(`{"type":"object","required":["ok"]}`),
+		RequireCompletedChildren: true,
+	})
+
+	// Assert
+	if err != nil {
+		t.Fatalf("err = %v, want the finished result", err)
+	}
+	if string(res.Output) != `{"ok":true}` {
+		t.Fatalf("output = %s, want the result", res.Output)
 	}
 }
 
