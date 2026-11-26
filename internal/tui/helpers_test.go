@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -35,18 +34,11 @@ func testSocketPath(t *testing.T) string {
 func startTestIPCServer(t *testing.T, sock string) *ipc.Server {
 	t.Helper()
 	srv := ipc.NewServer()
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(sock) }()
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		c, err := ipc.Dial(sock)
-		if err == nil {
-			_ = c.Close()
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	if err := srv.Listen(sock); err != nil {
+		t.Fatalf("listen: %v", err)
 	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ServeReady() }()
 
 	t.Cleanup(func() {
 		srv.Close()

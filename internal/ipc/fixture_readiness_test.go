@@ -1,23 +1,36 @@
-package cli
+package ipc_test
 
 import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
 const ipcPackagePath = "github.com/kunchenguid/no-mistakes/internal/ipc"
 
-// TestIPCFixturesBindBeforeTheirFirstDial keeps fake-daemon fixtures from
-// starting srv.Serve in a goroutine: Serve binds the endpoint inside that
-// goroutine, so a dial right after it races the bind (slow on a loaded Windows
-// runner) and needs a readiness deadline. srv.Listen binds synchronously.
+// TestIPCFixturesBindBeforeTheirFirstDial keeps IPC test fixtures anywhere
+// under internal/ from starting srv.Serve in a goroutine: Serve binds the
+// endpoint inside that goroutine, so a dial right after it races the bind
+// (slow on a loaded Windows runner) and needs a readiness deadline. srv.Listen
+// binds synchronously. Build tags are not evaluated, so e2e fixtures are
+// scanned too.
 func TestIPCFixturesBindBeforeTheirFirstDial(t *testing.T) {
 	// Arrange
-	files, err := filepath.Glob("*_test.go")
+	var files []string
+	err := filepath.WalkDir("..", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() && strings.HasSuffix(path, "_test.go") {
+			files = append(files, path)
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +42,7 @@ func TestIPCFixturesBindBeforeTheirFirstDial(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", file, err)
 		}
-		if !importsIPC(parsed) {
+		if filepath.Base(filepath.Dir(file)) != "ipc" && !importsIPC(parsed) {
 			continue
 		}
 		scannedFixtureFiles++
@@ -48,7 +61,7 @@ func TestIPCFixturesBindBeforeTheirFirstDial(t *testing.T) {
 				selector, isSelector := call.Fun.(*ast.SelectorExpr)
 				if isSelector && selector.Sel.Name == "Serve" {
 					// Assert
-					t.Errorf("%s: bind the listener before Serve starts in a goroutine: call startIPCServer (srv.Listen, then go srv.ServeReady()) so the first dial never races the bind", fileSet.Position(call.Pos()))
+					t.Errorf("%s: bind the listener before Serve starts in a goroutine: call srv.Listen, then go srv.ServeReady(), so the first dial never races the bind", fileSet.Position(call.Pos()))
 				}
 				return true
 			})
@@ -57,7 +70,7 @@ func TestIPCFixturesBindBeforeTheirFirstDial(t *testing.T) {
 	}
 
 	if scannedFixtureFiles == 0 {
-		t.Fatalf("no test file in the package imports %s", ipcPackagePath)
+		t.Fatalf("no test file under internal/ imports %s", ipcPackagePath)
 	}
 }
 
