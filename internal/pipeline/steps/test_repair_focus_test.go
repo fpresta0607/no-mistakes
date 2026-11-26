@@ -1351,15 +1351,6 @@ func TestKeepUndrivenScenarios_ARepairTurnsLiveProofReplacesAResolvedPrerequisit
 			want:            types.TestScenario{Name: "browser \t history", Result: types.ScenarioResultPass, Live: true, Evidence: "repair turn on cccccccccccc: history.png"},
 			wantReasonParts: []string{"passed live in the repair turn on cccccccccccc, which changed nothing"},
 		},
-		"a no-surface re-check takes no proof from the repair": {
-			verdict:         types.TestVerdictNoSurface,
-			isOnSameHead:    true,
-			last:            types.TestScenario{Name: "browser history", Result: types.ScenarioResultUntested, Reason: missingDependencies},
-			repair:          []types.TestScenario{repairPass},
-			wantVerdict:     types.TestVerdictNoSurface,
-			want:            types.TestScenario{Name: "browser history", Result: types.ScenarioResultUntested},
-			wantReasonParts: []string{missingDependencies},
-		},
 		"an excluded scenario the repair did not report keeps its own reason": {
 			verdict:         types.TestVerdictGo,
 			isOnSameHead:    true,

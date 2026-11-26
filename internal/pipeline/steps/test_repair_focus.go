@@ -495,12 +495,8 @@ func keepUndrivenScenarios(focused, last Findings, isOnSameHead bool, baselineTe
 // repair turn reported driving (repairDriven, see repairScenariosDriven) to that
 // report: the ones the focused turn left out, and that the live check did not
 // record as a pass. A recorded name matches as repairScenariosDriven normalized
-// the reported one. A no-surface re-check takes no proof, since that verdict
-// cannot stand beside a live scenario.
+// the reported one.
 func repairProofFor(focused, last Findings, repairDriven []types.TestScenario) map[string]types.TestScenario {
-	if focused.Verdict == types.TestVerdictNoSurface {
-		return nil
-	}
 	driven := make(map[string]types.TestScenario, len(repairDriven))
 	for _, scenario := range repairDriven {
 		driven[scenario.Name] = scenario
