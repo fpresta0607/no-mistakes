@@ -20,6 +20,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testwait"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -62,14 +63,10 @@ func TestReviewLoop_NativeSafetyRefusalPreservesWorkAndParks(t *testing.T) {
 	go func() { done <- executor.Execute(ctx, run, repo, workDir) }()
 	t.Cleanup(func() {
 		cancel()
-		select {
-		case err := <-done:
-			if t.Failed() {
-				log, _ := os.ReadFile(filepath.Join(appPaths.RunLogDir(run.ID), "review.log"))
-				t.Logf("executor: %v\n%s", err, log)
-			}
-		case <-time.After(5 * time.Second):
-			t.Error("executor did not stop")
+		err := testwait.Receive(t, done, "executor did not stop")
+		if t.Failed() {
+			log, _ := os.ReadFile(filepath.Join(appPaths.RunLogDir(run.ID), "review.log"))
+			t.Logf("executor: %v\n%s", err, log)
 		}
 	})
 	waitForReviewStatus(t, database, run.ID, types.StepStatusAwaitingApproval)
@@ -330,11 +327,7 @@ func TestSideBySide_RefusedLaneSurvivesADaemonRestart(t *testing.T) {
 	go func() { defer close(finished); done <- executor.Execute(ctx, run, repo, dir) }()
 	t.Cleanup(func() {
 		cancel(pipeline.ErrDaemonShutdown)
-		select {
-		case <-finished:
-		case <-time.After(10 * time.Second):
-			t.Error("executor did not stop")
-		}
+		testwait.Receive(t, finished, "executor did not stop")
 	})
 	waitForPark := func(want types.StepName) {
 		t.Helper()
@@ -351,13 +344,8 @@ func TestSideBySide_RefusedLaneSurvivesADaemonRestart(t *testing.T) {
 	}
 	waitForPark(types.StepReview)
 	cancel(pipeline.ErrDaemonShutdown)
-	select {
-	case err := <-done:
-		if !errors.Is(err, pipeline.ErrParkedAtShutdown) {
-			t.Fatalf("park was not retained: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("executor did not stop at its park")
+	if err := testwait.Receive(t, done, "executor did not stop at its park"); !errors.Is(err, pipeline.ErrParkedAtShutdown) {
+		t.Fatalf("park was not retained: %v", err)
 	}
 	<-finished
 	if err := database.Close(); err != nil {

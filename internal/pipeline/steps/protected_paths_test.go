@@ -17,6 +17,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testwait"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -141,18 +142,14 @@ func TestCIStep_ProtectedPathRetryUsesPersistedRepair(t *testing.T) {
 			go func() { done <- executor.Resume(ctx, run, f.sctx.Repo, f.dir) }()
 			t.Cleanup(func() {
 				cancel()
-				select {
-				case <-done:
-				case <-time.After(15 * time.Second):
-					t.Error("executor did not stop")
-				}
+				testwait.Receive(t, done, "executor did not stop")
 			})
 			select {
 			case <-parked:
 			case err := <-done:
 				done <- err
 				t.Fatalf("could not resume refusal: %v", err)
-			case <-time.After(15 * time.Second):
+			case <-time.After(testwait.Timeout):
 				t.Fatal("refusal did not resume")
 			}
 			refused, err := types.ParseFindingsJSON(outcome.Findings)

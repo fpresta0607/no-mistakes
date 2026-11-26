@@ -16,6 +16,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/testwait"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -164,14 +165,10 @@ func TestExecutor_RequestedSkipsSurviveParkAndRecovery(t *testing.T) {
 					defer func() {
 						cancel()
 						if !finished {
-							select {
-							case <-done:
-							case <-time.After(5 * time.Second):
-								t.Error("fixture executor did not stop")
-							}
+							testwait.Receive(t, done, "fixture executor did not stop")
 						}
 					}()
-					deadline := time.Now().Add(5 * time.Second)
+					deadline := time.Now().Add(testwait.Timeout)
 					for {
 						select {
 						case err := <-done:

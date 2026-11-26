@@ -9,6 +9,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/testwait"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -161,13 +162,9 @@ func TestExecutorRecoveredCIHandbackPreservesReservation(t *testing.T) {
 			go func() { done <- executor.Resume(ctx, run, repo, workDir) }()
 			defer func() {
 				cancel()
-				select {
-				case <-done:
-				case <-time.After(5 * time.Second):
-					t.Error("recovered executor did not stop")
-				}
+				testwait.Receive(t, done, "recovered executor did not stop")
 			}()
-			deadline := time.Now().Add(5 * time.Second)
+			deadline := time.Now().Add(testwait.Timeout)
 			for {
 				executor.mu.Lock()
 				isWaiting := executor.waiting
