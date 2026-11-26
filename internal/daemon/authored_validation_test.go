@@ -358,15 +358,18 @@ func TestAuthoredAdmissionWorktreeFailureFailsTheChildRecoverably(t *testing.T) 
 // records the PR but no push binding. Admission used to read that as an
 // incomplete binding and refuse it even while the PR's head was still exactly
 // the run's submitted head (#336). It now reads the PR live and continues only
-// at that head, refusing with both heads named once the PR has moved.
+// at that head, refusing with both heads named once the PR has moved, and
+// refusing a PR whose head repository is no longer the push target (#342).
 func TestAuthoredAdmissionContinuesAnInheritedPROnlyAtItsSubmittedHead(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		isPRMoved  bool
-		isAccepted bool
+		prHeadRepo string
+		refusal    string
 	}{
-		{"PR still at the submitted head", false, true},
-		{"PR head moved", true, false},
+		{"PR still at the submitted head", false, "test/repo", ""},
+		{"PR head moved", true, "test/repo", "is not the run's submitted head"},
+		{"PR head repository changed", false, "someone/repo", "terminal PR repository, branch, state or public head changed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			// Arrange
@@ -394,7 +397,7 @@ func TestAuthoredAdmissionContinuesAnInheritedPROnlyAtItsSubmittedHead(t *testin
 			originalOutput := authoredPRCommandOutput
 			t.Cleanup(func() { authoredPRCommandOutput = originalOutput })
 			authoredPRCommandOutput = func(command *exec.Cmd) ([]byte, error) {
-				return []byte(fmt.Sprintf(`{"html_url":%q,"state":"open","head":{"sha":%q,"ref":"feature","repo":{"full_name":"test/repo"}},"base":{"ref":"main","repo":{"full_name":"test/repo"}}}`, prURL, livePRHead)), nil
+				return []byte(fmt.Sprintf(`{"html_url":%q,"state":"open","head":{"sha":%q,"ref":"feature","repo":{"full_name":%q}},"base":{"ref":"main","repo":{"full_name":"test/repo"}}}`, prURL, livePRHead, test.prHeadRepo)), nil
 			}
 			snapshot, err := database.ReadTerminalSnapshot(request.Request.PredecessorID)
 			if err != nil {
@@ -411,7 +414,7 @@ func TestAuthoredAdmissionContinuesAnInheritedPROnlyAtItsSubmittedHead(t *testin
 			result, err := manager.validateAuthored(context.Background(), request, os.Getpid())
 
 			// Assert
-			if test.isAccepted {
+			if test.refusal == "" {
 				if err != nil || !result.Started {
 					t.Fatalf("admission of a run bound to an inherited PR at its submitted head: %+v %v", result, err)
 				}
@@ -421,8 +424,12 @@ func TestAuthoredAdmissionContinuesAnInheritedPROnlyAtItsSubmittedHead(t *testin
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), "inherited PR live head "+livePRHead+" is not the run's submitted head "+submitted) {
-				t.Fatalf("admission over a moved inherited PR = %v, want a refusal naming both heads", err)
+			refusal := test.refusal
+			if test.isPRMoved {
+				refusal = "inherited PR live head " + livePRHead + " is not the run's submitted head " + submitted
+			}
+			if err == nil || !strings.Contains(err.Error(), refusal) {
+				t.Fatalf("admission over a changed inherited PR = %v, want %q", err, refusal)
 			}
 			after, err := database.GetRunsByRepo(repo.ID)
 			if err != nil || !reflect.DeepEqual(before, after) || gitOutput(t, gate, "rev-parse", "refs/heads/feature") != gateHead {

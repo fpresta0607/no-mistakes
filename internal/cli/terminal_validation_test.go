@@ -157,6 +157,54 @@ func TestTerminalPreflightRequiresEveryAdmissionCandidateAnchor(t *testing.T) {
 	}
 }
 
+// A predecessor that inherited its branch's open PR and failed before Push has
+// a PR URL and no push binding. The preflight used to print only the empty push
+// fields, hiding the PR the admission binds it to (#342).
+func TestTerminalPreflightShowsTheInheritedPRBesideTheEmptyPushBinding(t *testing.T) {
+	// Arrange
+	directory, root, database, repo := setupAxiQueryRepo(t)
+	run(t, directory, "git", "checkout", "-b", "feature")
+	chdir(t, directory)
+	head, err := git.HeadSHA(context.Background(), directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run(t, directory, "git", "clone", "--bare", directory, root.RepoDir(repo.ID))
+	parent, err := database.InsertRun(repo.ID, "feature", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prURL := "https://github.com/test/repo/pull/17"
+	if err := database.UpdateRunPRURL(parent.ID, prURL); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(parent.ID, types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	command := newAxiTerminalPreflightCmd()
+	var output bytes.Buffer
+	command.SetOut(&output)
+	command.SetArgs([]string{"--predecessor", parent.ID})
+	command.SetContext(context.Background())
+
+	// Act
+	err = command.Execute()
+
+	// Assert
+	var observed struct {
+		PublishedHeadSHA      *string `toon:"published_head_sha"`
+		PushGeneration        *int64  `toon:"push_generation"`
+		PushTargetFingerprint *string `toon:"push_target_fingerprint"`
+		PRURL                 *string `toon:"pr_url"`
+	}
+	if err != nil || toon.UnmarshalString(output.String(), &observed) != nil {
+		t.Fatalf("preflight: %v\n%s", err, output.String())
+	}
+	if observed.PRURL == nil || *observed.PRURL != prURL || observed.PublishedHeadSHA != nil || observed.PushGeneration != nil || observed.PushTargetFingerprint != nil {
+		t.Fatalf("preflight = %+v, want the inherited PR %s beside an empty push binding:\n%s", observed, prURL, output.String())
+	}
+}
+
 func TestTerminalPreflightObservesBindingsWithoutMutatingHistoryRefsOrStartingADaemon(t *testing.T) {
 	directory, root, database, repo := setupAxiQueryRepo(t)
 	run(t, directory, "git", "checkout", "-b", "feature")

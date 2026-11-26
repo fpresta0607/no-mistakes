@@ -528,7 +528,7 @@ no-mistakes axi terminal-preflight --predecessor <run-id>
 ```
 
 This is read-only and works with the daemon stopped.
-It reports the predecessor snapshot digest and original launch bindings, current caller commit/tree and cleanliness, custody state, publication bindings, and the known recovery anchors in the caller and gate repositories.
+It reports the predecessor snapshot digest and original launch bindings, current caller commit/tree and cleanliness, custody state, publication bindings with the PR URL the predecessor is bound to (`pr_url`, set even for a predecessor that inherited its PR and never pushed), and the known recovery anchors in the caller and gate repositories.
 It does not fetch, recover custody, reconstruct missing source, start a daemon, admit a candidate or grant execution authority.
 Its observations must be checked again at admission; a preflight is not a validation result.
 Preflight output contains local paths and source evidence and should stay private.

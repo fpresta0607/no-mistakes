@@ -98,7 +98,7 @@ func newAxiTerminalPreflightCmd() *cobra.Command {
 				toon.Field{Key: "caller_is_clean", Value: status == ""}, toon.Field{Key: "custody_returned_at", Value: parent.CustodyReturnedAt},
 				toon.Field{Key: "predecessor_launch_nonce", Value: parent.LaunchNonce}, toon.Field{Key: "predecessor_validation_generation", Value: parent.LaunchValidationGeneration},
 				toon.Field{Key: "intent_digest", Value: parent.LaunchIntentDigest}, toon.Field{Key: "predecessor_launch_assertion_json", Value: string(assertionJSON)},
-				toon.Field{Key: "published_head_sha", Value: parent.LastPushedSHA}, toon.Field{Key: "push_generation", Value: parent.PushGeneration}, toon.Field{Key: "push_target_fingerprint", Value: parent.PushTargetFingerprint},
+				toon.Field{Key: "published_head_sha", Value: parent.LastPushedSHA}, toon.Field{Key: "push_generation", Value: parent.PushGeneration}, toon.Field{Key: "push_target_fingerprint", Value: parent.PushTargetFingerprint}, toon.Field{Key: "pr_url", Value: parent.PRURL},
 				toon.Field{Key: "source_anchors", Value: anchors}, toon.Field{Key: "historical_source_completeness", Value: "unknown"},
 				toon.Field{Key: "note", Value: "Read-only observations. Admission must separately prove the explicit successor selection and current trusted source; this preflight grants no execution or completion authority."})
 			return nil
