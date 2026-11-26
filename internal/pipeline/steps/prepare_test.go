@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -581,6 +582,67 @@ func TestEnsurePrepared_RestoresAfterCleanupTimeout(t *testing.T) {
 	}
 	if got := gitStatusPorcelain(t, dir); got != before {
 		t.Fatalf("pending worktree state after cleanup timeout = %q, want %q", got, before)
+	}
+}
+
+// Issue #323: only a preparation failure that is the environment's in every
+// part is marked, so a prepare command's own failure is never retried.
+func TestEnsurePrepared_MarksOnlyAnEnvironmentFailure(t *testing.T) {
+	environmentExit := "exit 75"
+	if runtime.GOOS == "windows" {
+		environmentExit = "exit /b 75"
+	}
+	for _, tc := range []struct {
+		name          string
+		command       string
+		cleanup       string
+		isEnvironment bool
+	}{
+		{name: "command reserves the environment exit code", command: environmentExit, isEnvironment: true},
+		{name: "command fails about the change", command: failingPreparationCommand()},
+		{name: "cleanup hits its deadline", command: preparationCommand(), cleanup: "deadline", isEnvironment: true},
+		{name: "environment exit and cleanup deadline", command: environmentExit, cleanup: "deadline", isEnvironment: true},
+		{name: "command fails about the change and cleanup hits its deadline", command: failingPreparationCommand(), cleanup: "deadline"},
+		{name: "cleanup fails before its deadline", command: environmentExit, cleanup: "error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			sctx := newPreparationTestContext(t, nil, dir, baseSHA, headSHA, config.Commands{Prepare: tc.command})
+			sctx.Shared = &pipeline.RunShared{}
+			previousTimeout := prepareCleanupTimeout
+			previousCleanup := runPreparationCleanup
+			t.Cleanup(func() {
+				prepareCleanupTimeout = previousTimeout
+				runPreparationCleanup = previousCleanup
+			})
+			switch tc.cleanup {
+			case "deadline":
+				prepareCleanupTimeout = time.Millisecond
+				runPreparationCleanup = func(ctx context.Context, workDir, head string, submodules []preparationSubmodule) error {
+					if err := cleanupPreparationChanges(context.Background(), workDir, head, submodules); err != nil {
+						return err
+					}
+					<-ctx.Done()
+					return ctx.Err()
+				}
+			case "error":
+				runPreparationCleanup = func(ctx context.Context, workDir, head string, submodules []preparationSubmodule) error {
+					if err := cleanupPreparationChanges(ctx, workDir, head, submodules); err != nil {
+						return err
+					}
+					return errors.New("cleanup refused")
+				}
+			}
+
+			err := ensurePrepared(sctx, types.StepTest)
+
+			if err == nil {
+				t.Fatal("preparation succeeded, want it to fail")
+			}
+			if got := errors.Is(err, pipeline.ErrPreparationEnvironment); got != tc.isEnvironment {
+				t.Fatalf("environment failure = %v, want %v (err %v)", got, tc.isEnvironment, err)
+			}
+		})
 	}
 }
 

@@ -84,7 +84,8 @@ func refuseRetry(runID, proof, format string, args ...any) error {
 // are carried, the failed step restarts from the beginning, and every later
 // step runs normally. It refuses, changing nothing, unless every proof holds:
 // the run is this branch's latest and failed while nothing is active; its
-// record names exactly one failed step, failed on an agent invocation error,
+// record names exactly one failed step, failed on an agent invocation error or
+// in Test's preparation for its environment at the head Review approved,
 // with nothing from Test on carried and nothing published; its preserved head
 // is anchored; the caller is clean at exactly that head; the model profile and
 // the repository's gates are unchanged; and the repository configuration, the
