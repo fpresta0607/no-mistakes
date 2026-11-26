@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
@@ -35,7 +36,15 @@ type PRStep struct {
 	// gitlabUploader uploads image evidence to a GitLab project. Nil uses the
 	// GitLab host. Tests inject a stub so they never talk to live GitLab.
 	gitlabUploader gitlabEvidenceUploader
+	// createRetryDelays overrides prCreateConnectionRetryDelays in tests.
+	createRetryDelays []time.Duration
 }
+
+// prCreateConnectionRetryDelays are the waits before each new attempt after a
+// pull request create fails with scm.ErrConnection. Together they outlast the
+// minute-long api.github.com outage that once failed a run whose push had
+// already landed (issue #291); a failure after the last one fails the step.
+var prCreateConnectionRetryDelays = []time.Duration{15 * time.Second, 30 * time.Second, 60 * time.Second}
 
 type prContent struct {
 	Title       string         `json:"title"`
@@ -320,7 +329,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, err
 	}
 	sctx.Log("creating pull request...")
-	created, err := host.CreatePR(ctx, branch, baseBranch, scm.PRContent{Title: content.Title, Body: content.Body})
+	created, err := s.createPR(sctx, host, branch, baseBranch, scm.PRContent{Title: content.Title, Body: content.Body})
 	if err != nil {
 		return nil, err
 	}
@@ -355,6 +364,53 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, err
 	}
 	return &pipeline.StepOutcome{PRURL: created.URL}, nil
+}
+
+// createPR creates the pull request, trying again on the bounded
+// prCreateConnectionRetryDelays schedule while the forge cannot be reached. A
+// create whose connection broke may still have opened the pull request, so
+// each new attempt first looks for an open one on the branch and adopts it
+// instead of opening a duplicate, but only when its body is the proposed one;
+// no create is repeated until that read succeeds.
+func (s *PRStep) createPR(sctx *pipeline.StepContext, host scm.Host, branch, baseBranch string, content scm.PRContent) (*scm.PR, error) {
+	delays := s.createRetryDelays
+	if delays == nil {
+		delays = prCreateConnectionRetryDelays
+	}
+	ctx := sctx.Ctx
+	created, err := host.CreatePR(ctx, branch, baseBranch, content)
+	for attempt := 0; attempt < len(delays) && errors.Is(err, scm.ErrConnection); attempt++ {
+		sctx.Log(fmt.Sprintf("could not reach the forge (%v); trying again in %s (retry %d of %d)", err, delays[attempt], attempt+1, len(delays)))
+		timer := time.NewTimer(delays[attempt])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		opened, findErr := host.FindPR(ctx, branch, "")
+		switch {
+		case findErr != nil:
+			err = fmt.Errorf("check whether the failed create opened a pull request: %w", findErr)
+		case opened != nil:
+			reader, ok := host.(scm.PRContentReader)
+			if !ok {
+				return nil, fmt.Errorf("found open pull request %s after the failed create, and this provider cannot read its body to prove the create opened it", describePR(opened))
+			}
+			actual, readErr := reader.GetPRContent(ctx, opened)
+			if readErr != nil {
+				return nil, fmt.Errorf("read found pull request %s after the failed create: %w", describePR(opened), readErr)
+			}
+			if actual.Body != content.Body {
+				return nil, fmt.Errorf("found open pull request %s after the failed create, but its body is not the proposed one; refusing to adopt it", describePR(opened))
+			}
+			sctx.Log(fmt.Sprintf("the failed create had opened %s", describePR(opened)))
+			return opened, nil
+		default:
+			created, err = host.CreatePR(ctx, branch, baseBranch, content)
+		}
+	}
+	return created, err
 }
 
 // retargetExistingPRIfNeeded moves an already-open PR onto a per-run
