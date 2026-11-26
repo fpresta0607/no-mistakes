@@ -885,6 +885,11 @@ func TestResolveVerifiedFindingsJSON(t *testing.T) {
 		{name: "finding covered and no longer reported clears", thisRound: "", reviewed: []string{"service.go"}, pending: []string{"review-1"}, wantCleared: true},
 		{name: "an unwatched finding keeps its neighbour pending", thisRound: "", reviewed: []string{"cache.go"}, pending: []string{"review-1"}},
 		{name: "line-shifted reword in the same file is ambiguous, not resolution", thisRound: lineShiftedReword, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
+		{name: "closed verdict with a no-op note in the same file clears", thisRound: `{"findings":[{"id":"review-9","severity":"info","file":"service.go","line":3,"description":"helper name could be clearer","action":"no-op"}],"closed_findings":["review-1"],"summary":"1 finding"}`, reviewed: []string{"service.go"}, pending: []string{"review-1"}, wantCleared: true},
+		{name: "closed verdict with a blocking finding in the same file stays outstanding", thisRound: `{"findings":[{"id":"review-9","severity":"warning","file":"service.go","line":3,"description":"error is swallowed","action":"auto-fix"}],"closed_findings":["review-1"],"summary":"1 finding"}`, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
+		{name: "closed verdict that re-reports the defect stays outstanding", thisRound: `{"findings":[{"id":"review-9","severity":"error","file":"service.go","line":10,"description":"nil deref on the error path","action":"no-op"}],"closed_findings":["review-1"],"summary":"1 finding"}`, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
+		{name: "closed verdict for another finding leaves a same-file note blocking", thisRound: `{"findings":[{"id":"review-9","severity":"info","file":"service.go","line":3,"description":"helper name could be clearer","action":"no-op"}],"closed_findings":["review-2"],"summary":"1 finding"}`, reviewed: []string{"service.go"}, pending: []string{"review-1"}},
+		{name: "closed verdict without coverage of its file stays outstanding", thisRound: `{"findings":[],"closed_findings":["review-1"],"summary":"0 findings"}`, reviewed: []string{"cache.go"}, pending: []string{"review-1"}},
 	}
 
 	for _, tc := range cases {
