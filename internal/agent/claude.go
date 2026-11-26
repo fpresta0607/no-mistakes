@@ -99,6 +99,9 @@ type claudeAgent struct {
 	// failure in which the provider never answered. Nil keeps such a retry on
 	// the plain backoff and step-budget rule.
 	providerAnswers func(ctx context.Context, endpoint string) error
+	// settingsHost locates the Claude Code settings sources outside the
+	// working directory that decide whether a probe is made at all.
+	settingsHost claudeSettingsHost
 }
 
 // claudeDefaultAPIBaseURL is where Claude Code sends model requests unless
@@ -107,12 +110,21 @@ const claudeDefaultAPIBaseURL = "https://api.anthropic.com"
 
 // claudeCloudProviderEnvVars select a cloud provider whose endpoint this
 // adapter does not resolve, so no probe is made for it.
-var claudeCloudProviderEnvVars = []string{"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"}
+var claudeCloudProviderEnvVars = []string{
+	"CLAUDE_CODE_USE_BEDROCK",
+	"CLAUDE_CODE_USE_VERTEX",
+	"CLAUDE_CODE_USE_FOUNDRY",
+	"CLAUDE_CODE_USE_MANTLE",
+	"CLAUDE_CODE_USE_ANTHROPIC_AWS",
+}
 
 func (a *claudeAgent) Name() string { return "claude" }
 
 // providerProbe probes the endpoint the CLI sends model requests to, read from
-// the environment the CLI is started with.
+// the environment the CLI is started with. It is resolved when a retry needs
+// it, and is nil, keeping the plain retry rule, when a cloud provider is
+// selected, the operator passes --settings, or any Claude Code settings source
+// routes the CLI elsewhere or cannot be read (claudeSettingsHost.leaveRoute).
 func (a *claudeAgent) providerProbe(opts RunOpts) providerProbe {
 	if a.providerAnswers == nil {
 		return nil
@@ -127,6 +139,14 @@ func (a *claudeAgent) providerProbe(opts RunOpts) providerProbe {
 		if value := env[key]; value != "" && value != "0" && !strings.EqualFold(value, "false") {
 			return nil
 		}
+	}
+	for _, arg := range a.extraArgs {
+		if arg == "--settings" || strings.HasPrefix(arg, "--settings=") {
+			return nil
+		}
+	}
+	if !a.settingsHost.leaveRoute(env, opts.CWD, !a.NeutralizesGateInstructions()) {
+		return nil
 	}
 	endpoint := env["ANTHROPIC_BASE_URL"]
 	if endpoint == "" {
@@ -159,7 +179,7 @@ func (a *claudeAgent) NeutralizesGateInstructions() bool {
 }
 
 func (a *claudeAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
-	return runWithRetry(ctx, "claude", opts, claudeMaxRetries, claudeRetryClassifier, nil, a.providerProbe(opts), func() (*Result, error) {
+	return runWithRetry(ctx, "claude", opts, claudeMaxRetries, claudeRetryClassifier, nil, func() providerProbe { return a.providerProbe(opts) }, func() (*Result, error) {
 		return a.runOnce(ctx, opts)
 	})
 }

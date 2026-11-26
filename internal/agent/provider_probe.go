@@ -71,7 +71,7 @@ func awaitProvider(ctx context.Context, opts RunOpts, name string, probe provide
 		if probes == 1 {
 			emitAgentControl(opts, LifecycleEvent{
 				Agent:   name,
-				Phase:   LifecyclePhaseRetry,
+				Phase:   LifecyclePhaseProviderWait,
 				Message: fmt.Sprintf("%s waiting for its model provider to answer before retrying: %v", name, probeErr),
 			})
 		}

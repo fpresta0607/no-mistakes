@@ -21,6 +21,11 @@ func withFastProviderProbe(t *testing.T) {
 	t.Cleanup(func() { providerProbeInterval, providerOutageReserve = interval, reserve })
 }
 
+// probeResolver hands runWithRetry the same probe at every retry.
+func probeResolver(probe providerProbe) func() providerProbe {
+	return func() providerProbe { return probe }
+}
+
 // outageTimeline records the order of attempts and probes.
 type outageTimeline struct {
 	mu     sync.Mutex
@@ -60,7 +65,7 @@ func TestRunWithRetry_TimedOutAttemptRetriesOnceTheProviderAnswersAndPasses(t *t
 	calls := 0
 
 	// Act
-	res, err := runWithRetry(ctx, "claude", RunOpts{}, 3, claudeRetryClassifier, nil, probe, func() (*Result, error) {
+	res, err := runWithRetry(ctx, "claude", RunOpts{}, 3, claudeRetryClassifier, nil, probeResolver(probe), func() (*Result, error) {
 		calls++
 		timeline.add("attempt")
 		if calls == 1 {
@@ -88,12 +93,14 @@ func TestRunWithRetry_NoRetryStartsWhileTheProviderDoesNotAnswer(t *testing.T) {
 	timedOut := &claudeAPIError{Message: "Request timed out"}
 	probes := 0
 	calls := 0
+	var phases []string
+	opts := RunOpts{OnLifecycle: func(event LifecycleEvent) { phases = append(phases, event.Phase) }}
 
 	// Act
-	_, err := runWithRetry(ctx, "claude", RunOpts{}, 3, claudeRetryClassifier, nil, func(context.Context) error {
+	_, err := runWithRetry(ctx, "claude", opts, 3, claudeRetryClassifier, nil, probeResolver(func(context.Context) error {
 		probes++
 		return errors.New("dial tcp: lookup api.anthropic.com: no such host")
-	}, func() (*Result, error) {
+	}), func() (*Result, error) {
 		calls++
 		return nil, timedOut
 	})
@@ -114,6 +121,9 @@ func TestRunWithRetry_NoRetryStartsWhileTheProviderDoesNotAnswer(t *testing.T) {
 	if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, ctx = %v: the wait must give up before the step's own deadline cuts the turn", err, ctx.Err())
 	}
+	if got, want := strings.Join(phases, ","), LifecyclePhaseRetry+","+LifecyclePhaseProviderWait; got != want {
+		t.Fatalf("lifecycle phases = %s, want %s: the wait is declared once, so the stall watcher can leave it to the deadline", got, want)
+	}
 }
 
 func TestRunWithRetry_CancellationEndsTheProviderWait(t *testing.T) {
@@ -125,13 +135,13 @@ func TestRunWithRetry_CancellationEndsTheProviderWait(t *testing.T) {
 	probes := 0
 
 	// Act
-	_, err := runWithRetry(ctx, "claude", RunOpts{}, 3, claudeRetryClassifier, nil, func(context.Context) error {
+	_, err := runWithRetry(ctx, "claude", RunOpts{}, 3, claudeRetryClassifier, nil, probeResolver(func(context.Context) error {
 		probes++
 		if probes == 3 {
 			cancel()
 		}
 		return errors.New("connection refused")
-	}, func() (*Result, error) {
+	}), func() (*Result, error) {
 		return nil, &claudeAPIError{Message: "API Error: Can't reach the API server (ECONNREFUSED)"}
 	})
 
@@ -151,10 +161,10 @@ func TestRunWithRetry_ProviderAnsweringFailuresKeepTheBudgetRule(t *testing.T) {
 	calls := 0
 
 	// Act
-	_, err := runWithRetry(ctx, "claude", RunOpts{}, 3, classifyTransient, nil, func(context.Context) error {
+	_, err := runWithRetry(ctx, "claude", RunOpts{}, 3, classifyTransient, nil, probeResolver(func(context.Context) error {
 		probes++
 		return nil
-	}, func() (*Result, error) {
+	}), func() (*Result, error) {
 		calls++
 		time.Sleep(400 * time.Millisecond)
 		return nil, errors.New("API Error: overloaded_error: please retry")
@@ -166,46 +176,30 @@ func TestRunWithRetry_ProviderAnsweringFailuresKeepTheBudgetRule(t *testing.T) {
 	}
 }
 
-func TestClaudeProviderProbeEndpoint(t *testing.T) {
-	for _, tc := range []struct {
-		name         string
-		env          []string
-		wantEndpoint string
-		wantProbe    bool
-	}{
-		{name: "default API", wantEndpoint: claudeDefaultAPIBaseURL, wantProbe: true},
-		{name: "base URL override", env: []string{"ANTHROPIC_BASE_URL=https://gateway.example.test"}, wantEndpoint: "https://gateway.example.test", wantProbe: true},
-		{name: "bedrock", env: []string{"CLAUDE_CODE_USE_BEDROCK=1"}},
-		{name: "vertex", env: []string{"CLAUDE_CODE_USE_VERTEX=true"}},
-		{name: "foundry", env: []string{"CLAUDE_CODE_USE_FOUNDRY=1"}},
-		{name: "bedrock off", env: []string{"CLAUDE_CODE_USE_BEDROCK=0"}, wantEndpoint: claudeDefaultAPIBaseURL, wantProbe: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			// Arrange
-			t.Setenv("ANTHROPIC_BASE_URL", "")
-			for _, key := range claudeCloudProviderEnvVars {
-				t.Setenv(key, "")
-			}
-			var probed string
-			a := &claudeAgent{providerAnswers: func(_ context.Context, endpoint string) error {
-				probed = endpoint
-				return nil
-			}}
+// A settings source that routes the CLI elsewhere resolves to no probe at
+// retry time, and the request timeout then keeps the plain budget rule.
+func TestRunWithRetry_NoProbeAtRetryTimeKeepsTheBudgetRule(t *testing.T) {
+	// Arrange
+	defer withFastBackoff(t)()
+	withFastProviderProbe(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	resolved := 0
+	calls := 0
 
-			// Act
-			probe := a.providerProbe(RunOpts{CWD: t.TempDir(), Env: tc.env})
+	// Act
+	_, err := runWithRetry(ctx, "claude", RunOpts{}, 3, claudeRetryClassifier, nil, func() providerProbe {
+		resolved++
+		return nil
+	}, func() (*Result, error) {
+		calls++
+		time.Sleep(400 * time.Millisecond)
+		return nil, &claudeAPIError{Message: "Request timed out"}
+	})
 
-			// Assert
-			if (probe != nil) != tc.wantProbe {
-				t.Fatalf("probe = %v, want present %v", probe != nil, tc.wantProbe)
-			}
-			if probe == nil {
-				return
-			}
-			if err := probe(context.Background()); err != nil || probed != tc.wantEndpoint {
-				t.Fatalf("probed %q (err %v), want %q", probed, err, tc.wantEndpoint)
-			}
-		})
+	// Assert
+	if resolved != 1 || calls != 1 || err == nil || !strings.Contains(err.Error(), "less than the") {
+		t.Fatalf("resolved=%d calls=%d err=%v, want the probe resolved after the failure and the budget rule applied", resolved, calls, err)
 	}
 }
 
@@ -219,12 +213,13 @@ func TestClaudeAgent_RequestTimeoutRetriesOnceTheProviderAnswers(t *testing.T) {
 	// Arrange
 	defer withFastBackoff(t)()
 	withFastProviderProbe(t)
-	t.Setenv("ANTHROPIC_BASE_URL", "")
+	settings := newClaudeSettingsFixture(t)
 	t.Setenv("NM_CLAUDE_STDIN_HELPER", "transient-then-succeed")
 	t.Setenv("NM_CLAUDE_STDIN_COUNT_FILE", filepath.Join(t.TempDir(), "attempts"))
 	t.Setenv("NM_CLAUDE_STDIN_TRANSIENT_REMAIN", "1")
 	t.Setenv("NM_CLAUDE_STDIN_BANNER", `{"type":"result","subtype":"success","is_error":true,"terminal_reason":"api_error","api_error_status":null,"result":"Request timed out"}`+"\n")
 	a := newClaudeStdinHelperAgent(t)
+	a.settingsHost = settings.host()
 	var probed []string
 	a.providerAnswers = func(_ context.Context, endpoint string) error {
 		probed = append(probed, endpoint)
