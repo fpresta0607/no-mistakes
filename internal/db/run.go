@@ -236,6 +236,21 @@ func (r *Run) EvidencePath() string {
 	return *r.EvidenceDir
 }
 
+// InheritedPRHead returns the run's submitted head when the run is bound to an
+// open PR it inherited at launch and never pushed to: every push field is
+// unset, so the PR's head can only be the head the run was submitted at. A
+// terminal admission continues such a run only after reading that head live
+// (#336); any partial push binding is not an inherited PR and returns false.
+func (r *Run) InheritedPRHead() (string, bool) {
+	if r == nil || r.PRURL == nil || r.PRState == nil || *r.PRState != "open" || r.SubmittedHeadSHA == nil || *r.SubmittedHeadSHA == "" {
+		return "", false
+	}
+	if r.LastPushedSHA != nil || r.PushGeneration != nil || r.PushTargetKind != nil || r.PushTargetFingerprint != nil || r.PushRef != nil || r.LastPushedAt != nil {
+		return "", false
+	}
+	return *r.SubmittedHeadSHA, true
+}
+
 // InsertRun creates a new run record.
 func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
 	return d.InsertRunWithIntent(repoID, branch, headSHA, baseSHA, nil, "")

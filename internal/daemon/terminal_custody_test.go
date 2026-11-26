@@ -947,6 +947,84 @@ func TestTerminalPublicationRequiresTheOriginalPRAndHead(t *testing.T) {
 	}
 }
 
+// A failed run that inherited an open PR and never pushed to it used to be
+// refused as an incomplete publication binding (#336). It is bound to that PR
+// at its submitted head, read live, and a partial push binding still refuses.
+func TestTerminalPublicationBindsAnInheritedPRAtItsSubmittedHead(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	for _, variable := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "NM_HOME"} {
+		t.Setenv(variable, p.Root())
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, head := setupTestGitRepo(t, p, database, "inherited-terminal")
+	public := p.RepoDir(repo.ID)
+	moved := gitOutput(t, repo.WorkingPath, "commit-tree", head+"^{tree}", "-p", head, "-m", "pushed outside the run")
+	gitCmd(t, repo.WorkingPath, "push", public, moved+":refs/heads/moved-outside-the-run")
+	repo.UpstreamURL = "https://github.com/example/fixture.git"
+	gitCmd(t, repo.WorkingPath, "config", "url."+filepath.ToSlash(public)+".insteadOf", repo.UpstreamURL)
+	run, err := database.InsertRun(repo.ID, "feature", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	url := "https://github.com/example/fixture/pull/27"
+	if err := database.UpdateRunPRURL(run.ID, url); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responsePath := filepath.Join(t.TempDir(), "pr.json")
+	binaryDir := t.TempDir()
+	command := filepath.Join(binaryDir, "gh")
+	script := "#!/bin/sh\ncat " + shellQuoteForTest(responsePath) + "\n"
+	if runtime.GOOS == "windows" {
+		command += ".bat"
+		script = "@echo off\r\ntype \"" + responsePath + "\"\r\n"
+	}
+	if err := os.WriteFile(command, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binaryDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	generation := int64(1)
+	for _, test := range []struct {
+		name, liveHead string
+		pushGeneration *int64
+		wantError      string
+	}{
+		{"PR still at the submitted head", head, nil, ""},
+		{"PR head moved", moved, nil, "inherited PR head moved from the run's submitted head " + head + " to " + moved},
+		{"partial push binding", head, &generation, "terminal publication binding is incomplete"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Arrange
+			gitCmd(t, public, "update-ref", "refs/heads/feature", test.liveHead)
+			body := fmt.Sprintf(`{"html_url":%q,"state":"open","head":{"sha":%q,"ref":"feature","repo":{"full_name":"example/fixture"}},"base":{"ref":"main","repo":{"full_name":"example/fixture"}}}`, url, test.liveHead)
+			if err := os.WriteFile(responsePath, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			selected := *run
+			selected.PushGeneration = test.pushGeneration
+			cfg := config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{})
+
+			// Act
+			err := proveTerminalPublication(context.Background(), &selected, repo, repo.WorkingPath, nil, cfg)
+
+			// Assert
+			if test.wantError == "" && err != nil || test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
+				t.Fatalf("publication proof = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestTerminalRefusedPreflightDoesNotBindAnUnacceptedCandidate(t *testing.T) {
 	factory := func() []pipeline.Step {
 		var sequence []pipeline.Step
