@@ -1212,17 +1212,19 @@ func TestInspectOwnerBesideANewerPublishedRun(t *testing.T) {
 	for _, tt := range []struct {
 		name          string
 		olderBinding  *db.PushBinding
-		olderOutside  bool
+		newerOutside  bool
 		olderMoved    bool
+		olderDirty    bool
 		moveGateAfter bool
 		wantNewer     bool
 	}{
 		{name: "never-pushed older run yields to the newer published run", wantNewer: true},
 		{name: "never-pushed older run that moved its head stays the owner", olderMoved: true},
+		{name: "never-pushed older run with recorded dirty source stays the owner", olderDirty: true},
 		{name: "older run that pushed to another ref stays the owner", olderBinding: &db.PushBinding{TargetKind: "upstream", Ref: "refs/heads/other"}},
 		{name: "older run that pushed to another target stays the owner", olderBinding: &db.PushBinding{TargetKind: "upstream", TargetFingerprint: TargetFingerprint("https://example.com/other.git"), Ref: "refs/heads/feature/recover"}},
 		{name: "gate branch past the newer pushed head keeps the older owner", moveGateAfter: true},
-		{name: "newer pushed head without the older head keeps the older owner", olderOutside: true},
+		{name: "newer pushed head without the older head keeps the older owner", newerOutside: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -1243,8 +1245,8 @@ func TestInspectOwnerBesideANewerPublishedRun(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if tt.olderOutside {
-				if err := f.db.UpdateRunHeadSHA(older.ID, commitOutsidePreservedHistory(t, f)); err != nil {
+			if tt.olderDirty {
+				if err := f.db.RecordTerminalSourceState(older.ID, "dirty:"+f.submitted); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -1257,6 +1259,9 @@ func TestInspectOwnerBesideANewerPublishedRun(t *testing.T) {
 			newer, err := f.db.InsertRun(f.repo.ID, "feature/recover", f.submitted, f.base)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if tt.newerOutside {
+				mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", f.base)
 			}
 			pushed := commitOnGateBranch(t, f, "published")
 			if err := f.db.UpdateRunStatusWithVerifiedHead(newer.ID, types.RunCompleted, pushed); err != nil {

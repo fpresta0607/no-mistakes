@@ -2464,11 +2464,13 @@ func exactPushedBinding(repo *db.Repo, run *db.Run, branch string) bool {
 // older run that ended before its push step with its head still at the
 // submitted head holds no pipeline commits and has no binding to compare, so it
 // qualifies when the newer binding is exact for this branch; one that moved its
-// head without push provenance stays authoritative. Any missing or conflicting
-// evidence leaves the older run authoritative.
+// head or recorded dirty source without push provenance stays authoritative.
+// Any missing or conflicting evidence leaves the older run authoritative.
 func (s *Service) supersededUnpublishedRun(ctx context.Context, older, newer *db.Run, branch string) bool {
 	if older == nil || newer == nil || !terminalRunStatus(older.Status) || !unpublishedPipelineHead(older) ||
-		!(samePushTargetBinding(older, newer) || (neverPushed(older) && runHeadUnmoved(older) && exactPushedBinding(s.Repo, newer, branch))) ||
+		!(samePushTargetBinding(older, newer) || (neverPushed(older) && runHeadUnmoved(older) &&
+			(older.TerminalSourceState == nil || !strings.HasPrefix(*older.TerminalSourceState, "dirty:")) &&
+			exactPushedBinding(s.Repo, newer, branch))) ||
 		strings.TrimSpace(s.GateDir) == "" || older.HeadSHA == "" || newer.LastPushedSHA == nil {
 		return false
 	}
