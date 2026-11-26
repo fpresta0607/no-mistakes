@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -240,38 +241,114 @@ func TestLintStep_WrapperLeavesLintAlone(t *testing.T) {
 // agent's prompt.
 const wrapperWordsMarker = "followed by the command's program and its own arguments: "
 
+// promptWrapperWords returns the wrapper words a Test agent's prompt names,
+// with the rule that names them: the prompt line that carries them.
+func promptWrapperWords(prompt string) (string, []string, error) {
+	before, rest, found := strings.Cut(prompt, wrapperWordsMarker)
+	if !found {
+		return "", nil, errors.New("prompt names no wrapper words")
+	}
+	rule := before[strings.LastIndex(before, "\n")+1:] + wrapperWordsMarker
+	var words []string
+	if err := json.NewDecoder(strings.NewReader(rest)).Decode(&words); err != nil || len(words) == 0 {
+		return "", nil, fmt.Errorf("wrapper words in the prompt = %q, %v", words, err)
+	}
+	return rule, words, nil
+}
+
+// startAgentShellCommand starts command through the shell the way a Test
+// agent's own command starts, behind words when there are any, and returns
+// what it printed.
+func startAgentShellCommand(ctx context.Context, f *wrapperFixture, dir string, words []string, command string) (string, error) {
+	shell, flag := "sh", "-c"
+	if runtime.GOOS == "windows" {
+		shell, flag = "cmd.exe", "/c"
+	}
+	shellPath, err := exec.LookPath(shell)
+	if err != nil {
+		return "", err
+	}
+	argv := append(append([]string{}, words...), shellPath, flag, command)
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Dir = dir
+	cmd.Env = mergeEnv(f.sctx.Env)
+	output, err := cmd.CombinedOutput()
+	return string(output), err
+}
+
 // agentBuildBehindWrapper is a Test agent that starts its own build the way
 // its prompt tells it to, behind the words the prompt names, and fails the
 // test when the prompt names none.
 func agentBuildBehindWrapper(t *testing.T, f *wrapperFixture, build string) func(context.Context, agent.RunOpts) (*agent.Result, error) {
 	return func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		passing := &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}
-		_, rest, found := strings.Cut(opts.Prompt, wrapperWordsMarker)
-		if !found {
-			t.Errorf("prompt names no wrapper words for the agent's own build:\n%s", opts.Prompt)
-			return passing, nil
-		}
-		var words []string
-		if err := json.NewDecoder(strings.NewReader(rest)).Decode(&words); err != nil || len(words) == 0 {
-			t.Errorf("wrapper words in the prompt = %q, %v", words, err)
-			return passing, nil
-		}
-		shell, flag := "sh", "-c"
-		if runtime.GOOS == "windows" {
-			shell, flag = "cmd.exe", "/c"
-		}
-		shellPath, err := exec.LookPath(shell)
+		_, words, err := promptWrapperWords(opts.Prompt)
 		if err != nil {
-			t.Errorf("find %s: %v", shell, err)
+			t.Errorf("%v for the agent's own build:\n%s", err, opts.Prompt)
 			return passing, nil
 		}
-		cmd := exec.CommandContext(ctx, words[0], append(words[1:], shellPath, flag, build)...)
-		cmd.Dir = opts.CWD
-		cmd.Env = mergeEnv(f.sctx.Env)
-		if output, err := cmd.CombinedOutput(); err != nil {
+		if output, err := startAgentShellCommand(ctx, f, opts.CWD, words, build); err != nil {
 			t.Errorf("agent's build behind the wrapper: %v\n%s", err, output)
 		}
 		return passing, nil
+	}
+}
+
+// echoVariableCommand prints one environment variable from the shell a step
+// command starts in.
+func echoVariableCommand(name string) string {
+	if runtime.GOOS == "windows" {
+		return "echo %" + name + "%"
+	}
+	return `echo "$` + name + `"`
+}
+
+// Issue #390: the machine's wrapper, not the step, bound the project's
+// environment (uv's UV_PROJECT_ENVIRONMENT) for the test command it started.
+// The Test agent then ran its interpreter probe outside the wrapper, resolved
+// a host interpreter without pytest, and reported the suite's tools missing
+// from an environment the baseline had just used. The stand-in agent follows
+// its prompt: it starts the probe behind the words only when the rule naming
+// them covers a command that runs the project's interpreter.
+func TestTestStep_AgentInterpreterProbeResolvesTheEnvironmentTheBaselineRanOn(t *testing.T) {
+	const variable = "NM_ISSUE_390_PROJECT_ENVIRONMENT"
+	bound := filepath.Join(t.TempDir(), ".venv")
+	f := newWrapperFixture(t, config.Commands{Test: echoVariableCommand(variable)}, map[string]string{
+		"FAKE_CLI_WRAPPER_BINDS": variable + "=" + bound,
+	})
+	var probed string
+	f.agent.runFn = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		passing := &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}
+		rule, words, err := promptWrapperWords(opts.Prompt)
+		if err != nil {
+			t.Errorf("%v:\n%s", err, opts.Prompt)
+			return passing, nil
+		}
+		if !strings.Contains(rule, "interpreter") {
+			words = nil
+		}
+		output, err := startAgentShellCommand(ctx, f, opts.CWD, words, echoVariableCommand(variable))
+		if err != nil {
+			t.Errorf("agent's interpreter probe: %v\n%s", err, output)
+		}
+		probed = strings.TrimSpace(output)
+		return passing, nil
+	}
+
+	if _, err := (&TestStep{}).Execute(f.sctx); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if len(f.agent.calls) == 0 {
+		t.Fatal("no Test agent turn ran")
+	}
+	if log := strings.Join(*f.logs, "\n"); !strings.Contains(log, bound) {
+		t.Fatalf("step log = %q, want the baseline to have run on the wrapper's binding %q", log, bound)
+	}
+	if probed != bound {
+		t.Fatalf("agent's interpreter probe resolved %q, want the environment the baseline ran on, %q", probed, bound)
+	}
+	if prompt := f.agent.calls[0].Prompt; !strings.Contains(prompt, "never report a tool or dependency missing") {
+		t.Fatalf("prompt = %q, want a missing tool never concluded from a command started without the words", prompt)
 	}
 }
 
@@ -325,6 +402,9 @@ func TestTestStep_AgentWithAWrapperThatCannotBeFilledStartsNoBuild(t *testing.T)
 	prompt := f.agent.calls[0].Prompt
 	if strings.Contains(prompt, wrapperWordsMarker) || !strings.Contains(prompt, "Start no build, compile or test run") || !strings.Contains(prompt, "test_comparison_sha") {
 		t.Fatalf("prompt = %q, want no wrapper words, the reason named, and no build allowed", prompt)
+	}
+	if !strings.Contains(prompt, "no command that runs or inspects the project's interpreter, package manager or test tools") || !strings.Contains(prompt, "Never report a tool or dependency missing from a command started without the wrapper") {
+		t.Fatalf("prompt = %q, want no interpreter command allowed and no missing tool reported from one started without the wrapper", prompt)
 	}
 }
 

@@ -96,11 +96,16 @@ const testLoadRunGuidance = "\n- Start no load, stress or saturation run: no bus
 // words for the heavy work it starts by itself. A build an agent chose on its
 // own once held 3 GB beside a test line that counted only configured test
 // commands, while other runs' tests waited there for memory (issue #252).
+// The words also carry whatever environment the wrapper binds for what it
+// starts, which the step never sees. An agent once probed `uv run --no-sync
+// python -c "import pytest"` outside them, resolved a host interpreter instead
+// of the project environment the wrapper had bound for the baseline, and
+// reported the suite's tools missing (issue #390).
 func testCommandWrapperGuidance(sctx *pipeline.StepContext) string {
 	words, err := commandWrapperWords(sctx, "test")
 	if err != nil {
 		sctx.Log("Test agent gets no test wrapper: " + err.Error())
-		return "\n- This machine runs builds and tests in a test line, and its wrapper could not be prepared for this run (" + err.Error() + "). Start no build, compile or test run; report every scenario that needs one as untested with that reason."
+		return "\n- This machine runs builds and tests in a test line, and its wrapper could not be prepared for this run (" + err.Error() + "). Start no build, compile or test run, and no command that runs or inspects the project's interpreter, package manager or test tools (such as `uv run`, an import check or a tool's version), since without the wrapper it can resolve a different environment than the configured test command would run in. Never report a tool or dependency missing from a command started without the wrapper; report every scenario that needs one of these commands as untested with that reason."
 	}
 	if len(words) == 0 {
 		return ""
@@ -111,8 +116,8 @@ func testCommandWrapperGuidance(sctx *pipeline.StepContext) string {
 	if err := encoder.Encode(words); err != nil {
 		panic(err) // a []string always encodes
 	}
-	sctx.Log("machine-local wrapper given to the Test agent for the builds and test runs it starts")
-	guidance := fmt.Sprintf("\n- This machine runs builds and tests in a test line. Start every command that installs dependencies, builds, compiles or runs tests (a whole suite or one named test) behind these words, as one argument each and in this order, followed by the command's program and its own arguments: %s. The words may wait for this machine's turn before they start the command; wait inside that tool call. Never start such a command without them.", bytes.TrimSpace(list.Bytes()))
+	sctx.Log("machine-local wrapper given to the Test agent for the builds, test runs and project interpreter commands it starts")
+	guidance := fmt.Sprintf("\n- This machine runs builds and tests in a test line. Start every command that installs dependencies, builds, compiles or runs tests (a whole suite or one named test), and every command that runs or inspects the project's interpreter, package manager or test tools (such as `uv run`, an import check or a tool's version), behind these words, as one argument each and in this order, followed by the command's program and its own arguments: %s. The words may wait for this machine's turn before they start the command; wait inside that tool call. They may also start the command in the environment the configured test command ran in, such as the project's bound interpreter and tools, so a command started without them can resolve a different one. Never start such a command without them, and never report a tool or dependency missing from a command started without them.", bytes.TrimSpace(list.Bytes()))
 	if prefix := sctx.Config.TestCommandWrapper.RefusalPrefix; prefix != "" {
 		guidance += fmt.Sprintf(" An exit code of 125 or 126 whose last output line starts with %q means the machine gave the command no turn and it never ran: report every scenario that needed it as untested with that line, and never run it another way.", prefix)
 	}
