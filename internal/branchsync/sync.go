@@ -2461,13 +2461,14 @@ func exactPushedBinding(repo *db.Repo, run *db.Run, branch string) bool {
 // ignore an older terminal unpublished head during branch selection. The gate
 // is read-only evidence: its exact branch head must equal the newer push
 // binding, and Git must prove the older preserved head is its ancestor. An
-// older run that never pushed (cancelled or failed before its push step) has no
-// binding to compare, so it qualifies only when the newer binding is exact for
-// this branch. Any missing or conflicting evidence leaves the older run
-// authoritative.
+// older run that ended before its push step with its head still at the
+// submitted head holds no pipeline commits and has no binding to compare, so it
+// qualifies when the newer binding is exact for this branch; one that moved its
+// head without push provenance stays authoritative. Any missing or conflicting
+// evidence leaves the older run authoritative.
 func (s *Service) supersededUnpublishedRun(ctx context.Context, older, newer *db.Run, branch string) bool {
 	if older == nil || newer == nil || !terminalRunStatus(older.Status) || !unpublishedPipelineHead(older) ||
-		!(samePushTargetBinding(older, newer) || (neverPushed(older) && exactPushedBinding(s.Repo, newer, branch))) ||
+		!(samePushTargetBinding(older, newer) || (neverPushed(older) && runHeadUnmoved(older) && exactPushedBinding(s.Repo, newer, branch))) ||
 		strings.TrimSpace(s.GateDir) == "" || older.HeadSHA == "" || newer.LastPushedSHA == nil {
 		return false
 	}

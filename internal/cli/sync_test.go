@@ -946,34 +946,22 @@ func newCLIStaleUnpublishedFixtureWithOptions(t *testing.T, pushedDescendant boo
 	return cliStaleUnpublishedFixture{local: local, gate: gate, base: base, localHead: localHead, unpublished: unpublished, pushed: pushed}
 }
 
-// The never-pushed case is issue #335: an older run that ended before its push
-// step recorded no target provenance, so it yields to the newer exact binding.
 func TestAxiSyncOlderUnpublishedRunSelectsNewerPushedDescendant(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		provenance olderTargetProvenance
-	}{
-		{name: "matching", provenance: olderTargetMatching},
-		{name: "never_pushed", provenance: olderTargetMissing},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newCLIStaleUnpublishedFixtureWithOptions(t, true, tc.provenance)
-			out, err := executeCmd("axi", "sync")
-			if err != nil {
-				t.Fatalf("descendant sync: %v\n%s", err, out)
-			}
-			for _, want := range []string{"state: synchronized", "status: completed", f.pushed, "changed: true"} {
-				if !strings.Contains(out, want) {
-					t.Errorf("descendant sync missing %q:\n%s", want, out)
-				}
-			}
-			if got := cliGit(t, f.local, "rev-parse", "HEAD"); got != f.pushed {
-				t.Fatalf("sync HEAD = %s, want pushed descendant %s", got, f.pushed)
-			}
-			if got := cliGit(t, f.gate, "rev-parse", "refs/heads/feature/sync"); got != f.pushed {
-				t.Fatalf("sync moved gate to %s, want unchanged pushed head %s", got, f.pushed)
-			}
-		})
+	f := newCLIStaleUnpublishedFixture(t)
+	out, err := executeCmd("axi", "sync")
+	if err != nil {
+		t.Fatalf("descendant sync: %v\n%s", err, out)
+	}
+	for _, want := range []string{"state: synchronized", "status: completed", f.pushed, "changed: true"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("descendant sync missing %q:\n%s", want, out)
+		}
+	}
+	if got := cliGit(t, f.local, "rev-parse", "HEAD"); got != f.pushed {
+		t.Fatalf("sync HEAD = %s, want pushed descendant %s", got, f.pushed)
+	}
+	if got := cliGit(t, f.gate, "rev-parse", "refs/heads/feature/sync"); got != f.pushed {
+		t.Fatalf("sync moved gate to %s, want unchanged pushed head %s", got, f.pushed)
 	}
 }
 
@@ -1033,6 +1021,7 @@ func TestAxiSyncOlderUnpublishedTargetProvenanceRefusesTakeover(t *testing.T) {
 		provenance olderTargetProvenance
 	}{
 		{name: "conflicting", provenance: olderTargetConflicting},
+		{name: "missing", provenance: olderTargetMissing},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newCLIStaleUnpublishedFixtureWithOptions(t, true, tc.provenance)

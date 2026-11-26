@@ -1213,10 +1213,12 @@ func TestInspectOwnerBesideANewerPublishedRun(t *testing.T) {
 		name          string
 		olderBinding  *db.PushBinding
 		olderOutside  bool
+		olderMoved    bool
 		moveGateAfter bool
 		wantNewer     bool
 	}{
 		{name: "never-pushed older run yields to the newer published run", wantNewer: true},
+		{name: "never-pushed older run that moved its head stays the owner", olderMoved: true},
 		{name: "older run that pushed to another ref stays the owner", olderBinding: &db.PushBinding{TargetKind: "upstream", Ref: "refs/heads/other"}},
 		{name: "older run that pushed to another target stays the owner", olderBinding: &db.PushBinding{TargetKind: "upstream", TargetFingerprint: TargetFingerprint("https://example.com/other.git"), Ref: "refs/heads/feature/recover"}},
 		{name: "gate branch past the newer pushed head keeps the older owner", moveGateAfter: true},
@@ -1243,6 +1245,11 @@ func TestInspectOwnerBesideANewerPublishedRun(t *testing.T) {
 			}
 			if tt.olderOutside {
 				if err := f.db.UpdateRunHeadSHA(older.ID, commitOutsidePreservedHistory(t, f)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.olderMoved {
+				if err := f.db.UpdateRunHeadSHA(older.ID, commitOnGateBranch(t, f, "older-fix")); err != nil {
 					t.Fatal(err)
 				}
 			}
