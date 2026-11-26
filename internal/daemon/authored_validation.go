@@ -72,9 +72,9 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		stageNames = append(stageNames, name)
 		stageStarts = append(stageStarts, time.Now())
 	}
-	enterStage("waiting for the branch lock")
+	enterStage("waiting for the branch lock and the run manager")
 	var result *ipc.ValidateAuthoredResult
-	_, err := m.withBranchLock(request.RepoID, request.Branch, func() (_ string, err error) {
+	_, err := m.withBranchLockContext(ctx, request.RepoID, request.Branch, func() (_ string, err error) {
 		enterStage("reading the predecessor")
 		if m.shuttingDown.Load() {
 			return "", fmt.Errorf("daemon is shutting down")
@@ -105,7 +105,10 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if request.TerminalGeneration != "" && !maps.Equal(anchors, request.SourceAnchors) {
 			return "", fmt.Errorf("terminal recovery anchors changed; inspect and bind every known anchor")
 		}
-		m.mu.Lock()
+		enterStage("checking for competing runs")
+		if err := lockContext(ctx, &m.mu); err != nil {
+			return "", err
+		}
 		isPredecessorScheduled := m.runScheduledLocked(snapshot.Run.ID)
 		m.mu.Unlock()
 		if isPredecessorScheduled || !snapshot.Run.Status.Terminal() || snapshot.Run.PushActive {
@@ -128,16 +131,22 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil {
 			return "", err
 		}
+		if err := lockContext(ctx, &m.mu); err != nil {
+			return "", err
+		}
+		isBranchOwned := false
 		for _, run := range runs {
 			if run.Branch != request.Branch || run.ID == snapshot.Run.ID || event != nil && run.ID == event.ChildID {
 				continue
 			}
-			m.mu.Lock()
-			isRunScheduled := m.runScheduledLocked(run.ID)
-			m.mu.Unlock()
-			if !run.Status.Terminal() || run.ID > snapshot.Run.ID || isRunScheduled {
-				return "", fmt.Errorf("a newer or active run owns this branch; authored admission cannot replace it")
+			if !run.Status.Terminal() || run.ID > snapshot.Run.ID || m.runScheduledLocked(run.ID) {
+				isBranchOwned = true
+				break
 			}
+		}
+		m.mu.Unlock()
+		if isBranchOwned {
+			return "", fmt.Errorf("a newer or active run owns this branch; authored admission cannot replace it")
 		}
 		if event != nil {
 			if !reflect.DeepEqual(event.Request, request) {
@@ -162,7 +171,9 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 			// A scheduled child stays pending until its executor starts, so a
 			// child that holds a slot or is queued for one is already owned and
 			// a replay only observes.
-			m.mu.Lock()
+			if err := lockContext(ctx, &m.mu); err != nil {
+				return "", err
+			}
 			isChildScheduled := m.runScheduledLocked(child.ID)
 			m.mu.Unlock()
 			if child.Status != types.RunPending || isChildScheduled {

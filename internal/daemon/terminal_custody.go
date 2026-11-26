@@ -37,7 +37,7 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	var result *ipc.RecoverTerminalResult
-	_, err := m.withBranchLock(request.RepoID, request.Branch, func() (string, error) {
+	_, err := m.withBranchLockContext(ctx, request.RepoID, request.Branch, func() (string, error) {
 		if m.shuttingDown.Load() {
 			return "", fmt.Errorf("daemon is shutting down")
 		}
@@ -93,7 +93,9 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if request.SnapshotDigest != original.Digest() {
 			return "", fmt.Errorf("terminal run, generation, receipt or findings changed since observation")
 		}
-		m.mu.Lock()
+		if err := lockContext(ctx, &m.mu); err != nil {
+			return "", err
+		}
 		executor := m.executors[original.Run.ID]
 		isChildScheduled := event != nil && m.runScheduledLocked(event.Successor.ID)
 		m.mu.Unlock()

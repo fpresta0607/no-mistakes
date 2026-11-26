@@ -1884,14 +1884,52 @@ func (m *RunManager) branchMutex(repoID, branch string) *sync.Mutex {
 }
 
 func (m *RunManager) withBranchLock(repoID, branch string, action func() (string, error)) (string, error) {
+	return m.withBranchLockContext(context.Background(), repoID, branch, action)
+}
+
+// withBranchLockContext is withBranchLock for a caller with a deadline. A held
+// branch lock or run manager lock used to keep such a caller waiting until the
+// holder finished, long past the deadline its client had already given up on
+// (#337); it now stops waiting when ctx ends.
+func (m *RunManager) withBranchLockContext(ctx context.Context, repoID, branch string, action func() (string, error)) (string, error) {
 	branchMu := m.branchMutex(repoID, branch)
-	branchMu.Lock()
+	if err := lockContext(ctx, branchMu); err != nil {
+		return "", err
+	}
 	defer branchMu.Unlock()
-	if err := m.beginAdmission(); err != nil {
+	if err := m.beginAdmissionContext(ctx); err != nil {
 		return "", err
 	}
 	defer m.endAdmission()
 	return action()
+}
+
+// lockContext locks mu, or returns ctx's error once ctx ends first. A lock
+// taken after the caller stopped waiting is released at once, so giving up
+// never leaves mu held.
+func lockContext(ctx context.Context, mu *sync.Mutex) error {
+	if ctx.Done() == nil {
+		mu.Lock()
+		return nil
+	}
+	if mu.TryLock() {
+		return nil
+	}
+	acquired := make(chan struct{})
+	go func() {
+		mu.Lock()
+		close(acquired)
+	}()
+	select {
+	case <-acquired:
+		return nil
+	case <-ctx.Done():
+		go func() {
+			<-acquired
+			mu.Unlock()
+		}()
+		return ctx.Err()
+	}
 }
 
 // startRunWithIntentSourceLocked performs run creation while the caller owns

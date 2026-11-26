@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -144,33 +145,73 @@ func TestAuthoredAdmissionTracksItsOwnTelemetryTrigger(t *testing.T) {
 // fail with only the next call's error ("git rev-parse --show-toplevel: context
 // deadline exceeded"), which pointed at a cheap git call instead of the wait
 // that spent the time (#167). The error names the stage the deadline passed in.
+// The wait itself ignored the deadline, so on a busy daemon whose branch lock
+// or run manager lock was held the admission stayed blocked long after its
+// client gave up (#337). It now gives up when its deadline passes.
 func TestAuthoredAdmissionDeadlineNamesTheStageThatSpentIt(t *testing.T) {
-	// Arrange
-	manager, database, repo, request, _ := authoredAdmissionFixture(t, nil)
-	originalTimeout := authoredAdmissionTimeout
-	authoredAdmissionTimeout = 100 * time.Millisecond
-	t.Cleanup(func() { authoredAdmissionTimeout = originalTimeout })
-	branchLock := manager.branchMutex(request.Request.RepoID, request.Request.Branch)
-	branchLock.Lock()
-	go func() {
-		time.Sleep(3 * authoredAdmissionTimeout)
-		branchLock.Unlock()
-	}()
-	before, err := database.GetRunsByRepo(repo.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, test := range []struct {
+		name string
+		lock func(manager *RunManager, request ipc.ValidateAuthoredParams) *sync.Mutex
+	}{
+		{"branch lock", func(manager *RunManager, request ipc.ValidateAuthoredParams) *sync.Mutex {
+			return manager.branchMutex(request.Request.RepoID, request.Request.Branch)
+		}},
+		{"run manager lock", func(manager *RunManager, _ ipc.ValidateAuthoredParams) *sync.Mutex { return &manager.mu }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Arrange
+			manager, database, repo, request, _ := authoredAdmissionFixture(t, nil)
+			for index := range 800 {
+				if _, err := database.InsertRun(repo.ID, fmt.Sprintf("history-%d", index), request.Request.CandidateSHA, request.Request.CandidateSHA); err != nil {
+					t.Fatal(err)
+				}
+			}
+			originalTimeout := authoredAdmissionTimeout
+			authoredAdmissionTimeout = 200 * time.Millisecond
+			t.Cleanup(func() { authoredAdmissionTimeout = originalTimeout })
+			before, err := database.GetRunsByRepo(repo.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			held := test.lock(manager, request)
+			held.Lock()
+			released := make(chan struct{})
+			go func() {
+				time.Sleep(20 * authoredAdmissionTimeout)
+				held.Unlock()
+				close(released)
+			}()
+			t.Cleanup(func() { <-released })
 
-	// Act
-	_, err = manager.validateAuthored(context.Background(), request, os.Getpid())
+			// Act
+			started := time.Now()
+			_, err = manager.validateAuthored(context.Background(), request, os.Getpid())
+			elapsed := time.Since(started)
 
-	// Assert
-	if err == nil || !strings.Contains(err.Error(), "ran out of its 100ms deadline while waiting for the branch lock") || !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "deadline exceeded") {
-		t.Fatalf("admission deadline error = %v, want it to name the branch lock wait", err)
-	}
-	after, err := database.GetRunsByRepo(repo.ID)
-	if err != nil || !reflect.DeepEqual(before, after) {
-		t.Fatalf("a timed-out admission changed runs: %v", err)
+			// Assert
+			if elapsed >= 10*authoredAdmissionTimeout {
+				t.Fatalf("admission waited %s behind the held %s, far past its %s deadline", elapsed.Round(time.Millisecond), test.name, authoredAdmissionTimeout)
+			}
+			if err == nil || !strings.Contains(err.Error(), "ran out of its 200ms deadline while waiting for the branch lock") || !errors.Is(err, context.DeadlineExceeded) && !strings.Contains(err.Error(), "deadline exceeded") {
+				t.Fatalf("admission deadline error = %v, want it to name the lock wait", err)
+			}
+			<-released
+			isFree := false
+			for wait := time.Now().Add(5 * time.Second); time.Now().Before(wait); time.Sleep(10 * time.Millisecond) {
+				if held.TryLock() {
+					held.Unlock()
+					isFree = true
+					break
+				}
+			}
+			if !isFree {
+				t.Fatalf("the %s stayed held after the admission stopped waiting for it", test.name)
+			}
+			after, err := database.GetRunsByRepo(repo.ID)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("a timed-out admission changed runs: %v", err)
+			}
+		})
 	}
 }
 

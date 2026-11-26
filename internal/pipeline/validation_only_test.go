@@ -79,13 +79,19 @@ func validationOnlyFixture(t *testing.T) (*db.DB, *paths.Paths, *db.Run, *db.Rep
 // (issue #75), so it matches the daemon tests' one-minute terminal-state waits.
 const validationParkTimeout = time.Minute
 
+// validationStopTimeout bounds the wait from cancelling a parked run to Execute
+// returning. That span is the run's whole teardown, which outlasted a fixed 6
+// seconds on a Windows host shared by three test processes (issue #340), so it
+// matches validationParkTimeout.
+const validationStopTimeout = time.Minute
+
 // startParkedValidation starts Execute and returns its context once the
 // executor parks at stepName, failing the test if it does not within
 // validationParkTimeout, or at once if the run ends first. The run's context
 // carries no deadline of its own: a shorter one cancelled the run mid-start on
-// a loaded host before it could park. Cleanup cancels the run and waits for
-// Execute to return, so a parked step releases its files before t.TempDir
-// removes them.
+// a loaded host before it could park. Cleanup cancels the run and waits up to
+// validationStopTimeout for Execute to return, so a parked step releases its
+// files before t.TempDir removes them.
 func startParkedValidation(t *testing.T, executor *Executor, child *db.Run, repo *db.Repo, stepName types.StepName) context.Context {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -99,8 +105,8 @@ func startParkedValidation(t *testing.T, executor *Executor, child *db.Run, repo
 		cancel()
 		select {
 		case <-finished:
-		case <-time.After(6 * time.Second):
-			t.Error("executor did not stop")
+		case <-time.After(validationStopTimeout):
+			t.Errorf("executor did not stop within %s", validationStopTimeout)
 		}
 	})
 	for deadline := time.Now().Add(validationParkTimeout); time.Now().Before(deadline); {
@@ -136,6 +142,52 @@ func TestValidationOnlyParkWaitOutlastsASlowRunStart(t *testing.T) {
 
 	if err := executor.Respond(types.StepReview, types.ActionFix, []string{"r1"}); err == nil {
 		t.Error("accepted fix despite zero repair authority")
+	}
+}
+
+// slowTeardownStep parks, and its first gate reconciliation holds the run's
+// teardown for teardown after the run is cancelled.
+type slowTeardownStep struct {
+	teardown    time.Duration
+	calls       atomic.Int32
+	reconciling chan struct{}
+	isTornDown  atomic.Bool
+}
+
+func (s *slowTeardownStep) Name() types.StepName { return types.StepReview }
+func (s *slowTeardownStep) Execute(*StepContext) (*StepOutcome, error) {
+	return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"r1","severity":"error","file":"file.go","description":"repair needed","action":"auto-fix"}]}`}, nil
+}
+func (s *slowTeardownStep) ReconcileApprovalGate(sctx *StepContext) (bool, error) {
+	if s.calls.Add(1) == 1 {
+		close(s.reconciling)
+		<-sctx.Ctx.Done()
+		time.Sleep(s.teardown)
+		s.isTornDown.Store(true)
+	}
+	return false, nil
+}
+
+func TestValidationOnlyStopWaitOutlastsASlowTeardown(t *testing.T) {
+	t.Parallel()
+	database, root, child, repo := validationOnlyFixture(t)
+	// Longer than the earlier fixed 6 second stop wait, standing in for a slow
+	// teardown on a loaded Windows host.
+	step := &slowTeardownStep{teardown: 7 * time.Second, reconciling: make(chan struct{})}
+	executor := NewExecutor(database, root, &config.Config{AutoFix: config.AutoFix{Review: 5}}, nil, []Step{step}, nil)
+	executor.SetGateReconcileTimings(time.Millisecond, time.Hour)
+	t.Cleanup(func() {
+		if !step.isTornDown.Load() {
+			t.Error("cleanup returned before the slow teardown ended")
+		}
+	})
+
+	startParkedValidation(t, executor, child, repo, types.StepReview)
+
+	select {
+	case <-step.reconciling:
+	case <-time.After(validationParkTimeout):
+		t.Fatalf("parked gate was not reconciled within %s", validationParkTimeout)
 	}
 }
 
