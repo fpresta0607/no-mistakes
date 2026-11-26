@@ -107,7 +107,7 @@ func TestAuthoredPublicationProofChecksLiveProviderFactsAndRefusesRaces(t *testi
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			err := proveAuthoredPublication(ctx, &candidate, &candidateRepo, repo.WorkingPath, &config.Config{}, nil)
+			err := proveAuthoredPublication(ctx, &candidate, "", &candidateRepo, repo.WorkingPath, &config.Config{}, nil)
 			if (change == "matching" || change == "mixed-case registration") != (err == nil) {
 				t.Fatalf("publication proof %s: %v", change, err)
 			}
@@ -409,7 +409,7 @@ func TestAuthoredAdmissionContinuesAnInheritedPROnlyAtItsSubmittedHead(t *testin
 		refusal    string
 	}{
 		{"PR still at the submitted head", false, "test/repo", ""},
-		{"PR head moved", true, "test/repo", "is not the run's submitted head"},
+		{"PR head moved", true, "test/repo", "is not the head the run's recorded lineage was submitted at"},
 		{"PR head repository changed", false, "someone/repo", "terminal PR repository, branch, state or public head changed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -467,7 +467,7 @@ func TestAuthoredAdmissionContinuesAnInheritedPROnlyAtItsSubmittedHead(t *testin
 			}
 			refusal := test.refusal
 			if test.isPRMoved {
-				refusal = "inherited PR live head " + livePRHead + " is not the run's submitted head " + submitted
+				refusal = "inherited PR live head " + livePRHead + " is not the head the run's recorded lineage was submitted at, " + submitted
 			}
 			if err == nil || !strings.Contains(err.Error(), refusal) {
 				t.Fatalf("admission over a changed inherited PR = %v, want %q", err, refusal)
@@ -475,6 +475,131 @@ func TestAuthoredAdmissionContinuesAnInheritedPROnlyAtItsSubmittedHead(t *testin
 			after, err := database.GetRunsByRepo(repo.ID)
 			if err != nil || !reflect.DeepEqual(before, after) || gitOutput(t, gate, "rev-parse", "refs/heads/feature") != gateHead {
 				t.Fatalf("refusal changed runs or the gate: %v", err)
+			}
+		})
+	}
+}
+
+// A child created by admission copies its parent's inherited PR but records
+// its own candidate as its submitted head, a commit the PR branch never held,
+// so a further admission from that child was refused though the PR never moved
+// (#448). The child is now bound, through its recorded admission only, to the
+// head its lineage root was submitted at.
+func TestAuthoredAdmissionContinuesAChildOfAnInheritedPRAtItsLineageHead(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		isPRMoved     bool
+		isLinkMissing bool
+	}{
+		{"grandchild while the PR head is unchanged", false, false},
+		{"PR head moved after the child", true, false},
+		{"child whose recorded link is missing", false, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Arrange
+			manager, database, repo, request, gate := authoredAdmissionFixture(t, func() []pipeline.Step {
+				return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+			})
+			prURL := "https://github.com/test/repo/pull/17"
+			if err := database.UpdateRunPRURL(request.Request.PredecessorID, prURL); err != nil {
+				t.Fatal(err)
+			}
+			root, err := database.ReadTerminalSnapshot(request.Request.PredecessorID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rootHead := *root.Run.SubmittedHeadSHA
+			request.Request.SnapshotDigest = root.Digest()
+			proof, err := request.Request.LaunchAssertion.Verify(request.Request.LaunchAssertion.TrustedSHA, request.Request.LaunchAssertion.Profiles)
+			if err != nil {
+				t.Fatal(err)
+			}
+			event, _, err := database.AcceptValidationAdmission(context.Background(), db.ValidationAdmission{Request: request.Request, Snapshot: *root, AssertionProof: proof, WorktreeRoot: filepath.Dir(manager.paths.WorktreeDir(repo.ID, "pending")), Gates: "[]", Steps: []types.StepName{types.StepReview}, Operator: "fixture"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, gate, "fetch", "--no-tags", "--no-write-fetch-head", repo.WorkingPath, request.Request.CandidateSHA)
+			gitCmd(t, gate, "update-ref", "refs/no-mistakes/authored-candidate/"+event.ID, request.Request.CandidateSHA)
+			if err := database.UpdateRunStatus(event.ChildID, types.RunFailed); err != nil {
+				t.Fatal(err)
+			}
+			if test.isLinkMissing {
+				connection, err := sql.Open("sqlite", manager.paths.DB())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer connection.Close()
+				if _, err := connection.Exec(`DELETE FROM validation_admissions WHERE child_id = ?`, event.ChildID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			child, err := database.ReadTerminalSnapshot(event.ChildID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if child.Run.PRURL == nil || *child.Run.PRURL != prURL || child.Run.LastPushedSHA != nil || *child.Run.SubmittedHeadSHA == rootHead {
+				t.Fatalf("fixture did not leave an unpublished child bound to the inherited PR: %+v", child.Run)
+			}
+			lineageHead, err := database.InheritedPRLineageHead(&child.Run)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantHead := rootHead
+			if test.isLinkMissing {
+				wantHead = *child.Run.SubmittedHeadSHA
+			}
+			if lineageHead != wantHead {
+				t.Fatalf("lineage head = %s, want %s", lineageHead, wantHead)
+			}
+			if test.isLinkMissing {
+				gitCmd(t, gate, "update-ref", "refs/heads/feature", *child.Run.SubmittedHeadSHA)
+			}
+			public := t.TempDir()
+			gitCmd(t, public, "init", "--bare")
+			gitCmd(t, repo.WorkingPath, "push", public, rootHead+":refs/heads/feature")
+			livePRHead := rootHead
+			if test.isPRMoved {
+				livePRHead = gitOutput(t, repo.WorkingPath, "commit-tree", rootHead+"^{tree}", "-p", rootHead, "-m", "pushed outside the lineage")
+				gitCmd(t, repo.WorkingPath, "push", "--force", public, livePRHead+":refs/heads/feature")
+			}
+			gitCmd(t, repo.WorkingPath, "config", "url."+filepath.ToSlash(public)+".insteadOf", repo.UpstreamURL)
+			originalOutput := authoredPRCommandOutput
+			t.Cleanup(func() { authoredPRCommandOutput = originalOutput })
+			authoredPRCommandOutput = func(command *exec.Cmd) ([]byte, error) {
+				return []byte(fmt.Sprintf(`{"html_url":%q,"state":"open","head":{"sha":%q,"ref":"feature","repo":{"full_name":"test/repo"}},"base":{"ref":"main","repo":{"full_name":"test/repo"}}}`, prURL, livePRHead)), nil
+			}
+			if err := os.WriteFile(filepath.Join(repo.WorkingPath, "authored.txt"), []byte("grandchild candidate\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, repo.WorkingPath, "commit", "-am", "author grandchild candidate")
+			request.Request.PredecessorID, request.Request.SnapshotDigest, request.Request.LaunchNonce = event.ChildID, child.Digest(), *child.Run.LaunchNonce
+			request.Request.CandidateSHA = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+			request.Request.CandidateTree = gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD^{tree}")
+			before, err := database.GetRunsByRepo(repo.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Act
+			result, err := manager.validateAuthored(context.Background(), request, os.Getpid())
+
+			// Assert
+			if !test.isPRMoved && !test.isLinkMissing {
+				if err != nil || !result.Started {
+					t.Fatalf("admission of a grandchild while the inherited PR is at its lineage head: %+v %v", result, err)
+				}
+				grandchild := waitForRunTerminalState(t, database, result.Receipt.RunID)
+				if grandchild.Status != types.RunCompleted || grandchild.PRURL == nil || *grandchild.PRURL != prURL || grandchild.LastPushedSHA != nil {
+					t.Fatalf("grandchild = %+v, want it completed and still bound to the inherited PR", grandchild)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "inherited PR live head "+livePRHead+" is not the head the run's recorded lineage was submitted at, "+wantHead) {
+				t.Fatalf("admission from the child = %v, want a refusal naming the live head and the lineage head", err)
+			}
+			after, err := database.GetRunsByRepo(repo.ID)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("refusal changed runs: %v", err)
 			}
 		})
 	}
