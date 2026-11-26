@@ -18,6 +18,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -532,9 +533,9 @@ func runRequiredWorkflowCheckJob(t *testing.T, workflow requiredWorkflow, event 
 		env = append(env, name+"="+value)
 	}
 
-	bash, err := exec.LookPath("bash")
+	bash, err := testgit.Bash()
 	if err != nil {
-		t.Skip("bash unavailable to execute the composite action")
+		t.Skipf("bash unavailable to execute the composite action: %v", err)
 	}
 	actionDir, err := filepath.Abs(actionPath)
 	if err != nil {
