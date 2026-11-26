@@ -421,7 +421,7 @@ func TestAuthoredAdmissionContinuesAnInheritedPROnlyAtItsSubmittedHead(t *testin
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), "inherited PR head moved from the run's submitted head "+submitted+" to "+livePRHead) {
+			if err == nil || !strings.Contains(err.Error(), "inherited PR live head "+livePRHead+" is not the run's submitted head "+submitted) {
 				t.Fatalf("admission over a moved inherited PR = %v, want a refusal naming both heads", err)
 			}
 			after, err := database.GetRunsByRepo(repo.ID)

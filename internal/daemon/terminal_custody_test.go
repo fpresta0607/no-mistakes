@@ -1000,7 +1000,7 @@ func TestTerminalPublicationBindsAnInheritedPRAtItsSubmittedHead(t *testing.T) {
 		wantError      string
 	}{
 		{"PR still at the submitted head", head, nil, ""},
-		{"PR head moved", moved, nil, "inherited PR head moved from the run's submitted head " + head + " to " + moved},
+		{"PR head moved", moved, nil, "inherited PR live head " + moved + " is not the run's submitted head " + head},
 		{"partial push binding", head, &generation, "terminal publication binding is incomplete"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

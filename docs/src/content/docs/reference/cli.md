@@ -506,7 +506,7 @@ A PR that is still open, or a state that cannot be read or proven, keeps the ref
 A merge proven at a head other than the one the child published (for example after the PR head moved outside no-mistakes) also ends the lineage, but records nothing on the child: the forge's proof must name that head, and a second proof at it must show the same PR merged with its merge commit and time.
 The live PR's head and base repository names are compared case-insensitively with the registered repositories; head and base branch names must match exactly, including case.
 A predecessor that inherited an open PR URL through a same-head relaunch or `rerun` and never pushed to it is bound to that PR at the head it was submitted at.
-Admission reads the PR and its branch live and continues only while both still name the predecessor's submitted head, with the same PR identity and base checks as a published predecessor; once that head has moved it refuses with both heads named.
+Admission reads the PR and its branch live and continues only while both still name the predecessor's submitted head, with the same PR identity and base checks as a published predecessor; when the live head is any other commit it refuses with both heads named.
 A predecessor with only part of a push binding is ineligible even if its PR is still open.
 A child that publishes but then cannot run its PR or CI stage fails and cannot itself be continued, so confirm forge access before admission.
 An accepted pending child can be cancelled with `axi abort`.

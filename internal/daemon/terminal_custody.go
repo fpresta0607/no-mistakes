@@ -378,7 +378,7 @@ func proveTerminalPublication(ctx context.Context, run *db.Run, repo *db.Repo, w
 	ctx = git.WithEnvironment(ctx, forgeEnvironment(forge))
 	head, err := git.LsRemote(ctx, workDir, repo.PushURL(), pushRef)
 	if err == nil && head != boundHead && isInheritedPR {
-		return inheritedPRHeadMoved(boundHead, head)
+		return inheritedPRHeadDiffers(boundHead, head)
 	}
 	if err != nil || head != boundHead {
 		return fmt.Errorf("public head moved or cannot be read")
@@ -437,11 +437,13 @@ func proveTerminalPublication(ctx context.Context, run *db.Run, repo *db.Repo, w
 	return nil
 }
 
-// inheritedPRHeadMoved refuses a run bound to an inherited PR whose live head
-// is no longer the head the run was submitted at, naming both heads.
-func inheritedPRHeadMoved(submitted, live string) error {
+// inheritedPRHeadDiffers refuses a run bound to an inherited PR whose live
+// head is not the head the run was submitted at, naming both heads. It does not
+// claim the head moved: a run created by admission was submitted at a
+// candidate the PR branch never held.
+func inheritedPRHeadDiffers(submitted, live string) error {
 	if live == "" {
 		live = "(branch deleted)"
 	}
-	return fmt.Errorf("inherited PR head moved from the run's submitted head %s to %s; start a fresh run from the new head", submitted, live)
+	return fmt.Errorf("inherited PR live head %s is not the run's submitted head %s; an inherited PR is continued only at the head the run was submitted at", live, submitted)
 }

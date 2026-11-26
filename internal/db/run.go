@@ -237,10 +237,13 @@ func (r *Run) EvidencePath() string {
 }
 
 // InheritedPRHead returns the run's submitted head when the run is bound to an
-// open PR it inherited at launch and never pushed to: every push field is
-// unset, so the PR's head can only be the head the run was submitted at. A
-// terminal admission continues such a run only after reading that head live
-// (#336); any partial push binding is not an inherited PR and returns false.
+// open PR it inherited and never pushed to: every push field is unset. The
+// submitted head is the only head such a run can bind, but it need not be the
+// PR's head: a run created by admission inherits the PR with a new candidate
+// that was never on the PR branch. A terminal admission therefore continues
+// such a run only after reading the live PR head and finding the submitted
+// head there (#336); any partial push binding is not an inherited PR and
+// returns false.
 func (r *Run) InheritedPRHead() (string, bool) {
 	if r == nil || r.PRURL == nil || r.PRState == nil || *r.PRState != "open" || r.SubmittedHeadSHA == nil || *r.SubmittedHeadSHA == "" {
 		return "", false

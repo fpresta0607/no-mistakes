@@ -555,7 +555,7 @@ func proveAuthoredPublication(ctx context.Context, run *db.Run, repo *db.Repo, c
 	ctx = git.WithEnvironment(ctx, forgeEnvironment(forge))
 	head, err := git.LsRemote(ctx, caller, repo.PushURL(), pushRef)
 	if err == nil && head != boundHead && isInheritedPR {
-		return inheritedPRHeadMoved(boundHead, head)
+		return inheritedPRHeadDiffers(boundHead, head)
 	}
 	if err != nil || head != boundHead {
 		return fmt.Errorf("bound public head moved or cannot be read")
