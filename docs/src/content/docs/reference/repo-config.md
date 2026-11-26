@@ -426,6 +426,9 @@ A successful result is shared by all later configured commands in that isolated 
 The dependent step log records the preparation command, output, and elapsed preparation time, split into the command, the cleanup of its changes, and the restoration of earlier pending changes.
 The cleanup walks registered submodules natively, so a repository without a `.gitmodules` file starts no submodule process.
 A non-zero exit or launch failure fails that step before its command runs.
+Exit code 75 is reserved for a failure that is the environment's, not the change's, such as a dependency registry or a plan read that timed out on a loaded machine.
+When the command exits 75, or the engine's own cleanup of preparation changes hits its deadline, and nothing else in the preparation failed, a failed Test records the cause `preparation_environment`, and [`no-mistakes axi retry`](/no-mistakes/reference/cli/#no-mistakes-axi-retry) can continue it at the head Review approved.
+Any other non-zero exit is treated as a failure about the change and is never retried.
 
 Use this for deterministic dependency materialization such as `npm ci --prefer-offline`. The run worktree starts with tracked files only, so ignored dependency directories such as `node_modules` are otherwise absent. no-mistakes keeps ignored files produced by preparation, and keeps any submodule it checks out at the commit the superproject records, while removing its tracked, ordinary untracked, and nested-repository mutations before continuing; a submodule commit the command moved to is reset to the recorded commit. Earlier pending tracked and ordinary untracked pipeline changes are restored exactly, so preparation can run before a later configured command without admitting setup artifacts into a fix commit.
 

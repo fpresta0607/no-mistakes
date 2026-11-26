@@ -59,10 +59,10 @@ func TestExecutor_RecordsAnAgentInvocationFailureAsTheStepsCause(t *testing.T) {
 		name  string
 		agent agent.Agent
 		step  func(*StepContext) (*StepOutcome, error)
-		cause bool
+		cause string
 	}{
-		{name: "direct agent call", agent: &fallbackUsageAgent{name: "codex", err: providerErr}, step: callAgent, cause: true},
-		{name: "budgeted agent seam", agent: &fallbackUsageAgent{name: "codex", err: providerErr}, cause: true, step: func(sctx *StepContext) (*StepOutcome, error) {
+		{name: "direct agent call", agent: &fallbackUsageAgent{name: "codex", err: providerErr}, step: callAgent, cause: db.StepFailureCauseAgentInvocation},
+		{name: "budgeted agent seam", agent: &fallbackUsageAgent{name: "codex", err: providerErr}, cause: db.StepFailureCauseAgentInvocation, step: func(sctx *StepContext) (*StepOutcome, error) {
 			if _, err := sctx.RunAgent(agent.RunOpts{Prompt: "review"}); err != nil {
 				return nil, fmt.Errorf("review agent: %w", err)
 			}
@@ -74,6 +74,9 @@ func TestExecutor_RecordsAnAgentInvocationFailureAsTheStepsCause(t *testing.T) {
 				return nil, err
 			}
 			return nil, errors.New("tests failed")
+		}},
+		{name: "preparation failed for its environment", agent: &fallbackUsageAgent{name: "codex"}, cause: db.StepFailureCausePreparationEnvironment, step: func(*StepContext) (*StepOutcome, error) {
+			return nil, fmt.Errorf("prepare test dependencies: %w", PreparationEnvironmentFailure(errors.New("prepare command exited with code 75")))
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -87,9 +90,8 @@ func TestExecutor_RecordsAnAgentInvocationFailureAsTheStepsCause(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := steps[0].FailureCause != nil && *steps[0].FailureCause == db.StepFailureCauseAgentInvocation
-			if steps[0].Status != types.StepStatusFailed || got != tc.cause {
-				t.Fatalf("step status=%s agent-invocation cause=%v, want failed with cause=%v (error %v)", steps[0].Status, got, tc.cause, derefString(steps[0].Error))
+			if steps[0].Status != types.StepStatusFailed || derefString(steps[0].FailureCause) != tc.cause {
+				t.Fatalf("step status=%s cause=%q, want failed with cause %q (error %v)", steps[0].Status, derefString(steps[0].FailureCause), tc.cause, derefString(steps[0].Error))
 			}
 		})
 	}
@@ -149,7 +151,7 @@ func TestPlanRetryCheckpointRefusesAnUnprovenBoundary(t *testing.T) {
 		want   string
 	}{
 		{name: "provable", want: ""},
-		{name: "cause not recorded", want: "did not fail on an agent invocation error", mutate: func(t *testing.T, database *db.DB, run *db.Run) []Step {
+		{name: "cause not recorded", want: "step review recorded no failure cause", mutate: func(t *testing.T, database *db.DB, run *db.Run) []Step {
 			steps, _ := database.GetStepsByRun(run.ID)
 			if err := database.FailStep(steps[1].ID, "review agent: findings unreadable", 10); err != nil {
 				t.Fatal(err)
@@ -227,6 +229,60 @@ func TestPlanRetryCheckpointNeverCarriesTestOrALaterStep(t *testing.T) {
 	_, err := PlanRetryCheckpoint(database, afterTest, stepsNamed(core...))
 	if err == nil || !strings.Contains(err.Error(), "cannot carry test") {
 		t.Fatalf("err = %v, want a refusal to carry Test", err)
+	}
+}
+
+func TestPlanRetryCheckpointContinuesAPreparationEnvironmentFailureOnlyAtTheReviewedTest(t *testing.T) {
+	core := []types.StepName{types.StepRebase, types.StepReview, types.StepTest, types.StepDocument}
+	for _, tc := range []struct {
+		name     string
+		failed   types.StepName
+		cause    string
+		approved string
+		skipped  []types.StepName
+		want     string
+	}{
+		{name: "test at the reviewed head", failed: types.StepTest, cause: db.StepFailureCausePreparationEnvironment, approved: "abc123"},
+		{name: "a step other than test", failed: types.StepReview, cause: db.StepFailureCausePreparationEnvironment, want: "step review recorded failure cause preparation_environment, which only a failed Test continues from"},
+		{name: "no review approval", failed: types.StepTest, cause: db.StepFailureCausePreparationEnvironment, want: "no carried Review approved"},
+		{name: "review skipped", failed: types.StepTest, cause: db.StepFailureCausePreparationEnvironment, approved: "abc123", skipped: []types.StepName{types.StepReview}, want: "no carried Review approved"},
+		{name: "head moved past the approval", failed: types.StepTest, cause: db.StepFailureCausePreparationEnvironment, approved: "reviewed", want: "the run's head abc123 is not the head reviewed that Review approved"},
+		{name: "an unknown cause", failed: types.StepTest, cause: "something_else", approved: "abc123", want: "step test recorded failure cause something_else, so the failure may be about the change itself"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database, _, _, repo := setupTest(t)
+			source := failedSourceRun(t, database, repo, core, tc.failed, tc.skipped...)
+			rows, err := database.GetStepsByRun(source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range rows {
+				if row.StepName == tc.failed {
+					if err := database.FailStepWithCause(row.ID, "prepare test dependencies: prepare command exited with code 75", 10, tc.cause); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if tc.approved != "" {
+				if err := database.UpdateRunReviewApprovedHeadSHA(source.ID, tc.approved); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if source, err = database.GetRun(source.ID); err != nil {
+				t.Fatal(err)
+			}
+			checkpoint, err := PlanRetryCheckpoint(database, source, stepsNamed(core...))
+			if tc.want == "" {
+				if err != nil || checkpoint.Failed().StepName != types.StepTest {
+					t.Fatalf("checkpoint = %+v, err = %v; want Test continued", checkpoint, err)
+				}
+				return
+			}
+			var refusal *RetryRefusal
+			if !errors.As(err, &refusal) || refusal.Proof != RetryProofCause || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want a %q refusal containing %q", err, RetryProofCause, tc.want)
+			}
+		})
 	}
 }
 

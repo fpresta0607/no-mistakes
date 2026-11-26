@@ -1181,14 +1181,17 @@ That cancels the pipeline's in-flight work and forces a full re-validation; use 
 
 ## no-mistakes axi retry
 
-Continue a run that failed because an agent invocation itself failed, instead of starting the whole pipeline again.
+Continue a run that failed because an agent invocation itself failed, or because Test's dependency preparation failed for its environment, instead of starting the whole pipeline again.
 
 ```sh
 no-mistakes axi retry --run <id>
 ```
 
 An agent invocation failure is an error the agent call returned while its context was still live: a provider processing error, a usage or quota limit, a transport failure, or the agent process exiting.
-The executor records that cause on the failed step when the step fails with that error.
+The executor records that cause (`agent_invocation`) on the failed step when the step fails with that error.
+A preparation environment failure (`preparation_environment`) is a [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) run whose every failing part is the environment's: the engine's own cleanup of preparation changes hit its deadline, or the prepare command exited with its reserved code 75, and the restoration of earlier pending changes succeeded.
+A prepare command that exits with any other code is a failure about the change, such as an invalid lock file, and records no cause.
+That cause continues only a failed Test, and only when a carried Review approved exactly the run's head, so the continuation never tests a head Review did not approve.
 A timeout, a cancellation, and every failure about the change itself - a review finding, a failing test or lint, a refused policy, a human decision at a gate - record no cause and are never retried; use [`no-mistakes rerun`](#no-mistakes-rerun) or address them first.
 
 The retry starts a new run at the failed run's preserved head, so every correction the pipeline already committed is kept:
@@ -1212,7 +1215,7 @@ The retry refuses, changing nothing, unless every proof holds:
 | `failed run` | the run's status is `failed`, not `cancelled` or `completed` |
 | `unpublished run` | the run never pushed |
 | `durable checkpoint` | the run's record holds one row per step of its pinned pipeline: completed or skipped steps, exactly one failed step, then steps that never ran |
-| `eligible failure` | the failed step's recorded cause is an agent invocation failure |
+| `eligible failure` | the failed step's recorded cause is an agent invocation failure, or a preparation environment failure in Test at exactly the head a carried Review approved; the refusal names the recorded cause |
 | `reusable evidence` | the failed step is Test or an earlier step |
 | `preserved head` | the run verified its final head when it failed, and the gate still keeps exactly that commit: its recovery ref when the pipeline moved the head, the submitted commit otherwise |
 | `clean branch` | the working tree has no uncommitted changes |
@@ -1306,9 +1309,9 @@ inherited from the selected prior run; `--no-publish-intent` and the global
 default can only add omission, never remove it. If another run is active on that branch, rerun
 cancels it before starting over. Treat rerun as a between-runs action after a
 failed or cancelled outcome; use `axi run` for separate local fixes, and do not
-use rerun to bypass a gate. When the run failed only because an agent invocation
-failed, [`no-mistakes axi retry`](#no-mistakes-axi-retry) continues it from the
-failed step instead of repeating every completed step.
+use rerun to bypass a gate. When the run failed only for a cause
+[`no-mistakes axi retry`](#no-mistakes-axi-retry) accepts, retry continues it from
+the failed step instead of repeating every completed step.
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |

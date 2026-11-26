@@ -2031,8 +2031,11 @@ rounds:
 			fmt.Fprintf(logFile, "\nerror: %s\n", redactedErr)
 			touchLogActivity("error: "+redactedErr, true)
 			cause := ""
-			if errors.Is(err, ErrAgentInvocationFailed) {
+			switch {
+			case errors.Is(err, ErrAgentInvocationFailed):
 				cause = db.StepFailureCauseAgentInvocation
+			case errors.Is(err, ErrPreparationEnvironment):
+				cause = db.StepFailureCausePreparationEnvironment
 			}
 			if dbErr := e.db.FailStepWithCause(sr.ID, redactedErr, durationMS, cause); dbErr != nil {
 				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)

@@ -15,6 +15,10 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+// prepareEnvironmentExitCode is the exit code a prepare command reserves to
+// say its failure is the environment's, not the change's (EX_TEMPFAIL).
+const prepareEnvironmentExitCode = 75
+
 var (
 	prepareCleanupTimeout = 30 * time.Second
 	prepareRestoreTimeout = 30 * time.Second
@@ -71,6 +75,7 @@ func ensurePrepared(sctx *pipeline.StepContext, logStep types.StepName) error {
 		cleanupStarted := time.Now()
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(sctx.Ctx), prepareCleanupTimeout)
 		cleanupErr := runPreparationCleanup(cleanupCtx, sctx.WorkDir, head, snapshot.submodules)
+		isCleanupPastDeadline := errors.Is(cleanupCtx.Err(), context.DeadlineExceeded)
 		cancel()
 		cleanupElapsed := time.Since(cleanupStarted)
 
@@ -79,6 +84,7 @@ func ensurePrepared(sctx *pipeline.StepContext, logStep types.StepName) error {
 		restoreErr := snapshot.restore(restoreCtx)
 		cancelRestore()
 		restoreElapsed := time.Since(restoreStarted)
+		isCommandEnvironmentExit := commandErr == nil && exitCode == prepareEnvironmentExitCode
 		if commandErr != nil {
 			commandErr = fmt.Errorf("run prepare command: %w", commandErr)
 		} else if exitCode != 0 {
@@ -99,6 +105,14 @@ func ensurePrepared(sctx *pipeline.StepContext, logStep types.StepName) error {
 			restoreElapsed.Round(time.Millisecond),
 		))
 		if err := errors.Join(commandErr, cleanupErr, restoreErr); err != nil {
+			// Only a failure that is the environment's in every part is marked:
+			// a prepare command's own failure about the change, or a restore
+			// that retained a snapshot, keeps the failure about the change.
+			isCommandEnvironment := commandErr == nil || isCommandEnvironmentExit
+			isCleanupEnvironment := cleanupErr == nil || isCleanupPastDeadline
+			if isCommandEnvironment && isCleanupEnvironment && restoreErr == nil {
+				return pipeline.PreparationEnvironmentFailure(err)
+			}
 			return err
 		}
 		if err := os.WriteFile(marker, []byte(prepareCmd+"\n"), 0o600); err != nil {
