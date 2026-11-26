@@ -1133,10 +1133,7 @@ func assertEmptyDiffAfterRebaseRun(t *testing.T, h *Harness) {
 
 func assertAgentEditCommitRun(t *testing.T, h *Harness) {
 	t.Helper()
-	formatScript := filepath.Join(h.BinDir, "nm-format-e2e")
-	if err := os.WriteFile(formatScript, []byte("#!/bin/sh\nprintf formatted > formatted-by-push.txt\n"), 0o755); err != nil {
-		t.Fatalf("write e2e formatter: %v", err)
-	}
+	writeShellCommand(t, h.BinDir, "nm-format-e2e", "#!/bin/sh\nprintf formatted > formatted-by-push.txt\n")
 	h.CommitChange("agent-edits", "agent-edits.txt", "feature before agent\n", "add agent-edits branch")
 	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  format: \"nm-format-e2e\"\n"
 	originalHead := h.CommitChange("agent-edits", ".no-mistakes.yaml", config, "configure formatter")
@@ -1395,15 +1392,9 @@ func assertGateRefDeletionDoesNotCreateRun(t *testing.T, h *Harness, branch stri
 func assertConfiguredCommandRun(t *testing.T, h *Harness) {
 	t.Helper()
 	testCommandLog := filepath.Join(h.NMHome, "configured-test-command.log")
-	testCommand := filepath.Join(h.BinDir, "nm-test-e2e")
-	if err := os.WriteFile(testCommand, []byte("#!/bin/sh\nprintf test-ran > \""+testCommandLog+"\"\n"), 0o755); err != nil {
-		t.Fatalf("write e2e test command: %v", err)
-	}
+	writeShellCommand(t, h.BinDir, "nm-test-e2e", "#!/bin/sh\nprintf test-ran > \""+testCommandLog+"\"\n")
 	lintCommandLog := filepath.Join(h.NMHome, "configured-lint-command.log")
-	lintCommand := filepath.Join(h.BinDir, "nm-lint-e2e")
-	if err := os.WriteFile(lintCommand, []byte("#!/bin/sh\nprintf lint-ran > \""+lintCommandLog+"\"\n"), 0o755); err != nil {
-		t.Fatalf("write e2e lint command: %v", err)
-	}
+	writeShellCommand(t, h.BinDir, "nm-lint-e2e", "#!/bin/sh\nprintf lint-ran > \""+lintCommandLog+"\"\n")
 	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-test-e2e\n  lint: nm-lint-e2e\n"
 	head := h.CommitChange("configured-commands", ".no-mistakes.yaml", config, "enable configured checks")
 	h.PushToGate("configured-commands")
@@ -1661,10 +1652,7 @@ func assertReviewExistingBranchUsesMergeBaseScope(t *testing.T, h *Harness) {
 func assertExplicitAttachUsesRepoWideActiveRun(t *testing.T, h *Harness) {
 	t.Helper()
 	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-explicit-attach-slow-e2e\n  lint: true\n"
-	slowCommand := filepath.Join(h.BinDir, "nm-explicit-attach-slow-e2e")
-	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 60\n"), 0o755); err != nil {
-		t.Fatalf("write explicit attach slow test command: %v", err)
-	}
+	writeShellCommand(t, h.BinDir, "nm-explicit-attach-slow-e2e", "#!/bin/sh\nsleep 60\n")
 	h.CommitChange("explicit-attach-active", ".no-mistakes.yaml", config, "configure explicit attach slow test")
 	h.PushToGate("explicit-attach-active")
 	run := waitForStepStatus(t, h, "explicit-attach-active", types.StepTest, types.StepStatusRunning, 60*time.Second)
@@ -2033,14 +2021,11 @@ func assertSupersededRunCancellation(t *testing.T, h *Harness) {
 // moment it holds (issue #213).
 func assertSupersededRunCancellationAfter(t *testing.T, h *Harness, whileTestRunning func()) {
 	t.Helper()
-	slowCommand := filepath.Join(h.BinDir, "nm-superseded-test-e2e")
 	holding := filepath.Join(h.BinDir, "nm-superseded-test-holding")
 	// Cancellation reaps the process group, so the long sleep adds no wall time
 	// on the passing path.
 	script := "#!/bin/sh\nif [ -e superseded-run.txt ]; then exit 0; fi\n: > '" + holding + "'\nexec sleep 120\n"
-	if err := os.WriteFile(slowCommand, []byte(script), 0o755); err != nil {
-		t.Fatalf("write superseded slow test command: %v", err)
-	}
+	writeShellCommand(t, h.BinDir, "nm-superseded-test-e2e", script)
 	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-superseded-test-e2e\n  lint: true\n"
 	h.CommitChange("superseded-run", ".no-mistakes.yaml", config, "configure superseded slow test")
 	h.PushToGate("superseded-run")
@@ -2084,10 +2069,7 @@ func waitForTestCommandHolding(t *testing.T, h *Harness, runID, marker string, t
 
 func assertDifferentBranchDoesNotCancelActiveRun(t *testing.T, h *Harness) {
 	t.Helper()
-	slowCommand := filepath.Join(h.BinDir, "nm-different-branch-slow-e2e")
-	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 10\n"), 0o755); err != nil {
-		t.Fatalf("write different-branch slow test command: %v", err)
-	}
+	writeShellCommand(t, h.BinDir, "nm-different-branch-slow-e2e", "#!/bin/sh\nsleep 10\n")
 	slowConfig := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-different-branch-slow-e2e\n  lint: true\n"
 	h.CommitChange("different-branch-slow", ".no-mistakes.yaml", slowConfig, "configure different-branch slow test")
 	h.PushToGate("different-branch-slow")
@@ -2115,10 +2097,7 @@ func assertDifferentBranchDoesNotCancelActiveRun(t *testing.T, h *Harness) {
 
 func assertCancelRunStopsActivePipeline(t *testing.T, h *Harness) {
 	t.Helper()
-	slowCommand := filepath.Join(h.BinDir, "nm-cancel-test-e2e")
-	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 10\n"), 0o755); err != nil {
-		t.Fatalf("write cancel slow test command: %v", err)
-	}
+	writeShellCommand(t, h.BinDir, "nm-cancel-test-e2e", "#!/bin/sh\nsleep 10\n")
 	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-cancel-test-e2e\n  lint: true\n"
 	h.CommitChange("cancel-run", ".no-mistakes.yaml", config, "configure cancel slow test")
 	h.PushToGate("cancel-run")
@@ -2136,10 +2115,7 @@ func assertCancelRunStopsActivePipeline(t *testing.T, h *Harness) {
 // error.
 func assertAbortByRunIDReapsRunFromOutsideWorktree(t *testing.T, h *Harness) {
 	t.Helper()
-	slowCommand := filepath.Join(h.BinDir, "nm-abort-byid-test-e2e")
-	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 10\n"), 0o755); err != nil {
-		t.Fatalf("write abort-by-id slow test command: %v", err)
-	}
+	writeShellCommand(t, h.BinDir, "nm-abort-byid-test-e2e", "#!/bin/sh\nsleep 10\n")
 	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-abort-byid-test-e2e\n  lint: true\n"
 	h.CommitChange("abort-by-id", ".no-mistakes.yaml", config, "configure abort-by-id slow test")
 	h.PushToGate("abort-by-id")
@@ -2172,10 +2148,7 @@ func assertAbortByRunIDReapsRunFromOutsideWorktree(t *testing.T, h *Harness) {
 
 func assertRespondNoWaitingStepRun(t *testing.T, h *Harness) {
 	t.Helper()
-	slowCommand := filepath.Join(h.BinDir, "nm-slow-test-e2e")
-	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 2\n"), 0o755); err != nil {
-		t.Fatalf("write slow e2e test command: %v", err)
-	}
+	writeShellCommand(t, h.BinDir, "nm-slow-test-e2e", "#!/bin/sh\nsleep 2\n")
 	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-slow-test-e2e\n  lint: true\n"
 	h.CommitChange("respond-no-waiting", ".no-mistakes.yaml", config, "configure slow test command")
 	h.PushToGate("respond-no-waiting")
@@ -2195,10 +2168,7 @@ func assertRespondNoWaitingStepRun(t *testing.T, h *Harness) {
 
 func assertFailingTestCommandRun(t *testing.T, h *Harness) {
 	t.Helper()
-	failingCommand := filepath.Join(h.BinDir, "nm-test-fails-e2e")
-	if err := os.WriteFile(failingCommand, []byte("#!/bin/sh\necho configured test failed\nexit 1\n"), 0o755); err != nil {
-		t.Fatalf("write failing e2e test command: %v", err)
-	}
+	writeShellCommand(t, h.BinDir, "nm-test-fails-e2e", "#!/bin/sh\necho configured test failed\nexit 1\n")
 	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-test-fails-e2e\n  lint: true\n"
 	h.CommitChange("failing-test-command", ".no-mistakes.yaml", config, "configure failing test command")
 	h.PushToGate("failing-test-command")
@@ -2262,10 +2232,7 @@ func assertFailingTestCommandRun(t *testing.T, h *Harness) {
 
 func assertFailingLintCommandRun(t *testing.T, h *Harness) {
 	t.Helper()
-	failingCommand := filepath.Join(h.BinDir, "nm-lint-fails-e2e")
-	if err := os.WriteFile(failingCommand, []byte("#!/bin/sh\necho configured lint failed\nexit 1\n"), 0o755); err != nil {
-		t.Fatalf("write failing e2e lint command: %v", err)
-	}
+	writeShellCommand(t, h.BinDir, "nm-lint-fails-e2e", "#!/bin/sh\necho configured lint failed\nexit 1\n")
 	config := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: true\n  lint: nm-lint-fails-e2e\n"
 	h.CommitChange("failing-lint-command", ".no-mistakes.yaml", config, "configure failing lint command")
 	h.PushToGate("failing-lint-command")

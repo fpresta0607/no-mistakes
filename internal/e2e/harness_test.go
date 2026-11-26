@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -74,6 +75,34 @@ func TestHarnessFakeExecutablesPreserveDispatchAndInterception(t *testing.T) {
 	invocations := h.AgentInvocations()
 	if len(invocations) != 1 || invocations[0].Agent != "pi" {
 		t.Fatalf("basename dispatch recorded %v, want one Pi invocation", invocations)
+	}
+}
+
+// The pipeline starts a configured command through the platform shell, which is
+// cmd.exe /c on Windows, so a journey's POSIX script fixture must start by its
+// bare name there too (#373).
+func TestShellCommandFixtureStartsUnderThePlatformShell(t *testing.T) {
+	binDir := t.TempDir()
+	workDir := t.TempDir()
+	writeShellCommand(t, binDir, "nm-shell-command-e2e", "#!/bin/sh\nprintf ran > ran.txt\nexit 3\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "sh", "-c", "nm-shell-command-e2e")
+	if runtime.GOOS == "windows" {
+		command = exec.CommandContext(ctx, "cmd.exe", "/c", "nm-shell-command-e2e")
+	}
+	command.Dir = workDir
+
+	output, err := command.CombinedOutput()
+
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 3 {
+		t.Fatalf("start the fixture by name: %v, want its own exit code 3\n%s", err, output)
+	}
+	ran, err := os.ReadFile(filepath.Join(workDir, "ran.txt"))
+	if err != nil || string(ran) != "ran" {
+		t.Fatalf("fixture output = %q, %v; want %q", ran, err, "ran")
 	}
 }
 
