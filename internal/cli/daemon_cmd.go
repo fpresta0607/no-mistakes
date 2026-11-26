@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -100,6 +101,31 @@ func newDaemonAdmitPushCmd() *cobra.Command {
 	return cmd
 }
 
+// receivedPushOptions reads the push options Git sets in the post-receive
+// hook's environment, which notify-push inherits. The hook does not forward
+// them as arguments, because one option can exceed Windows' 32,767-character
+// command line (issue #320).
+func receivedPushOptions() ([]string, error) {
+	raw, ok := os.LookupEnv("GIT_PUSH_OPTION_COUNT")
+	if !ok {
+		return nil, nil
+	}
+	count, err := strconv.Atoi(raw)
+	if err != nil || count < 0 {
+		return nil, fmt.Errorf("invalid GIT_PUSH_OPTION_COUNT %q", raw)
+	}
+	var options []string
+	for index := range count {
+		name := "GIT_PUSH_OPTION_" + strconv.Itoa(index)
+		option, ok := os.LookupEnv(name)
+		if !ok {
+			return nil, fmt.Errorf("%s is missing although GIT_PUSH_OPTION_COUNT is %d", name, count)
+		}
+		options = append(options, option)
+	}
+	return options, nil
+}
+
 // parseReceiveUpdates reads Git's pre-receive input from standard input: one
 // "<old> <new> <ref>" line per proposed ref update. The daemon validates each
 // value and refuses an admission that carries none.
@@ -128,7 +154,6 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 	var ref string
 	var oldSHA string
 	var newSHA string
-	var pushOptions []string
 
 	cmd := &cobra.Command{
 		Use:    "notify-push",
@@ -136,6 +161,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			pushOptions, err := receivedPushOptions()
+			if err != nil {
+				return err
+			}
 			skipSteps, err := parseSkipPushOptions(pushOptions)
 			if err != nil {
 				return err
@@ -245,7 +274,6 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 	cmd.Flags().StringVar(&ref, "ref", "", "git ref name")
 	cmd.Flags().StringVar(&oldSHA, "old", "", "previous commit SHA")
 	cmd.Flags().StringVar(&newSHA, "new", "", "new commit SHA")
-	cmd.Flags().StringArrayVar(&pushOptions, "push-option", nil, "git push option")
 	_ = cmd.MarkFlagRequired("gate")
 	_ = cmd.MarkFlagRequired("ref")
 	_ = cmd.MarkFlagRequired("old")

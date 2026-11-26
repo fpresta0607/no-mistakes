@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -361,6 +362,69 @@ func TestPushWithOptionsForwardsPushOptions(t *testing.T) {
 	}
 	if got, want := strings.TrimSpace(string(data)), "1:no-mistakes.skip=test,lint"; got != want {
 		t.Fatalf("push options marker = %q, want %q", got, want)
+	}
+}
+
+// Issue #320: one push option can fill a whole 65,516-byte pkt-line, past
+// Windows' 32,767-character command line, so options must reach the hook
+// byte for byte without riding on git's argv, and leave no file behind.
+func TestPushCommitWithOptionsCarriesOptionsOffTheCommandLine(t *testing.T) {
+	ctx := context.Background()
+	src := initTestRepo(t)
+	bare := filepath.Join(t.TempDir(), "dest.git")
+	if err := InitBare(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	run(t, bare, "git", "config", "receive.advertisePushOptions", "true")
+	run(t, src, "git", "remote", "add", "dest", bare)
+	marker := filepath.Join(t.TempDir(), "push-options.txt")
+	hook := "#!/bin/sh\ni=0\nwhile [ \"$i\" -lt \"$GIT_PUSH_OPTION_COUNT\" ]; do\n  printenv \"GIT_PUSH_OPTION_$i\" >> " + shellSingleQuote(marker) + "\n  i=$((i + 1))\ndone\n"
+	if err := os.WriteFile(filepath.Join(bare, "hooks", "post-receive"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tempDir := t.TempDir()
+	for _, name := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(name, tempDir)
+	}
+	tracePath := filepath.Join(t.TempDir(), "trace.txt")
+	t.Setenv("GIT_TRACE", tracePath)
+	const prefix = "no-mistakes.intent="
+	largest := prefix + strings.Repeat("A", 65516-len(prefix))
+	options := []string{largest, `quote"and\backslash`, "semi; hash # tail", "  padded\tvalue  "}
+	head := run(t, src, "git", "rev-parse", "HEAD")
+
+	err := PushCommitWithOptions(ctx, src, "dest", head, "refs/heads/main", "", false, options)
+
+	if err != nil {
+		t.Fatalf("PushCommitWithOptions failed: %v", err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n"); !slices.Equal(got, options) {
+		t.Fatalf("hook received %d options, want the %d pushed byte for byte", len(got), len(options))
+	}
+	trace, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushLines := 0
+	for _, line := range strings.Split(string(trace), "\n") {
+		if !strings.Contains(line, "built-in: git") || !strings.Contains(line, " push ") {
+			continue
+		}
+		pushLines++
+		if strings.Contains(line, prefix) || strings.Contains(line, " -o ") {
+			t.Fatalf("git push argv carries a push option: %.200s", line)
+		}
+	}
+	if pushLines == 0 {
+		t.Fatalf("GIT_TRACE recorded no git push command:\n%.2000s", trace)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(tempDir, "no-mistakes-push-options-*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("push options file left behind: %v (err %v)", leftovers, err)
 	}
 }
 

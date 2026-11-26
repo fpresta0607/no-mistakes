@@ -96,6 +96,50 @@ func TestIntentPushOptionRoundTrip(t *testing.T) {
 	}
 }
 
+func TestReceivedPushOptionsReadsTheHookEnvironment(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     map[string]string
+		want    []string
+		wantErr string
+	}{
+		{name: "no push options", env: nil, want: nil},
+		{name: "zero count", env: map[string]string{"GIT_PUSH_OPTION_COUNT": "0"}, want: nil},
+		{
+			name: "options in order",
+			env:  map[string]string{"GIT_PUSH_OPTION_COUNT": "2", "GIT_PUSH_OPTION_0": "no-mistakes.skip=test", "GIT_PUSH_OPTION_1": "  padded value  "},
+			want: []string{"no-mistakes.skip=test", "  padded value  "},
+		},
+		{name: "empty option", env: map[string]string{"GIT_PUSH_OPTION_COUNT": "1", "GIT_PUSH_OPTION_0": ""}, want: []string{""}},
+		{name: "non-numeric count", env: map[string]string{"GIT_PUSH_OPTION_COUNT": "two"}, wantErr: "invalid GIT_PUSH_OPTION_COUNT"},
+		{name: "negative count", env: map[string]string{"GIT_PUSH_OPTION_COUNT": "-1"}, wantErr: "invalid GIT_PUSH_OPTION_COUNT"},
+		{name: "missing option", env: map[string]string{"GIT_PUSH_OPTION_COUNT": "2", "GIT_PUSH_OPTION_0": "a"}, wantErr: "GIT_PUSH_OPTION_1 is missing"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, name := range []string{"GIT_PUSH_OPTION_COUNT", "GIT_PUSH_OPTION_0", "GIT_PUSH_OPTION_1"} {
+				t.Setenv(name, "")
+				os.Unsetenv(name)
+			}
+			for name, value := range tt.env {
+				t.Setenv(name, value)
+			}
+
+			got, err := receivedPushOptions()
+
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("receivedPushOptions() error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("receivedPushOptions() = %q, %v; want %q", got, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestFormatIntentPushOptionEmpty(t *testing.T) {
 	if got := formatIntentPushOption("   "); got != "" {
 		t.Fatalf("formatIntentPushOption(blank) = %q, want empty", got)
