@@ -32,10 +32,10 @@ func TestDaemonLifecycleRetainsStartupExclusion(t *testing.T) {
 						})
 					}
 					oldStop, oldStart, oldGuarded := daemonStopFn, daemonStartFn, daemonStartGuardedFn
-					oldUninstall, oldSupported := daemonUninstallFn, daemonUninstallSupportedFn
+					oldUninstall := daemonUninstallFn
 					t.Cleanup(func() {
 						daemonStopFn, daemonStartFn, daemonStartGuardedFn = oldStop, oldStart, oldGuarded
-						daemonUninstallFn, daemonUninstallSupportedFn = oldUninstall, oldSupported
+						daemonUninstallFn = oldUninstall
 					})
 					isStopped := false
 					daemonStopFn = func(p *paths.Paths) error {
@@ -69,7 +69,6 @@ func TestDaemonLifecycleRetainsStartupExclusion(t *testing.T) {
 						}
 						return daemonStartFn(p)
 					}
-					daemonUninstallSupportedFn = func() bool { return true }
 					daemonUninstallFn = func(p *paths.Paths, guard func() (func(), error)) (string, error) {
 						release, err := guard()
 						if err != nil {
@@ -104,10 +103,10 @@ func TestDaemonLifecyclePreservesAtomicBusyRefusal(t *testing.T) {
 				})
 			})
 			oldStop, oldStart, oldGuarded := daemonStopFn, daemonStartFn, daemonStartGuardedFn
-			oldUninstall, oldSupported, oldRunning := daemonUninstallFn, daemonUninstallSupportedFn, daemonIsRunningFn
+			oldUninstall, oldRunning := daemonUninstallFn, daemonIsRunningFn
 			t.Cleanup(func() {
 				daemonStopFn, daemonStartFn, daemonStartGuardedFn = oldStop, oldStart, oldGuarded
-				daemonUninstallFn, daemonUninstallSupportedFn, daemonIsRunningFn = oldUninstall, oldSupported, oldRunning
+				daemonUninstallFn, daemonIsRunningFn = oldUninstall, oldRunning
 			})
 			daemonStopFn = func(*paths.Paths) error { t.Fatal("refusal reached stop or PID fallback"); return nil }
 			daemonStartFn = func(*paths.Paths) error { t.Fatal("refusal reached restart"); return nil }
@@ -118,7 +117,6 @@ func TestDaemonLifecyclePreservesAtomicBusyRefusal(t *testing.T) {
 				}
 				return err
 			}
-			daemonUninstallSupportedFn = func() bool { return true }
 			daemonUninstallFn = func(_ *paths.Paths, guard func() (func(), error)) (string, error) {
 				release, err := guard()
 				if err == nil {

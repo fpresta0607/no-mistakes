@@ -470,6 +470,21 @@ func stopManagedService(p *paths.Paths) (bool, error) {
 	}
 }
 
+// removeManagedService deletes this instance's stopped managed service so it
+// no longer starts the daemon at login.
+func removeManagedService(p *paths.Paths) error {
+	switch runtimeGOOS {
+	case "darwin":
+		return removeLaunchAgent(p)
+	case "linux":
+		return removeSystemdUserService(p)
+	case "windows":
+		return removeWindowsTask(p)
+	default:
+		return nil
+	}
+}
+
 // resetFailedManagedService clears failed-unit bookkeeping for the daemon's
 // managed service. A crash-looping systemd unit (Restart=always on a dead
 // binary) is held by the manager in a failed/backoff state that keeps emitting

@@ -139,7 +139,7 @@ Removes the gate from the current repository; [`no-mistakes eject`](/no-mistakes
 Stop the daemon, delete the binary, and clear state:
 
 ```sh
-no-mistakes daemon uninstall # macOS: removes the LaunchAgent
+no-mistakes daemon uninstall # removes the LaunchAgent, systemd unit, or scheduled task
 no-mistakes daemon stop
 rm -f ~/.local/bin/no-mistakes /usr/local/bin/no-mistakes
 rm -rf ~/.no-mistakes
@@ -147,4 +147,4 @@ rm -rf ~/.no-mistakes
 
 If you configured [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots), also delete the run worktree directories it placed outside `~/.no-mistakes`.
 
-On macOS, `daemon uninstall` removes only the LaunchAgent for the current `NM_HOME`. Repeat it with each instance's `NM_HOME` if you installed multiple services. On Linux, also remove `~/.config/systemd/user/no-mistakes-daemon-*.service`. On Windows, remove the `no-mistakes-daemon-*` Task Scheduler task.
+`daemon uninstall` removes only the managed service for the current `NM_HOME`. Repeat it with each instance's `NM_HOME` if you installed multiple services.

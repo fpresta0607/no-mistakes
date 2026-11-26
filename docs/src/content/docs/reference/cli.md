@@ -1496,18 +1496,18 @@ owns the active-run guard, the scope of `--force`, and recursive
 validation-step containment.
 
 This does not remove the managed service. A later `no-mistakes`, `no-mistakes daemon start`, `init`, `attach`, `rerun`, or `update` can start the daemon again through the same service manager when available, or as a detached daemon otherwise.
-On macOS, the retained LaunchAgent starts the daemon again at the next login; the stop output names its plist and points to `daemon uninstall`.
+The retained managed service starts the daemon again at the next login; the stop output names it and points to `daemon uninstall`.
 
 ## no-mistakes daemon uninstall
 
-Stop and remove the macOS LaunchAgent for the current `NM_HOME` instance.
+Stop and remove the managed daemon service for the current `NM_HOME` instance: the macOS LaunchAgent, the Linux systemd user unit, or the Windows scheduled task.
 
 ```sh
 no-mistakes daemon uninstall
 no-mistakes daemon uninstall --force
 ```
 
-Removes the LaunchAgent plist and names it in the output. If no LaunchAgent is installed, it succeeds with a message saying so. On other platforms it changes nothing, prints that no service removal is available there, and exits 0. It preserves application data and does not stop a detached daemon when no managed service exists. A later `daemon start` or a command that ensures the daemon is running can install the service again.
+Removes the LaunchAgent plist, the systemd unit file, or the scheduled task, and names it in the output. If no managed service is installed, it succeeds with a message saying so. It preserves application data and does not stop a detached daemon when no managed service exists. A later `daemon start` or a command that ensures the daemon is running can install the service again.
 
 [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the active-run guard, the scope of `--force`, and recursive validation-step containment.
 
