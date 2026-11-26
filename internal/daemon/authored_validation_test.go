@@ -503,6 +503,9 @@ func TestAuthoredAdmissionContinuesAChildOfAnInheritedPRAtItsLineageHead(t *test
 			if lineageHead != wantHead {
 				t.Fatalf("lineage head = %s, want %s", lineageHead, wantHead)
 			}
+			if test.isLinkMissing {
+				gitCmd(t, gate, "update-ref", "refs/heads/feature", *child.Run.SubmittedHeadSHA)
+			}
 			public := t.TempDir()
 			gitCmd(t, public, "init", "--bare")
 			gitCmd(t, repo.WorkingPath, "push", public, rootHead+":refs/heads/feature")
@@ -543,11 +546,8 @@ func TestAuthoredAdmissionContinuesAChildOfAnInheritedPRAtItsLineageHead(t *test
 				}
 				return
 			}
-			if err == nil {
-				t.Fatal("admission from the child was accepted, want it refused")
-			}
-			if test.isPRMoved && !strings.Contains(err.Error(), "inherited PR live head "+livePRHead+" is not the head the run's recorded lineage was submitted at, "+rootHead) {
-				t.Fatalf("admission over a PR moved after the child = %v, want a refusal naming both heads", err)
+			if err == nil || !strings.Contains(err.Error(), "inherited PR live head "+livePRHead+" is not the head the run's recorded lineage was submitted at, "+wantHead) {
+				t.Fatalf("admission from the child = %v, want a refusal naming the live head and the lineage head", err)
 			}
 			after, err := database.GetRunsByRepo(repo.ID)
 			if err != nil || !reflect.DeepEqual(before, after) {
