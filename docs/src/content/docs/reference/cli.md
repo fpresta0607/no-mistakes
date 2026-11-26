@@ -466,7 +466,7 @@ The input is one operator-owned UTF-8 JSON object, at most 64 KiB, with these fi
 | `predecessor_id`, `snapshot_digest`, `repo_id`, `branch` | The terminal predecessor and its native validation history (run record, gates, steps and rounds, with the repository by ID only); `axi status` reports `terminal_snapshot_digest` and `repository_id` |
 | `caller_dir`, `candidate_sha`, `candidate_tree` | The invoking canonical repository root and full lowercase commit/tree identities; staged, tracked, untracked and submodule changes must all be absent |
 | `launch_nonce`, `validation_generation`, `intent_digest` | The predecessor's preserved launch receipt; the child receives its own fresh nonce and proof |
-| `published_head_sha`, `push_generation`, `push_target_fingerprint` | The predecessor's exact publication binding, verified against the live target and open PR; use `""`, `0`, `""` for an unpublished predecessor |
+| `published_head_sha`, `push_generation`, `push_target_fingerprint` | The predecessor's exact publication binding, verified against the live target and open PR; use `""`, `0`, `""` for a predecessor that never pushed, including one bound to an inherited PR |
 | `launch_assertion` | A complete [launch assertion](#launch-assertions) naming the current trusted source and exactly the predecessor's original role selections |
 | `controller_policy` | `{ "sha256": "<64 lowercase hex characters>", "class": "<original class>", "review_cycles": 2 }`, recorded only as the controller's historical assertion, never as a native historical policy fact or a grant of repair authority |
 | `historical_source_completeness` | Exactly `"unknown"`; declaring the authored candidate complete for validation does not certify recovery of missing historical dirty, untracked or later source |
@@ -505,8 +505,9 @@ For that child alone, the daemon reads the live PR state on the forge before it 
 A PR that is still open, or a state that cannot be read or proven, keeps the refusal.
 A merge proven at a head other than the one the child published (for example after the PR head moved outside no-mistakes) also ends the lineage, but records nothing on the child: the forge's proof must name that head, and a second proof at it must show the same PR merged with its merge commit and time.
 The live PR's head and base repository names are compared case-insensitively with the registered repositories; head and base branch names must match exactly, including case.
-A predecessor that inherited an open PR URL through a same-head relaunch or `rerun`, but never recorded its own complete push binding, is ineligible even if that PR is still open.
-An inherited PR URL alone proves neither publication nor an unpublished predecessor, so admission fails closed rather than inferring a binding from the live PR.
+A predecessor that inherited an open PR URL through a same-head relaunch or `rerun` and never pushed to it is bound to that PR at the head it was submitted at.
+Admission reads the PR and its branch live and continues only while both still name the predecessor's submitted head, with the same PR identity and base checks as a published predecessor; when the live head is any other commit it refuses with both heads named.
+A predecessor with only part of a push binding is ineligible even if its PR is still open.
 A child that publishes but then cannot run its PR or CI stage fails and cannot itself be continued, so confirm forge access before admission.
 An accepted pending child can be cancelled with `axi abort`.
 Ordinary explicit gate acknowledgements and review-question answers retain their existing meaning; they do not create repair capacity or turn an approved failure into a clean pass.

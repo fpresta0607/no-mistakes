@@ -534,22 +534,30 @@ func proveAuthoredCheckout(ctx context.Context, actualDir string, request *autho
 }
 
 func proveAuthoredPublication(ctx context.Context, run *db.Run, repo *db.Repo, caller string, cfg *config.Config, forge *forgecontext.Context) error {
-	if run.LastPushedSHA == nil {
+	boundHead, isInheritedPR := run.InheritedPRHead()
+	if run.LastPushedSHA == nil && !isInheritedPR {
 		if run.PRURL != nil || run.PushGeneration != nil {
 			return fmt.Errorf("terminal publication binding is incomplete")
 		}
 		return nil
 	}
-	kind := "upstream"
-	if repo.ForkURL != "" {
-		kind = "fork"
-	}
-	if run.PushGeneration == nil || *run.PushGeneration <= 0 || run.PushTargetKind == nil || *run.PushTargetKind != kind || run.PushTargetFingerprint == nil || *run.PushTargetFingerprint != branchsync.TargetFingerprint(repo.PushURL()) || run.PushRef == nil || *run.PushRef != "refs/heads/"+run.Branch || run.LastPushedAt == nil || run.PRURL == nil || run.PRState == nil || *run.PRState != "open" {
-		return fmt.Errorf("terminal publication repository, target, ref or generation is incomplete or changed")
+	pushRef := "refs/heads/" + run.Branch
+	if !isInheritedPR {
+		kind := "upstream"
+		if repo.ForkURL != "" {
+			kind = "fork"
+		}
+		if run.PushGeneration == nil || *run.PushGeneration <= 0 || run.PushTargetKind == nil || *run.PushTargetKind != kind || run.PushTargetFingerprint == nil || *run.PushTargetFingerprint != branchsync.TargetFingerprint(repo.PushURL()) || run.PushRef == nil || *run.PushRef != pushRef || run.LastPushedAt == nil || run.PRURL == nil || run.PRState == nil || *run.PRState != "open" {
+			return fmt.Errorf("terminal publication repository, target, ref or generation is incomplete or changed")
+		}
+		boundHead = *run.LastPushedSHA
 	}
 	ctx = git.WithEnvironment(ctx, forgeEnvironment(forge))
-	head, err := git.LsRemote(ctx, caller, repo.PushURL(), *run.PushRef)
-	if err != nil || head != *run.LastPushedSHA {
+	head, err := git.LsRemote(ctx, caller, repo.PushURL(), pushRef)
+	if err == nil && head != boundHead && isInheritedPR {
+		return inheritedPRHeadDiffers(boundHead, head)
+	}
+	if err != nil || head != boundHead {
 		return fmt.Errorf("bound public head moved or cannot be read")
 	}
 	if _, err := git.Run(ctx, caller, "merge-base", "--is-ancestor", head, "HEAD"); err != nil {
@@ -598,7 +606,7 @@ func proveAuthoredPublication(ctx context.Context, run *db.Run, repo *db.Repo, c
 	if pr.Base.Ref != base {
 		return fmt.Errorf("live terminal PR base differs from the fresh validation base")
 	}
-	confirmed, err := git.LsRemote(ctx, caller, repo.PushURL(), *run.PushRef)
+	confirmed, err := git.LsRemote(ctx, caller, repo.PushURL(), pushRef)
 	if err != nil || confirmed != head {
 		return fmt.Errorf("bound public head changed during PR verification")
 	}

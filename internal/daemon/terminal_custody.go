@@ -354,25 +354,33 @@ func freezeTerminalLimits(cfg *config.Config, snapshot *db.ContinuationSnapshot)
 }
 
 func proveTerminalPublication(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, forge *forgecontext.Context, cfg *config.Config) error {
-	if run.LastPushedSHA == nil {
+	boundHead, isInheritedPR := run.InheritedPRHead()
+	if run.LastPushedSHA == nil && !isInheritedPR {
 		if run.PRURL != nil || run.PushGeneration != nil {
 			return fmt.Errorf("terminal publication binding is incomplete")
 		}
 		return nil
 	}
-	if run.PushGeneration == nil || *run.PushGeneration <= 0 || run.PushRef == nil || *run.PushRef != "refs/heads/"+run.Branch || run.PushTargetFingerprint == nil || *run.PushTargetFingerprint != branchsync.TargetFingerprint(repo.PushURL()) || run.PRURL == nil || run.PRState == nil || *run.PRState != "open" {
-		return fmt.Errorf("terminal publication binding is incomplete or changed")
-	}
-	kind := "upstream"
-	if repo.ForkURL != "" {
-		kind = "fork"
-	}
-	if run.PushTargetKind == nil || *run.PushTargetKind != kind || run.LastPushedAt == nil {
-		return fmt.Errorf("terminal publication target kind changed")
+	pushRef := "refs/heads/" + run.Branch
+	if !isInheritedPR {
+		if run.PushGeneration == nil || *run.PushGeneration <= 0 || run.PushRef == nil || *run.PushRef != pushRef || run.PushTargetFingerprint == nil || *run.PushTargetFingerprint != branchsync.TargetFingerprint(repo.PushURL()) || run.PRURL == nil || run.PRState == nil || *run.PRState != "open" {
+			return fmt.Errorf("terminal publication binding is incomplete or changed")
+		}
+		kind := "upstream"
+		if repo.ForkURL != "" {
+			kind = "fork"
+		}
+		if run.PushTargetKind == nil || *run.PushTargetKind != kind || run.LastPushedAt == nil {
+			return fmt.Errorf("terminal publication target kind changed")
+		}
+		boundHead = *run.LastPushedSHA
 	}
 	ctx = git.WithEnvironment(ctx, forgeEnvironment(forge))
-	head, err := git.LsRemote(ctx, workDir, repo.PushURL(), *run.PushRef)
-	if err != nil || head != *run.LastPushedSHA {
+	head, err := git.LsRemote(ctx, workDir, repo.PushURL(), pushRef)
+	if err == nil && head != boundHead && isInheritedPR {
+		return inheritedPRHeadDiffers(boundHead, head)
+	}
+	if err != nil || head != boundHead {
 		return fmt.Errorf("public head moved or cannot be read")
 	}
 	if scm.DetectProviderStaticContext(ctx, repo.UpstreamURL) != scm.ProviderGitHub {
@@ -422,9 +430,20 @@ func proveTerminalPublication(ctx context.Context, run *db.Run, repo *db.Repo, w
 	if pr.Base.Ref != base {
 		return fmt.Errorf("live terminal PR base differs from the fresh validation base")
 	}
-	confirmed, err := git.LsRemote(ctx, workDir, repo.PushURL(), *run.PushRef)
+	confirmed, err := git.LsRemote(ctx, workDir, repo.PushURL(), pushRef)
 	if err != nil || confirmed != head {
 		return fmt.Errorf("public head changed during terminal PR verification")
 	}
 	return nil
+}
+
+// inheritedPRHeadDiffers refuses a run bound to an inherited PR whose live
+// head is not the head the run was submitted at, naming both heads. It does not
+// claim the head moved: a run created by admission was submitted at a
+// candidate the PR branch never held.
+func inheritedPRHeadDiffers(submitted, live string) error {
+	if live == "" {
+		live = "(branch deleted)"
+	}
+	return fmt.Errorf("inherited PR live head %s is not the run's submitted head %s; an inherited PR is continued only at the head the run was submitted at", live, submitted)
 }

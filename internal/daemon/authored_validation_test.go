@@ -354,30 +354,81 @@ func TestAuthoredAdmissionWorktreeFailureFailsTheChildRecoverably(t *testing.T) 
 	}
 }
 
-func TestAuthoredAdmissionRefusesAnInheritedPRWithoutPushBinding(t *testing.T) {
-	manager, database, repo, request, gate := authoredAdmissionFixture(t, nil)
-	if err := database.UpdateRunPRURL(request.Request.PredecessorID, "https://github.com/test/repo/pull/17"); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := database.ReadTerminalSnapshot(request.Request.PredecessorID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Request.SnapshotDigest = snapshot.Digest()
-	gateHead := gitOutput(t, gate, "rev-parse", "refs/heads/feature")
-	before, err := database.GetRunsByRepo(repo.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+// A run that inherited an open PR at launch and failed before its push step
+// records the PR but no push binding. Admission used to read that as an
+// incomplete binding and refuse it even while the PR's head was still exactly
+// the run's submitted head (#336). It now reads the PR live and continues only
+// at that head, refusing with both heads named once the PR has moved.
+func TestAuthoredAdmissionContinuesAnInheritedPROnlyAtItsSubmittedHead(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		isPRMoved  bool
+		isAccepted bool
+	}{
+		{"PR still at the submitted head", false, true},
+		{"PR head moved", true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// Arrange
+			manager, database, repo, request, gate := authoredAdmissionFixture(t, func() []pipeline.Step {
+				return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+			})
+			prURL := "https://github.com/test/repo/pull/17"
+			if err := database.UpdateRunPRURL(request.Request.PredecessorID, prURL); err != nil {
+				t.Fatal(err)
+			}
+			parent, err := database.GetRun(request.Request.PredecessorID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			submitted := *parent.SubmittedHeadSHA
+			public := t.TempDir()
+			gitCmd(t, public, "init", "--bare")
+			gitCmd(t, repo.WorkingPath, "push", public, submitted+":refs/heads/feature")
+			livePRHead := submitted
+			if test.isPRMoved {
+				livePRHead = request.Request.CandidateSHA
+				gitCmd(t, repo.WorkingPath, "push", public, livePRHead+":refs/heads/feature")
+			}
+			gitCmd(t, repo.WorkingPath, "config", "url."+filepath.ToSlash(public)+".insteadOf", repo.UpstreamURL)
+			originalOutput := authoredPRCommandOutput
+			t.Cleanup(func() { authoredPRCommandOutput = originalOutput })
+			authoredPRCommandOutput = func(command *exec.Cmd) ([]byte, error) {
+				return []byte(fmt.Sprintf(`{"html_url":%q,"state":"open","head":{"sha":%q,"ref":"feature","repo":{"full_name":"test/repo"}},"base":{"ref":"main","repo":{"full_name":"test/repo"}}}`, prURL, livePRHead)), nil
+			}
+			snapshot, err := database.ReadTerminalSnapshot(request.Request.PredecessorID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Request.SnapshotDigest = snapshot.Digest()
+			gateHead := gitOutput(t, gate, "rev-parse", "refs/heads/feature")
+			before, err := database.GetRunsByRepo(repo.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	_, err = manager.validateAuthored(context.Background(), request, os.Getpid())
+			// Act
+			result, err := manager.validateAuthored(context.Background(), request, os.Getpid())
 
-	if err == nil || !strings.Contains(err.Error(), "publication binding is incomplete") {
-		t.Fatalf("inherited PR became a publication binding: %v", err)
-	}
-	after, err := database.GetRunsByRepo(repo.ID)
-	if err != nil || !reflect.DeepEqual(before, after) || gitOutput(t, gate, "rev-parse", "refs/heads/feature") != gateHead {
-		t.Fatalf("refusal changed runs or the gate: %v", err)
+			// Assert
+			if test.isAccepted {
+				if err != nil || !result.Started {
+					t.Fatalf("admission of a run bound to an inherited PR at its submitted head: %+v %v", result, err)
+				}
+				child := waitForRunTerminalState(t, database, result.Receipt.RunID)
+				if child.Status != types.RunCompleted || child.PRURL == nil || *child.PRURL != prURL || child.LastPushedSHA != nil {
+					t.Fatalf("child = %+v, want it completed and still bound to the inherited PR", child)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "inherited PR live head "+livePRHead+" is not the run's submitted head "+submitted) {
+				t.Fatalf("admission over a moved inherited PR = %v, want a refusal naming both heads", err)
+			}
+			after, err := database.GetRunsByRepo(repo.ID)
+			if err != nil || !reflect.DeepEqual(before, after) || gitOutput(t, gate, "rev-parse", "refs/heads/feature") != gateHead {
+				t.Fatalf("refusal changed runs or the gate: %v", err)
+			}
+		})
 	}
 }
 

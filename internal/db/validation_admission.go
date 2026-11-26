@@ -77,7 +77,8 @@ func (snapshot TerminalSnapshot) validateAuthoredRequest(request authoredvalidat
 		return fmt.Errorf("authored admission cannot change the original agent selection")
 	}
 	if parent.LastPushedSHA == nil {
-		if request.PublishedHeadSHA != "" || request.PushGeneration != 0 || request.PushTargetFingerprint != "" || parent.PRURL != nil || parent.PushGeneration != nil {
+		_, isInheritedPR := parent.InheritedPRHead()
+		if request.PublishedHeadSHA != "" || request.PushGeneration != 0 || request.PushTargetFingerprint != "" || (parent.PRURL != nil && !isInheritedPR) || parent.PushGeneration != nil {
 			return fmt.Errorf("authored admission publication binding is incomplete")
 		}
 	} else if parent.PushGeneration == nil || parent.PushTargetFingerprint == nil || request.PublishedHeadSHA != *parent.LastPushedSHA || request.PushGeneration != *parent.PushGeneration || request.PushTargetFingerprint != *parent.PushTargetFingerprint {
