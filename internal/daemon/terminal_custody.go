@@ -255,11 +255,6 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 			// A new successor's checkout is set up before its acceptance is
 			// recorded, so a checkout that cannot be created or configured leaves
 			// no pending successor holding the branch (#408).
-			if _, err := os.Lstat(workDir); err == nil {
-				return "", fmt.Errorf("successor checkout %s already exists before acceptance", workDir)
-			} else if !os.IsNotExist(err) {
-				return "", err
-			}
 			m.unrecordedCheckouts.Store(successorID, struct{}{})
 			defer m.unrecordedCheckouts.Delete(successorID)
 			if err := placeSuccessorCheckout(ctx, service.GateDir, repo.WorkingPath, workDir, source.Head); err != nil {
