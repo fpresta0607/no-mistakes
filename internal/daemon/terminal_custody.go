@@ -250,9 +250,25 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if err := custody.PreserveRecoveryAnchor(ctx, service.GateDir, candidateRef, source.Head); err != nil {
 			return "", err
 		}
-		if event == nil {
+		isReplay := event != nil
+		if !isReplay {
+			// A new successor's checkout is set up before its acceptance is
+			// recorded, so a checkout that cannot be created or configured leaves
+			// no pending successor holding the branch (#408).
+			if _, err := os.Lstat(workDir); err == nil {
+				return "", fmt.Errorf("successor checkout %s already exists before acceptance", workDir)
+			} else if !os.IsNotExist(err) {
+				return "", err
+			}
+			m.unrecordedCheckouts.Store(successorID, struct{}{})
+			defer m.unrecordedCheckouts.Delete(successorID)
+			if err := placeSuccessorCheckout(ctx, service.GateDir, repo.WorkingPath, workDir, source.Head); err != nil {
+				m.removeRunWorktree(repo.ID, successorID, service.GateDir, workDir, "terminal_continuation_refused")
+				return "", err
+			}
 			event, err = m.db.AdoptTerminalCandidate(ctx, db.TerminalAdoption{Snapshot: *original, SuccessorID: successorID, WorktreeRoot: filepath.Dir(workDir), EvidenceRoot: evidenceRoot, Plan: plan, Gates: gates, StepNames: stepNames, CandidateSHA: source.Head, RetainedSHA: source.RetainedHead, CandidateTree: source.Tree, SourceRef: candidateRef, GateHead: source.GateHead, RecoveryHead: source.RecoveryHead, CallerDir: request.CallerDir, CallerHead: callerHead, ManagedDir: source.ManagedDir, Reason: request.Reason, Operator: strconv.Itoa(operator), Assertion: assertion, Proof: proof})
 			if err != nil {
+				m.removeRunWorktree(repo.ID, successorID, service.GateDir, workDir, "terminal_continuation_refused")
 				return "", err
 			}
 		} else {
@@ -270,15 +286,10 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if err := pipeline.ValidateTerminalSuccessor(m.db, fresh, execSteps, event); err != nil {
 			return "", err
 		}
-		if _, err := os.Stat(workDir); os.IsNotExist(err) {
-			if err := git.WorktreeAdd(ctx, service.GateDir, workDir, source.Head); err != nil {
-				return "", fmt.Errorf("create registered successor checkout: %w", err)
+		if isReplay {
+			if err := placeSuccessorCheckout(ctx, service.GateDir, repo.WorkingPath, workDir, source.Head); err != nil {
+				return "", err
 			}
-		} else if err != nil {
-			return "", err
-		}
-		if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, workDir); err != nil {
-			return "", fmt.Errorf("configure successor identity: %w", err)
 		}
 		result = &ipc.RecoverTerminalResult{RunID: fresh.ID, PredecessorID: original.Run.ID, CandidateSHA: event.CandidateSHA, CandidateTree: event.CandidateTree, AdoptionID: event.ID}
 		result.PhaseBudgets = make(map[string]db.TerminalPhaseBudget)
@@ -300,6 +311,22 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		return fresh.ID, nil
 	})
 	return result, err
+}
+
+// placeSuccessorCheckout creates the successor's checkout at head unless it
+// already exists, and gives it the operator's local Git identity.
+func placeSuccessorCheckout(ctx context.Context, gateDir, workingPath, workDir, head string) error {
+	if _, err := os.Stat(workDir); os.IsNotExist(err) {
+		if err := git.WorktreeAdd(ctx, gateDir, workDir, head); err != nil {
+			return fmt.Errorf("create successor checkout: %w", err)
+		}
+	} else if err != nil {
+		return err
+	}
+	if err := git.CopyLocalUserIdentity(ctx, workingPath, workDir); err != nil {
+		return fmt.Errorf("configure successor identity: %w", err)
+	}
+	return nil
 }
 
 func validateTerminalAgentInactivity(snapshot *db.ContinuationSnapshot) error {

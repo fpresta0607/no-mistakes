@@ -1239,7 +1239,10 @@ func removeOrphanWorktree(ctx context.Context, d *db.DB, wt orphanWorktree) bool
 // pruned) are eligible for removal. RunManager.startRun always inserts the
 // run row before creating the worktree directory, so on a single daemon a
 // "no matching run" directory is never one whose insert simply hasn't landed
-// yet - it is safe to remove immediately.
+// yet - it is safe to remove immediately. The one exception is a terminal
+// continuation successor's checkout, created before the acceptance that
+// records its run; reapWorktrees skips it while RunManager.unrecordedCheckouts
+// holds its run ID.
 //
 // An interrupted CI monitor also keeps a checkout whose head differs from the
 // recorded run head: it may hold the only copy of a CI repair committed before
