@@ -1200,6 +1200,110 @@ func mustWrite(t *testing.T, path, content string) {
 	}
 }
 
+// TestInspectOwnerBesideANewerPublishedRun is the regression test for issue
+// #335: a run cancelled before its push step, its head still the submitted
+// head, stood as the branch's owner beside a newer completed run that published
+// that head's descendant, because supersession compared push bindings the
+// cancelled run never recorded. The cases the binding comparison guards stay
+// refused.
+func TestInspectOwnerBesideANewerPublishedRun(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name          string
+		olderBinding  *db.PushBinding
+		newerOutside  bool
+		olderMoved    bool
+		olderDirty    bool
+		moveGateAfter bool
+		wantNewer     bool
+	}{
+		{name: "never-pushed older run yields to the newer published run", wantNewer: true},
+		{name: "never-pushed older run that moved its head stays the owner", olderMoved: true},
+		{name: "never-pushed older run with recorded dirty source stays the owner", olderDirty: true},
+		{name: "older run that pushed to another ref stays the owner", olderBinding: &db.PushBinding{TargetKind: "upstream", Ref: "refs/heads/other"}},
+		{name: "older run that pushed to another target stays the owner", olderBinding: &db.PushBinding{TargetKind: "upstream", TargetFingerprint: TargetFingerprint("https://example.com/other.git"), Ref: "refs/heads/feature/recover"}},
+		{name: "gate branch past the newer pushed head keeps the older owner", moveGateAfter: true},
+		{name: "newer pushed head without the older head keeps the older owner", newerOutside: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Arrange
+			f := newRecoverFixtureAtSubmittedHead(t)
+			older := f.run
+			if err := f.db.UpdateRunStatus(older.ID, types.RunCancelled); err != nil {
+				t.Fatal(err)
+			}
+			if tt.olderBinding != nil {
+				binding := *tt.olderBinding
+				binding.HeadSHA = f.base
+				if binding.TargetFingerprint == "" {
+					binding.TargetFingerprint = TargetFingerprint(f.remote)
+				}
+				if err := f.db.UpdateRunPushBinding(older.ID, binding); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.olderDirty {
+				if err := f.db.RecordTerminalSourceState(older.ID, "dirty:"+f.submitted); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.olderMoved {
+				if err := f.db.UpdateRunHeadSHA(older.ID, commitOnGateBranch(t, f, "older-fix")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			time.Sleep(1100 * time.Millisecond)
+			newer, err := f.db.InsertRun(f.repo.ID, "feature/recover", f.submitted, f.base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.newerOutside {
+				mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", f.base)
+			}
+			pushed := commitOnGateBranch(t, f, "published")
+			if err := f.db.UpdateRunStatusWithVerifiedHead(newer.ID, types.RunCompleted, pushed); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.UpdateRunPublication(newer.ID, db.PushBinding{HeadSHA: pushed, TargetKind: "upstream", TargetFingerprint: TargetFingerprint(f.remote), Ref: "refs/heads/feature/recover"}); err != nil {
+				t.Fatal(err)
+			}
+			if tt.moveGateAfter {
+				commitOnGateBranch(t, f, "later")
+			}
+
+			// Act
+			state := f.service.InspectCached(f.ctx)
+
+			// Assert
+			want := older.ID
+			if tt.wantNewer {
+				want = newer.ID
+			}
+			if state.Pipeline.RunID != want {
+				t.Fatalf("owner = %s, want %s (older %s, newer %s); state = %#v", state.Pipeline.RunID, want, older.ID, newer.ID, state)
+			}
+		})
+	}
+}
+
+// commitOnGateBranch adds one commit on top of the gate's feature/recover
+// branch, moves the branch to it, and returns it.
+func commitOnGateBranch(t *testing.T, f *recoverFixture, name string) string {
+	t.Helper()
+	worktree := filepath.Join(filepath.Dir(f.local), name+"-worktree")
+	mustRun(t, f.gate, "worktree", "add", "--detach", worktree, "refs/heads/feature/recover")
+	mustWrite(t, filepath.Join(worktree, name+".txt"), name+"\n")
+	mustRun(t, worktree, "add", name+".txt")
+	mustRun(t, worktree, "commit", "-m", name)
+	sha := mustRun(t, worktree, "rev-parse", "HEAD")
+	mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", sha)
+	mustRun(t, f.gate, "worktree", "remove", worktree)
+	return sha
+}
+
 func readOptional(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
