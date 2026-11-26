@@ -15,24 +15,37 @@ import (
 func TestServerClose(t *testing.T) {
 	sock := socketPath(t)
 	srv := ipc.NewServer()
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(sock) }()
-
-	// wait for server to be ready
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		c, err := ipc.Dial(sock)
-		if err == nil {
-			c.Close()
-			break
+	served := make(chan struct{})
+	closedWhileServing := make(chan struct{})
+	// Serve binds inside its own call, so no fixed deadline fits a loaded
+	// runner: the dialer keeps trying until a connection proves the bind,
+	// and stops when Serve returns.
+	go func() {
+		for {
+			select {
+			case <-served:
+				return
+			default:
+			}
+			if c, err := ipc.Dial(sock); err == nil {
+				c.Close()
+				close(closedWhileServing)
+				srv.Close()
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	}()
 
-	srv.Close()
-	err := <-errCh
+	err := srv.Serve(sock)
+	close(served)
 	if err != nil {
-		t.Errorf("Serve returned unexpected error: %v", err)
+		t.Fatalf("Serve returned unexpected error: %v", err)
+	}
+	select {
+	case <-closedWhileServing:
+	default:
+		t.Fatal("Serve returned before a client connected")
 	}
 
 	// dial should fail after close (on Windows named pipes may need a moment)
@@ -87,19 +100,11 @@ func TestServerInvalidJSON(t *testing.T) {
 func TestServerExitsWhenListenerClosed(t *testing.T) {
 	sock := socketPath(t)
 	srv := ipc.NewServer()
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(sock) }()
-
-	// Wait for server to be ready.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		c, err := ipc.Dial(sock)
-		if err == nil {
-			c.Close()
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	if err := srv.Listen(sock); err != nil {
+		t.Fatalf("listen: %v", err)
 	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ServeReady() }()
 
 	// Simulate the listener being closed externally (e.g. tokenListener
 	// self-close on Windows after too many accept errors) by removing the
@@ -122,19 +127,11 @@ func TestServerExitsWhenListenerClosed(t *testing.T) {
 func TestServerDoubleClose(t *testing.T) {
 	sock := socketPath(t)
 	srv := ipc.NewServer()
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(sock) }()
-
-	// Wait for server to be ready.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		c, err := ipc.Dial(sock)
-		if err == nil {
-			c.Close()
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	if err := srv.Listen(sock); err != nil {
+		t.Fatalf("listen: %v", err)
 	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ServeReady() }()
 
 	// Close twice — should not panic.
 	srv.Close()

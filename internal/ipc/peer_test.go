@@ -20,8 +20,11 @@ func TestServerAuthenticatesLocalPeerPID(t *testing.T) {
 	srv.Handle("peer", func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
 		return map[string]int{"pid": ipc.PeerPID(ctx)}, nil
 	})
+	if err := srv.Listen(sock); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
 	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(sock) }()
+	go func() { errCh <- srv.ServeReady() }()
 	t.Cleanup(func() {
 		srv.Close()
 		select {
@@ -33,16 +36,7 @@ func TestServerAuthenticatesLocalPeerPID(t *testing.T) {
 			t.Error("server did not stop")
 		}
 	})
-	var client *ipc.Client
-	var err error
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		client, err = ipc.Dial(sock)
-		if err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	client, err := ipc.Dial(sock)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

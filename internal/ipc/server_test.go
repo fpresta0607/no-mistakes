@@ -23,23 +23,20 @@ func socketPath(t *testing.T) string {
 func startServer(t *testing.T, sock string) *ipc.Server {
 	t.Helper()
 	srv := ipc.NewServer()
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(sock) }()
-
-	// wait for server to be ready
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		c, err := ipc.Dial(sock)
-		if err == nil {
-			c.Close()
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	if err := srv.Listen(sock); err != nil {
+		t.Fatalf("listen: %v", err)
 	}
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ServeReady() }()
 	t.Cleanup(func() {
 		srv.Close()
-		if err := <-errCh; err != nil {
-			// server returns nil on clean close
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Errorf("serve: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("server did not stop")
 		}
 	})
 	return srv
