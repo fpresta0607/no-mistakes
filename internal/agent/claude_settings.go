@@ -43,6 +43,61 @@ func defaultClaudeSettingsHost() claudeSettingsHost {
 	return host
 }
 
+// claudeRouteFollow says how far the probe can follow a network setting.
+type claudeRouteFollow int
+
+const (
+	// claudeRouteFollowedFromDaemon: the probe's client follows the daemon
+	// process's own value, so only a different value, or one set on one side
+	// only, routes the CLI where the probe does not go.
+	claudeRouteFollowedFromDaemon claudeRouteFollow = iota
+	// claudeRouteNeverFollowed: the probe reads no value, so any non-empty one
+	// routes the CLI where the probe does not go.
+	claudeRouteNeverFollowed
+)
+
+// claudeNetworkRouteEnvVars are the proxy, certificate and launcher settings
+// of Claude Code's network configuration (code.claude.com/docs/en/network-config),
+// plus the Anthropic AWS endpoint. Set in the CLI's environment or in a
+// settings env block in a way the probe cannot follow, they mean no probe.
+var claudeNetworkRouteEnvVars = map[string]claudeRouteFollow{
+	"HTTPS_PROXY":                       claudeRouteFollowedFromDaemon,
+	"https_proxy":                       claudeRouteFollowedFromDaemon,
+	"HTTP_PROXY":                        claudeRouteFollowedFromDaemon,
+	"http_proxy":                        claudeRouteFollowedFromDaemon,
+	"NO_PROXY":                          claudeRouteFollowedFromDaemon,
+	"no_proxy":                          claudeRouteFollowedFromDaemon,
+	"NODE_EXTRA_CA_CERTS":               claudeRouteNeverFollowed,
+	"CLAUDE_CODE_CERT_STORE":            claudeRouteNeverFollowed,
+	"CLAUDE_CODE_CLIENT_CERT":           claudeRouteNeverFollowed,
+	"CLAUDE_CODE_CLIENT_KEY":            claudeRouteNeverFollowed,
+	"CLAUDE_CODE_CLIENT_KEY_PASSPHRASE": claudeRouteNeverFollowed,
+	"NODE_TLS_REJECT_UNAUTHORIZED":      claudeRouteNeverFollowed,
+	"CLAUDE_CODE_PROCESS_WRAPPER":       claudeRouteNeverFollowed,
+	"ANTHROPIC_AWS_BASE_URL":            claudeRouteNeverFollowed,
+}
+
+// claudeRouteDiverts reports whether the network setting name, set to value
+// (isSet false when unset), routes the CLI where the probe cannot follow.
+// daemonEnv is the daemon process's own environment.
+func claudeRouteDiverts(name, value string, isSet bool, daemonEnv map[string]string) bool {
+	if claudeNetworkRouteEnvVars[name] == claudeRouteNeverFollowed {
+		return value != ""
+	}
+	daemonValue, isDaemonSet := daemonEnv[name]
+	return isSet != isDaemonSet || value != daemonValue
+}
+
+func claudeEnvMap(entries []string) map[string]string {
+	env := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		if key, value, ok := strings.Cut(entry, "="); ok {
+			env[key] = value
+		}
+	}
+	return env
+}
+
 // claudeSettingsDocument is one settings source to check; a managed one may
 // also delegate to a policyHelper.
 type claudeSettingsDocument struct {
@@ -52,13 +107,22 @@ type claudeSettingsDocument struct {
 
 // leaveRoute reports whether every Claude Code settings source the CLI loads
 // is absent or readable and sets neither ANTHROPIC_BASE_URL nor a cloud
-// provider switch, so the CLI's own environment decides its endpoint. env is
+// provider switch, so the CLI's own environment decides its endpoint, and
+// whether neither that environment nor any settings source sets a network
+// route the probe cannot follow (claudeNetworkRouteEnvVars). env is
 // the CLI's environment and cwd its working directory; readsProject is false
 // when the project and local sources are suppressed. A source that cannot be
 // located or read means false.
 func (h claudeSettingsHost) leaveRoute(env map[string]string, cwd string, readsProject bool) bool {
 	if h.homeDir == nil || h.managedDir == "" {
 		return false
+	}
+	daemonEnv := claudeEnvMap(os.Environ())
+	for name := range claudeNetworkRouteEnvVars {
+		value, isSet := env[name]
+		if claudeRouteDiverts(name, value, isSet, daemonEnv) {
+			return false
+		}
 	}
 	if h.wslInteropPath != "" {
 		if env["WSL_DISTRO_NAME"] != "" || !claudeSettingsAbsent(h.wslInteropPath) {
@@ -74,7 +138,7 @@ func (h claudeSettingsHost) leaveRoute(env map[string]string, cwd string, readsP
 			return false
 		}
 		for _, value := range values {
-			if !claudeSettingsLeaveRoute([]byte(value), true) {
+			if !claudeSettingsLeaveRoute([]byte(value), true, daemonEnv) {
 				return false
 			}
 		}
@@ -118,7 +182,7 @@ func (h claudeSettingsHost) leaveRoute(env map[string]string, cwd string, readsP
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		if err != nil || !claudeSettingsLeaveRoute(data, document.managed) {
+		if err != nil || !claudeSettingsLeaveRoute(data, document.managed, daemonEnv) {
 			return false
 		}
 	}
@@ -126,15 +190,20 @@ func (h claudeSettingsHost) leaveRoute(env map[string]string, cwd string, readsP
 }
 
 // claudeSettingsLeaveRoute reports whether one settings document is a JSON
-// object whose env, if present, is an object that sets neither
-// ANTHROPIC_BASE_URL nor a cloud provider switch. A managed document must also
-// name no policyHelper, whose settings cannot be read ahead of the CLI.
-func claudeSettingsLeaveRoute(data []byte, managed bool) bool {
+// object with no processWrapper launcher whose env, if present, is an object
+// that sets neither ANTHROPIC_BASE_URL nor a cloud provider switch, nor a
+// network route the probe cannot follow from daemonEnv. A managed document
+// must also name no policyHelper, whose settings cannot be read ahead of the
+// CLI.
+func claudeSettingsLeaveRoute(data []byte, managed bool, daemonEnv map[string]string) bool {
 	var settings map[string]json.RawMessage
 	if json.Unmarshal(data, &settings) != nil || settings == nil {
 		return false
 	}
 	if _, ok := settings["policyHelper"]; ok && managed {
+		return false
+	}
+	if _, ok := settings["processWrapper"]; ok {
 		return false
 	}
 	raw, ok := settings["env"]
@@ -150,6 +219,15 @@ func claudeSettingsLeaveRoute(data []byte, managed bool) bool {
 	}
 	for _, key := range claudeCloudProviderEnvVars {
 		if _, ok := env[key]; ok {
+			return false
+		}
+	}
+	for name, raw := range env {
+		if _, ok := claudeNetworkRouteEnvVars[name]; !ok {
+			continue
+		}
+		var value string
+		if json.Unmarshal(raw, &value) != nil || claudeRouteDiverts(name, value, true, daemonEnv) {
 			return false
 		}
 	}

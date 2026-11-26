@@ -39,6 +39,9 @@ func newClaudeSettingsFixture(t *testing.T) *claudeSettingsFixture {
 	for _, key := range append([]string{"ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR", "WSL_DISTRO_NAME"}, claudeCloudProviderEnvVars...) {
 		t.Setenv(key, "")
 	}
+	for key := range claudeNetworkRouteEnvVars {
+		t.Setenv(key, "")
+	}
 	return fixture
 }
 
@@ -66,6 +69,8 @@ func writeClaudeSettingsFile(t *testing.T, path, content string) {
 const (
 	routesToGateway = `{"env":{"ANTHROPIC_BASE_URL":"https://gateway.example.test"}}`
 	routesToBedrock = `{"env":{"CLAUDE_CODE_USE_BEDROCK":"1","AWS_REGION":"us-east-1"}}`
+	corporateProxy  = "http://proxy.corp.example:3128"
+	routesToProxy   = `{"env":{"HTTPS_PROXY":"` + corporateProxy + `"}}`
 )
 
 // The probe target follows Claude Code's settings precedence as documented at
@@ -198,6 +203,25 @@ func TestClaudeProviderProbeFollowsTheSettingsSources(t *testing.T) {
 		}},
 		{name: "macOS managed preferences", arrange: func(t *testing.T, f *claudeSettingsFixture) []string {
 			writeClaudeSettingsFile(t, filepath.Join(f.preferencesDir, "operator", "com.anthropic.claudecode.plist"), "<plist/>")
+			return nil
+		}},
+		{name: "user settings proxy the daemon lacks", arrange: func(t *testing.T, f *claudeSettingsFixture) []string {
+			writeClaudeSettingsFile(t, filepath.Join(f.home, ".claude", "settings.json"), routesToProxy)
+			return nil
+		}},
+		{name: "user settings proxy the daemon shares", wantEndpoint: "https://api.anthropic.com", arrange: func(t *testing.T, f *claudeSettingsFixture) []string {
+			t.Setenv("HTTPS_PROXY", corporateProxy)
+			writeClaudeSettingsFile(t, filepath.Join(f.home, ".claude", "settings.json"), routesToProxy)
+			return nil
+		}},
+		{name: "run environment proxy the daemon lacks", arrange: envOnly("HTTPS_PROXY=" + corporateProxy)},
+		{name: "certificate in the run environment the daemon shares", arrange: func(t *testing.T, f *claudeSettingsFixture) []string {
+			certificates := filepath.Join(f.root, "corporate-ca.pem")
+			t.Setenv("NODE_EXTRA_CA_CERTS", certificates)
+			return []string{"NODE_EXTRA_CA_CERTS=" + certificates}
+		}},
+		{name: "process wrapper in managed settings", arrange: func(t *testing.T, f *claudeSettingsFixture) []string {
+			writeClaudeSettingsFile(t, filepath.Join(f.managedDir, "managed-settings.json"), `{"processWrapper":"/usr/local/bin/corp-launch"}`)
 			return nil
 		}},
 		{name: "WSL distribution", arrange: envOnly("WSL_DISTRO_NAME=Ubuntu")},

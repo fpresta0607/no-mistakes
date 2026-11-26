@@ -123,18 +123,15 @@ func (a *claudeAgent) Name() string { return "claude" }
 // providerProbe probes the endpoint the CLI sends model requests to, read from
 // the environment the CLI is started with. It is resolved when a retry needs
 // it, and is nil, keeping the plain retry rule, when a cloud provider is
-// selected, the operator passes --settings, or any Claude Code settings source
-// routes the CLI elsewhere or cannot be read (claudeSettingsHost.leaveRoute).
+// selected, the operator passes --settings, the CLI's environment or any
+// Claude Code settings source routes the CLI elsewhere, including through a
+// proxy, certificate or launcher setting the probe cannot follow, or a
+// settings source cannot be read (claudeSettingsHost.leaveRoute).
 func (a *claudeAgent) providerProbe(opts RunOpts) providerProbe {
 	if a.providerAnswers == nil {
 		return nil
 	}
-	env := map[string]string{}
-	for _, entry := range a.gitSafeEnv(opts.CWD, opts.Env) {
-		if key, value, ok := strings.Cut(entry, "="); ok {
-			env[key] = value
-		}
-	}
+	env := claudeEnvMap(a.gitSafeEnv(opts.CWD, opts.Env))
 	for _, key := range claudeCloudProviderEnvVars {
 		if value := env[key]; value != "" && value != "0" && !strings.EqualFold(value, "false") {
 			return nil
