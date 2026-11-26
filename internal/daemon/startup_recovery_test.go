@@ -256,7 +256,7 @@ func TestRecoverOnStartup_DoesNotDeleteActiveRunWorktree(t *testing.T) {
 	// regardless of its actual mtime, mirroring recoverOnStartup's order.
 	future := time.Now().Add(365 * 24 * time.Hour)
 	NewRunManager(d, p, nil).reapWorktrees(worktreeReapPolicy{Retention: time.Nanosecond}, future)
-	cleanupOrphanWorktrees(d, p, leftoverRecordedRunWorktrees(d, p))
+	cleanupOrphanWorktrees(d, p, &preservedWorktrees{}, leftoverRecordedRunWorktrees(d, p))
 
 	if _, err := os.Stat(activeWT); err != nil {
 		t.Fatalf("active run worktree must survive cleanup, got: %v", err)

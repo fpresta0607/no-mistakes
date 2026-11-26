@@ -263,7 +263,7 @@ func TestTerminalCleanupPreservesCommittedCorrectionsBeforeAdoption(t *testing.T
 					case "completion":
 						manager.removeRunWorktree(repo.ID, run.ID, gateDir, managed, "terminal correction regression")
 					case "recorded startup":
-						cleanupOrphanWorktrees(database, p, leftoverRecordedRunWorktrees(database, p))
+						cleanupOrphanWorktrees(database, p, &preservedWorktrees{}, leftoverRecordedRunWorktrees(database, p))
 					case "default reap":
 						manager.reapWorktrees(worktreeReapPolicy{Retention: time.Nanosecond}, time.Now().Add(time.Hour))
 					}
@@ -576,7 +576,7 @@ func TestTerminalAbortDoesNotExtendProtectedPathDisposal(t *testing.T) {
 			manager := NewRunManager(f.db, f.p, nil)
 			manager.removeRunWorktree(repo.ID, run.ID, f.p.RepoDir(repo.ID), workDir, "abort preservation regression")
 			manager.reapWorktrees(worktreeReapPolicy{Retention: time.Nanosecond}, time.Now().Add(time.Hour))
-			cleanupOrphanWorktrees(f.db, f.p, nil)
+			cleanupOrphanWorktrees(f.db, f.p, &preservedWorktrees{}, nil)
 			for _, name := range []string{"test.txt", "staged.txt", ".untracked.txt"} {
 				if content, err := os.ReadFile(filepath.Join(workDir, name)); err != nil || string(content) != "retained abort source" {
 					t.Fatalf("abort lost %s: %q, %v", name, content, err)

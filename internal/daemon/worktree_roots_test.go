@@ -325,7 +325,7 @@ func TestCleanupOrphanWorktrees_ConfiguredRootRemovesOnlyRunDirectories(t *testi
 		t.Fatal(err)
 	}
 
-	cleanupOrphanWorktrees(d, p, leftoverRecordedRunWorktrees(d, p))
+	cleanupOrphanWorktrees(d, p, &preservedWorktrees{}, leftoverRecordedRunWorktrees(d, p))
 
 	if _, err := os.Stat(terminalWT); !os.IsNotExist(err) {
 		t.Fatalf("terminal run worktree should have been cleaned up, stat err: %v", err)
@@ -376,7 +376,7 @@ func TestCleanupOrphanWorktrees_UnconfiguredRepoUsesDefaultRoot(t *testing.T) {
 	// regardless of its actual mtime, mirroring recoverOnStartup's order.
 	future := time.Now().Add(365 * 24 * time.Hour)
 	NewRunManager(d, p, nil).reapWorktrees(worktreeReapPolicy{Retention: time.Nanosecond}, future)
-	cleanupOrphanWorktrees(d, p, leftoverRecordedRunWorktrees(d, p))
+	cleanupOrphanWorktrees(d, p, &preservedWorktrees{}, leftoverRecordedRunWorktrees(d, p))
 
 	if _, err := os.Stat(terminalWT); !os.IsNotExist(err) {
 		t.Fatalf("default-root worktree should have been cleaned up, stat err: %v", err)
@@ -617,7 +617,7 @@ func TestCleanupOrphanWorktrees_OperatorRootRemovesOnlyWhatARunRecorded(t *testi
 		}
 	}
 
-	cleanupOrphanWorktrees(d, p, leftoverRecordedRunWorktrees(d, p))
+	cleanupOrphanWorktrees(d, p, &preservedWorktrees{}, leftoverRecordedRunWorktrees(d, p))
 
 	for _, gone := range []string{ownWT, otherWT} {
 		if _, err := os.Stat(gone); !os.IsNotExist(err) {
@@ -757,7 +757,7 @@ func TestCleanupOrphanWorktrees_ReachesARootTheConfigNoLongerNames(t *testing.T)
 		t.Fatal(err)
 	}
 
-	cleanupOrphanWorktrees(d, p, leftoverRecordedRunWorktrees(d, p))
+	cleanupOrphanWorktrees(d, p, &preservedWorktrees{}, leftoverRecordedRunWorktrees(d, p))
 
 	if _, err := os.Stat(recordedWT); !os.IsNotExist(err) {
 		t.Fatalf("recorded worktree in a root the config no longer names survived cleanup, stat err: %v", err)
