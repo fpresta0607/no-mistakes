@@ -221,9 +221,12 @@ func TestWaitForRunScalesTimeoutAndPrefersNewestRunOnBranch(t *testing.T) {
 		}}, nil
 	})
 
+	if err := server.Listen(p.Socket()); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- server.Serve(p.Socket())
+		errCh <- server.ServeReady()
 	}()
 	t.Cleanup(func() {
 		server.Close()
@@ -231,16 +234,6 @@ func TestWaitForRunScalesTimeoutAndPrefersNewestRunOnBranch(t *testing.T) {
 			t.Errorf("ipc server: %v", err)
 		}
 	})
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		client, err := ipc.Dial(p.Socket())
-		if err == nil {
-			client.Close()
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 
 	h := &Harness{t: t, NMHome: nmHome, WorkDir: workDir}
 	run := h.WaitForRun("feature/e2e", time.Millisecond)
