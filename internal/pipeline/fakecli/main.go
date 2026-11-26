@@ -233,6 +233,8 @@ func fakeRecordSuccessHandler() {
 // through. FAKE_CLI_WRAPPER_SAYS is a line it prints first, as a wrapper does
 // while it waits. FAKE_CLI_WRAPPER_REFUSAL makes it print that line and exit
 // with FAKE_CLI_WRAPPER_REFUSAL_CODE without starting anything.
+// FAKE_CLI_WRAPPER_BINDS is one NAME=value pair it sets for the command it
+// starts, as `goblins gate turn` binds a project's environment.
 func fakeWrapperHandler(args []string) {
 	if logFile := os.Getenv("FAKE_CLI_WRAPPER_LOG"); logFile != "" {
 		if f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
@@ -262,6 +264,9 @@ func fakeWrapperHandler(args []string) {
 	}
 	command := exec.Command(args[separator+1], args[separator+2:]...)
 	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if binds := os.Getenv("FAKE_CLI_WRAPPER_BINDS"); binds != "" {
+		command.Env = append(os.Environ(), binds)
+	}
 	if err := command.Run(); err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
