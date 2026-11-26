@@ -26,6 +26,10 @@ func daemonEnvironmentTestPaths(t *testing.T) *paths.Paths {
 	for _, key := range []string{"TEMP", "TMP", "TMPDIR", "GOTMPDIR"} {
 		t.Setenv(key, os.Getenv(key))
 	}
+	// Run from Git Bash, the test binary's PATH carries Git's MSYS folders,
+	// which prepareDaemonEnvironment moves; only the test that covers that
+	// launcher sets MSYSTEM.
+	t.Setenv("MSYSTEM", "")
 	return paths.WithRoot(root)
 }
 
