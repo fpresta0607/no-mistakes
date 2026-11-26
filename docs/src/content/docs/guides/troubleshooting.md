@@ -167,7 +167,7 @@ Symptom: a run stops with a failed step.
 Check the per-step log at `~/.no-mistakes/logs/<runID>/<step>.log`.
 Fatal step errors are appended to that log, so failures such as rejected pushes include the returned error output there instead of only appearing in `daemon.log`.
 
-### A run failed on a provider error, usage limit, or agent exit
+### A run failed on a provider error, usage limit, agent exit, or dependency preparation
 
 When the failed step is Test or an earlier step and its error came from the agent invocation itself, or Test failed preparing dependencies for an environment reason after Review approved the run's head, continue the run instead of starting over:
 
