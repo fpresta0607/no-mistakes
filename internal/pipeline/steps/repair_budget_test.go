@@ -34,13 +34,25 @@ const (
 	repairCutStallBudget     = 4 * time.Second
 	repairCutWorkingCap      = repairCutStallBudget + 500*time.Millisecond
 	repairCutFirstChunkDelay = 1500 * time.Millisecond
+
+	// repairCutOtherTurnBudget bounds every turn but the cut one, far past
+	// anything a loaded runner holds a scripted turn for.
+	repairCutOtherTurnBudget = 10 * time.Minute
 )
 
 // repairCutLoop scripts a review whose first repair turn runs into its budget
 // after leaving a tracked edit and a new file. Later repair turns finish.
 type repairCutLoop struct {
-	mu             sync.Mutex
-	isStreaming    bool
+	mu          sync.Mutex
+	isStreaming bool
+	// isSlowReading makes every turn but the cut one outlast the cut turn's
+	// budget, as a loaded runner can.
+	isSlowReading bool
+	// cfg is the run's config, and cutBudget and cutWorking the review budgets
+	// the case gave it for the cut turn alone.
+	cfg            *config.Config
+	cutBudget      time.Duration
+	cutWorking     time.Duration
 	commitsWork    bool
 	mergesWork     bool
 	rereviewOutput string
@@ -52,10 +64,17 @@ func (l *repairCutLoop) agent(t *testing.T) *mockAgent {
 	return &mockAgent{name: "repair-cut", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		l.mu.Lock()
 		defer l.mu.Unlock()
+		if l.isSlowReading && !(opts.Purpose == "review-fix" && len(l.repairs) == 0) {
+			time.Sleep(time.Second)
+		}
 		switch opts.Purpose {
 		case "review":
 			l.reviews = append(l.reviews, opts.Prompt)
 			if len(l.reviews) == 1 {
+				// The step reads the budget as it starts each turn, on this
+				// goroutine, so the repair this finding sends runs under the
+				// cut budget and no reading turn does.
+				l.cfg.ReviewAgentTimeout, l.cfg.ReviewAgentWorkingTimeout = l.cutBudget, l.cutWorking
 				return &agent.Result{Output: json.RawMessage(repairCutFindingOutput)}, nil
 			}
 			if l.rereviewOutput != "" {
@@ -76,6 +95,7 @@ func (l *repairCutLoop) agent(t *testing.T) *mockAgent {
 }
 
 func (l *repairCutLoop) cutTurn(ctx context.Context, t *testing.T, opts agent.RunOpts) (*agent.Result, error) {
+	l.cfg.ReviewAgentTimeout, l.cfg.ReviewAgentWorkingTimeout = repairCutOtherTurnBudget, 0
 	for name, content := range map[string]string{"feature.txt": "feature code, half fixed\n", "helper.txt": "half a helper\n"} {
 		if err := os.WriteFile(filepath.Join(opts.CWD, name), []byte(content), 0o644); err != nil {
 			t.Errorf("write partial work: %v", err)
@@ -136,9 +156,13 @@ type repairCutRun struct {
 
 // startRepairCutRun runs the real review step under the executor until the
 // first repair turn has been cut and the gate is parked. The worktree already
-// holds scratch.txt, an untracked file no repair turn wrote.
+// holds scratch.txt, an untracked file no repair turn wrote. cfg's review
+// budgets bound only that cut turn; every other turn runs under
+// repairCutOtherTurnBudget, since a reading turn at its budget fails the step.
 func startRepairCutRun(t *testing.T, loop *repairCutLoop, cfg *config.Config) *repairCutRun {
 	t.Helper()
+	loop.cfg, loop.cutBudget, loop.cutWorking = cfg, cfg.ReviewAgentTimeout, cfg.ReviewAgentWorkingTimeout
+	cfg.ReviewAgentTimeout, cfg.ReviewAgentWorkingTimeout = repairCutOtherTurnBudget, 0
 	workDir, baseSHA, headSHA := twoFileRepo(t)
 	ensureHermeticOrigin(t, workDir)
 	if err := os.WriteFile(filepath.Join(workDir, "scratch.txt"), []byte("left by an earlier step\n"), 0o644); err != nil {
@@ -286,6 +310,24 @@ func TestReviewLoop_RepairAtItsBudgetParksWithItsWorkKept(t *testing.T) {
 				t.Errorf("abort: %v", abortErr)
 			}
 		})
+	}
+}
+
+// A reading turn at its budget fails the step, so a loaded runner that held a
+// reading turn past the short budget a case gives its cut turn failed the case
+// after the part it is about had passed (issue #317).
+func TestReviewLoop_TurnsAroundTheCutKeepTheirOwnBudget(t *testing.T) {
+	loop := &repairCutLoop{isSlowReading: true}
+	r := startRepairCutRun(t, loop, &config.Config{ReviewAgentTimeout: 500 * time.Millisecond})
+
+	if err := r.exec.Respond(types.StepReview, types.ActionFix, []string{"f-1", types.FindingIDRepairAgentBudget}); err != nil {
+		t.Fatalf("fix: %v", err)
+	}
+	r.finish(t)
+
+	reviews, repairs := loop.turns()
+	if len(reviews) != 2 || len(repairs) != 2 {
+		t.Fatalf("turns = %d reviews and %d repairs, want the first review, the cut, a finished repair and its rereview", len(reviews), len(repairs))
 	}
 }
 
