@@ -279,7 +279,11 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err != nil {
 			return "", err
 		}
-		if err := proveAuthoredPublication(ctx, &snapshot.Run, repo, request.CallerDir, cfg, forge); err != nil {
+		inheritedHead, err := m.db.InheritedPRLineageHead(&snapshot.Run)
+		if err != nil {
+			return "", err
+		}
+		if err := proveAuthoredPublication(ctx, &snapshot.Run, inheritedHead, repo, request.CallerDir, cfg, forge); err != nil {
 			return "", err
 		}
 		quotaRecord, err := replayQuotaRouting(cfg, storedQuota)
@@ -317,7 +321,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		if err := m.proveAuthoredGateLineage(ctx, snapshot, gateDir, gateHead); err != nil {
 			return "", err
 		}
-		if err := proveAuthoredPublication(ctx, &snapshot.Run, repo, request.CallerDir, cfg, forge); err != nil {
+		if err := proveAuthoredPublication(ctx, &snapshot.Run, inheritedHead, repo, request.CallerDir, cfg, forge); err != nil {
 			return "", err
 		}
 		if err := ctx.Err(); err != nil {
@@ -533,8 +537,11 @@ func proveAuthoredCheckout(ctx context.Context, actualDir string, request *autho
 	return nil
 }
 
-func proveAuthoredPublication(ctx context.Context, run *db.Run, repo *db.Repo, caller string, cfg *config.Config, forge *forgecontext.Context) error {
-	boundHead, isInheritedPR := run.InheritedPRHead()
+// proveAuthoredPublication proves run's publication binding live. inheritedHead
+// is db.InheritedPRLineageHead of run: the head its inherited PR must hold, or
+// "" when run is not bound to an inherited PR.
+func proveAuthoredPublication(ctx context.Context, run *db.Run, inheritedHead string, repo *db.Repo, caller string, cfg *config.Config, forge *forgecontext.Context) error {
+	boundHead, isInheritedPR := inheritedHead, inheritedHead != ""
 	if run.LastPushedSHA == nil && !isInheritedPR {
 		if run.PRURL != nil || run.PushGeneration != nil {
 			return fmt.Errorf("terminal publication binding is incomplete")

@@ -939,7 +939,7 @@ func TestTerminalPublicationRequiresTheOriginalPRAndHead(t *testing.T) {
 			if test.base == "release" {
 				cfg.PR.BaseBranch = "release"
 			}
-			err := proveTerminalPublication(context.Background(), &selected, repo, repo.WorkingPath, nil, cfg)
+			err := proveTerminalPublication(context.Background(), &selected, "", repo, repo.WorkingPath, nil, cfg)
 			if (err == nil) != test.isAccepted {
 				t.Fatalf("publication acceptance = %v, want %v: %v", err == nil, test.isAccepted, err)
 			}
@@ -1000,7 +1000,7 @@ func TestTerminalPublicationBindsAnInheritedPRAtItsSubmittedHead(t *testing.T) {
 		wantError      string
 	}{
 		{"PR still at the submitted head", head, nil, ""},
-		{"PR head moved", moved, nil, "inherited PR live head " + moved + " is not the run's submitted head " + head},
+		{"PR head moved", moved, nil, "inherited PR live head " + moved + " is not the head the run's recorded lineage was submitted at, " + head},
 		{"partial push binding", head, &generation, "terminal publication binding is incomplete"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1013,9 +1013,13 @@ func TestTerminalPublicationBindsAnInheritedPRAtItsSubmittedHead(t *testing.T) {
 			selected := *run
 			selected.PushGeneration = test.pushGeneration
 			cfg := config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{})
+			inherited, err := database.InheritedPRLineageHead(&selected)
+			if err != nil {
+				t.Fatal(err)
+			}
 
 			// Act
-			err := proveTerminalPublication(context.Background(), &selected, repo, repo.WorkingPath, nil, cfg)
+			err = proveTerminalPublication(context.Background(), &selected, inherited, repo, repo.WorkingPath, nil, cfg)
 
 			// Assert
 			if test.wantError == "" && err != nil || test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {

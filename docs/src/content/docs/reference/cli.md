@@ -507,6 +507,8 @@ A merge proven at a head other than the one the child published (for example aft
 The live PR's head and base repository names are compared case-insensitively with the registered repositories; head and base branch names must match exactly, including case.
 A predecessor that inherited an open PR URL through a same-head relaunch or `rerun` and never pushed to it is bound to that PR at the head it was submitted at.
 Admission reads the PR and its branch live and continues only while both still name the predecessor's submitted head, with the same PR identity and base checks as a published predecessor; when the live head is any other commit it refuses with both heads named.
+A validation-only child of such a predecessor inherits the same PR without pushing, and is bound to the head its lineage root was submitted at, so a later admission from the child, or from its own children, continues while the PR still names that head.
+The lineage is followed only through the recorded admission and terminal adoption links, never through Git ancestry, so a child whose recorded link is missing is bound to its own submitted head and refused.
 A predecessor with only part of a push binding is ineligible even if its PR is still open.
 A child that publishes but then cannot run its PR or CI stage fails and cannot itself be continued, so confirm forge access before admission.
 An accepted pending child can be cancelled with `axi abort`.
