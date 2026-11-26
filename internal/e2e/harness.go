@@ -919,6 +919,29 @@ func buildBinaries(t *testing.T) (nmBin, fakeBin string) {
 	return builtNM, builtFake
 }
 
+// writeShellCommand installs a POSIX sh script as the program a configured
+// command names. The pipeline starts configured commands through cmd.exe /c on
+// Windows, which starts only names with a PATHEXT extension, so there a
+// name.cmd beside the script hands it to sh (#373).
+func writeShellCommand(t *testing.T, dir, name, script string) {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write command %s: %v", name, err)
+	}
+	if runtime.GOOS != "windows" {
+		return
+	}
+	shell, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatalf("command %s needs sh on PATH to start under cmd.exe: %v", name, err)
+	}
+	shim := fmt.Sprintf("@\"%s\" \"%s\" %%*\r\n", shell, path)
+	if err := os.WriteFile(path+".cmd", []byte(shim), 0o755); err != nil {
+		t.Fatalf("write command %s.cmd: %v", name, err)
+	}
+}
+
 func executableName(base string) string {
 	if runtime.GOOS == "windows" {
 		return base + ".exe"
