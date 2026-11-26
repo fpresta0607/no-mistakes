@@ -125,3 +125,35 @@ func TestPRStep_ConnectionErrorRetriesAreBounded(t *testing.T) {
 		t.Fatalf("gh pr create ran %d times, want %d", got, want)
 	}
 }
+
+// A pull request found on the branch after a failed create may be one the
+// author opened in the meantime, not the run's own. Adopting it would report
+// success without the run's body and attestation, so the step fails instead.
+func TestPRStep_ConnectionErrorRefusesAFoundPRWithAnotherBody(t *testing.T) {
+	t.Parallel()
+	// Arrange
+	_, _, run, _, dir, _, env := setupCIGateReconcileTest(t)
+	env, countPath := prCreateFailureEnv(t, env, 1, ghResetFailure, true)
+	env = append(env, "FAKE_CLI_PR_FOUND_BODY=Opened from the compare banner.")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, run.BaseSHA, run.HeadSHA, config.Commands{})
+	publishValidationTextForTest(sctx)
+	sctx.Env = env
+
+	// Act
+	outcome, err := (&PRStep{createRetryDelays: testPRCreateRetryDelays}).Execute(sctx)
+
+	// Assert
+	if err == nil || !strings.Contains(err.Error(), "https://github.com/test/repo/pull/42") || !strings.Contains(err.Error(), "refusing to adopt") {
+		t.Fatalf("Execute() = (%+v, %v), want a refusal naming pull/42", outcome, err)
+	}
+	if got := readPRCreateCount(t, countPath); got != 1 {
+		t.Fatalf("gh pr create ran %d times, want 1", got)
+	}
+	persisted, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.PRURL != nil {
+		t.Fatalf("persisted PR URL = %q, want none", *persisted.PRURL)
+	}
+}

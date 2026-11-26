@@ -370,8 +370,8 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 // prCreateConnectionRetryDelays schedule while the forge cannot be reached. A
 // create whose connection broke may still have opened the pull request, so
 // each new attempt first looks for an open one on the branch and adopts it
-// instead of opening a duplicate; no create is repeated until that read
-// succeeds.
+// instead of opening a duplicate, but only when its body is the proposed one;
+// no create is repeated until that read succeeds.
 func (s *PRStep) createPR(sctx *pipeline.StepContext, host scm.Host, branch, baseBranch string, content scm.PRContent) (*scm.PR, error) {
 	delays := s.createRetryDelays
 	if delays == nil {
@@ -393,6 +393,17 @@ func (s *PRStep) createPR(sctx *pipeline.StepContext, host scm.Host, branch, bas
 		case findErr != nil:
 			err = fmt.Errorf("check whether the failed create opened a pull request: %w", findErr)
 		case opened != nil:
+			reader, ok := host.(scm.PRContentReader)
+			if !ok {
+				return nil, fmt.Errorf("found open pull request %s after the failed create, and this provider cannot read its body to prove the create opened it", describePR(opened))
+			}
+			actual, readErr := reader.GetPRContent(ctx, opened)
+			if readErr != nil {
+				return nil, fmt.Errorf("read found pull request %s after the failed create: %w", describePR(opened), readErr)
+			}
+			if actual.Body != content.Body {
+				return nil, fmt.Errorf("found open pull request %s after the failed create, but its body is not the proposed one; refusing to adopt it", describePR(opened))
+			}
 			sctx.Log(fmt.Sprintf("the failed create had opened %s", describePR(opened)))
 			return opened, nil
 		default:
