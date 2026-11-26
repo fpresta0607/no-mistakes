@@ -1342,6 +1342,24 @@ func TestKeepUndrivenScenarios_ARepairTurnsLiveProofReplacesAResolvedPrerequisit
 			want:            types.TestScenario{Name: " browser history ", Result: types.ScenarioResultPass, Live: true, Evidence: "repair turn on cccccccccccc: history.png"},
 			wantReasonParts: []string{"passed live in the repair turn on cccccccccccc, which changed nothing", "recorded it failed"},
 		},
+		"a recorded name with inner whitespace matches the repair's normalized name": {
+			verdict:         types.TestVerdictGo,
+			isOnSameHead:    true,
+			last:            types.TestScenario{Name: "browser \t history", Result: types.ScenarioResultUntested, Reason: missingDependencies},
+			repair:          []types.TestScenario{repairPass},
+			wantVerdict:     types.TestVerdictGo,
+			want:            types.TestScenario{Name: "browser \t history", Result: types.ScenarioResultPass, Live: true, Evidence: "repair turn on cccccccccccc: history.png"},
+			wantReasonParts: []string{"passed live in the repair turn on cccccccccccc, which changed nothing"},
+		},
+		"a no-surface re-check takes no proof from the repair": {
+			verdict:         types.TestVerdictNoSurface,
+			isOnSameHead:    true,
+			last:            types.TestScenario{Name: "browser history", Result: types.ScenarioResultUntested, Reason: missingDependencies},
+			repair:          []types.TestScenario{repairPass},
+			wantVerdict:     types.TestVerdictNoSurface,
+			want:            types.TestScenario{Name: "browser history", Result: types.ScenarioResultUntested},
+			wantReasonParts: []string{missingDependencies},
+		},
 		"an excluded scenario the repair did not report keeps its own reason": {
 			verdict:         types.TestVerdictGo,
 			isOnSameHead:    true,
@@ -1396,7 +1414,11 @@ func TestKeepUndrivenScenarios_ARepairTurnsLiveProofReplacesAResolvedPrerequisit
 			}
 			last := Findings{TestedHeadSHA: liveHead, Scenarios: []types.TestScenario{tc.last}}
 
-			got := keepUndrivenScenarios(focused, last, tc.isOnSameHead, nil, tc.repair)
+			var proof map[string]types.TestScenario
+			if tc.isOnSameHead {
+				proof = repairProofFor(focused, last, tc.repair)
+			}
+			got := keepUndrivenScenarios(focused, last, tc.isOnSameHead, nil, proof)
 
 			if got.Verdict != tc.wantVerdict {
 				t.Fatalf("verdict = %q, want %q", got.Verdict, tc.wantVerdict)
@@ -1484,11 +1506,16 @@ func TestRepairScenariosDriven(t *testing.T) {
 	t.Run("past the byte sizes", func(t *testing.T) {
 		t.Parallel()
 
-		got := repairScenariosDriven(driven(entry(strings.Repeat("é", maxRepairScenarioNameBytes), "pass", true, strings.Repeat("é", maxRepairScenarioEvidenceBytes))))
+		atBound := strings.Repeat("é", maxRepairScenarioNameBytes/2)
+		pastBound := atBound + "x"
 
-		if len(got) != 1 || len(got[0].Name) > maxRepairScenarioNameBytes || len(got[0].Evidence) > maxRepairScenarioEvidenceBytes ||
-			!utf8.ValidString(got[0].Name) || !utf8.ValidString(got[0].Evidence) {
-			t.Fatalf("scenarios = %+v, want one within the byte bounds and valid UTF-8", got)
+		got := repairScenariosDriven(driven(
+			entry(pastBound, "pass", true, "shot.png"),
+			entry(atBound, "pass", true, strings.Repeat("é", maxRepairScenarioEvidenceBytes)),
+		))
+
+		if len(got) != 1 || got[0].Name != atBound || len(got[0].Evidence) > maxRepairScenarioEvidenceBytes || !utf8.ValidString(got[0].Evidence) {
+			t.Fatalf("scenarios = %+v, want only the name at the bound, whole, with its evidence cut to valid UTF-8", got)
 		}
 	})
 }

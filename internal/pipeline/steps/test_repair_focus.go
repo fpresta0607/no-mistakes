@@ -116,15 +116,12 @@ func repairCommandsRun(result *agent.Result) []repairCommand {
 	}
 	var commands []repairCommand
 	for _, entry := range parsed.CommandsRun {
-		entry.Command = sanitizePromptText(entry.Command)
+		entry.Command = boundedPromptText(entry.Command, maxRepairCommandBytes)
 		if entry.Command == "" {
 			continue
 		}
 		if len(commands) == maxRepairCommands {
 			break
-		}
-		if len(entry.Command) > maxRepairCommandBytes {
-			entry.Command = strings.ToValidUTF8(entry.Command[:maxRepairCommandBytes], "")
 		}
 		commands = append(commands, entry)
 	}
@@ -134,7 +131,8 @@ func repairCommandsRun(result *agent.Result) []repairCommand {
 // repairScenariosDriven reads the scenarios a repair turn reports driving live.
 // Not every adapter enforces the schema's bounds, so they are applied again here.
 // Only a pass or fail with the evidence that shows it is kept, as live, and the
-// first entry for a name wins.
+// first entry for a name wins. A name past its bound is dropped rather than cut,
+// since a cut name could never match the recorded one.
 func repairScenariosDriven(result *agent.Result) []types.TestScenario {
 	if result == nil || result.Output == nil {
 		return nil
@@ -155,10 +153,10 @@ func repairScenariosDriven(result *agent.Result) []types.TestScenario {
 		if len(scenarios) == maxRepairScenarios {
 			break
 		}
-		name := boundedPromptText(entry.Name, maxRepairScenarioNameBytes)
+		name := sanitizePromptText(entry.Name)
 		evidence := boundedPromptText(entry.Evidence, maxRepairScenarioEvidenceBytes)
 		isReported := entry.Result == types.ScenarioResultPass || entry.Result == types.ScenarioResultFail
-		if !isReported || !entry.Live || name == "" || evidence == "" ||
+		if !isReported || !entry.Live || name == "" || len(name) > maxRepairScenarioNameBytes || evidence == "" ||
 			slices.ContainsFunc(scenarios, func(kept types.TestScenario) bool { return kept.Name == name }) {
 			continue
 		}
@@ -441,19 +439,14 @@ func repairReceiptSection(sctx *pipeline.StepContext, repairReport string, comma
 // less what the focused turn already reported and what baselineTested, this
 // execution's own baseline, already lists.
 //
-// Also on the same head, a scenario the live check did not record as a pass that
-// the repair turn reports driving live (repairDriven, see repairScenariosDriven)
-// is recorded from that turn: the repair ran on this exact source, so its
+// Also on the same head, a scenario in repairProof (see repairProofFor) is
+// recorded from the repair turn: the repair ran on this exact source, so its
 // result is the current one, and the earlier record is named as a separate
 // event. A scenario the repair turn did not report keeps its own untested reason.
-func keepUndrivenScenarios(focused, last Findings, isOnSameHead bool, baselineTested []string, repairDriven []types.TestScenario) Findings {
+func keepUndrivenScenarios(focused, last Findings, isOnSameHead bool, baselineTested []string, repairProof map[string]types.TestScenario) Findings {
 	reported := make(map[string]int, len(focused.Scenarios))
 	for i, scenario := range focused.Scenarios {
 		reported[strings.TrimSpace(scenario.Name)] = i
-	}
-	var repairProof map[string]types.TestScenario
-	if isOnSameHead {
-		repairProof = repairProofFor(focused, last, repairDriven)
 	}
 	hasKeptPass := false
 	for _, scenario := range last.Scenarios {
@@ -499,18 +492,24 @@ func keepUndrivenScenarios(focused, last Findings, isOnSameHead bool, baselineTe
 }
 
 // repairProofFor maps the trimmed name of each scenario of last that the
-// repair turn reported driving to that report: the ones the focused turn left
-// out, and that the live check did not record as a pass.
+// repair turn reported driving (repairDriven, see repairScenariosDriven) to that
+// report: the ones the focused turn left out, and that the live check did not
+// record as a pass. A recorded name matches as repairScenariosDriven normalized
+// the reported one. A no-surface re-check takes no proof, since that verdict
+// cannot stand beside a live scenario.
 func repairProofFor(focused, last Findings, repairDriven []types.TestScenario) map[string]types.TestScenario {
+	if focused.Verdict == types.TestVerdictNoSurface {
+		return nil
+	}
 	driven := make(map[string]types.TestScenario, len(repairDriven))
 	for _, scenario := range repairDriven {
-		driven[strings.TrimSpace(scenario.Name)] = scenario
+		driven[scenario.Name] = scenario
 	}
 	proof := make(map[string]types.TestScenario)
 	for _, scenario := range last.Scenarios {
 		name := strings.TrimSpace(scenario.Name)
 		isReported := slices.ContainsFunc(focused.Scenarios, func(reported types.TestScenario) bool { return strings.TrimSpace(reported.Name) == name })
-		if repair, ok := driven[name]; ok && !isReported && scenario.Result != types.ScenarioResultPass {
+		if repair, ok := driven[sanitizePromptText(scenario.Name)]; ok && !isReported && scenario.Result != types.ScenarioResultPass {
 			proof[name] = repair
 		}
 	}

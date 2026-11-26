@@ -470,7 +470,6 @@ Rules:
 	) + testRepairScopeRules
 	evidencePrompt += liveCheckPromptSections(sctx, evidenceDir)
 	var lastCheck Findings
-	var repairProof []types.TestScenario
 	var hasBaselineRerun bool
 	// isOnSameHead is true when the repair changed nothing and the last live check
 	// ran on this head in this executor lifetime: the same source, run
@@ -487,7 +486,6 @@ Rules:
 		}
 		evidencePrompt += focusedRecheckSection(lastCheck, repairedPaths, isOnSameHead)
 		if isOnSameHead {
-			repairProof = repairScenarios
 			hasBaselineRerun = len(baseline.results) > 0 && baseline.focused == nil
 			evidencePrompt += repairReceiptSection(sctx, repairReport, repairCommands)
 			if hasBaselineRerun {
@@ -515,8 +513,11 @@ Rules:
 		return nil, err
 	}
 	recheckDriven := len(findings.Scenarios)
-	proof := repairProofFor(findings, lastCheck, repairProof)
-	findings = keepUndrivenScenarios(findings, lastCheck, isOnSameHead, baseline.tested, repairProof)
+	var proof map[string]types.TestScenario
+	if isOnSameHead {
+		proof = repairProofFor(findings, lastCheck, repairScenarios)
+	}
+	findings = keepUndrivenScenarios(findings, lastCheck, isOnSameHead, baseline.tested, proof)
 	if isOnSameHead {
 		findings.Tested = append(findings.Tested, repairTestedEntries(repairCommands)...)
 		findings.TestingSummary = strings.TrimSpace(sameHeadRecheckSentence(startHead, proof, hasBaselineRerun, recheckDriven) + " " + findings.TestingSummary)
