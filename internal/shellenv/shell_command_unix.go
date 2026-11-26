@@ -32,6 +32,13 @@ const defaultWaitDelay = 5 * time.Second
 // pipe past the exec package's own backstop.
 const terminateGrace = 3 * time.Second
 
+// groupSnapshotTimeout is the least a ShellCommandGroupActive call gives its
+// first ps snapshot, whatever its window. ps on a loaded macOS runner can take
+// longer than 100ms (issue #285), and a call outlasts its window by at most
+// this one snapshot. It stays below the agent's 2s settle window, so that
+// caller's bound is unchanged.
+const groupSnapshotTimeout = time.Second
+
 // ConfigureShellCommand isolates cmd in its own process group (Setpgid) and
 // installs a cmd.Cancel that terminates the whole group when cmd's context is
 // cancelled. exec.CommandContext otherwise only kills the direct child PID,
@@ -152,11 +159,13 @@ func TerminateShellCommandGroup(cmd *exec.Cmd) {
 // on a fixed cadence until window elapses: a member that was merely finishing
 // when the leader exited (issue #1614) gets the window to leave the group, and
 // only a member still live past the deadline makes the verdict active. The
-// returned detail names up to groupMemberReportLimit members seen on the last
-// good probe so the caller's error can identify what refused to exit; it is
-// empty when nothing nameable survived. A probe that fails after earlier
-// probes saw members still returns those last-observed members, since the
-// probe's error refuses completion without identifying anyone.
+// first probe gets at least groupSnapshotTimeout, so a zero window still takes
+// one snapshot a slow ps can finish. The returned detail names up to
+// groupMemberReportLimit members seen on the last good probe so the caller's
+// error can identify what refused to exit; it is empty when nothing nameable
+// survived. A probe that fails after earlier probes saw members still returns
+// those last-observed members, since the probe's error refuses completion
+// without identifying anyone.
 func ShellCommandGroupActive(cmd *exec.Cmd, window time.Duration) (active bool, detail string, err error) {
 	return shellCommandGroupActive(cmd, window, shellCommandGroupPS)
 }
@@ -169,9 +178,10 @@ func shellCommandGroupActive(cmd *exec.Cmd, window time.Duration, ps func(contex
 	var lastMembers []groupMember
 	for first := true; ; first = false {
 		timeout := min(defaultWaitDelay, time.Until(deadline))
-		if first && timeout <= 0 {
-			// A zero-window call still needs one verifiable snapshot.
-			timeout = 100 * time.Millisecond
+		if first {
+			// Every call needs one verifiable snapshot, so a zero or short
+			// window cannot starve the first ps (issue #285).
+			timeout = max(timeout, groupSnapshotTimeout)
 		}
 		live, members, err := probeShellCommandGroup(cmd.Process.Pid, timeout, ps)
 		if len(members) > 0 {
