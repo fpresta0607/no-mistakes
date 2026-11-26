@@ -88,7 +88,7 @@ func TestOrphanCleanupRechecksSourceFlushedDuringSweep(t *testing.T) {
 				if cleanupPath == "default reap" {
 					manager.reapWorktrees(worktreeReapPolicy{Retention: time.Nanosecond}, time.Now().Add(time.Hour))
 				} else {
-					cleanupOrphanWorktrees(database, p, leftoverRecordedRunWorktrees(database, p))
+					cleanupOrphanWorktrees(database, p, &preservedWorktrees{}, leftoverRecordedRunWorktrees(database, p))
 				}
 
 				if sweepCount != 1 {
@@ -173,7 +173,7 @@ func TestCleanupOrphanWorktreesSweepsEveryRemovableDirectoryInOneSnapshot(t *tes
 	// regardless of its actual mtime, mirroring recoverOnStartup's order.
 	future := time.Now().Add(365 * 24 * time.Hour)
 	NewRunManager(d, p, nil).reapWorktrees(worktreeReapPolicy{Retention: time.Nanosecond}, future)
-	cleanupOrphanWorktrees(d, p, leftoverRecordedRunWorktrees(d, p))
+	cleanupOrphanWorktrees(d, p, &preservedWorktrees{}, leftoverRecordedRunWorktrees(d, p))
 
 	if len(sweeps) != 2 {
 		t.Fatalf("startup cleanup ran %d sweeps, want 2 (default tree, then operator-placed leftovers)", len(sweeps))

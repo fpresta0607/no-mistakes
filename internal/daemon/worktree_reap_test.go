@@ -240,7 +240,7 @@ func TestReapWorktreesReachesALinkedRepositoryFolder(t *testing.T) {
 
 				// Act
 				NewRunManager(f.db, f.p, nil).reapWorktrees(worktreeReapPolicy{Retention: 14 * 24 * time.Hour}, time.Now())
-				cleanupOrphanWorktrees(f.db, f.p, nil)
+				cleanupOrphanWorktrees(f.db, f.p, &preservedWorktrees{}, nil)
 
 				// Assert
 				if f.exists(stale) {
@@ -291,7 +291,7 @@ func TestDefaultTreeOrphanWorktreesReportsALinkItCannotFollow(t *testing.T) {
 			t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
 			// Act
-			defaultTreeOrphanWorktrees(f.db, f.p)
+			defaultTreeOrphanWorktrees(f.db, f.p, &preservedWorktrees{})
 
 			// Assert
 			if !strings.Contains(logs.String(), "does not resolve to a directory") || !strings.Contains(logs.String(), f.repo.ID) {

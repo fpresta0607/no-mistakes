@@ -102,7 +102,7 @@ func TestProtectedPathRefusalCancellationCleanup(t *testing.T) {
 					t.Fatalf("unexpected supersession: %+v", run)
 				}
 				assertProtectedWorktreePreserved(t, workDir, head)
-				cleanupOrphanWorktrees(database, p, nil)
+				cleanupOrphanWorktrees(database, p, &preservedWorktrees{}, nil)
 				assertProtectedWorktreePreserved(t, workDir, head)
 				return
 			}
@@ -166,7 +166,7 @@ func TestProtectedPathRefusalSurvivesShutdownCleanup(t *testing.T) {
 	}
 	workDir := p.WorktreeDir(repo.ID, result.RunID)
 	assertProtectedWorktreePreserved(t, workDir, head)
-	cleanupOrphanWorktrees(database, p, nil)
+	cleanupOrphanWorktrees(database, p, &preservedWorktrees{}, nil)
 	assertProtectedWorktreePreserved(t, workDir, head)
 }
 
@@ -238,7 +238,7 @@ func TestProtectedPathRefusalSurvivesFailedTrustedRecovery(t *testing.T) {
 			}
 			recoverOnStartup(database, p, mgr, layout)
 			assertProtectedWorktreePreserved(t, workDir, head)
-			cleanupOrphanWorktrees(database, p, nil)
+			cleanupOrphanWorktrees(database, p, &preservedWorktrees{}, nil)
 			assertProtectedWorktreePreserved(t, workDir, head)
 			if len(mgr.executors) != 0 {
 				t.Fatal("failed trusted config launched an executor")

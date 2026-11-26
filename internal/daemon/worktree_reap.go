@@ -53,7 +53,10 @@ func worktreeReapPolicyFor(global *config.GlobalConfig) worktreeReapPolicy {
 // eligibility (see skipWorktreeCleanup and refusalCleanupReason), then
 // applies the same two-rule bound reapEvidence applies to evidence: an
 // eligible directory older than the retention window is removed, and whatever
-// survives is trimmed to the run ceiling, oldest first. Unlike evidence, an
+// survives is trimmed to the run ceiling, oldest first. Discovery repeats a
+// keep decision while the kept worktree's freshness key is unchanged (see
+// preservedWorktrees), so a sweep starts Git only for leftovers that are new or
+// changed, not for every kept one (issue #367). Unlike evidence, an
 // eligible worktree is never removed merely for being "empty" - a real checkout is
 // never empty, so there is nothing analogous to reapEvidence's empty-run
 // case. Only the default tree is scanned: an operator-configured
@@ -61,7 +64,7 @@ func worktreeReapPolicyFor(global *config.GlobalConfig) worktreeReapPolicy {
 // cleanup considers only recorded eligible leftovers there.
 func (m *RunManager) reapWorktrees(policy worktreeReapPolicy, now time.Time) {
 	d, p := m.db, m.paths
-	removable, _ := defaultTreeOrphanWorktrees(d, p)
+	removable, _ := defaultTreeOrphanWorktrees(d, p, &m.preservedWorktrees)
 	if len(removable) == 0 {
 		return
 	}

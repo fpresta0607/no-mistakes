@@ -681,7 +681,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	// about retention, and sweeping first would kill a process still using a
 	// checkout the operator configured to retain.
 	orphanProcStarted := time.Now()
-	sweepOrphanRunProcesses(d, p, sweepableWorktrees(leftover, activeWorktrees), retainedDefaultTreeRunIDs(d, p, wtPolicy, now))
+	sweepOrphanRunProcesses(d, p, sweepableWorktrees(leftover, activeWorktrees), retainedDefaultTreeRunIDs(d, p, &mgr.preservedWorktrees, wtPolicy, now))
 	logStartupPhase("orphan_processes", orphanProcStarted)
 	mgr.startup.complete("orphan_processes")
 
@@ -692,7 +692,7 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	// instead of being bypassed by startup cleanup.
 	worktreeStarted := time.Now()
 	mgr.reapWorktrees(wtPolicy, now)
-	cleanupOrphanWorktrees(d, p, leftover)
+	cleanupOrphanWorktrees(d, p, &mgr.preservedWorktrees, leftover)
 	logStartupPhase("worktree_cleanup", worktreeStarted)
 	mgr.startup.complete("worktree_cleanup")
 
@@ -831,8 +831,8 @@ func sweepOrphanRunProcesses(d *db.DB, p *paths.Paths, worktrees []procreap.Work
 // rather than treating "run is terminal" alone as orphaned - otherwise a
 // restart could kill a process still using a checkout the operator configured
 // to retain (see worktreeReapCandidates).
-func retainedDefaultTreeRunIDs(d *db.DB, p *paths.Paths, policy worktreeReapPolicy, now time.Time) map[string]bool {
-	removable, _ := defaultTreeOrphanWorktrees(d, p)
+func retainedDefaultTreeRunIDs(d *db.DB, p *paths.Paths, preserved *preservedWorktrees, policy worktreeReapPolicy, now time.Time) map[string]bool {
+	removable, _ := defaultTreeOrphanWorktrees(d, p, preserved)
 	if len(removable) == 0 {
 		return nil
 	}
@@ -1049,9 +1049,9 @@ func reportUnusableWorktreeRoots(d *db.DB, layout *worktrees.Layout) {
 // pass runs before the daemon binds its socket, against the startup budget. A
 // crash that leaves several directories behind would otherwise make the daemon
 // slower to start the more there is to clean up.
-func cleanupOrphanWorktrees(d *db.DB, p *paths.Paths, leftover []db.RunWorktree) {
+func cleanupOrphanWorktrees(d *db.DB, p *paths.Paths, preserved *preservedWorktrees, leftover []db.RunWorktree) {
 	ctx := context.Background()
-	_, repoDirs := defaultTreeOrphanWorktrees(d, p)
+	_, repoDirs := defaultTreeOrphanWorktrees(d, p, preserved)
 	removable := recordedOrphanWorktrees(d, p, leftover)
 
 	sweepable := make([]procreap.Worktree, 0, len(removable))
@@ -1089,12 +1089,14 @@ type orphanWorktree struct {
 // only a directory a run of this repository records as its worktree is a
 // candidate there (see linkedRunWorktreeSkipReason), and the link itself is
 // never dropped - removing a junction ignores what its target still holds.
-func defaultTreeOrphanWorktrees(d *db.DB, p *paths.Paths) (removable []orphanWorktree, repoDirs []string) {
+func defaultTreeOrphanWorktrees(d *db.DB, p *paths.Paths, preserved *preservedWorktrees) (removable []orphanWorktree, repoDirs []string) {
 	wtRoot := p.WorktreesDir()
 	entries, err := os.ReadDir(wtRoot)
 	if err != nil {
 		return nil, nil // directory may not exist yet
 	}
+	visited := make(map[string]bool)
+	defer preserved.forgetOthers(visited)
 	for _, repoEntry := range entries {
 		repoPath := filepath.Join(wtRoot, repoEntry.Name())
 		isLinked := !repoEntry.IsDir()
@@ -1121,13 +1123,14 @@ func defaultTreeOrphanWorktrees(d *db.DB, p *paths.Paths) (removable []orphanWor
 				repoID:  repoEntry.Name(),
 				runID:   runEntry.Name(),
 			}
+			visited[wt.dir] = true
 			if isLinked {
 				if reason := linkedRunWorktreeSkipReason(d, p, wt); reason != "" {
 					slog.Info("skipping worktree cleanup", "path", wt.dir, "reason", reason)
 					continue
 				}
 			}
-			if removableOrphanWorktree(d, wt) {
+			if preserved.removable(d, wt) {
 				removable = append(removable, wt)
 			}
 		}
