@@ -22,22 +22,32 @@ import (
 // proof can apply: the rebased head is a rewrite of the gate branch, not a
 // descendant, and a run that failed in Review has no review authority.
 //
-// Both facts are read fresh: the source observation from the run row and the
-// anchor as an exact, non-symbolic gate ref naming a commit the gate holds.
+// All facts are read fresh: the source observation from the run row, the
+// anchor as an exact, non-symbolic gate ref naming a commit the gate holds, and
+// the managed worktree still holding that dirty source at the recorded head,
+// which is what verifyAnchoredDirtyTerminalHead preserves.
 // This proves only which head the run reached. It is never containment
 // evidence: the operator's local work is still proven present by ancestry or
 // the merge-tree proof before the branch moves.
-func recordedHeadIsTheRunsAnchoredDirtyHead(ctx context.Context, gateDir string, run *db.Run) bool {
+func (s *Service) recordedHeadIsTheRunsAnchoredDirtyHead(ctx context.Context, run *db.Run) bool {
 	recorded := strings.TrimSpace(run.HeadSHA)
 	if recorded == "" || run.TerminalSourceState == nil || *run.TerminalSourceState != "dirty:"+recorded {
 		return false
 	}
 	anchor := custody.RecoveryRef(run.ID)
-	if symbolic, err := git.Run(ctx, gateDir, "symbolic-ref", "-q", anchor); err == nil && symbolic != "" {
+	if symbolic, err := git.Run(ctx, s.GateDir, "symbolic-ref", "-q", anchor); err == nil && symbolic != "" {
 		return false
 	}
-	anchored, exists, err := git.ExactRefTarget(ctx, gateDir, anchor)
-	return err == nil && exists && anchored == recorded && objectExists(ctx, gateDir, recorded)
+	anchored, exists, err := git.ExactRefTarget(ctx, s.GateDir, anchor)
+	if err != nil || !exists || anchored != recorded || !objectExists(ctx, s.GateDir, recorded) {
+		return false
+	}
+	managed, err := s.managedSourceAtRecordedHead(ctx, run)
+	if err != nil {
+		return false
+	}
+	clean, _ := terminalSourceClean(ctx, managed)
+	return !clean
 }
 
 // verifyAnchoredDirtyTerminalHead records the proof from
@@ -55,7 +65,7 @@ func (s *Service) verifyAnchoredDirtyTerminalHead(ctx context.Context, state Sta
 	if err := custody.PreserveRecoveryAnchor(ctx, s.GateDir, sourceRef, snapshot); err != nil {
 		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", fmt.Sprintf("the dirty managed source could not be anchored at %s: %v; no files or worktree refs were changed", sourceRef, err)), false
 	}
-	if !recordedHeadIsTheRunsAnchoredDirtyHead(ctx, s.GateDir, run) {
+	if !s.recordedHeadIsTheRunsAnchoredDirtyHead(ctx, run) {
 		return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", fmt.Sprintf("the run recovery ref changed while the recorded head was being verified; the dirty managed source remains anchored at %s and custody was not returned", sourceRef)), false
 	}
 	updated, err := s.DB.VerifyTerminalRunAnchoredDirtyHead(run.ID, run.Status, run.HeadSHA, *run.TerminalSourceState)
@@ -72,27 +82,11 @@ func (s *Service) verifyAnchoredDirtyTerminalHead(ctx context.Context, state Sta
 // repeated recovery of the same content produces the same commit and the
 // create-only anchor accepts it.
 func (s *Service) commitManagedDirtySource(ctx context.Context, run *db.Run) (string, error) {
-	if s.Paths == nil {
-		return "", fmt.Errorf("the managed worktree location is unknown")
-	}
-	managed := worktrees.RecordedDir(s.Paths, run.WorktreePath(), run.RepoID, run.ID)
-	if _, err := os.Lstat(filepath.Join(managed, ".git")); err != nil {
-		return "", fmt.Errorf("the managed worktree %s is missing or unreadable", managed)
-	}
-	common, err := git.Run(ctx, managed, "rev-parse", "--git-common-dir")
+	managed, err := s.managedSourceAtRecordedHead(ctx, run)
 	if err != nil {
-		return "", fmt.Errorf("the managed worktree %s cannot be read", managed)
+		return "", err
 	}
-	if !filepath.IsAbs(common) {
-		common = filepath.Join(managed, common)
-	}
-	if worktrees.Canonical(common) != worktrees.Canonical(s.GateDir) {
-		return "", fmt.Errorf("the managed worktree %s does not belong to this run's gate", managed)
-	}
-	head, err := git.HeadSHA(ctx, managed)
-	if err != nil || head != run.HeadSHA {
-		return "", fmt.Errorf("the managed worktree is no longer at the recorded head")
-	}
+	head := run.HeadSHA
 	if clean, _ := terminalSourceClean(ctx, managed); clean {
 		return "", fmt.Errorf("the managed worktree no longer holds the dirty source it was recorded with")
 	}
@@ -122,4 +116,33 @@ func (s *Service) commitManagedDirtySource(ctx context.Context, run *db.Run) (st
 		return "", fmt.Errorf("commit the managed source: %w", err)
 	}
 	return commit, nil
+}
+
+// managedSourceAtRecordedHead is the one fresh read of a terminal run's own
+// managed worktree that both managed-source proofs rest on: it must exist,
+// share this run's gate, and sit exactly at the recorded head. It returns the
+// worktree's directory; the caller decides what its cleanliness proves.
+func (s *Service) managedSourceAtRecordedHead(ctx context.Context, run *db.Run) (string, error) {
+	if s.Paths == nil {
+		return "", fmt.Errorf("the managed worktree location is unknown")
+	}
+	managed := worktrees.RecordedDir(s.Paths, run.WorktreePath(), run.RepoID, run.ID)
+	if _, err := os.Lstat(filepath.Join(managed, ".git")); err != nil {
+		return "", fmt.Errorf("the managed worktree %s is missing or unreadable", managed)
+	}
+	common, err := git.Run(ctx, managed, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("the managed worktree %s cannot be read", managed)
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(managed, common)
+	}
+	if worktrees.Canonical(common) != worktrees.Canonical(s.GateDir) {
+		return "", fmt.Errorf("the managed worktree %s does not belong to this run's gate", managed)
+	}
+	head, err := git.HeadSHA(ctx, managed)
+	if err != nil || head != run.HeadSHA {
+		return "", fmt.Errorf("the managed worktree is no longer at the recorded head")
+	}
+	return managed, nil
 }

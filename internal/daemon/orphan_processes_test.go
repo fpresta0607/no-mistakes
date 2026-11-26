@@ -237,7 +237,7 @@ func TestSweepOrphanRunProcessesSparesWorktreesRetentionIsKeeping(t *testing.T) 
 	}
 
 	policy := worktreeReapPolicy{Retention: 14 * 24 * time.Hour}
-	retained := retainedDefaultTreeRunIDs(d, p, policy, time.Now())
+	retained := retainedDefaultTreeRunIDs(d, p, &preservedWorktrees{}, policy, time.Now())
 	sweepOrphanRunProcesses(d, p, nil, retained)
 
 	if !processIsAlive(retainedPID) {

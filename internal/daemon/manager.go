@@ -88,6 +88,11 @@ type RunManager struct {
 
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
 
+	// preservedWorktrees is what the worktree reaper's discovery remembers of
+	// the leftovers it keeps, so an unchanged one is not observed with Git on
+	// every finished run (see preservedWorktrees).
+	preservedWorktrees preservedWorktrees
+
 	// evalCaptureMu serializes automatic eval collection. Concurrent runs
 	// finishing together would otherwise write the same per-repository object
 	// pool and the same registry file at once.
