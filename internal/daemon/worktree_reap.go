@@ -80,7 +80,13 @@ func (m *RunManager) reapWorktrees(policy worktreeReapPolicy, now time.Time) {
 			slog.Warn("preserving run worktree: cannot read run", "run_id", wt.runID, "error", err)
 			continue
 		}
-		if run != nil {
+		if run == nil {
+			// Read after the run: a reservation released since then means the
+			// acceptance committed, and removableOrphanWorktree reads its row.
+			if _, isUnrecorded := m.unrecordedCheckouts.Load(wt.runID); isUnrecorded {
+				continue
+			}
+		} else {
 			branchMutex := m.branchMutex(run.RepoID, run.Branch)
 			isLocked, hasAttempt := branchLocks[branchMutex]
 			if !hasAttempt {

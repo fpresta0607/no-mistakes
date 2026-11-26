@@ -93,6 +93,12 @@ type RunManager struct {
 	// every finished run (see preservedWorktrees).
 	preservedWorktrees preservedWorktrees
 
+	// unrecordedCheckouts holds the run ID of each continuation successor whose
+	// checkout terminal continuation has created but whose acceptance has not
+	// yet committed, so the worktree reaper does not take that checkout for an
+	// orphan in between (#408).
+	unrecordedCheckouts sync.Map // runID → struct{}
+
 	// evalCaptureMu serializes automatic eval collection. Concurrent runs
 	// finishing together would otherwise write the same per-repository object
 	// pool and the same registry file at once.
