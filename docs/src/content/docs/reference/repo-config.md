@@ -323,6 +323,7 @@ Recorded validation output can quote or paraphrase the full intent, so when publ
 This includes finding descriptions, risk rationale, testing summaries, scenario names and evidence, fix summaries, errors, review conversations, and embedded or attached Test artifacts.
 The PR step also skips evidence-branch publication while validation publication is off.
 The body instead reports step lifecycle statuses and recorded finding counts with an explicit withholding notice; the machine-readable attestation retains its original head binding, statuses, override metadata, and live-validation counts.
+A Test step that completed at [`test_live_check_budget`](/no-mistakes/reference/global-config/#test_live_check_budget) still names the cut on its status line, built only from the step's own record: the budget and the passed, failed, and untested counts, never a scenario name or other agent text.
 Finding counts label each round and the final snapshot separately, including retained rounds for carried steps, rather than summing repeated observations of the same findings.
 Missing or unreadable snapshots report unavailable counts.
 Full findings and proof remain in the local run record, and validation agents still receive the complete intent.

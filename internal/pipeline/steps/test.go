@@ -770,6 +770,7 @@ func parseTestAnalyzerOutput(result *agent.Result) (Findings, error) {
 	findings.UnvalidatedSinceSHA = ""
 	findings.BaselineFailure = nil
 	findings.FocusedCheck = nil
+	findings.LiveCheckCut = nil
 	for i := range findings.Scenarios {
 		findings.Scenarios[i].StillFailing = false
 	}

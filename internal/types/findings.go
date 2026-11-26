@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Finding action constants.
@@ -306,6 +307,16 @@ type TestFocusedCheck struct {
 	Paths int `json:"paths"`
 }
 
+// TestLiveCheckCut records that the Test step completed a live check stopped
+// at test_live_check_budget. It holds only the gate's own numbers, so the PR
+// body can name the cut even when validation text is withheld.
+type TestLiveCheckCut struct {
+	Budget   time.Duration `json:"budget"`
+	Passed   int           `json:"passed"`
+	Failed   int           `json:"failed"`
+	Untested int           `json:"untested"`
+}
+
 // LiveScenarioCounts returns how many of scenarios were driven live against
 // the real product, and how many there are in total.
 func LiveScenarioCounts(scenarios []TestScenario) (live, total int) {
@@ -432,9 +443,12 @@ type Findings struct {
 	// the execution that ran the configured checks.
 	BaselineFailure *TestBaselineFailure `json:"baseline_failure,omitempty"`
 	FocusedCheck    *TestFocusedCheck    `json:"focused_check,omitempty"`
-	RiskLevel       string               `json:"risk_level"`
-	RiskRationale   string               `json:"risk_rationale"`
-	RiskScope       string               `json:"risk_scope,omitempty"`
+	// LiveCheckCut is step-owned too, set only when the Test step completed a
+	// live check stopped at test_live_check_budget.
+	LiveCheckCut  *TestLiveCheckCut `json:"live_check_cut,omitempty"`
+	RiskLevel     string            `json:"risk_level"`
+	RiskRationale string            `json:"risk_rationale"`
+	RiskScope     string            `json:"risk_scope,omitempty"`
 }
 
 type findingsWire struct {
@@ -456,6 +470,7 @@ type findingsWire struct {
 	UnvalidatedSinceSHA string               `json:"unvalidated_since_sha"`
 	BaselineFailure     *TestBaselineFailure `json:"baseline_failure"`
 	FocusedCheck        *TestFocusedCheck    `json:"focused_check"`
+	LiveCheckCut        *TestLiveCheckCut    `json:"live_check_cut"`
 	RiskLevel           string               `json:"risk_level"`
 	RiskRationale       string               `json:"risk_rationale"`
 	RiskScope           string               `json:"risk_scope"`
@@ -490,6 +505,7 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		UnvalidatedSinceSHA: wire.UnvalidatedSinceSHA,
 		BaselineFailure:     wire.BaselineFailure,
 		FocusedCheck:        wire.FocusedCheck,
+		LiveCheckCut:        wire.LiveCheckCut,
 		RiskLevel:           wire.RiskLevel,
 		RiskRationale:       wire.RiskRationale,
 		RiskScope:           wire.RiskScope,

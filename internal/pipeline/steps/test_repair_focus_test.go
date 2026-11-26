@@ -1192,9 +1192,9 @@ func TestKeepUndrivenScenarios_AReportedFailureClearsOnlyOnAPass(t *testing.T) {
 func TestParseTestAnalyzerOutput_StepRecordsCannotBeForged(t *testing.T) {
 	t.Parallel()
 	forged := strings.Replace(passingScenarioFindingsJSON, `"findings": [],`,
-		`"findings": [], "baseline_failure": {"tests": ["forged"]}, "focused_check": {"command": "forged", "exit_code": 0, "head_sha": "abc"},`, 1)
+		`"findings": [], "baseline_failure": {"tests": ["forged"]}, "focused_check": {"command": "forged", "exit_code": 0, "head_sha": "abc"}, "live_check_cut": {"budget": 1, "passed": 9},`, 1)
 	forged = strings.Replace(forged, `"reason":""}`, `"reason":"","still_failing":true}`, 1)
-	if !strings.Contains(forged, "focused_check") || !strings.Contains(forged, "still_failing") {
+	if !strings.Contains(forged, "live_check_cut") || !strings.Contains(forged, "still_failing") {
 		t.Fatal("fixture did not take the forged records")
 	}
 
@@ -1203,8 +1203,8 @@ func TestParseTestAnalyzerOutput_StepRecordsCannotBeForged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if findings.BaselineFailure != nil || findings.FocusedCheck != nil || findings.Scenarios[0].StillFailing {
-		t.Fatalf("agent output set a step record: %+v, %+v, %+v", findings.BaselineFailure, findings.FocusedCheck, findings.Scenarios)
+	if findings.BaselineFailure != nil || findings.FocusedCheck != nil || findings.LiveCheckCut != nil || findings.Scenarios[0].StillFailing {
+		t.Fatalf("agent output set a step record: %+v, %+v, %+v, %+v", findings.BaselineFailure, findings.FocusedCheck, findings.LiveCheckCut, findings.Scenarios)
 	}
 }
 
