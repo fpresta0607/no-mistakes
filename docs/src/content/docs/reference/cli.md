@@ -492,6 +492,7 @@ This command grants no authority to install the candidate or operate another run
 An exact repeated request returns the same admission and child.
 An admission whose caller stopped waiting before acceptance records nothing.
 The daemon gives up after two minutes or one second before the caller's own deadline, whichever comes first, so the refusal naming the stage that spent the time reaches the caller.
+That includes time spent waiting for the branch or the daemon's run bookkeeping while another run holds them: the admission stops waiting at its deadline instead of after the holder finishes.
 A fresh accepted admission schedules its child for execution.
 An untouched, unscheduled pending acceptance left by an interrupted admission or daemon restart remains idle until the exact request is explicitly replayed and revalidated.
 A setup failure after acceptance, such as a worktree that cannot be created, instead fails the never-started child with that reason, so it does not stay pending; validate its unchanged head with [terminal validation](#no-mistakes-axi-validate-terminal).
