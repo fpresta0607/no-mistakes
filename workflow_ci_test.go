@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
+	"github.com/kunchenguid/no-mistakes/internal/winres"
 )
 
 func TestCIWorkflowRunsTestsOnAllSupportedDesktopPlatforms(t *testing.T) {
@@ -182,6 +184,64 @@ func TestCIWorkflow_UnixShardsThePackagesThatOutgrewTheBudget(t *testing.T) {
 	slices.Sort(covered)
 	if all := goListPackages(t, "./..."); !slices.Equal(covered, all) {
 		t.Fatalf("the Unix remainder plus every sharded package must cover go list ./... exactly once: covered %v, module %v", covered, all)
+	}
+}
+
+// internal/winres cross-builds no-mistakes.exe for every Windows target, which
+// needs modules only Windows builds import. A runner's module cache held only
+// what its own platform builds, so on macos-latest that test downloaded them
+// itself and failed by chance when the proxy lookup did (issue #394). The test
+// job must fill the module cache before anything builds or tests, and a
+// no-argument `go mod download` fetches go.mod's explicit requirements, so
+// those must cover every module the Windows cross-builds need.
+func TestCIWorkflow_TestJobDownloadsEveryModuleBeforeItBuilds(t *testing.T) {
+	t.Parallel()
+
+	buildsOrTests := regexp.MustCompile(`\bgo (build|list|test|vet)\b|\bmake\b`)
+	steps := ciTestJob(t).Steps
+	download := -1
+	for index, step := range steps {
+		if strings.TrimSpace(step.Run) == "go mod download" {
+			if step.If != "" {
+				t.Fatalf("step %q downloads modules only when %q; every row cross-builds Windows", step.Name, step.If)
+			}
+			download = index
+			break
+		}
+		if buildsOrTests.MatchString(step.Run) {
+			t.Fatalf("step %q builds or tests before the test job runs go mod download, so a cold module cache sends its downloads into the tests", step.Name)
+		}
+	}
+	if download < 0 {
+		t.Fatal("the test job never runs go mod download, so a test that cross-builds downloads Windows-only modules itself")
+	}
+
+	editJSON, err := exec.Command("go", "mod", "edit", "-json").Output()
+	if err != nil {
+		t.Fatalf("go mod edit -json: %v", err)
+	}
+	var modFile struct {
+		Require []struct{ Path string }
+	}
+	if err := json.Unmarshal(editJSON, &modFile); err != nil {
+		t.Fatalf("parse go mod edit -json: %v", err)
+	}
+	required := make(map[string]bool, len(modFile.Require))
+	for _, requirement := range modFile.Require {
+		required[requirement.Path] = true
+	}
+	for _, target := range winres.Targets {
+		cmd := exec.Command("go", "list", "-deps", "-f", "{{with .Module}}{{if not .Main}}{{.Path}}{{end}}{{end}}", "./cmd/no-mistakes")
+		cmd.Env = append(os.Environ(), "GOOS=windows", "GOARCH="+target.GOARCH, "CGO_ENABLED=0")
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("go list windows/%s dependencies: %v", target.GOARCH, err)
+		}
+		for _, module := range strings.Fields(string(out)) {
+			if !required[module] {
+				t.Errorf("windows/%s builds with %s, which go.mod does not require, so go mod download leaves it for the test to fetch", target.GOARCH, module)
+			}
+		}
 	}
 }
 

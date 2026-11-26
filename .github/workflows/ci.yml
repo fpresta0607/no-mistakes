@@ -226,6 +226,15 @@ jobs:
             Write-Host "::warning::Defender exclusions unavailable, Windows tests run untuned: $_"
           }
 
+      # internal/winres cross-builds no-mistakes.exe for every Windows target,
+      # which needs modules only Windows builds import. The runner's module
+      # cache held only what its own platform builds, so on macos-latest that
+      # test downloaded them itself and failed when the proxy lookup did (issue
+      # #394). go mod download fetches every module go.mod requires, for every
+      # platform, so a network failure fails here with its own error instead.
+      - name: Download modules
+        run: go mod download
+
       # A deliberate per-package budget, not go test's implicit 10m. On
       # macos-latest, internal/pipeline/steps has passed anywhere from 392s to
       # 594s and timed out at 600s with no test hung on runners up to ~1.9x
