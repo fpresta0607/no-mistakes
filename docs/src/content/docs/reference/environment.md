@@ -394,3 +394,4 @@ No agent the daemon starts inherits them, so the worker's hooks never report tho
 `CFO_HOME`, `CFO_STATE_OVERRIDE`, and `CFO_PROJECTS_ROOT` name the harness installation rather than one worker, and stay.
 A gate agent's command can start the daemon on demand, so the daemon also drops the agent-only marks `NO_MISTAKES_GATE` and `COMPACT_ADVISER_DISABLE`: its step commands never carry either, and only the agents it spawns get them.
 On Windows the names match without regard to case.
+On Windows, a daemon started from Git Bash (`MSYSTEM` is set) moves that Git install's MSYS folders, such as `mingw64\bin` and `usr\bin`, behind the rest of `PATH`, so its step commands find `bash`, `find`, and `sort` where your Windows terminal does; the install's `cmd` folder keeps its place.
