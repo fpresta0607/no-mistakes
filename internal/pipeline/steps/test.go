@@ -188,6 +188,7 @@ func (s *TestStep) execute(sctx *pipeline.StepContext, desktop string) (*pipelin
 	// fixSummary keeps only whether it committed.
 	var repairReport string
 	var repairCommands []repairCommand
+	var repairScenarios []types.TestScenario
 	var repairCut error
 	// repaired is true when a repair turn ran, which is what lets this execution
 	// re-run only what the failure and the repair touch.
@@ -225,6 +226,7 @@ Rules:
 - Before finishing, remove any transient artifacts your testing created in the working tree (downloaded models, caches, build outputs, large binaries, or generated data directories) so they are not committed and pushed. Do not remove intentional source or test-file changes. Do not remove dependencies materialized by commands.prepare; later configured commands share them.
 - Return JSON with a "summary" field when you are done, plus a "needs_decision" array with one entry for each failure that needs a human decision. Leave that array out when none does.
 - List the commands you ran in a "commands_run" array, each with its "command" and its "exit_code": at most %d, putting first every command the operator's or driver's instructions limit.
+- When this turn drives, end to end against the real product, a scenario named in the previous findings' "scenarios", list it in a "scenarios_driven" array with that exact name, its "result" ("pass" or "fail"), "live": true and the "evidence" that shows it. Leave out every scenario you did not drive live in this turn.
 %s%s`,
 			sctx.Run.Branch,
 			baseSHA,
@@ -261,6 +263,7 @@ Previous test findings to address:
 				newTestsFromFix = detectNewTestFiles(ctx, sctx.WorkDir)
 				repairQuestions = repairDecisionFindings(result)
 				repairCommands = repairCommandsRun(result)
+				repairScenarios = repairScenariosDriven(result)
 				// executeFixMode parses the same summary next and reports its errors.
 				if summary, err := extractCommitSummary(result); err == nil {
 					repairReport = summary
@@ -467,6 +470,8 @@ Rules:
 	) + testRepairScopeRules
 	evidencePrompt += liveCheckPromptSections(sctx, evidenceDir)
 	var lastCheck Findings
+	var repairProof []types.TestScenario
+	var hasBaselineRerun bool
 	// isOnSameHead is true when the repair changed nothing and the last live check
 	// ran on this head in this executor lifetime: the same source, run
 	// configuration and daemon environment, so what passed there stands and a
@@ -482,7 +487,12 @@ Rules:
 		}
 		evidencePrompt += focusedRecheckSection(lastCheck, repairedPaths, isOnSameHead)
 		if isOnSameHead {
+			repairProof = repairScenarios
+			hasBaselineRerun = len(baseline.results) > 0 && baseline.focused == nil
 			evidencePrompt += repairReceiptSection(sctx, repairReport, repairCommands)
+			if hasBaselineRerun {
+				evidencePrompt += "\n- The configured test checks named above ran again in this execution on this head, after the repair, and passed. Do not describe the baseline as retained, reused or not repeated."
+			}
 		}
 	}
 	turn := beginLiveCheck(sctx, evidenceDir)
@@ -504,7 +514,13 @@ Rules:
 		}
 		return nil, err
 	}
-	findings = keepUndrivenScenarios(findings, lastCheck, isOnSameHead, baseline.tested)
+	recheckDriven := len(findings.Scenarios)
+	proof := repairProofFor(findings, lastCheck, repairProof)
+	findings = keepUndrivenScenarios(findings, lastCheck, isOnSameHead, baseline.tested, repairProof)
+	if isOnSameHead {
+		findings.Tested = append(findings.Tested, repairTestedEntries(repairCommands)...)
+		findings.TestingSummary = strings.TrimSpace(sameHeadRecheckSentence(startHead, proof, hasBaselineRerun, recheckDriven) + " " + findings.TestingSummary)
+	}
 	outcome := testStepOutcome(sctx, findings, baseline, fixSummary, newTestsFromFix)
 	// A repair that changed nothing already ran what it reported on this exact
 	// source. Another automatic repair would replay those commands, including a
@@ -641,7 +657,7 @@ func testStepOutcome(sctx *pipeline.StepContext, findings Findings, baseline tes
 func failedBaselineOutcome(sctx *pipeline.StepContext, baseline testBaseline, fixSummary string, newTestsFromFix []string) *pipeline.StepOutcome {
 	findings := answeredTestGate(sctx)
 	findings.Verdict = ""
-	findings.Scenarios = keepUndrivenScenarios(Findings{}, lastLiveCheck(sctx), false, nil).Scenarios
+	findings.Scenarios = keepUndrivenScenarios(Findings{}, lastLiveCheck(sctx), false, nil, nil).Scenarios
 	findings.Tested = baseline.tested
 	findings.Items = append(baseline.findings, findings.Items...)
 	findings.Summary = baseline.summary
