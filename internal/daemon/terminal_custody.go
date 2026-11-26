@@ -204,7 +204,11 @@ func (m *RunManager) recoverTerminal(ctx context.Context, request ipc.RecoverTer
 		if err != nil {
 			return "", err
 		}
-		if err := proveTerminalPublication(ctx, &original.Run, repo, request.CallerDir, forge, cfg); err != nil {
+		inheritedHead, err := m.db.InheritedPRLineageHead(&original.Run)
+		if err != nil {
+			return "", err
+		}
+		if err := proveTerminalPublication(ctx, &original.Run, inheritedHead, repo, request.CallerDir, forge, cfg); err != nil {
 			return "", err
 		}
 		quotaRecord, err := replayQuotaRouting(cfg, original.Run.QuotaRouting)
@@ -355,8 +359,11 @@ func freezeTerminalLimits(cfg *config.Config, snapshot *db.ContinuationSnapshot)
 	}
 }
 
-func proveTerminalPublication(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, forge *forgecontext.Context, cfg *config.Config) error {
-	boundHead, isInheritedPR := run.InheritedPRHead()
+// proveTerminalPublication proves run's publication binding live. inheritedHead
+// is db.InheritedPRLineageHead of run: the head its inherited PR must hold, or
+// "" when run is not bound to an inherited PR.
+func proveTerminalPublication(ctx context.Context, run *db.Run, inheritedHead string, repo *db.Repo, workDir string, forge *forgecontext.Context, cfg *config.Config) error {
+	boundHead, isInheritedPR := inheritedHead, inheritedHead != ""
 	if run.LastPushedSHA == nil && !isInheritedPR {
 		if run.PRURL != nil || run.PushGeneration != nil {
 			return fmt.Errorf("terminal publication binding is incomplete")
@@ -440,12 +447,13 @@ func proveTerminalPublication(ctx context.Context, run *db.Run, repo *db.Repo, w
 }
 
 // inheritedPRHeadDiffers refuses a run bound to an inherited PR whose live
-// head is not the head the run was submitted at, naming both heads. It does not
-// claim the head moved: a run created by admission was submitted at a
-// candidate the PR branch never held.
-func inheritedPRHeadDiffers(submitted, live string) error {
+// head is not the head its recorded lineage was submitted at, naming both
+// heads. It does not claim the head moved: a run whose recorded link to its
+// predecessor is missing is bound to its own submitted head, which the PR
+// branch may never have held.
+func inheritedPRHeadDiffers(inherited, live string) error {
 	if live == "" {
 		live = "(branch deleted)"
 	}
-	return fmt.Errorf("inherited PR live head %s is not the run's submitted head %s; an inherited PR is continued only at the head the run was submitted at", live, submitted)
+	return fmt.Errorf("inherited PR live head %s is not the head the run's recorded lineage was submitted at, %s; an inherited PR is continued only at that head", live, inherited)
 }

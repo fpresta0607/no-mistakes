@@ -25,6 +25,34 @@ func (d *DB) ValidationHistory(runID string) ([]ValidationHistoryEntry, error) {
 	return readValidationHistory(tx, runID)
 }
 
+// InheritedPRLineageHead returns the head a run bound to an inherited PR it
+// never pushed to must still find live on that PR, or "" when the run is not
+// so bound. A run created by admission inherits the PR with its own candidate
+// as its submitted head, a commit the PR branch never held, so the head is the
+// submitted head of the furthest ancestor its recorded admissions and terminal
+// adoptions link it to that is bound to the same PR the same way (#448). Git
+// ancestry never extends the lineage: a run without its recorded link is bound
+// to its own submitted head.
+func (d *DB) InheritedPRLineageHead(run *Run) (string, error) {
+	head, isInherited := run.InheritedPRHead()
+	if !isInherited {
+		return "", nil
+	}
+	history, err := d.ValidationHistory(run.ID)
+	if err != nil {
+		return "", err
+	}
+	for index := 1; index < len(history); index++ {
+		ancestor := history[index].Snapshot.Run
+		ancestorHead, isAncestorInherited := ancestor.InheritedPRHead()
+		if !isAncestorInherited || *ancestor.PRURL != *run.PRURL {
+			break
+		}
+		head = ancestorHead
+	}
+	return head, nil
+}
+
 func readValidationHistory(tx *sql.Tx, runID string) ([]ValidationHistoryEntry, error) {
 	var history []ValidationHistoryEntry
 	seen := make(map[string]bool)
