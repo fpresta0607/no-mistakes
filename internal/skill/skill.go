@@ -319,7 +319,9 @@ selection behavior.
 
 When a ` + "`failed`" + ` outcome came from the agent invocation itself - a provider
 processing error, a usage or quota limit, a transport failure, or the agent
-process exiting - in Test or an earlier step, and the run never pushed,
+process exiting - in Test or an earlier step, or from Test's dependency
+preparation failing for its environment at the head Review approved, and the
+run never pushed,
 ` + "`no-mistakes axi retry --run <id>`" + ` continues that run instead of repeating it:
 a new run starts at the preserved head, carries the steps before the failed
 one, and restarts the failed step from the beginning, so a failed Review

@@ -24,6 +24,28 @@ func (f *agentInvocationFailure) Unwrap() error { return f.err }
 
 func (f *agentInvocationFailure) Is(target error) bool { return target == ErrAgentInvocationFailed }
 
+// ErrPreparationEnvironment marks a dependency preparation that failed for its
+// environment rather than for the change. Preparation marks it only when every
+// part of its failure is the environment's, so a prepare command's own
+// failure about the change never carries it.
+var ErrPreparationEnvironment = errors.New("dependency preparation failed for its environment")
+
+type preparationEnvironmentFailure struct{ err error }
+
+func (f *preparationEnvironmentFailure) Error() string { return f.err.Error() }
+
+func (f *preparationEnvironmentFailure) Unwrap() error { return f.err }
+
+func (f *preparationEnvironmentFailure) Is(target error) bool {
+	return target == ErrPreparationEnvironment
+}
+
+// PreparationEnvironmentFailure marks err as ErrPreparationEnvironment and
+// keeps its text unchanged.
+func PreparationEnvironmentFailure(err error) error {
+	return &preparationEnvironmentFailure{err: err}
+}
+
 // invocationFailureAgent is the innermost step-agent decorator, so it sees the
 // adapter's own error under the invocation's own context: a deadline or a
 // cancellation has already ended that context by the time its error returns,
@@ -97,9 +119,12 @@ func refuseCheckpoint(proof, format string, args ...any) error {
 // boundary to continue from, against the step sequence steps, and refuses
 // with a *RetryRefusal naming the first proof that fails. The record must hold one row per step in
 // that order: completed or skipped rows, then exactly one failed row whose
-// recorded cause is an agent invocation failure, then rows that never ran.
-// No carried row may be Test or a later step, because Test's evidence and
-// every later step's work are not kept after a run ends.
+// recorded cause is eligible, then rows that never ran. An agent invocation
+// failure is eligible at any step; a preparation that failed for its
+// environment only at Test, after a carried Review approved exactly the head
+// the continuation starts from. No carried row may be Test or a later step,
+// because Test's evidence and every later step's work are not kept after a
+// run ends.
 func PlanRetryCheckpoint(database *db.DB, run *db.Run, steps []Step) (*RetryCheckpoint, error) {
 	rows, err := database.GetStepsByRun(run.ID)
 	if err != nil {
@@ -129,8 +154,8 @@ func PlanRetryCheckpoint(database *db.DB, run *db.Run, steps []Step) (*RetryChec
 		return nil, refuseCheckpoint(RetryProofCheckpoint, "no step failed")
 	}
 	row := rows[failed]
-	if row.FailureCause == nil || *row.FailureCause != db.StepFailureCauseAgentInvocation {
-		return nil, refuseCheckpoint(RetryProofCause, "step %s did not fail on an agent invocation error (provider, transport, or agent process), so the failure may be about the change itself", row.StepName)
+	if err := proveRetryCause(run, rows[:failed], row); err != nil {
+		return nil, err
 	}
 	for _, carried := range rows[:failed] {
 		if carried.StepName.Order() >= types.StepTest.Order() {
@@ -142,4 +167,37 @@ func PlanRetryCheckpoint(database *db.DB, run *db.Run, steps []Step) (*RetryChec
 		return nil, fmt.Errorf("read step %s rounds: %w", row.StepName, err)
 	}
 	return &RetryCheckpoint{Index: failed, Steps: rows, Round: len(rounds) + 1}, nil
+}
+
+// proveRetryCause requires the failed step's recorded cause to place its
+// failure outside the change, and names that cause when it refuses. A Test
+// preparation that failed for its environment continues only at exactly the
+// head a carried Review approved, so no route lets an unreviewed head through.
+func proveRetryCause(run *db.Run, carried []*db.StepResult, failed *db.StepResult) error {
+	recorded := "no failure cause"
+	cause := ""
+	if failed.FailureCause != nil {
+		cause = *failed.FailureCause
+		recorded = "failure cause " + cause
+	}
+	switch cause {
+	case db.StepFailureCauseAgentInvocation:
+		return nil
+	case db.StepFailureCausePreparationEnvironment:
+		if failed.StepName != types.StepTest {
+			return refuseCheckpoint(RetryProofCause, "step %s recorded %s, which only a failed Test continues from", failed.StepName, recorded)
+		}
+		reviewed := false
+		for _, row := range carried {
+			reviewed = reviewed || (row.StepName == types.StepReview && row.Status == types.StepStatusCompleted)
+		}
+		if !reviewed || run.ReviewApprovedHeadSHA == nil {
+			return refuseCheckpoint(RetryProofCause, "step %s recorded %s, but no carried Review approved the head it would test", failed.StepName, recorded)
+		}
+		if *run.ReviewApprovedHeadSHA != run.HeadSHA {
+			return refuseCheckpoint(RetryProofCause, "step %s recorded %s, but the run's head %s is not the head %s that Review approved", failed.StepName, recorded, run.HeadSHA, *run.ReviewApprovedHeadSHA)
+		}
+		return nil
+	}
+	return refuseCheckpoint(RetryProofCause, "step %s recorded %s, so the failure may be about the change itself; only an agent invocation failure (provider, transport, or agent process) or a Test preparation that failed for its environment continues", failed.StepName, recorded)
 }

@@ -13,7 +13,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 )
 
-// newAxiRetryCmd continues a run that failed on an agent invocation error.
+// newAxiRetryCmd continues a run that failed on an agent invocation error, or
+// in Test's dependency preparation for an environment reason.
 //
 // --run does not select a run. The retried run is always the current branch's
 // latest run, as for every mutating axi command; --run is the operator's
@@ -24,11 +25,14 @@ func newAxiRetryCmd() *cobra.Command {
 	var wait time.Duration
 	cmd := &cobra.Command{
 		Use:   "retry",
-		Short: "Continue a run that failed on an agent invocation error",
+		Short: "Continue a run that failed on an agent invocation or preparation environment error",
 		Long: "Continues the current branch's latest run when it failed because an agent\n" +
 			"invocation itself failed - a provider error, a usage limit, a transport\n" +
 			"failure, or the agent process exiting - instead of starting the whole\n" +
-			"pipeline again with `no-mistakes rerun`.\n\n" +
+			"pipeline again with `no-mistakes rerun`. It also continues a run whose\n" +
+			"Test failed preparing dependencies for an environment reason - the\n" +
+			"preparation cleanup hit its deadline, or `commands.prepare` exited 75 -\n" +
+			"after Review approved exactly the run's head.\n\n" +
 			"A new run starts at the failed run's preserved head, so every correction\n" +
 			"the pipeline already committed is kept. The steps before the failed one\n" +
 			"are carried from the failed run. The failed step restarts from the\n" +
@@ -38,7 +42,8 @@ func newAxiRetryCmd() *cobra.Command {
 			"The retry refuses, and changes nothing, unless every proof holds: --run\n" +
 			"names the branch's latest run; that run failed, nothing is active on the\n" +
 			"branch, and it never pushed; its record shows exactly one failed step,\n" +
-			"failed on an agent invocation error, at or before Test; its preserved head\n" +
+			"failed on an agent invocation error at or before Test, or in Test's\n" +
+			"preparation for its environment at the head Review approved; its preserved head\n" +
 			"is still anchored in the local gate; the working tree is clean at exactly\n" +
 			"that head (adopt it first with `no-mistakes axi sync --recover`); and the\n" +
 			"run's model profile and the repository's gates are unchanged, and a carried\n" +

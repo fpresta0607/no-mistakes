@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -185,6 +186,100 @@ func TestRetryContinuesAFailedReviewFromThePreservedHead(t *testing.T) {
 	}
 	if err := client.Call(ipc.MethodGetRun, &ipc.GetRunParams{RunID: failed.ID}, &info); err != nil || info.Run.RetriedBy != retried.ID {
 		t.Fatalf("failed run info = %+v (err %v), want retried_by %s", info.Run, err, retried.ID)
+	}
+}
+
+// approvingReviewStep approves the head it reviews, as a clean Review does.
+type approvingReviewStep struct{ execCnt atomic.Int32 }
+
+func (s *approvingReviewStep) Name() types.StepName { return types.StepReview }
+
+func (s *approvingReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	s.execCnt.Add(1)
+	return &pipeline.StepOutcome{ReviewApprovedHeadSHA: sctx.Run.HeadSHA}, nil
+}
+
+// environmentPreparationTestStep fails its first execution the way Test
+// preparation reports a failure that is the environment's, then passes.
+type environmentPreparationTestStep struct {
+	mu    sync.Mutex
+	heads []string
+}
+
+func (s *environmentPreparationTestStep) Name() types.StepName { return types.StepTest }
+
+func (s *environmentPreparationTestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	s.mu.Lock()
+	s.heads = append(s.heads, sctx.Run.HeadSHA)
+	first := len(s.heads) == 1
+	s.mu.Unlock()
+	if first {
+		return nil, fmt.Errorf("prepare test dependencies: %w", pipeline.PreparationEnvironmentFailure(errors.New("prepare command exited with code 75")))
+	}
+	return &pipeline.StepOutcome{}, nil
+}
+
+func (s *environmentPreparationTestStep) seenHeads() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.heads...)
+}
+
+// Issue #323: a run whose Review approved its head and whose Test then failed
+// preparing for an environment reason had no route forward but a fresh run.
+func TestRetryCarriesTheReviewedHeadThroughATestPreparationEnvironmentFailure(t *testing.T) {
+	rebase := &mockPassStep{name: types.StepRebase}
+	review := &approvingReviewStep{}
+	test := &environmentPreparationTestStep{}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{rebase, review, test} })
+	repo, submitted := setupTestGitRepo(t, p, d, "retry-preparation-repo")
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var first ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate: p.RepoDir(repo.ID), Ref: "refs/heads/main", New: submitted, Old: submitted, Intent: "keep the reviewed head",
+	}, &first); err != nil {
+		t.Fatal(err)
+	}
+	failed := waitForRunTerminalState(t, d, first.RunID)
+	failedSteps, err := d.GetStepsByRun(failed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status != types.RunFailed || failed.ReviewApprovedHeadSHA == nil || *failed.ReviewApprovedHeadSHA != submitted {
+		t.Fatalf("first run = %s approved %v, want failed after Review approved %s", failed.Status, deref(failed.ReviewApprovedHeadSHA), submitted)
+	}
+	if cause := failedSteps[2].FailureCause; cause == nil || *cause != db.StepFailureCausePreparationEnvironment {
+		t.Fatalf("test failure cause = %v, want %s", deref(cause), db.StepFailureCausePreparationEnvironment)
+	}
+
+	var result ipc.RetryRunResult
+	if err := client.Call(ipc.MethodRetryRun, &ipc.RetryRunParams{RepoID: repo.ID, Branch: "main", RunID: failed.ID, CallerHeadSHA: submitted}, &result); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	retried := waitForRunTerminalState(t, d, result.RunID)
+	if retried.Status != types.RunCompleted || retried.ReviewApprovedHeadSHA == nil || *retried.ReviewApprovedHeadSHA != submitted {
+		t.Fatalf("retried run = %s approved %v, want completed carrying the approval of %s", retried.Status, deref(retried.ReviewApprovedHeadSHA), submitted)
+	}
+	if got := review.execCnt.Load(); got != 1 {
+		t.Errorf("review executed %d times, want once: the retry carries it", got)
+	}
+	if heads := test.seenHeads(); len(heads) != 2 || heads[0] != submitted || heads[1] != submitted {
+		t.Errorf("test saw heads %v, want the reviewed head %s twice", heads, submitted)
+	}
+	retriedSteps, err := d.GetStepsByRun(retried.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retriedSteps[1].CarriedFrom == nil || *retriedSteps[1].CarriedFrom != failedSteps[1].ID {
+		t.Errorf("review = %+v, want carried from %s", retriedSteps[1], failedSteps[1].ID)
+	}
+	if rounds, err := d.GetRoundsByStep(retriedSteps[1].RoundsStepID()); err != nil || len(rounds) != 1 {
+		t.Errorf("carried review rounds = %+v (err %v), want the spent round kept on record", rounds, err)
 	}
 }
 

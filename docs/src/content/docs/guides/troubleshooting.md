@@ -169,7 +169,7 @@ Fatal step errors are appended to that log, so failures such as rejected pushes 
 
 ### A run failed on a provider error, usage limit, or agent exit
 
-When the failed step is Test or an earlier step and its error came from the agent invocation itself, continue the run instead of starting over:
+When the failed step is Test or an earlier step and its error came from the agent invocation itself, or Test failed preparing dependencies for an environment reason after Review approved the run's head, continue the run instead of starting over:
 
 ```sh
 no-mistakes axi sync --recover   # when the run left unpublished pipeline commits
