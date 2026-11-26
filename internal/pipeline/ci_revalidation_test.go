@@ -107,117 +107,140 @@ func prepareCIAdoptionRecovery(t *testing.T, database *db.DB, run *db.Run, entry
 	return run, event, names
 }
 
+// ciAdoptionWaitTimeout bounds each wait in this file for an executor to reach
+// a boundary or park, and to return once interrupted. Those spans hold no
+// fault of their own, but the matrices run their rows in parallel, and a fixed
+// 5 seconds was outlasted on loaded Windows runners (issue #355), so it matches
+// the package's other one-minute executor waits.
+const ciAdoptionWaitTimeout = time.Minute
+
+var ciAdoptionInterruptionEntries = []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.CustomGateStepName(types.StepLint, "fixture"), types.StepPush}
+
 func TestCIAdoptionInterruptionCauseAndValidationBoundaryMatrix(t *testing.T) {
-	entries := []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.CustomGateStepName(types.StepLint, "fixture"), types.StepPush}
-	for _, entry := range entries {
+	for _, entry := range ciAdoptionInterruptionEntries {
 		for _, mode := range []string{"live gate", "recovered gate", "pending", "executing"} {
 			for _, cause := range []string{"shutdown", "cancelled", "abort"} {
 				t.Run(string(entry)+"/"+mode+"/"+cause, func(t *testing.T) {
 					t.Parallel()
-					database, locations, run, repo := setupTest(t)
-					run.HeadSHA = strings.Repeat("c", 40)
-					if err := database.UpdateRunHeadSHA(run.ID, run.HeadSHA); err != nil {
-						t.Fatal(err)
-					}
-					var event *db.CIRepairAdoption
-					var names []types.StepName
-					if mode == "recovered gate" || mode == "pending" {
-						status := types.StepStatusAwaitingApproval
-						if mode == "pending" {
-							status = types.StepStatusPending
-						}
-						run, event, names = prepareCIAdoptionRecovery(t, database, run, entry, status)
-					} else {
-						event = &db.CIRepairAdoption{ExpectedRun: *run, CandidateSHA: run.HeadSHA}
-						names = entries
-					}
-					ctx, cancel := context.WithCancelCause(t.Context())
-					defer cancel(nil)
-					var cancellation error
-					if cause == "abort" {
-						cancellation = errors.New(types.RunCancelReasonAbortedByUser)
-					} else if cause == "shutdown" {
-						cancellation = errors.New("daemon shutting down")
-					}
-					ready := make(chan struct{}, 1)
-					var steps []Step
-					for _, name := range names {
-						steps = append(steps, &adaptiveCallStep{name: name, fn: func(sctx *StepContext) (*StepOutcome, error) {
-							if sctx.Ctx.Err() != nil {
-								return nil, context.Cause(sctx.Ctx)
-							}
-							outcome := &StepOutcome{ReviewApprovedHeadSHA: run.HeadSHA, Findings: `{"findings":[],"tested_head_sha":"` + run.HeadSHA + `"}`}
-							if name == entry {
-								outcome.NeedsApproval = true
-							}
-							return outcome, nil
-						}})
-					}
-					executor := NewExecutor(database, locations, nil, nil, steps, func(observed ipc.Event) {
-						if observed.StepName == nil || *observed.StepName != entry {
-							return
-						}
-						if mode == "executing" && observed.Type == ipc.EventStepStarted {
-							ready <- struct{}{}
-							<-ctx.Done()
-						} else if observed.Type == ipc.EventStepCompleted && observed.Status != nil && *observed.Status == string(types.StepStatusAwaitingApproval) {
-							ready <- struct{}{}
-						}
-					})
-					executor.adoption = event
-					workDir := t.TempDir()
-					done := make(chan error, 1)
-					if mode == "pending" {
-						cancel(cancellation)
-					}
-					go func() {
-						if mode == "recovered gate" || mode == "pending" {
-							done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, nil, "", requireCIRepairSnapshot(t, database, run.ID))
-						} else {
-							done <- executor.Execute(ctx, run, repo, workDir)
-						}
-					}()
-					if mode != "pending" {
-						select {
-						case <-ready:
-						case err := <-done:
-							t.Fatalf("validation never reached its boundary: %v", err)
-						case <-time.After(5 * time.Second):
-							t.Fatal("validation boundary never became observable")
-						}
-					}
-					before, err := database.GetStepsByRun(run.ID)
-					if err != nil {
-						t.Fatal(err)
-					}
-					cancel(cancellation)
-					select {
-					case err := <-done:
-						if err == nil {
-							t.Fatal("interruption returned success")
-						}
-					case <-time.After(5 * time.Second):
-						t.Fatal("interrupted validation did not return")
-					}
-					stored, err := database.GetRun(run.ID)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if cause == "abort" {
-						if stored.Status != types.RunCancelled || stored.AwaitingAgentSince != nil || stored.PushActive || stored.Error == nil || *stored.Error != types.RunCancelReasonAbortedByUser {
-							t.Fatalf("explicit cancellation stayed held: %+v", stored)
-						}
-					} else {
-						after, err := database.GetStepsByRun(run.ID)
-						if err != nil || stored.Status != types.RunRunning || !reflect.DeepEqual(before, after) {
-							t.Fatalf("interruption changed retained validation: %+v, %v", stored, err)
-						}
-						if (mode == "live gate" || mode == "recovered gate") && stored.AwaitingAgentSince == nil {
-							t.Fatal("shutdown cleared the parked gate")
-						}
-					}
+					runCIAdoptionInterruption(t, entry, mode, cause, 0)
 				})
 			}
+		}
+	}
+}
+
+func TestCIAdoptionBoundaryWaitOutlastsASlowGateStart(t *testing.T) {
+	t.Parallel()
+	// Longer than the earlier fixed 5 second boundary wait, standing in for a
+	// gate that reaches its boundary late on a loaded Windows runner.
+	runCIAdoptionInterruption(t, types.StepReview, "live gate", "cancelled", 6*time.Second)
+}
+
+// runCIAdoptionInterruption drives one row of the interruption matrix: it
+// reaches entry's boundary in mode, interrupts it with cause, and checks what
+// the interruption kept. The entry step waits entryDelay before it returns.
+func runCIAdoptionInterruption(t *testing.T, entry types.StepName, mode, cause string, entryDelay time.Duration) {
+	database, locations, run, repo := setupTest(t)
+	run.HeadSHA = strings.Repeat("c", 40)
+	if err := database.UpdateRunHeadSHA(run.ID, run.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	var event *db.CIRepairAdoption
+	var names []types.StepName
+	if mode == "recovered gate" || mode == "pending" {
+		status := types.StepStatusAwaitingApproval
+		if mode == "pending" {
+			status = types.StepStatusPending
+		}
+		run, event, names = prepareCIAdoptionRecovery(t, database, run, entry, status)
+	} else {
+		event = &db.CIRepairAdoption{ExpectedRun: *run, CandidateSHA: run.HeadSHA}
+		names = ciAdoptionInterruptionEntries
+	}
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	var cancellation error
+	if cause == "abort" {
+		cancellation = errors.New(types.RunCancelReasonAbortedByUser)
+	} else if cause == "shutdown" {
+		cancellation = errors.New("daemon shutting down")
+	}
+	ready := make(chan struct{}, 1)
+	var steps []Step
+	for _, name := range names {
+		steps = append(steps, &adaptiveCallStep{name: name, fn: func(sctx *StepContext) (*StepOutcome, error) {
+			if sctx.Ctx.Err() != nil {
+				return nil, context.Cause(sctx.Ctx)
+			}
+			outcome := &StepOutcome{ReviewApprovedHeadSHA: run.HeadSHA, Findings: `{"findings":[],"tested_head_sha":"` + run.HeadSHA + `"}`}
+			if name == entry {
+				time.Sleep(entryDelay)
+				outcome.NeedsApproval = true
+			}
+			return outcome, nil
+		}})
+	}
+	executor := NewExecutor(database, locations, nil, nil, steps, func(observed ipc.Event) {
+		if observed.StepName == nil || *observed.StepName != entry {
+			return
+		}
+		if mode == "executing" && observed.Type == ipc.EventStepStarted {
+			ready <- struct{}{}
+			<-ctx.Done()
+		} else if observed.Type == ipc.EventStepCompleted && observed.Status != nil && *observed.Status == string(types.StepStatusAwaitingApproval) {
+			ready <- struct{}{}
+		}
+	})
+	executor.adoption = event
+	workDir := t.TempDir()
+	done := make(chan error, 1)
+	if mode == "pending" {
+		cancel(cancellation)
+	}
+	go func() {
+		if mode == "recovered gate" || mode == "pending" {
+			done <- executor.ResumeCIAdoption(ctx, run, repo, workDir, event, nil, "", requireCIRepairSnapshot(t, database, run.ID))
+		} else {
+			done <- executor.Execute(ctx, run, repo, workDir)
+		}
+	}()
+	if mode != "pending" {
+		select {
+		case <-ready:
+		case err := <-done:
+			t.Fatalf("validation never reached its boundary: %v", err)
+		case <-time.After(ciAdoptionWaitTimeout):
+			t.Fatal("validation boundary never became observable")
+		}
+	}
+	before, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel(cancellation)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("interruption returned success")
+		}
+	case <-time.After(ciAdoptionWaitTimeout):
+		t.Fatal("interrupted validation did not return")
+	}
+	stored, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cause == "abort" {
+		if stored.Status != types.RunCancelled || stored.AwaitingAgentSince != nil || stored.PushActive || stored.Error == nil || *stored.Error != types.RunCancelReasonAbortedByUser {
+			t.Fatalf("explicit cancellation stayed held: %+v", stored)
+		}
+	} else {
+		after, err := database.GetStepsByRun(run.ID)
+		if err != nil || stored.Status != types.RunRunning || !reflect.DeepEqual(before, after) {
+			t.Fatalf("interruption changed retained validation: %+v, %v", stored, err)
+		}
+		if (mode == "live gate" || mode == "recovered gate") && stored.AwaitingAgentSince == nil {
+			t.Fatal("shutdown cleared the parked gate")
 		}
 	}
 }
@@ -332,7 +355,7 @@ func TestCIAdoptionEveryRecoveryEntryHoldsAPushValidationRestart(t *testing.T) {
 						}
 					case err := <-done:
 						t.Fatalf("recovered validation escaped its hold: %v", err)
-					case <-time.After(10 * time.Second):
+					case <-time.After(ciAdoptionWaitTimeout):
 						t.Fatal("recovered validation did not reach its Push hold")
 					}
 					break
@@ -473,7 +496,7 @@ func TestCIPublicationHoldSurvivesLiveAndRecoveredInterruption(t *testing.T) {
 		case err := <-done:
 			cancel()
 			t.Fatalf("publication hold returned before parking: %v", err)
-		case <-time.After(5 * time.Second):
+		case <-time.After(ciAdoptionWaitTimeout):
 			cancel()
 			t.Fatal("publication hold never parked")
 		}
@@ -483,7 +506,7 @@ func TestCIPublicationHoldSurvivesLiveAndRecoveredInterruption(t *testing.T) {
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("interruption = %v", err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(ciAdoptionWaitTimeout):
 			t.Fatal("publication hold did not stop")
 		}
 		var err error
@@ -590,7 +613,7 @@ func TestCIPublicationUserAbortCancelsLiveAndRecoveredHolds(t *testing.T) {
 			case <-parked:
 			case err := <-done:
 				t.Fatalf("hold returned before abort: %v", err)
-			case <-time.After(5 * time.Second):
+			case <-time.After(ciAdoptionWaitTimeout):
 				t.Fatal("hold never parked")
 			}
 			before := requireCIRepairSnapshot(t, database, run.ID)
@@ -600,7 +623,7 @@ func TestCIPublicationUserAbortCancelsLiveAndRecoveredHolds(t *testing.T) {
 				if err == nil {
 					t.Fatal("explicit abort returned success")
 				}
-			case <-time.After(5 * time.Second):
+			case <-time.After(ciAdoptionWaitTimeout):
 				t.Fatal("explicit abort did not finish")
 			}
 			stored, err := database.GetRun(run.ID)
@@ -1093,13 +1116,13 @@ func TestCIRetainedGuardLeavesProtectedPathRetryOwnership(t *testing.T) {
 		cancel()
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+		case <-time.After(ciAdoptionWaitTimeout):
 			t.Error("protected-path executor did not stop")
 		}
 	})
 	select {
 	case <-parked:
-	case <-time.After(5 * time.Second):
+	case <-time.After(ciAdoptionWaitTimeout):
 		t.Fatal("protected-path refusal did not park")
 	}
 	if err := executor.Respond(types.StepCI, types.ActionApprove, nil); err == nil || !strings.Contains(err.Error(), "use fix") {
@@ -1110,7 +1133,7 @@ func TestCIRetainedGuardLeavesProtectedPathRetryOwnership(t *testing.T) {
 	}
 	select {
 	case <-parked:
-	case <-time.After(5 * time.Second):
+	case <-time.After(ciAdoptionWaitTimeout):
 		t.Fatal("original protected-path retry did not execute")
 	}
 }
@@ -1306,7 +1329,7 @@ func TestCIAdoptionRestartsOnlyAnExactlyReviewedInterruptedPush(t *testing.T) {
 				case <-parked:
 				case err := <-done:
 					t.Fatalf("publication recovery did not reach its credential hold: %v", err)
-				case <-time.After(5 * time.Second):
+				case <-time.After(ciAdoptionWaitTimeout):
 					t.Fatal("publication recovery did not park")
 				}
 				cancel()
@@ -1315,7 +1338,7 @@ func TestCIAdoptionRestartsOnlyAnExactlyReviewedInterruptedPush(t *testing.T) {
 					if !errors.Is(err, context.Canceled) {
 						t.Fatalf("recovery interruption = %v", err)
 					}
-				case <-time.After(5 * time.Second):
+				case <-time.After(ciAdoptionWaitTimeout):
 					t.Fatal("publication recovery did not stop")
 				}
 				after, err := database.GetStepsByRun(run.ID)
@@ -1517,7 +1540,7 @@ func TestCIRetainedBeforeAdoptionRespectsCancellationCause(t *testing.T) {
 			case <-parked:
 			case err := <-done:
 				t.Fatalf("retained CI did not park: %v", err)
-			case <-time.After(5 * time.Second):
+			case <-time.After(ciAdoptionWaitTimeout):
 				t.Fatal("retained CI did not park")
 			}
 			cause := error(context.Canceled)
@@ -1527,7 +1550,7 @@ func TestCIRetainedBeforeAdoptionRespectsCancellationCause(t *testing.T) {
 			cancel(cause)
 			select {
 			case <-done:
-			case <-time.After(5 * time.Second):
+			case <-time.After(ciAdoptionWaitTimeout):
 				t.Fatal("retained CI did not stop")
 			}
 			stored, err := database.GetRun(run.ID)
