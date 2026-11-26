@@ -165,7 +165,7 @@ func runUnobservedTerminalHead(t *testing.T) *unobservedTerminalHead {
 	}
 	if recorded.Status != types.RunFailed || recorded.HeadSHA != reviewed || recorded.ReviewApprovedHeadSHA == nil || *recorded.ReviewApprovedHeadSHA != reviewed ||
 		recorded.TerminalHeadVerifiedAt != nil || recorded.TerminalSourceState != nil {
-		t.Fatalf("terminal record = status %s head %s verified %v source %v, want failed at the unobserved reviewed head %s", recorded.Status, recorded.HeadSHA, recorded.TerminalHeadVerifiedAt, recorded.TerminalSourceState, reviewed)
+		t.Fatalf("terminal record = status %s head %s verified %v source %v, want failed at the unobserved reviewed head %s", recorded.Status, recorded.HeadSHA, recorded.TerminalHeadVerifiedAt, derefString(recorded.TerminalSourceState), reviewed)
 	}
 	if refs := gitOutput(t, gate, "for-each-ref", "refs/no-mistakes"); refs != "" {
 		t.Fatalf("terminalization anchored refs it could not observe: %s", refs)
@@ -244,7 +244,7 @@ func TestUnobservedTerminalHeadRecoversByTheOfferedPath(t *testing.T) {
 			}
 			if recorded.HeadSHA != f.reviewed || recorded.TerminalHeadVerifiedAt == nil || recorded.CustodyReturnedAt == nil ||
 				recorded.TerminalSourceState == nil || *recorded.TerminalSourceState != "clean:"+f.reviewed {
-				t.Fatalf("run = head %s verified %v returned %v source %v, want custody returned at the observed clean head %s", recorded.HeadSHA, recorded.TerminalHeadVerifiedAt, recorded.CustodyReturnedAt, recorded.TerminalSourceState, f.reviewed)
+				t.Fatalf("run = head %s verified %v returned %v source %v, want custody returned at the observed clean head %s", recorded.HeadSHA, recorded.TerminalHeadVerifiedAt, recorded.CustodyReturnedAt, derefString(recorded.TerminalSourceState), f.reviewed)
 			}
 		})
 	}

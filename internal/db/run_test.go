@@ -1407,24 +1407,24 @@ func TestVerifyTerminalRunObservedCleanHeadIsACompareAndSwapOnTheSourceObservati
 			"source": {types.RunFailed, "recorded", &other},
 		} {
 			if updated, err := d.VerifyTerminalRunObservedCleanHead(run.ID, args.status, args.head, args.source); err != nil || updated {
-				t.Fatalf("prior %v: %s mismatch CAS = %t, %v", prior, name, updated, err)
+				t.Fatalf("prior %v: %s mismatch CAS = %t, %v", deref(prior), name, updated, err)
 			}
 		}
 		got, err := d.GetRun(run.ID)
 		if err != nil || got.TerminalHeadVerifiedAt != nil {
-			t.Fatalf("prior %v: failed CAS changed run = %#v, %v", prior, got, err)
+			t.Fatalf("prior %v: failed CAS changed run = %#v, %v", deref(prior), got, err)
 		}
 
 		if updated, err := d.VerifyTerminalRunObservedCleanHead(run.ID, types.RunFailed, "recorded", prior); err != nil || !updated {
-			t.Fatalf("prior %v: matching CAS = %t, %v", prior, updated, err)
+			t.Fatalf("prior %v: matching CAS = %t, %v", deref(prior), updated, err)
 		}
 
 		got, err = d.GetRun(run.ID)
 		if err != nil || got.HeadSHA != "recorded" || got.TerminalHeadVerifiedAt == nil || got.TerminalSourceState == nil || *got.TerminalSourceState != "clean:recorded" {
-			t.Fatalf("prior %v: successful CAS = %#v, %v, want the recorded head verified with its clean observation", prior, got, err)
+			t.Fatalf("prior %v: successful CAS = %#v, %v, want the recorded head verified with its clean observation", deref(prior), got, err)
 		}
 		if updated, err := d.VerifyTerminalRunObservedCleanHead(run.ID, types.RunFailed, "recorded", got.TerminalSourceState); err != nil || updated {
-			t.Fatalf("prior %v: already-verified CAS = %t, %v", prior, updated, err)
+			t.Fatalf("prior %v: already-verified CAS = %t, %v", deref(prior), updated, err)
 		}
 	}
 }
