@@ -264,6 +264,30 @@ func stdoutOnly(cmd *exec.Cmd) (out []byte, detail string, err error) {
 	return out, detail, err
 }
 
+// ghConnectionFailures are what gh prints when a request never got its answer.
+// gh reports a DNS failure as "error connecting to <host>" followed by "check
+// your internet connection or https://githubstatus.com", and passes Go's
+// transport errors through verbatim. gh exits 1 for these as for any other
+// failure, so its message is the only signal (issue #291).
+var ghConnectionFailures = []string{
+	"error connecting to ",
+	"connection reset by peer",
+	"connection refused",
+	"i/o timeout",
+	"TLS handshake timeout",
+}
+
+// ghFailure is a failed gh call's error, marked scm.ErrConnection when gh
+// reports that the request never got its answer.
+func ghFailure(label, detail string, err error) error {
+	for _, marker := range ghConnectionFailures {
+		if strings.Contains(detail, marker) {
+			return fmt.Errorf("%s: %s: %w (%w)", label, detail, err, scm.ErrConnection)
+		}
+	}
+	return fmt.Errorf("%s: %s: %w", label, detail, err)
+}
+
 func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error) {
 	args := []string{"pr", "list", "--head", branch}
 	if strings.TrimSpace(base) != "" {
@@ -278,7 +302,7 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 	cmd := h.cmd(ctx, "gh", args...)
 	out, detail, err := stdoutOnly(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("gh pr list: %s: %w", detail, err)
+		return nil, ghFailure("gh pr list", detail, err)
 	}
 	var prs []struct {
 		Number              int    `json:"number"`
@@ -366,7 +390,7 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 	cmd.Stdin = strings.NewReader(content.Body)
 	out, detail, err := stdoutOnly(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("gh pr create: %s: %w", detail, err)
+		return nil, ghFailure("gh pr create", detail, err)
 	}
 	url := strings.TrimSpace(string(out))
 	pr := &scm.PR{URL: url}

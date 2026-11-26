@@ -752,12 +752,15 @@ func fakeCIGHReconcileHandler(args []string) {
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr list") {
-		fmt.Println("[]")
+		if fakeReconcilePROpened() {
+			fmt.Println(`[{"number":42,"url":"https://github.com/test/repo/pull/42","baseRefName":"main"}]`)
+		} else {
+			fmt.Println("[]")
+		}
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr create") {
-		fmt.Println("https://github.com/test/repo/pull/42")
-		os.Exit(0)
+		fakeReconcileCreatePR()
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json state") {
 		state, err := os.ReadFile(os.Getenv("FAKE_CLI_STATE_PATH"))
@@ -792,6 +795,57 @@ func fakeCIGHReconcileHandler(args []string) {
 	}
 	fmt.Fprintln(os.Stderr, "unsupported reconcile gh argv:", joined)
 	os.Exit(1)
+}
+
+// fakeReconcilePROpened reports whether a create already opened PR 42. It is
+// tracked only when FAKE_CLI_PR_CREATE_COUNT_PATH is set.
+func fakeReconcilePROpened() bool {
+	path := os.Getenv("FAKE_CLI_PR_CREATE_COUNT_PATH")
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path + ".opened")
+	return err == nil
+}
+
+// fakeReconcileCreatePR answers `gh pr create`. With
+// FAKE_CLI_PR_CREATE_COUNT_PATH set, the first FAKE_CLI_PR_CREATE_FAILURES
+// creates print FAKE_CLI_PR_CREATE_FAILURE and exit 1, as gh does when it
+// loses the connection; FAKE_CLI_PR_CREATE_LANDS=1 makes such a create open the
+// PR anyway, as one whose answer was lost does. Like GitHub, a create on a
+// branch whose PR is already open is refused.
+func fakeReconcileCreatePR() {
+	path := os.Getenv("FAKE_CLI_PR_CREATE_COUNT_PATH")
+	if path == "" {
+		fmt.Println("https://github.com/test/repo/pull/42")
+		os.Exit(0)
+	}
+	if fakeReconcilePROpened() {
+		fmt.Fprintln(os.Stderr, "a pull request for branch \"feature\" into branch \"main\" already exists:\nhttps://github.com/test/repo/pull/42")
+		os.Exit(1)
+	}
+	count := 0
+	if raw, err := os.ReadFile(path); err == nil {
+		count, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
+	}
+	if err := os.WriteFile(path, []byte(strconv.Itoa(count+1)), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	failures, _ := strconv.Atoi(os.Getenv("FAKE_CLI_PR_CREATE_FAILURES"))
+	lands := count >= failures || os.Getenv("FAKE_CLI_PR_CREATE_LANDS") == "1"
+	if lands {
+		if err := os.WriteFile(path+".opened", nil, 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+	if count < failures {
+		fmt.Fprintln(os.Stderr, os.Getenv("FAKE_CLI_PR_CREATE_FAILURE"))
+		os.Exit(1)
+	}
+	fmt.Println("https://github.com/test/repo/pull/42")
+	os.Exit(0)
 }
 
 func fakeGHHandlePRContentCommands(args []string, joined string) {

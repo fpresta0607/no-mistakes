@@ -366,6 +366,11 @@ var (
 	// monitoring. It prevents a late status or already-merged race from proving
 	// the wrong commit.
 	ErrHeadChanged = errors.New("pull request head changed")
+	// ErrConnection marks a provider call that failed on the network: the
+	// forge could not be reached, or the connection broke before its answer
+	// arrived. A mutating call that failed this way may still have taken
+	// effect, so a caller reads the forge before repeating one.
+	ErrConnection = errors.New("could not reach the forge")
 )
 
 // HeadChangedError is ErrHeadChanged from an answer that named the head the
