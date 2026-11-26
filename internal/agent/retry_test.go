@@ -161,7 +161,7 @@ func TestClassifyTransient_Positive(t *testing.T) {
 func TestRunWithRetrySafetyRefusalOverridesTransientDetail(t *testing.T) {
 	refusal := errors.Join(ErrSafetyRefusal, errors.New("codex exited: exit status 1: This content was flagged for possible cybersecurity risk.; HTTP 503"))
 	calls := 0
-	_, err := runWithRetry(context.Background(), "codex", RunOpts{}, 1, classifyTransient, nil, func() (*Result, error) {
+	_, err := runWithRetry(context.Background(), "codex", RunOpts{}, 1, classifyTransient, nil, nil, func() (*Result, error) {
 		calls++
 		return nil, refusal
 	})
@@ -273,7 +273,7 @@ func TestRunWithRetry_DoesNotRetryQuotaExhaustion(t *testing.T) {
 		t.Run(message, func(t *testing.T) {
 			calls := 0
 			quotaErr := errors.New(message)
-			_, err := runWithRetry(context.Background(), "antigravity", RunOpts{}, 3, classifyTransient, nil, func() (*Result, error) {
+			_, err := runWithRetry(context.Background(), "antigravity", RunOpts{}, 3, classifyTransient, nil, nil, func() (*Result, error) {
 				calls++
 				return nil, quotaErr
 			})
@@ -337,7 +337,7 @@ func TestRunWithRetry_RetriesTransientThenSucceeds(t *testing.T) {
 		OnAttempt: func(attempt Attempt) { attempts = append(attempts, attempt) },
 	}
 
-	res, err := runWithRetry(context.Background(), "claude", opts, 3, classifyTransient, nil, func() (*Result, error) {
+	res, err := runWithRetry(context.Background(), "claude", opts, 3, classifyTransient, nil, nil, func() (*Result, error) {
 		calls++
 		if calls < 3 {
 			return nil, transientErr
@@ -396,7 +396,7 @@ func TestRunWithRetry_PiTransientThenSucceeds(t *testing.T) {
 				OnLifecycle: func(e LifecycleEvent) { events = append(events, e) },
 				OnAttempt:   func(a Attempt) { attempts = append(attempts, a) },
 			}
-			got, err := runWithRetry(context.Background(), "pi", opts, 1, classifyTransient, nil, func() (*Result, error) {
+			got, err := runWithRetry(context.Background(), "pi", opts, 1, classifyTransient, nil, nil, func() (*Result, error) {
 				calls++
 				if calls == 1 {
 					return nil, firstErr
@@ -423,7 +423,7 @@ func TestRunWithRetry_ProtocolResidueTicket401StillRetries(t *testing.T) {
 
 	calls := 0
 	residueErr := errors.New(`pi output parse: invalid character '<' after top-level value (output snippet: "{\"summary\":\"ticket 401\"}<html>")`)
-	result, err := runWithRetry(context.Background(), "pi", RunOpts{}, 1, classifyTransient, nil, func() (*Result, error) {
+	result, err := runWithRetry(context.Background(), "pi", RunOpts{}, 1, classifyTransient, nil, nil, func() (*Result, error) {
 		calls++
 		if calls == 1 {
 			return nil, residueErr
@@ -449,7 +449,7 @@ func TestRunWithRetry_EmitsRetryLifecycleWhenConfigured(t *testing.T) {
 		OnLifecycle: func(e LifecycleEvent) { events = append(events, e) },
 	}
 
-	_, err := runWithRetry(context.Background(), "codex", opts, 1, classifyTransient, nil, func() (*Result, error) {
+	_, err := runWithRetry(context.Background(), "codex", opts, 1, classifyTransient, nil, nil, func() (*Result, error) {
 		calls++
 		if calls == 1 {
 			return nil, errors.New("API Error: 503 overloaded")
@@ -482,7 +482,7 @@ func TestRunWithRetry_CallsRetryRecoveryBeforeRetry(t *testing.T) {
 		if label == "connection refused" {
 			recovered = true
 		}
-	}, func() (*Result, error) {
+	}, nil, func() (*Result, error) {
 		calls++
 		if !recovered {
 			return nil, errors.New("dial tcp 127.0.0.1:5555: connection refused")
@@ -506,7 +506,7 @@ func TestRunWithRetry_PermanentErrorFailsImmediately(t *testing.T) {
 	calls := 0
 	permErr := errors.New("API Error: authentication_error: invalid x-api-key")
 
-	_, err := runWithRetry(context.Background(), "claude", RunOpts{}, 3, classifyTransient, nil, func() (*Result, error) {
+	_, err := runWithRetry(context.Background(), "claude", RunOpts{}, 3, classifyTransient, nil, nil, func() (*Result, error) {
 		calls++
 		return nil, permErr
 	})
@@ -524,7 +524,7 @@ func TestRunWithRetry_ExhaustsRetries(t *testing.T) {
 	calls := 0
 	transientErr := errors.New("503 service unavailable")
 
-	_, err := runWithRetry(context.Background(), "claude", RunOpts{}, 3, classifyTransient, nil, func() (*Result, error) {
+	_, err := runWithRetry(context.Background(), "claude", RunOpts{}, 3, classifyTransient, nil, nil, func() (*Result, error) {
 		calls++
 		return nil, transientErr
 	})
@@ -563,7 +563,7 @@ func TestRunWithRetry_RespectsContextCancellation(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, err := runWithRetry(ctx, "claude", RunOpts{}, 3, classifyTransient, nil, func() (*Result, error) {
+	_, err := runWithRetry(ctx, "claude", RunOpts{}, 3, classifyTransient, nil, nil, func() (*Result, error) {
 		calls++
 		return nil, transientErr
 	})
@@ -583,7 +583,7 @@ func TestRunWithRetry_CombinedClassifierForClaude(t *testing.T) {
 
 	// claudeRetryClassifier should retry both transient API errors AND errNoStructuredOutput.
 	calls := 0
-	_, err := runWithRetry(context.Background(), "claude", RunOpts{}, 3, claudeRetryClassifier, nil, func() (*Result, error) {
+	_, err := runWithRetry(context.Background(), "claude", RunOpts{}, 3, claudeRetryClassifier, nil, nil, func() (*Result, error) {
 		calls++
 		return nil, errNoStructuredOutput
 	})
@@ -690,7 +690,7 @@ func TestRunWithRetry_SkipsRetryWhenFirstAttemptConsumedTheBudget(t *testing.T) 
 	defer cancel()
 	transientErr := fmt.Errorf("API Error: overloaded_error: please retry")
 	calls := 0
-	_, err := runWithRetry(ctx, "claude", RunOpts{}, 3, classifyTransient, nil, func() (*Result, error) {
+	_, err := runWithRetry(ctx, "claude", RunOpts{}, 3, classifyTransient, nil, nil, func() (*Result, error) {
 		calls++
 		time.Sleep(400 * time.Millisecond)
 		return nil, transientErr
@@ -725,7 +725,7 @@ func TestRunWithRetry_SkipsRetryWhenBackoffConsumesTheRemainingBudget(t *testing
 	defer cancel()
 	transientErr := fmt.Errorf("API Error: overloaded_error: please retry")
 	calls := 0
-	_, err := runWithRetry(ctx, "claude", RunOpts{}, 3, classifyTransient, nil, func() (*Result, error) {
+	_, err := runWithRetry(ctx, "claude", RunOpts{}, 3, classifyTransient, nil, nil, func() (*Result, error) {
 		calls++
 		time.Sleep(200 * time.Millisecond)
 		return nil, transientErr
@@ -747,7 +747,7 @@ func TestRunWithRetry_RetriesFastFailureUnderShortDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	calls := 0
-	res, err := runWithRetry(ctx, "claude", RunOpts{}, 3, classifyTransient, nil, func() (*Result, error) {
+	res, err := runWithRetry(ctx, "claude", RunOpts{}, 3, classifyTransient, nil, nil, func() (*Result, error) {
 		calls++
 		if calls < 2 {
 			return nil, fmt.Errorf("API Error: overloaded_error: please retry")

@@ -56,7 +56,7 @@ func (a *grokAgent) NeutralizesGateInstructions() bool {
 }
 
 func (a *grokAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
-	return runWithRetry(ctx, "grok", opts, claudeMaxRetries, classifyTransient, nil, func() (*Result, error) {
+	return runWithRetry(ctx, "grok", opts, claudeMaxRetries, classifyTransient, nil, nil, func() (*Result, error) {
 		return a.runOnce(ctx, opts)
 	})
 }

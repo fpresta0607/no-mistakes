@@ -95,9 +95,45 @@ type claudeAgent struct {
 	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
 	// buildArgs suppresses claude's project-level settings/memory surface.
 	disableProjectSettings bool
+	// providerAnswers probes the model API endpoint before a retry after a
+	// failure in which the provider never answered. Nil keeps such a retry on
+	// the plain backoff and step-budget rule.
+	providerAnswers func(ctx context.Context, endpoint string) error
 }
 
+// claudeDefaultAPIBaseURL is where Claude Code sends model requests unless
+// ANTHROPIC_BASE_URL overrides it.
+const claudeDefaultAPIBaseURL = "https://api.anthropic.com"
+
+// claudeCloudProviderEnvVars select a cloud provider whose endpoint this
+// adapter does not resolve, so no probe is made for it.
+var claudeCloudProviderEnvVars = []string{"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"}
+
 func (a *claudeAgent) Name() string { return "claude" }
+
+// providerProbe probes the endpoint the CLI sends model requests to, read from
+// the environment the CLI is started with.
+func (a *claudeAgent) providerProbe(opts RunOpts) providerProbe {
+	if a.providerAnswers == nil {
+		return nil
+	}
+	env := map[string]string{}
+	for _, entry := range a.gitSafeEnv(opts.CWD, opts.Env) {
+		if key, value, ok := strings.Cut(entry, "="); ok {
+			env[key] = value
+		}
+	}
+	for _, key := range claudeCloudProviderEnvVars {
+		if value := env[key]; value != "" && value != "0" && !strings.EqualFold(value, "false") {
+			return nil
+		}
+	}
+	endpoint := env["ANTHROPIC_BASE_URL"]
+	if endpoint == "" {
+		endpoint = claudeDefaultAPIBaseURL
+	}
+	return func(ctx context.Context) error { return a.providerAnswers(ctx, endpoint) }
+}
 
 // SupportsSessionResume reports claude's native durable-session capability:
 // every stream-json event carries a session_id, and `claude -p --resume <id>`
@@ -123,7 +159,7 @@ func (a *claudeAgent) NeutralizesGateInstructions() bool {
 }
 
 func (a *claudeAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
-	return runWithRetry(ctx, "claude", opts, claudeMaxRetries, claudeRetryClassifier, nil, func() (*Result, error) {
+	return runWithRetry(ctx, "claude", opts, claudeMaxRetries, claudeRetryClassifier, nil, a.providerProbe(opts), func() (*Result, error) {
 		return a.runOnce(ctx, opts)
 	})
 }

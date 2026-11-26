@@ -64,6 +64,11 @@ func (e *exhaustedTransientRetries) TerminalProviderError() bool { return true }
 // exponential backoff (via transientBackoff) and respects ctx cancellation.
 // The retry attempt and classification label are surfaced to opts.OnLifecycle,
 // falling back to opts.OnChunk for older direct callers.
+//
+// With a probe, a failure that means the provider never answered (see
+// providerUnreachableLabels) is retried only once the probe reports the
+// provider answers again (awaitProvider), and the retry is not refused for the
+// failed attempt's length: that measured the CLI's own timeout, not the work.
 func runWithRetry(
 	ctx context.Context,
 	name string,
@@ -71,6 +76,7 @@ func runWithRetry(
 	maxRetries int,
 	classify retryClassifier,
 	recoverRetry func(label string),
+	probe providerProbe,
 	runOnce func() (*Result, error),
 ) (*Result, error) {
 	var lastErr error
@@ -90,7 +96,12 @@ func runWithRetry(
 			name, left.Round(time.Millisecond), lastDuration.Round(time.Millisecond), lastErr)
 	}
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
+		if attempt > 0 && probe != nil && providerUnreachableLabels[lastLabel] {
+			emitAgentRetry(opts, name, lastLabel, attempt+1, maxRetries+1)
+			if err := awaitProvider(ctx, opts, name, probe, lastErr); err != nil {
+				return lastResult, err
+			}
+		} else if attempt > 0 {
 			if err := budgetForRetry(); err != nil {
 				return lastResult, &exhaustedTransientRetries{err: err}
 			}

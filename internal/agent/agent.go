@@ -1411,7 +1411,7 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 	}
 	switch name {
 	case types.AgentClaude:
-		return &claudeAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings, subprocessContext: newSubprocessContext(opts.Environment)}, nil
+		return &claudeAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings, subprocessContext: newSubprocessContext(opts.Environment), providerAnswers: httpEndpointAnswers}, nil
 	case types.AgentCodex:
 		return &codexAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings, subprocessContext: newSubprocessContext(opts.Environment)}, nil
 	case types.AgentGrok:
