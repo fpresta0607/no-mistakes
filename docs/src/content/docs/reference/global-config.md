@@ -860,6 +860,7 @@ With a budget set:
 - A turn that reaches the budget is stopped, and the Test step completes with what the ledger holds instead of parking. A recorded live pass counts. A recorded failure is a `no-go`, which parks as an auto-fixable error exactly as a finished live check's failure does. A scenario that was planned and not reached is listed on the pull request as `untested`, with the budget as its reason.
 - The ledger is held to the live-validation contract: a pass or fail counts only when it is recorded as live with evidence, and anything else is listed as `untested`.
 - The record carries no verdict unless a failure was recorded, so the pull request's attestation omits `live_validation` for a live check that did not finish.
+- The pull request body names the cut with the budget and the passed, failed, and untested counts, also when [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent) withholds validation text.
 - Files the stopped turn left in the worktree are moved to `live-check/set-aside` in the run's evidence directory, changes to tracked files as one patch, and the worktree is put back at its head. They are neither pushed nor deleted, and that folder is never published as evidence.
 
 The stop still parks, exactly as an expired `test_agent_timeout` does, when completing could publish or clear something nobody validated:

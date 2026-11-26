@@ -11,7 +11,9 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -373,6 +375,52 @@ func TestTestStep_LiveCheckBudgetCutCompletesWithWhatItProved(t *testing.T) {
 	}
 	if len(findings.Tested) == 0 || findings.Tested[0] != "echo baseline-ran" {
 		t.Fatalf("tested = %q, want the baseline that ran before the live check", findings.Tested)
+	}
+}
+
+// A budget cut completes Test with nobody's approval, so the PR body must name
+// it even when intent publication is off, in the gate's own words and with
+// nothing the agent wrote (issue #313).
+func TestTestStep_LiveCheckBudgetCutIsNamedInAWithheldPRBody(t *testing.T) {
+	const privateScenario = "operator exports the synthetic private ledger"
+	const privateEvidence = "synthetic private evidence line"
+	const privateLeftover = "synthetic-private-leftover.txt"
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{name: "test"}
+	ag.runFn = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		appendLedger(t, ledgerPathFromPrompt(t, opts.Prompt),
+			`{"name":"`+privateScenario+`","result":"planned"}`,
+			`{"name":"user signs in","result":"pass","live":true,"evidence":"`+privateEvidence+`","reason":""}`,
+			`{"name":"user deletes an account","result":"planned"}`,
+		)
+		if err := os.WriteFile(filepath.Join(dir, privateLeftover), []byte("left behind\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.TestLiveCheckBudget = 60 * time.Millisecond
+	sctx.Config.TestAgentTimeout = liveCheckTestAgentTimeout
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil || outcome.NeedsApproval {
+		t.Fatalf("Execute() = %#v, %v, want the step completed at the budget", outcome, err)
+	}
+	step := &db.StepResult{ID: "test", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &outcome.Findings}
+
+	body, notice := buildPipelineSummaryWithVisibility([]*db.StepResult{step}, nil, headSHA, scm.ProviderGitHub, pipelineAttestationPolicy{}, false)
+
+	const want = "- **Test**: completed. The live check was stopped at its 60ms budget: 1 passed live, 0 failed, 2 untested."
+	if !strings.Contains(body, want) {
+		t.Fatalf("withheld body does not name the budget cut, want %q in:\n%s", want, body)
+	}
+	if !strings.Contains(notice, "Validation text withheld") {
+		t.Fatalf("notice = %q, want validation text still withheld", notice)
+	}
+	for _, private := range []string{privateScenario, "user signs in", privateEvidence, privateLeftover, sctx.EvidenceDir, "set aside"} {
+		if strings.Contains(body+notice, private) {
+			t.Fatalf("withheld body published %q:\n%s\n%s", private, body, notice)
+		}
 	}
 }
 

@@ -215,19 +215,18 @@ func (turn liveCheckTurn) completeAtBudget(sctx *pipeline.StepContext, evidenceD
 	}
 
 	scenarios := readLiveCheckLedger(liveCheckLedgerPath(evidenceDir), turn.budget)
-	var passed, failed, untested int
+	cut := types.TestLiveCheckCut{Budget: turn.budget}
 	for _, scenario := range scenarios {
 		switch scenario.Result {
 		case types.ScenarioResultPass:
-			passed++
+			cut.Passed++
 		case types.ScenarioResultFail:
-			failed++
+			cut.Failed++
 		default:
-			untested++
+			cut.Untested++
 		}
 	}
-	counts := fmt.Sprintf("%d passed live, %d failed, %d untested", passed, failed, untested)
-	note := fmt.Sprintf("The live check was stopped at its %s budget (test_live_check_budget) and the Test step completed with what it had written down: %s. Untested scenarios are listed on the pull request.", turn.budget, counts)
+	note := fmt.Sprintf("The live check was stopped at its %s budget (test_live_check_budget) and the Test step completed with what it had written down: %s. Untested scenarios are listed on the pull request.", turn.budget, liveCheckCutCounts(cut))
 	if len(setAside) > 0 {
 		const maxNamed = 10
 		named := strings.Join(setAside[:min(len(setAside), maxNamed)], ", ")
@@ -240,7 +239,8 @@ func (turn liveCheckTurn) completeAtBudget(sctx *pipeline.StepContext, evidenceD
 
 	findings := Findings{
 		Scenarios:      scenarios,
-		TestingSummary: fmt.Sprintf("The live check was stopped at its %s budget: %s.", turn.budget, counts),
+		TestingSummary: liveCheckCutSentence(cut),
+		LiveCheckCut:   &cut,
 		Items: []Finding{{
 			ID:          types.FindingIDTestLiveCheckBudget,
 			Severity:    types.FindingSeverityInfo,
@@ -251,10 +251,21 @@ func (turn liveCheckTurn) completeAtBudget(sctx *pipeline.StepContext, evidenceD
 	// A recorded failure is the same no-go a finished live check reports, so
 	// verdictFindings parks it as an auto-fixable error. Anything else earns
 	// no verdict: the turn did not finish, so it cannot say "go".
-	if failed > 0 {
+	if cut.Failed > 0 {
 		findings.Verdict = types.TestVerdictNoGo
 	}
 	return findings, true
+}
+
+func liveCheckCutCounts(cut types.TestLiveCheckCut) string {
+	return fmt.Sprintf("%d passed live, %d failed, %d untested", cut.Passed, cut.Failed, cut.Untested)
+}
+
+// liveCheckCutSentence is the gate's own account of a budget cut, built only
+// from the step-owned record, so it is published even when validation text is
+// withheld.
+func liveCheckCutSentence(cut types.TestLiveCheckCut) string {
+	return fmt.Sprintf("The live check was stopped at its %s budget: %s.", cut.Budget, liveCheckCutCounts(cut))
 }
 
 // readLiveCheckLedger reads the scenarios a stopped live check wrote down, in

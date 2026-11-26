@@ -167,6 +167,13 @@ func buildPipelineSummaryWithVisibility(steps []*db.StepResult, rounds map[strin
 			if sr.OverrideReason != nil && strings.TrimSpace(*sr.OverrideReason) != "" {
 				line += " (with override)"
 			}
+			// A budget cut completes Test with nobody's approval, so this body is
+			// the only place a reader learns the live check did not finish.
+			if sr.StepName == types.StepTest {
+				if findings, ok := attestedTestFindings(steps, rounds); ok && findings.LiveCheckCut != nil {
+					line += ". " + liveCheckCutSentence(*findings.LiveCheckCut)
+				}
+			}
 			counts := fmt.Sprintf("%s: final %s", stepDisplayName(sr.StepName), recordedFindingCount(sr.FindingsJSON))
 			var roundCounts []string
 			for _, round := range rounds[sr.ID] {
