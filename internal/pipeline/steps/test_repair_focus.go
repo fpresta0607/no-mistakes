@@ -36,6 +36,11 @@ const (
 	// turn reports running, since they ride into the evidence turn's prompt.
 	maxRepairCommands     = 20
 	maxRepairCommandBytes = 500
+	// maxRepairScenarios and the two byte caps bound the scenarios a repair turn
+	// reports driving, since they ride into the final Test record.
+	maxRepairScenarios             = 20
+	maxRepairScenarioNameBytes     = 300
+	maxRepairScenarioEvidenceBytes = 1000
 )
 
 // unnamedFailureLine matches a failure the attribution parser lists nothing for:
@@ -45,10 +50,12 @@ const (
 var unnamedFailureLine = regexp.MustCompile(`(?m)^\s*(?:ERROR\s|.*Test suite failed to run)`)
 
 // testFixSchema is the Test repair turn's result: commitSummarySchema plus the
-// failures it left for a human and the commands it ran. A failed baseline has no
-// evidence turn after its repair, so this is where a test whose failure may be
-// wanted is asked about. The commands reach the evidence turn on the same head
-// (repairReceiptSection), since the summary is a commit subject.
+// failures it left for a human, the commands it ran and the scenarios it drove
+// live. A failed baseline has no evidence turn after its repair, so this is where
+// a test whose failure may be wanted is asked about. The commands reach the
+// evidence turn on the same head (repairReceiptSection), since the summary is a
+// commit subject, and the scenarios reach the final record through
+// keepUndrivenScenarios.
 var testFixSchema = json.RawMessage(fmt.Sprintf(`{
 	"type": "object",
 	"properties": {
@@ -69,10 +76,24 @@ var testFixSchema = json.RawMessage(fmt.Sprintf(`{
 				},
 				"required": ["command", "exit_code"]
 			}
+		},
+		"scenarios_driven": {
+			"type": "array",
+			"maxItems": %d,
+			"items": {
+				"type": "object",
+				"properties": {
+					"name": {"type": "string", "maxLength": %d},
+					"result": {"type": "string", "enum": ["pass", "fail"]},
+					"live": {"type": "boolean"},
+					"evidence": {"type": "string", "maxLength": %d}
+				},
+				"required": ["name", "result", "live", "evidence"]
+			}
 		}
 	},
 	"required": ["summary"]
-}`, config.MaxFixMessageSummaryBytes, maxRepairDecisions, maxRepairDecisionBytes, maxRepairCommands, maxRepairCommandBytes))
+}`, config.MaxFixMessageSummaryBytes, maxRepairDecisions, maxRepairDecisionBytes, maxRepairCommands, maxRepairCommandBytes, maxRepairScenarios, maxRepairScenarioNameBytes, maxRepairScenarioEvidenceBytes))
 
 // repairCommand is one command a Test repair turn reported running.
 type repairCommand struct {
@@ -95,19 +116,61 @@ func repairCommandsRun(result *agent.Result) []repairCommand {
 	}
 	var commands []repairCommand
 	for _, entry := range parsed.CommandsRun {
-		entry.Command = sanitizePromptText(entry.Command)
+		entry.Command = boundedPromptText(entry.Command, maxRepairCommandBytes)
 		if entry.Command == "" {
 			continue
 		}
 		if len(commands) == maxRepairCommands {
 			break
 		}
-		if len(entry.Command) > maxRepairCommandBytes {
-			entry.Command = strings.ToValidUTF8(entry.Command[:maxRepairCommandBytes], "")
-		}
 		commands = append(commands, entry)
 	}
 	return commands
+}
+
+// repairScenariosDriven reads the scenarios a repair turn reports driving live.
+// Not every adapter enforces the schema's bounds, so they are applied again here.
+// Only a pass or fail with the evidence that shows it is kept, as live, and the
+// first entry for a name wins. A name past its bound is dropped rather than cut,
+// since a cut name could never match the recorded one.
+func repairScenariosDriven(result *agent.Result) []types.TestScenario {
+	if result == nil || result.Output == nil {
+		return nil
+	}
+	var parsed struct {
+		ScenariosDriven []struct {
+			Name     string `json:"name"`
+			Result   string `json:"result"`
+			Live     bool   `json:"live"`
+			Evidence string `json:"evidence"`
+		} `json:"scenarios_driven"`
+	}
+	if err := json.Unmarshal(result.Output, &parsed); err != nil {
+		return nil
+	}
+	var scenarios []types.TestScenario
+	for _, entry := range parsed.ScenariosDriven {
+		if len(scenarios) == maxRepairScenarios {
+			break
+		}
+		name := sanitizePromptText(entry.Name)
+		evidence := boundedPromptText(entry.Evidence, maxRepairScenarioEvidenceBytes)
+		isReported := entry.Result == types.ScenarioResultPass || entry.Result == types.ScenarioResultFail
+		if !isReported || !entry.Live || name == "" || len(name) > maxRepairScenarioNameBytes || evidence == "" ||
+			slices.ContainsFunc(scenarios, func(kept types.TestScenario) bool { return kept.Name == name }) {
+			continue
+		}
+		scenarios = append(scenarios, types.TestScenario{Name: name, Result: entry.Result, Live: true, Evidence: evidence})
+	}
+	return scenarios
+}
+
+func boundedPromptText(text string, maxBytes int) string {
+	text = sanitizePromptText(text)
+	if len(text) > maxBytes {
+		text = strings.TrimSpace(strings.ToValidUTF8(text[:maxBytes], ""))
+	}
+	return text
 }
 
 // repairDecisionFindings turns a repair turn's needs_decision entries into
@@ -375,7 +438,12 @@ func repairReceiptSection(sctx *pipeline.StepContext, repairReport string, comma
 // tested entries and artifacts of that live check come onto the record with it,
 // less what the focused turn already reported and what baselineTested, this
 // execution's own baseline, already lists.
-func keepUndrivenScenarios(focused, last Findings, isOnSameHead bool, baselineTested []string) Findings {
+//
+// Also on the same head, a scenario in repairProof (see repairProofFor) is
+// recorded from the repair turn: the repair ran on this exact source, so its
+// result is the current one, and the earlier record is named as a separate
+// event. A scenario the repair turn did not report keeps its own untested reason.
+func keepUndrivenScenarios(focused, last Findings, isOnSameHead bool, baselineTested []string, repairProof map[string]types.TestScenario) Findings {
 	reported := make(map[string]int, len(focused.Scenarios))
 	for i, scenario := range focused.Scenarios {
 		reported[strings.TrimSpace(scenario.Name)] = i
@@ -385,6 +453,10 @@ func keepUndrivenScenarios(focused, last Findings, isOnSameHead bool, baselineTe
 		wasFailing := scenario.Result == types.ScenarioResultFail || scenario.StillFailing
 		if i, ok := reported[strings.TrimSpace(scenario.Name)]; ok {
 			focused.Scenarios[i].StillFailing = wasFailing && focused.Scenarios[i].Result == types.ScenarioResultUntested
+			continue
+		}
+		if driven, ok := repairProof[strings.TrimSpace(scenario.Name)]; ok {
+			focused.Scenarios = append(focused.Scenarios, recordFromRepairTurn(scenario, driven, last.TestedHeadSHA))
 			continue
 		}
 		if isOnSameHead && scenario.Result == types.ScenarioResultPass {
@@ -417,4 +489,92 @@ func keepUndrivenScenarios(focused, last Findings, isOnSameHead bool, baselineTe
 		focused.Verdict = types.TestVerdictInconclusive
 	}
 	return focused
+}
+
+// repairProofFor maps the trimmed name of each scenario of last that the
+// repair turn reported driving (repairDriven, see repairScenariosDriven) to that
+// report: the ones the focused turn left out, and that the live check did not
+// record as a pass. A recorded name matches as repairScenariosDriven normalized
+// the reported one.
+func repairProofFor(focused, last Findings, repairDriven []types.TestScenario) map[string]types.TestScenario {
+	driven := make(map[string]types.TestScenario, len(repairDriven))
+	for _, scenario := range repairDriven {
+		driven[scenario.Name] = scenario
+	}
+	proof := make(map[string]types.TestScenario)
+	for _, scenario := range last.Scenarios {
+		name := strings.TrimSpace(scenario.Name)
+		isReported := slices.ContainsFunc(focused.Scenarios, func(reported types.TestScenario) bool { return strings.TrimSpace(reported.Name) == name })
+		if repair, ok := driven[sanitizePromptText(scenario.Name)]; ok && !isReported && scenario.Result != types.ScenarioResultPass {
+			proof[name] = repair
+		}
+	}
+	return proof
+}
+
+// recordFromRepairTurn records a scenario from what the repair turn drove on
+// the head the live check last ran on. A pass stands as a live pass whose
+// evidence names the repair turn, since a table shows a pass by its evidence,
+// with the earlier record named in its reason. A failure stays open and untested, since
+// nothing drove it again after the repair turn.
+func recordFromRepairTurn(earlier, repair types.TestScenario, headSHA string) types.TestScenario {
+	head := shortObjectID(headSHA)
+	if repair.Result == types.ScenarioResultFail {
+		earlier.Result, earlier.Live, earlier.Evidence, earlier.StillFailing = types.ScenarioResultUntested, false, "", true
+		earlier.Reason = fmt.Sprintf("failed live in the repair turn on %s, which changed nothing, and was not driven again", head)
+		return earlier
+	}
+	recorded := types.ScenarioResultUntested
+	if earlier.Result == types.ScenarioResultFail {
+		recorded = "failed"
+	}
+	if reason := sanitizePromptText(earlier.Reason); reason != "" {
+		recorded += " (" + reason + ")"
+	}
+	earlier.Result, earlier.Live, earlier.Evidence, earlier.StillFailing = types.ScenarioResultPass, true, fmt.Sprintf("repair turn on %s: %s", head, repair.Evidence), false
+	earlier.Reason = fmt.Sprintf("passed live in the repair turn on %s, which changed nothing; the live check before it recorded it %s", head, recorded)
+	return earlier
+}
+
+// repairTestedEntries is the engine's record of the commands a repair turn that
+// changed nothing reported running, one tested entry per command.
+func repairTestedEntries(commands []repairCommand) []string {
+	entries := make([]string, 0, len(commands))
+	for _, command := range commands {
+		status := "exit status not reported"
+		if command.ExitCode != nil {
+			status = fmt.Sprintf("exited %d", *command.ExitCode)
+		}
+		entries = append(entries, fmt.Sprintf("repair turn (changed nothing): `%s` %s", command.Command, status))
+	}
+	return entries
+}
+
+// sameHeadRecheckSentence states for the testing summary what a re-check after
+// a repair that changed nothing stands on, as separate facts: what the repair
+// turn's live proof covers, whether the configured test checks ran again on
+// this head, and how much the re-check itself drove.
+func sameHeadRecheckSentence(headSHA string, repairProof map[string]types.TestScenario, hasBaselineRerun bool, recheckDriven int) string {
+	sentence := fmt.Sprintf("The repair turn on %s changed nothing", shortObjectID(headSHA))
+	held := 0
+	for _, scenario := range repairProof {
+		if scenario.Result == types.ScenarioResultPass {
+			held++
+		}
+	}
+	if held > 0 {
+		sentence += fmt.Sprintf(", and its live proof stands behind %s", scenarioCount(held))
+	}
+	sentence += "."
+	if hasBaselineRerun {
+		sentence += " The configured test checks ran again on this head after the repair and passed."
+	}
+	return sentence + fmt.Sprintf(" The re-check then drove %s.", scenarioCount(recheckDriven))
+}
+
+func scenarioCount(count int) string {
+	if count == 1 {
+		return "1 scenario"
+	}
+	return fmt.Sprintf("%d scenarios", count)
 }
