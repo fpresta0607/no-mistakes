@@ -282,12 +282,18 @@ func TestUnobservedTerminalHeadFailsClosedWithoutOfferingRecovery(t *testing.T) 
 		{name: "recovery ref names another head", mutate: func(t *testing.T, f *unobservedTerminalHead) {
 			execGit(t, f.gate, "update-ref", custody.RecoveryRef(f.run.ID), f.submitted)
 		}},
+		{name: "caller dirty at the exact reviewed head", mutate: func(t *testing.T, f *unobservedTerminalHead) {
+			execGit(t, f.caller, "fetch", f.gate, f.reviewed)
+			execGit(t, f.caller, "reset", "--hard", f.reviewed)
+			writeTestFile(t, f.caller, "feature.txt", "uncommitted operator edit\n")
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := runUnobservedTerminalHead(t)
 			test.mutate(t, f)
 			ctx := context.Background()
 			gateRefs := gitOutput(t, f.gate, "for-each-ref", "refs/no-mistakes")
+			callerHead := gitOutput(t, f.caller, "rev-parse", "HEAD")
 
 			state := f.service.InspectCached(ctx)
 			refused := f.service.Recover(ctx, false)
@@ -298,8 +304,8 @@ func TestUnobservedTerminalHeadFailsClosedWithoutOfferingRecovery(t *testing.T) 
 			if refused.Recovered || refused.Safety == "custody_returned" {
 				t.Fatalf("recover = %s/%s, want a refusal", refused.State, refused.Safety)
 			}
-			if head := gitOutput(t, f.caller, "rev-parse", "HEAD"); head != f.submitted {
-				t.Fatalf("caller moved to %s", head)
+			if head := gitOutput(t, f.caller, "rev-parse", "HEAD"); head != callerHead {
+				t.Fatalf("caller moved from %s to %s", callerHead, head)
 			}
 			if refs := gitOutput(t, f.caller, "for-each-ref", "refs/no-mistakes"); refs != "" {
 				t.Fatalf("caller refs changed: %s", refs)

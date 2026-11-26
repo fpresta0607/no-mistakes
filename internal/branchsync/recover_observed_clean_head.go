@@ -24,9 +24,9 @@ import (
 // that proof, this proves only which head the run reached and is never
 // containment evidence: the operator's local work is still proven present by
 // ancestry or the merge-tree proof before the branch moves.
-func (s *Service) recordedHeadIsTheRunsObservedCleanHead(ctx context.Context, run *db.Run) bool {
+func (s *Service) recordedHeadIsTheRunsObservedCleanHead(ctx context.Context, state State, run *db.Run) bool {
 	recorded := strings.TrimSpace(run.HeadSHA)
-	if recorded == "" || !objectExists(ctx, s.GateDir, recorded) {
+	if !state.Local.Clean || recorded == "" || !objectExists(ctx, s.GateDir, recorded) {
 		return false
 	}
 	if observed := run.TerminalSourceState; observed != nil && *observed != "unreadable" && *observed != "clean:"+recorded {

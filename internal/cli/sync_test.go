@@ -1077,6 +1077,30 @@ func TestAxiSyncCheckSurfacesRecoveryForTerminalPrePushRun(t *testing.T) {
 	}
 }
 
+// TestHumanStatusOffersTheRecoveryAxiStatusOffers keeps the human status
+// surface reading the same gate evidence as axi: a terminal run whose head was
+// never verified is recoverable only by a proof read from the local gate, so a
+// status without the gate reported manual reconciliation for it.
+func TestHumanStatusOffersTheRecoveryAxiStatusOffers(t *testing.T) {
+	f := newCLIRecoverFixture(t)
+	check, _ := executeCmd("axi", "sync", "--check")
+	if !strings.Contains(check, "command: no-mistakes axi sync --recover") {
+		t.Fatalf("axi sync --check did not offer the recovery:\n%s", check)
+	}
+
+	out, err := executeCmd("status")
+
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "recover custody with `no-mistakes sync --recover`") {
+		t.Fatalf("human status did not offer the recovery axi offers:\n%s", out)
+	}
+	if got := cliGit(t, f.local, "rev-parse", "HEAD"); got != f.submitted {
+		t.Fatal("status moved HEAD")
+	}
+}
+
 // TestAxiSyncRecoversRemoteRewrittenBindingEndToEnd reproduces issue #652:
 // after an operator synchronized to the pipeline head, the push target was
 // force-rewritten outside the pipeline. The check must name the explicit

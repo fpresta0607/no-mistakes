@@ -1029,7 +1029,7 @@ func (s *Service) unverifiedTerminalHeadShape(ctx context.Context, state State, 
 		return unverifiedHeadAnchoredDirty
 	case equalTreeRewriteOfRecordedHead(ctx, s.GateDir, state, run, gateHead):
 		return unverifiedHeadEqualTreeRewrite
-	case s.recordedHeadIsTheRunsObservedCleanHead(ctx, run):
+	case s.recordedHeadIsTheRunsObservedCleanHead(ctx, state, run):
 		return unverifiedHeadObservedClean
 	}
 	return unverifiedHeadUnprovable
