@@ -9,9 +9,8 @@ import (
 
 func TestDaemonUninstallReportsRemovedDefinitionAndNoService(t *testing.T) {
 	t.Setenv("NM_HOME", t.TempDir())
-	prev, prevSupported := daemonUninstallFn, daemonUninstallSupportedFn
-	t.Cleanup(func() { daemonUninstallFn, daemonUninstallSupportedFn = prev, prevSupported })
-	daemonUninstallSupportedFn = func() bool { return true }
+	prev := daemonUninstallFn
+	t.Cleanup(func() { daemonUninstallFn = prev })
 	for _, definition := range []string{"/tmp/home/Library/LaunchAgents/daemon.plist", ""} {
 		t.Run(definition, func(t *testing.T) {
 			called := false
@@ -44,9 +43,8 @@ func TestDaemonUninstallRefusesActiveRunsUnlessForced(t *testing.T) {
 	nmHome := t.TempDir()
 	t.Setenv("NM_HOME", nmHome)
 	createLifecycleGuardRuns(t, paths.WithRoot(nmHome))
-	prev, prevSupported := daemonUninstallFn, daemonUninstallSupportedFn
-	t.Cleanup(func() { daemonUninstallFn, daemonUninstallSupportedFn = prev, prevSupported })
-	daemonUninstallSupportedFn = func() bool { return true }
+	prev := daemonUninstallFn
+	t.Cleanup(func() { daemonUninstallFn = prev })
 	called := false
 	daemonUninstallFn = func(_ *paths.Paths, guard func() (func(), error)) (string, error) {
 		release, err := guard()
@@ -67,42 +65,32 @@ func TestDaemonUninstallRefusesActiveRunsUnlessForced(t *testing.T) {
 	}
 }
 
-func TestDaemonStopNamesRetainedLaunchAgentAndUninstallCommand(t *testing.T) {
+func TestDaemonStopNamesRetainedServiceAndUninstallCommand(t *testing.T) {
 	t.Setenv("NM_HOME", t.TempDir())
-	prevStop, prevPath := daemonStopFn, daemonLaunchAgentPathFn
-	t.Cleanup(func() { daemonStopFn, daemonLaunchAgentPathFn = prevStop, prevPath })
+	prevStop, prevDefinition := daemonStopFn, daemonServiceDefinitionFn
+	t.Cleanup(func() { daemonStopFn, daemonServiceDefinitionFn = prevStop, prevDefinition })
 	daemonStopFn = func(*paths.Paths) error { return nil }
-	file := "/tmp/home/Library/LaunchAgents/com.kunchenguid.no-mistakes.daemon.test.plist"
-	daemonLaunchAgentPathFn = func(*paths.Paths) string { return file }
+	for _, definition := range []string{
+		"/tmp/home/Library/LaunchAgents/com.kunchenguid.no-mistakes.daemon.test.plist",
+		"/tmp/home/.config/systemd/user/no-mistakes-daemon-test.service",
+		"no-mistakes-daemon-test",
+	} {
+		t.Run(definition, func(t *testing.T) {
+			daemonServiceDefinitionFn = func(*paths.Paths) string { return definition }
+			out, err := executeCmd("daemon", "stop")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{"daemon stopped", "starts again at the next login", definition, "no-mistakes daemon uninstall"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("stop must contain %q: %q", want, out)
+				}
+			}
+		})
+	}
+	daemonServiceDefinitionFn = func(*paths.Paths) string { return "" }
 	out, err := executeCmd("daemon", "stop")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"daemon stopped", "starts again at the next login", file, "no-mistakes daemon uninstall"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("stop must contain %q: %q", want, out)
-		}
-	}
-	daemonLaunchAgentPathFn = func(*paths.Paths) string { return "" }
-	out, err = executeCmd("daemon", "stop")
 	if err != nil || strings.Contains(out, "next login") {
-		t.Fatalf("no retained plist should mean no login notice: %q, %v", out, err)
-	}
-}
-
-func TestDaemonUninstallOnUnsupportedPlatformChangesNothingAndSucceeds(t *testing.T) {
-	nmHome := t.TempDir()
-	t.Setenv("NM_HOME", nmHome)
-	createLifecycleGuardRuns(t, paths.WithRoot(nmHome))
-	prev, prevSupported := daemonUninstallFn, daemonUninstallSupportedFn
-	t.Cleanup(func() { daemonUninstallFn, daemonUninstallSupportedFn = prev, prevSupported })
-	daemonUninstallSupportedFn = func() bool { return false }
-	daemonUninstallFn = func(_ *paths.Paths, _ func() (func(), error)) (string, error) {
-		t.Fatal("unsupported platform must not uninstall")
-		return "", nil
-	}
-	out, err := executeCmd("daemon", "uninstall")
-	if err != nil || !strings.Contains(out, "No service removal is available on this platform") {
-		t.Fatalf("unsupported uninstall: error=%v output=%q", err, out)
+		t.Fatalf("no retained service should mean no login notice: %q, %v", out, err)
 	}
 }

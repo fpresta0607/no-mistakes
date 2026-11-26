@@ -22,15 +22,14 @@ import (
 )
 
 var (
-	daemonRun                  = daemon.RunRestartable
-	daemonStartFn              = daemon.Start
-	daemonStartGuardedFn       = daemon.StartGuarded
-	daemonStopFn               = daemon.StopPrepared
-	daemonScheduleRestartFn    = daemon.ScheduleRestart
-	daemonUninstallFn          = daemon.UninstallGuarded
-	daemonUninstallSupportedFn = daemon.UninstallSupported
-	daemonLaunchAgentPathFn    = daemon.InstalledLaunchAgentPath
-	daemonIsRunningFn          = daemon.IsRunning
+	daemonRun                 = daemon.RunRestartable
+	daemonStartFn             = daemon.Start
+	daemonStartGuardedFn      = daemon.StartGuarded
+	daemonStopFn              = daemon.StopPrepared
+	daemonScheduleRestartFn   = daemon.ScheduleRestart
+	daemonUninstallFn         = daemon.UninstallGuarded
+	daemonServiceDefinitionFn = daemon.InstalledServiceDefinition
+	daemonIsRunningFn         = daemon.IsRunning
 )
 
 func newDaemonCmd() *cobra.Command {
@@ -735,8 +734,8 @@ func newDaemonStopCmd() *cobra.Command {
 					return err
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "  %s daemon stopped\n", sGreen.Render("✓"))
-				if path := daemonLaunchAgentPathFn(p); path != "" {
-					fmt.Fprintf(cmd.OutOrStdout(), "  Service starts again at the next login; LaunchAgent remains at %s. Remove it with `no-mistakes daemon uninstall`.\n", path)
+				if definition := daemonServiceDefinitionFn(p); definition != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "  Service starts again at the next login; managed service %s remains. Remove it with `no-mistakes daemon uninstall`.\n", definition)
 				}
 				return nil
 			})
@@ -755,10 +754,6 @@ func newDaemonUninstallCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logLifecycleInvocation("daemon.uninstall", force)
 			return trackCommand("daemon.uninstall", func() error {
-				if !daemonUninstallSupportedFn() {
-					fmt.Fprintln(cmd.OutOrStdout(), "  No service removal is available on this platform; daemon uninstall changed nothing.")
-					return nil
-				}
 				p, err := paths.New()
 				if err != nil {
 					return err

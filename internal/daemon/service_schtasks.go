@@ -155,6 +155,13 @@ func stopWindowsTask(p *paths.Paths) error {
 	return nil
 }
 
+func removeWindowsTask(p *paths.Paths) error {
+	if _, err := serviceCommandRunner("schtasks", "/Delete", "/TN", windowsTaskName(p), "/F"); err != nil {
+		return fmt.Errorf("schtasks delete: %w", err)
+	}
+	return nil
+}
+
 type windowsManagedDaemonObservation struct {
 	state         int
 	runGeneration string

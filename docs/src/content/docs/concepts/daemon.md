@@ -95,8 +95,8 @@ With no active run, `--when-idle` falls back to the plain prompt and attempts an
 If the daemon executable path cannot be determined, the update aborts before replacing anything.
 
 `no-mistakes daemon stop` and `no-mistakes daemon restart` apply the same guard: if pending or running pipeline runs exist, each refuses by default and lists the active runs, and each takes its own `--force` to proceed anyway.
-`no-mistakes daemon uninstall` applies this guard when a macOS LaunchAgent is installed.
-A missing LaunchAgent, or a platform without service removal, is a no-op that does not invoke shutdown preparation or close admission.
+`no-mistakes daemon uninstall` applies this guard when a managed service is installed.
+A missing managed service is a no-op that does not invoke shutdown preparation or close admission.
 The daemon makes the final idle check and closes admission together, including launches still preparing their run row, queued runs, and parked or recovered active runs.
 If admission wins, ordinary maintenance refuses without changing that run.
 If shutdown wins, later launches, source claims, hook admission, and gate responses refuse before changing run state.
@@ -286,7 +286,11 @@ log_level: debug # debug | info | warn | error
 ## Shutdown
 
 `no-mistakes daemon stop` stops the current daemon process without removing the managed service. The next `no-mistakes daemon start`, `no-mistakes`, `init`, `attach`, `rerun`, or `update` will start it again through the same service manager when available, or as a detached daemon otherwise.
-On macOS, the retained LaunchAgent also starts it again at the next login. To remove that automatic startup, use `no-mistakes daemon uninstall`: it stops the managed daemon for the current `NM_HOME` and removes its LaunchAgent plist. It reports the removed file, succeeds when no LaunchAgent is installed, and keeps application data. On other platforms it changes nothing, prints that no service removal is available, and exits 0. If this instance only has a detached daemon, use `daemon stop` to stop that process.
+The retained managed service (the macOS LaunchAgent, the Linux systemd user unit, or the Windows scheduled task) also starts it again at the next login, and the stop output names it.
+To remove that automatic startup, use `no-mistakes daemon uninstall`: it stops the managed daemon for the current `NM_HOME` and removes its LaunchAgent plist, disables and deletes its systemd unit, or deletes its scheduled task.
+It names the removed service, succeeds when none is installed, and keeps application data.
+If stopping fails, it keeps the service definition and exits non-zero.
+If this instance only has a detached daemon, use `daemon stop` to stop that process.
 The [starting and stopping](#starting-and-stopping) section owns the active-run
 guard, the top-level `--force` override, and the separate validation-step
 containment rule.
