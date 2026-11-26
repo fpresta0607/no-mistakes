@@ -273,8 +273,9 @@ func TestPostReceiveHookScriptDoesNotEvaluatePushOptions(t *testing.T) {
 	}
 
 	argsPath := filepath.Join(base, "args.txt")
+	optionPath := filepath.Join(base, "option.txt")
 	fakeBin := filepath.Join(base, "fake-no-mistakes")
-	fakeScript := "#!/bin/sh\nprintf '%s\n' \"$@\" > " + shellSingleQuote(argsPath) + "\nexit 0\n"
+	fakeScript := "#!/bin/sh\nprintf '%s\n' \"$@\" > " + shellSingleQuote(argsPath) + "\nprintenv GIT_PUSH_OPTION_0 > " + shellSingleQuote(optionPath) + "\nexit 0\n"
 	if err := os.WriteFile(fakeBin, []byte(fakeScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -303,8 +304,15 @@ func TestPostReceiveHookScriptDoesNotEvaluatePushOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(args), "ok; touch "+markerPath) {
-		t.Fatalf("hook should forward push option literally, got:\n%s", args)
+	if strings.Contains(string(args), "touch") {
+		t.Fatalf("hook should leave push options out of notify-push's arguments (issue #320), got:\n%s", args)
+	}
+	option, err := os.ReadFile(optionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.TrimSuffix(string(option), "\n"), "ok; touch "+markerPath; got != want {
+		t.Fatalf("notify-push should inherit the push option literally, got %q, want %q", got, want)
 	}
 }
 
