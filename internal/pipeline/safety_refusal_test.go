@@ -15,6 +15,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/testwait"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -292,11 +293,7 @@ func TestSafetyRefusalParkStopsSideLanes(t *testing.T) {
 			go func() { done <- executor.Execute(ctx, run, repo, t.TempDir()) }()
 			t.Cleanup(func() {
 				cancel()
-				select {
-				case <-done:
-				case <-time.After(10 * time.Second):
-					t.Error("executor did not stop")
-				}
+				testwait.Receive(t, done, "executor did not stop")
 			})
 
 			waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)

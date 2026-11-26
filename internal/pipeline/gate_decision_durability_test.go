@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/testwait"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -247,7 +248,7 @@ func TestExecutor_RecoveredRoundRestoresTheAcceptedAddition(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { done <- exec.Resume(ctx, recoveredRun, repo, t.TempDir()) }()
 
-			deadline := time.Now().Add(5 * time.Second)
+			deadline := time.Now().Add(testwait.Timeout)
 			var respondErr error
 			for time.Now().Before(deadline) {
 				if respondErr = respondFixPartialWithOverrides(t, exec, types.StepReview, []string{"R1"}, nil, tc.added); respondErr == nil {
@@ -264,7 +265,7 @@ func TestExecutor_RecoveredRoundRestoresTheAcceptedAddition(t *testing.T) {
 			case merged = <-dispatched:
 			case err := <-done:
 				t.Fatalf("recovered step finished without dispatching a fix: %v", err)
-			case <-time.After(5 * time.Second):
+			case <-time.After(testwait.Timeout):
 				t.Fatal("recovered step never dispatched a fix")
 			}
 			findings, err := types.ParseFindingsJSON(merged)
@@ -303,11 +304,7 @@ func TestExecutor_RecoveredRoundRestoresTheAcceptedAddition(t *testing.T) {
 
 			// Stop the recovered executor before the fixture closes its database.
 			cancel()
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				t.Fatal("recovered executor did not stop")
-			}
+			testwait.Receive(t, done, "recovered executor did not stop")
 		})
 	}
 }

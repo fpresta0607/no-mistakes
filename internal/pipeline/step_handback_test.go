@@ -11,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/testwait"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -56,7 +57,7 @@ func (s *handbackGateStep) HandbackStep(sctx *StepContext, request ipc.StepHandb
 
 func waitForHandbackGate(t *testing.T, executor *Executor) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(testwait.Timeout)
 	for !executor.AwaitingApproval() {
 		if time.Now().After(deadline) {
 			t.Fatal("step never parked")

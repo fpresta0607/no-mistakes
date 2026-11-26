@@ -16,6 +16,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testwait"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -191,11 +192,7 @@ func TestAcceptedReviewScopeRunsOneBaselineAfterReview(t *testing.T) {
 				go func() { defer close(finished); done <- executor.Execute(ctx, run, repo, dir) }()
 				t.Cleanup(func() {
 					cancel(pipeline.ErrDaemonShutdown)
-					select {
-					case <-finished:
-					case <-time.After(10 * time.Second):
-						t.Error("executor did not stop")
-					}
+					testwait.Receive(t, finished, "executor did not stop")
 				})
 				waitForPark := func() {
 					t.Helper()
@@ -203,7 +200,7 @@ func TestAcceptedReviewScopeRunsOneBaselineAfterReview(t *testing.T) {
 					case <-parks:
 					case err := <-done:
 						t.Fatalf("Review did not park: %v", err)
-					case <-time.After(10 * time.Second):
+					case <-time.After(testwait.Timeout):
 						t.Fatal("Review did not park")
 					}
 				}
@@ -213,13 +210,8 @@ func TestAcceptedReviewScopeRunsOneBaselineAfterReview(t *testing.T) {
 				}
 				if strings.HasPrefix(mode, "recovered") {
 					cancel(pipeline.ErrDaemonShutdown)
-					select {
-					case err := <-done:
-						if !errors.Is(err, pipeline.ErrParkedAtShutdown) {
-							t.Fatalf("park was not retained: %v", err)
-						}
-					case <-time.After(10 * time.Second):
-						t.Fatal("executor did not stop at its park")
+					if err := testwait.Receive(t, done, "executor did not stop at its park"); !errors.Is(err, pipeline.ErrParkedAtShutdown) {
+						t.Fatalf("park was not retained: %v", err)
 					}
 					<-finished
 					if err := database.Close(); err != nil {

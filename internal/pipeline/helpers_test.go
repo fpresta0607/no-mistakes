@@ -16,6 +16,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/testwait"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -229,7 +230,7 @@ func (a *adaptiveCallStep) Execute(sctx *StepContext) (*StepOutcome, error) {
 // waitForStepEvent polls the event collector until an event with the given type and step name appears.
 func waitForStepEvent(t *testing.T, ec *eventCollector, eventType ipc.EventType, stepName types.StepName) *ipc.Event {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testwait.Timeout)
 	for time.Now().Before(deadline) {
 		if e := ec.find(eventType, stepName); e != nil {
 			return e
@@ -243,7 +244,7 @@ func waitForStepEvent(t *testing.T, ec *eventCollector, eventType ipc.EventType,
 // waitForEvent polls the event collector until an event with the given type and status appears.
 func waitForEvent(t *testing.T, ec *eventCollector, eventType ipc.EventType, status string) *ipc.Event {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(testwait.Timeout)
 	for time.Now().Before(deadline) {
 		if e := ec.findLast(eventType, status); e != nil {
 			return e
@@ -295,11 +296,7 @@ func startExecutor(t *testing.T, exec *Executor, run *db.Run, repo *db.Repo, wor
 		if finished.Load() {
 			return
 		}
-		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
-			t.Error("executor did not return after cancel")
-		}
+		testwait.Receive(t, done, "executor did not return after cancel")
 	})
 	go func() {
 		err := exec.Execute(ctx, run, repo, workDir)
