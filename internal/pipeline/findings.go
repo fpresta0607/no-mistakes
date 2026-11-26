@@ -606,8 +606,10 @@ func normalizeCoveredPath(value string) string {
 // record: for a file-anchored finding, the round listed the finding's file in
 // its ReviewedPaths coverage, that path is in the trusted reviewable set, and
 // the round's own output (thisRoundRaw) neither re-reports the defect nor
-// reports anything else at all in that same file. The file-less exception
-// below requires coverage of the entire trusted reviewable set.
+// reports anything else at all in that same file. A repair round that names
+// the finding in its closed_findings verdict may still report no-op notes in
+// that file; any other same-file finding keeps it outstanding. The file-less
+// exception below requires coverage of the entire trusted reviewable set.
 //
 // This is the only way a selected-and-fixed finding leaves the outstanding set
 // besides an explicit operator action (approve/skip/abort). A file the round
@@ -671,13 +673,21 @@ func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, rev
 	}
 	fullyCovered := len(covered) == len(reviewable)
 	thisRound, _ := types.ParseFindingsJSON(thisRoundRaw)
+	closed := make(map[string]bool, len(thisRound.ClosedFindings))
+	for _, id := range thisRound.ClosedFindings {
+		closed[id] = true
+	}
 	reported := make(map[types.Finding]bool, len(thisRound.Items))
 	reportedFiles := make(map[string]bool, len(thisRound.Items))
+	blockingFiles := make(map[string]bool, len(thisRound.Items))
 	hasUnanchoredFinding := false
 	for _, item := range thisRound.Items {
 		reported[findingKey(item)] = true
 		if normalized := normalizeCoveredPath(item.File); normalized != "" {
 			reportedFiles[normalized] = true
+			if item.ActionOrDefault() != types.ActionNoOp {
+				blockingFiles[normalized] = true
+			}
 		} else {
 			hasUnanchoredFinding = true
 		}
@@ -687,7 +697,10 @@ func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, rev
 	result := types.FindingsMetadata(outstanding)
 	for _, item := range outstanding.Items {
 		file := normalizeCoveredPath(item.File)
-		if pending[item.ID] && !hasUnanchoredFinding && (covered[file] || file == "" && fullyCovered) && !hasFindingMatch(item, reported, outstandingCounts, thisRoundCounts) && !reportedFiles[file] {
+		// A same-file report is ambiguous evidence unless the round named this
+		// finding closed and everything else it reports in that file is no-op.
+		sameFileClear := !reportedFiles[file] || closed[item.ID] && !blockingFiles[file]
+		if pending[item.ID] && !hasUnanchoredFinding && (covered[file] || file == "" && fullyCovered) && !hasFindingMatch(item, reported, outstandingCounts, thisRoundCounts) && sameFileClear {
 			continue
 		}
 		result.Items = append(result.Items, item)
