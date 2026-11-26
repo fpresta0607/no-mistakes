@@ -3294,6 +3294,11 @@ func (e *Executor) terminalRunStatus(run *db.Run) (types.RunStatus, error) {
 	return types.RunCompleted, nil
 }
 
+// terminalHeadObservationTimeout bounds terminalization's read of the managed
+// worktree. A loaded host can exceed it; the head then stays unverified and
+// custody recovery observes the retained worktree itself (issue #364).
+var terminalHeadObservationTimeout = 5 * time.Second
+
 func (e *Executor) reconcileTerminalRunHead(run *db.Run) (string, bool) {
 	if run == nil || strings.TrimSpace(e.workDir) == "" {
 		return "", false
@@ -3307,7 +3312,7 @@ func (e *Executor) reconcileTerminalRunHead(run *db.Run) (string, bool) {
 	if recorded == "" {
 		return "", false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), terminalHeadObservationTimeout)
 	defer cancel()
 	observed, err := git.HeadSHA(ctx, e.workDir)
 	if err != nil {
