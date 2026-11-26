@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -14,7 +15,15 @@ var errAdmissionClosed = errors.New("daemon is shutting down")
 var errAdmissionClientGone = errors.New("the client hung up before the admission created a run; nothing was started")
 
 func (m *RunManager) beginAdmission() error {
-	m.mu.Lock()
+	return m.beginAdmissionContext(context.Background())
+}
+
+// beginAdmissionContext is beginAdmission for a caller with a deadline: it
+// stops waiting for the run manager lock when ctx ends (#337).
+func (m *RunManager) beginAdmissionContext(ctx context.Context) error {
+	if err := lockContext(ctx, &m.mu); err != nil {
+		return err
+	}
 	defer m.mu.Unlock()
 	if m.admissionClosed || m.shuttingDown.Load() {
 		return errAdmissionClosed

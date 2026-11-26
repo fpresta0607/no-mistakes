@@ -9,6 +9,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/testwait"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -79,11 +80,7 @@ func TestProtectedPathRefusalRequiresDecisionAcrossRecovery(t *testing.T) {
 				done := make(chan error, 1)
 				t.Cleanup(func() {
 					cancel()
-					select {
-					case <-done:
-					case <-time.After(5 * time.Second):
-						t.Error("executor did not stop")
-					}
+					testwait.Receive(t, done, "executor did not stop")
 				})
 				workDir := t.TempDir()
 				go func() {
@@ -93,11 +90,7 @@ func TestProtectedPathRefusalRequiresDecisionAcrossRecovery(t *testing.T) {
 						done <- exec.Execute(ctx, run, repo, workDir)
 					}
 				}()
-				select {
-				case <-parked:
-				case <-time.After(5 * time.Second):
-					t.Fatal("refusal did not park")
-				}
+				testwait.Receive(t, parked, "refusal did not park")
 				if err := exec.Respond(step.Name(), types.ActionApprove, nil); err == nil || !strings.Contains(err.Error(), "cannot approve") {
 					t.Fatalf("approval must preserve the refusal gate and explain how to retry: %v", err)
 				}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -1066,7 +1067,7 @@ func TestKeepUndrivenScenarios(t *testing.T) {
 			focused := Findings{Verdict: tc.verdict, Scenarios: []types.TestScenario{driven}}
 			last := Findings{TestedHeadSHA: liveHead, Scenarios: tc.last}
 
-			got := keepUndrivenScenarios(focused, last, tc.isOnSameHead, nil)
+			got := keepUndrivenScenarios(focused, last, tc.isOnSameHead, nil, nil)
 
 			if got.Verdict != tc.wantVerdict {
 				t.Fatalf("verdict = %q, want %q", got.Verdict, tc.wantVerdict)
@@ -1143,7 +1144,7 @@ func TestKeepUndrivenScenarios_AKeptPassCarriesItsRecord(t *testing.T) {
 			last := last
 			last.Scenarios = tc.lastScenarios
 
-			got := keepUndrivenScenarios(focused, last, tc.isOnSameHead, []string{"make test passed"})
+			got := keepUndrivenScenarios(focused, last, tc.isOnSameHead, []string{"make test passed"}, nil)
 
 			if !slices.Equal(got.Tested, tc.wantTested) {
 				t.Fatalf("tested = %q, want %q", got.Tested, tc.wantTested)
@@ -1179,7 +1180,7 @@ func TestKeepUndrivenScenarios_AReportedFailureClearsOnlyOnAPass(t *testing.T) {
 			}
 			focused := Findings{Verdict: types.TestVerdictGo, Scenarios: []types.TestScenario{{Name: "retry", Result: tc.result}}}
 
-			got := keepUndrivenScenarios(focused, Findings{TestedHeadSHA: strings.Repeat("c", 40), Scenarios: []types.TestScenario{earlier}}, false, nil)
+			got := keepUndrivenScenarios(focused, Findings{TestedHeadSHA: strings.Repeat("c", 40), Scenarios: []types.TestScenario{earlier}}, false, nil, nil)
 
 			if got.Verdict != tc.wantVerdict || got.Scenarios[0].StillFailing != tc.wantOpen {
 				t.Fatalf("verdict = %q, still failing = %v, want %q, %v", got.Verdict, got.Scenarios[0].StillFailing, tc.wantVerdict, tc.wantOpen)
@@ -1300,5 +1301,316 @@ func TestTestStep_EvidencePromptOrdersNoBuildingWithEveryLiveCheckSetting(t *tes
 		if strings.Contains(prompt, duty) {
 			t.Fatalf("evidence prompt still carries the duty %q", duty)
 		}
+	}
+}
+
+// Issue #447: a scenario the repair turn drove live on the head it changed
+// nothing on is recorded from that turn, naming the earlier record, and one it
+// did not drive keeps its own untested reason.
+func TestKeepUndrivenScenarios_ARepairTurnsLiveProofReplacesAResolvedPrerequisiteReason(t *testing.T) {
+	t.Parallel()
+	const liveHead = "cccccccccccccccccccccccccccccccccccccccc"
+	const missingDependencies = "Prepared frontend dependencies are missing"
+	driven := types.TestScenario{Name: "late response", Result: types.ScenarioResultPass, Live: true, Evidence: "late.png"}
+	repairPass := types.TestScenario{Name: "browser history", Result: types.ScenarioResultPass, Live: true, Evidence: "history.png"}
+	repairFail := types.TestScenario{Name: "browser history", Result: types.ScenarioResultFail, Live: true, Evidence: "history-broken.png"}
+	cases := map[string]struct {
+		verdict          string
+		isOnSameHead     bool
+		last             types.TestScenario
+		isReportedByTurn bool
+		repair           []types.TestScenario
+		wantVerdict      string
+		want             types.TestScenario
+		wantReasonParts  []string
+	}{
+		"an untested prerequisite the repair drove to a pass is recorded from the repair": {
+			verdict:         types.TestVerdictGo,
+			isOnSameHead:    true,
+			last:            types.TestScenario{Name: "browser history", Result: types.ScenarioResultUntested, Reason: missingDependencies},
+			repair:          []types.TestScenario{repairPass},
+			wantVerdict:     types.TestVerdictGo,
+			want:            types.TestScenario{Name: "browser history", Result: types.ScenarioResultPass, Live: true, Evidence: "repair turn on cccccccccccc: history.png"},
+			wantReasonParts: []string{"passed live in the repair turn on cccccccccccc, which changed nothing", "the live check before it recorded it untested (" + missingDependencies + ")"},
+		},
+		"a recorded failure the repair drove to a pass names the failure": {
+			verdict:         types.TestVerdictGo,
+			isOnSameHead:    true,
+			last:            types.TestScenario{Name: " browser history ", Result: types.ScenarioResultFail, Live: true, Evidence: "old.png"},
+			repair:          []types.TestScenario{repairPass},
+			wantVerdict:     types.TestVerdictGo,
+			want:            types.TestScenario{Name: " browser history ", Result: types.ScenarioResultPass, Live: true, Evidence: "repair turn on cccccccccccc: history.png"},
+			wantReasonParts: []string{"passed live in the repair turn on cccccccccccc, which changed nothing", "recorded it failed"},
+		},
+		"a recorded name with inner whitespace matches the repair's normalized name": {
+			verdict:         types.TestVerdictGo,
+			isOnSameHead:    true,
+			last:            types.TestScenario{Name: "browser \t history", Result: types.ScenarioResultUntested, Reason: missingDependencies},
+			repair:          []types.TestScenario{repairPass},
+			wantVerdict:     types.TestVerdictGo,
+			want:            types.TestScenario{Name: "browser \t history", Result: types.ScenarioResultPass, Live: true, Evidence: "repair turn on cccccccccccc: history.png"},
+			wantReasonParts: []string{"passed live in the repair turn on cccccccccccc, which changed nothing"},
+		},
+		"an excluded scenario the repair did not report keeps its own reason": {
+			verdict:         types.TestVerdictGo,
+			isOnSameHead:    true,
+			last:            types.TestScenario{Name: "installed native session", Result: types.ScenarioResultUntested, Reason: "excluded by the intent"},
+			repair:          []types.TestScenario{repairPass},
+			wantVerdict:     types.TestVerdictGo,
+			want:            types.TestScenario{Name: "installed native session", Result: types.ScenarioResultUntested},
+			wantReasonParts: []string{"excluded by the intent"},
+		},
+		"a scenario the repair failed stays open and cannot leave a go standing": {
+			verdict:         types.TestVerdictGo,
+			isOnSameHead:    true,
+			last:            types.TestScenario{Name: "browser history", Result: types.ScenarioResultUntested, Reason: missingDependencies},
+			repair:          []types.TestScenario{repairFail},
+			wantVerdict:     types.TestVerdictInconclusive,
+			want:            types.TestScenario{Name: "browser history", Result: types.ScenarioResultUntested, StillFailing: true},
+			wantReasonParts: []string{"failed live in the repair turn on cccccccccccc, which changed nothing, and was not driven again"},
+		},
+		"a moved head ignores what the repair reported": {
+			verdict:         types.TestVerdictGo,
+			last:            types.TestScenario{Name: "browser history", Result: types.ScenarioResultUntested, Reason: missingDependencies},
+			repair:          []types.TestScenario{repairPass},
+			wantVerdict:     types.TestVerdictGo,
+			want:            types.TestScenario{Name: "browser history", Result: types.ScenarioResultUntested},
+			wantReasonParts: []string{missingDependencies},
+		},
+		"a scenario the re-check reported is not overridden": {
+			verdict:          types.TestVerdictGo,
+			isOnSameHead:     true,
+			last:             types.TestScenario{Name: "browser history", Result: types.ScenarioResultUntested, Reason: missingDependencies},
+			isReportedByTurn: true,
+			repair:           []types.TestScenario{repairFail},
+			wantVerdict:      types.TestVerdictGo,
+			want:             types.TestScenario{Name: "browser history", Result: types.ScenarioResultUntested},
+			wantReasonParts:  []string{"the re-check could not start the browser"},
+		},
+		"a recorded pass is not overridden by a repair failure": {
+			verdict:      types.TestVerdictGo,
+			isOnSameHead: true,
+			last:         types.TestScenario{Name: "browser history", Result: types.ScenarioResultPass, Live: true, Evidence: "recorded.png"},
+			repair:       []types.TestScenario{repairFail},
+			wantVerdict:  types.TestVerdictGo,
+			want:         types.TestScenario{Name: "browser history", Result: types.ScenarioResultPass, Live: true, Evidence: "recorded.png"},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			focused := Findings{Verdict: tc.verdict, Scenarios: []types.TestScenario{driven}}
+			if tc.isReportedByTurn {
+				focused.Scenarios = append(focused.Scenarios, types.TestScenario{Name: "browser history", Result: types.ScenarioResultUntested, Reason: "the re-check could not start the browser"})
+			}
+			last := Findings{TestedHeadSHA: liveHead, Scenarios: []types.TestScenario{tc.last}}
+
+			var proof map[string]types.TestScenario
+			if tc.isOnSameHead {
+				proof = repairProofFor(focused, last, tc.repair)
+			}
+			got := keepUndrivenScenarios(focused, last, tc.isOnSameHead, nil, proof)
+
+			if got.Verdict != tc.wantVerdict {
+				t.Fatalf("verdict = %q, want %q", got.Verdict, tc.wantVerdict)
+			}
+			if len(got.Scenarios) != 2 || got.Scenarios[0] != driven {
+				t.Fatalf("scenarios = %+v, want the driven one then exactly one for %q", got.Scenarios, tc.want.Name)
+			}
+			kept := got.Scenarios[1]
+			reason := kept.Reason
+			kept.Reason = ""
+			if kept != tc.want {
+				t.Fatalf("scenario = %+v, want %+v", kept, tc.want)
+			}
+			for _, part := range tc.wantReasonParts {
+				if !strings.Contains(reason, part) {
+					t.Fatalf("reason = %q, want it to hold %q", reason, part)
+				}
+			}
+			if tc.want.StillFailing && strings.Contains(reason, missingDependencies) {
+				t.Fatalf("reason = %q, a repair failure must not repeat the earlier reason", reason)
+			}
+		})
+	}
+}
+
+func TestRepairScenariosDriven(t *testing.T) {
+	t.Parallel()
+	entry := func(name, result string, live bool, evidence string) map[string]any {
+		return map[string]any{"name": name, "result": result, "live": live, "evidence": evidence}
+	}
+	driven := func(entries ...map[string]any) *agent.Result {
+		raw, err := json.Marshal(map[string]any{"scenarios_driven": entries})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &agent.Result{Output: raw}
+	}
+	var many []map[string]any
+	for i := range maxRepairScenarios + 3 {
+		many = append(many, entry(fmt.Sprintf("scenario %d", i), "pass", true, "shot.png"))
+	}
+	cases := map[string]struct {
+		result *agent.Result
+		want   []types.TestScenario
+	}{
+		"no result":         {nil, nil},
+		"no output":         {&agent.Result{}, nil},
+		"unreadable output": {&agent.Result{Output: json.RawMessage(`{"scenarios_driven":"not a list"}`)}, nil},
+		"nothing driven":    {&agent.Result{Output: json.RawMessage(repairResultJSON)}, nil},
+		"a live pass and a live failure are kept as live": {
+			driven(entry(" browser  history ", "pass", true, "history.png"), entry("late response", "fail", true, "late.png")),
+			[]types.TestScenario{
+				{Name: "browser history", Result: types.ScenarioResultPass, Live: true, Evidence: "history.png"},
+				{Name: "late response", Result: types.ScenarioResultFail, Live: true, Evidence: "late.png"},
+			},
+		},
+		"a scenario that was not driven live is dropped": {driven(entry("a", "pass", false, "a.png")), nil},
+		"a scenario without evidence is dropped":         {driven(entry("a", "pass", true, "  ")), nil},
+		"an untested scenario is dropped":                {driven(entry("a", "untested", true, "a.png")), nil},
+		"an unnamed scenario is dropped":                 {driven(entry("  ", "pass", true, "a.png")), nil},
+		"the first entry for a name wins": {
+			driven(entry("a", "fail", true, "first.png"), entry(" a ", "pass", true, "second.png")),
+			[]types.TestScenario{{Name: "a", Result: types.ScenarioResultFail, Live: true, Evidence: "first.png"}},
+		},
+		"past the count bound": {driven(many...), nil},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got := repairScenariosDriven(tc.result)
+
+			if name == "past the count bound" {
+				if len(got) != maxRepairScenarios {
+					t.Fatalf("scenarios = %d, want the bound %d", len(got), maxRepairScenarios)
+				}
+				return
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("scenarios = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+
+	t.Run("past the byte sizes", func(t *testing.T) {
+		t.Parallel()
+
+		atBound := strings.Repeat("é", maxRepairScenarioNameBytes/2)
+		pastBound := atBound + "x"
+
+		got := repairScenariosDriven(driven(
+			entry(pastBound, "pass", true, "shot.png"),
+			entry(atBound, "pass", true, strings.Repeat("é", maxRepairScenarioEvidenceBytes)),
+		))
+
+		if len(got) != 1 || got[0].Name != atBound || len(got[0].Evidence) > maxRepairScenarioEvidenceBytes || !utf8.ValidString(got[0].Evidence) {
+			t.Fatalf("scenarios = %+v, want only the name at the bound, whole, with its evidence cut to valid UTF-8", got)
+		}
+	})
+}
+
+// Issue #447: the issue's sequence end to end. The last live check on this head
+// recorded a prerequisite failure the repair turn then resolved by driving the
+// scenario live. The final record, which is all the PR's Testing section reads,
+// must carry that proof, and must not call the baseline retained when this
+// execution ran it again.
+func TestTestStep_NoChangeRepairProofReachesThePRTestingSection(t *testing.T) {
+	t.Parallel()
+	const lateResponse, browserHistory, nativeSession = "late response", "browser history", "installed native session"
+	const missingDependencies, excluded = "Prepared frontend dependencies are missing", "excluded by the intent"
+	const repairResult = `{"summary":"no change; dependencies were installed earlier",` +
+		`"commands_run":[{"command":"npm ci","exit_code":0},{"command":"npx playwright test history","exit_code":0}],` +
+		`"scenarios_driven":[` +
+		`{"name":"late response","result":"pass","live":true,"evidence":"late-response.png"},` +
+		`{"name":"browser history","result":"pass","live":true,"evidence":"browser-history.png"}]}`
+	const recheck = `{"findings":[],"summary":"","tested":["drove late response"],` +
+		`"testing_summary":"The baseline was retained without repetition and late response passed.","artifacts":[],` +
+		`"scenarios":[{"name":"late response","result":"pass","live":true,"evidence":"late-response.png","reason":""}],"verdict":"go"}`
+	dir, baseSHA, headSHA := detachedRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if isRepairTurn(opts) {
+			return &agent.Result{Output: json.RawMessage(repairResult)}, nil
+		}
+		return &agent.Result{Output: json.RawMessage(recheck)}, nil
+	}}
+	answered := marshalFindings(t, types.Findings{
+		Items: []types.Finding{{ID: "test-1", Severity: "error", Action: types.ActionAutoFix, Description: "the late response is dropped"}},
+		Scenarios: []types.TestScenario{
+			{Name: lateResponse, Result: types.ScenarioResultFail, Live: true, Evidence: "late-old.png"},
+			{Name: browserHistory, Result: types.ScenarioResultUntested, Reason: missingDependencies},
+			{Name: nativeSession, Result: types.ScenarioResultUntested, Reason: excluded},
+		},
+		TestingSummary: "drove the late response",
+		Verdict:        types.TestVerdictNoGo,
+		TestedHeadSHA:  headSHA,
+	})
+	sctx := repairContext(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"}, answered)
+	sctx.Shared.RecordLiveCheck(headSHA)
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if prompt := lastPrompt(ag); !strings.Contains(prompt, "ran again in this execution on this head") {
+		t.Fatalf("evidence prompt does not say the configured checks ran again:\n%s", prompt)
+	}
+	findings := parsedOutcomeFindings(t, outcome)
+	byName := map[string]types.TestScenario{}
+	for _, scenario := range findings.Scenarios {
+		byName[scenario.Name] = scenario
+	}
+	history := byName[browserHistory]
+	if history.Result != types.ScenarioResultPass || !history.Live || history.Evidence != "repair turn on "+headSHA[:12]+": browser-history.png" ||
+		!strings.Contains(history.Reason, "passed live in the repair turn on "+headSHA[:12]) ||
+		!strings.Contains(history.Reason, "recorded it untested ("+missingDependencies+")") {
+		t.Fatalf("browser history = %+v, want the repair turn's live pass naming the earlier record", history)
+	}
+	if native := byName[nativeSession]; native.Result != types.ScenarioResultUntested || native.Reason != excluded {
+		t.Fatalf("installed native session = %+v, want it still untested for %q", native, excluded)
+	}
+	for _, want := range []string{
+		"repair turn (changed nothing): `npm ci` exited 0",
+		"repair turn (changed nothing): `npx playwright test history` exited 0",
+	} {
+		if !slices.Contains(findings.Tested, want) {
+			t.Fatalf("tested = %q, want %q", findings.Tested, want)
+		}
+	}
+	if outcome.NeedsApproval || outcome.AutoFixable {
+		t.Fatalf("needs approval = %v, auto-fixable = %v, want a passing record", outcome.NeedsApproval, outcome.AutoFixable)
+	}
+
+	finalJSON := outcome.Findings
+	firstJSON := answered
+	steps := []*db.StepResult{{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &finalJSON}}
+	rounds := map[string][]*db.StepRound{"s1": {
+		{Round: 1, Trigger: "initial", FindingsJSON: &firstJSON},
+		{Round: 2, Trigger: "auto_fix", FindingsJSON: &finalJSON},
+	}}
+	testing := BuildTestingSummary(steps, rounds)
+	for _, want := range []string{
+		"| browser history | ✅ pass | live | repair turn on " + headSHA[:12] + ": browser-history.png |",
+		"| installed native session | ⏸️ untested | no | excluded by the intent |",
+		"The repair turn on " + headSHA[:12] + " changed nothing, and its live proof stands behind 1 scenario.",
+		"The configured test checks ran again on this head after the repair and passed.",
+		"The re-check then drove 1 scenario.",
+		"npm ci",
+	} {
+		if !strings.Contains(testing, want) {
+			t.Errorf("Testing section missing %q:\n%s", want, testing)
+		}
+	}
+	if strings.Contains(testing, missingDependencies) {
+		t.Errorf("Testing section still carries the resolved prerequisite reason as current:\n%s", testing)
+	}
+	pipelineBlock, _ := BuildPipelineSummary(steps, rounds, headSHA)
+	if !strings.Contains(pipelineBlock, "| browser history | ⏸️ untested | no | "+missingDependencies+" |") {
+		t.Errorf("round 1's record must still show the original untested row:\n%s", pipelineBlock)
+	}
+	if !strings.Contains(pipelineBlock, "| browser history | ✅ pass | live | repair turn on "+headSHA[:12]+": browser-history.png |") {
+		t.Errorf("the final round must show the repair turn's pass:\n%s", pipelineBlock)
 	}
 }

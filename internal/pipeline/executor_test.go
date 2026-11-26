@@ -14,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
+	"github.com/kunchenguid/no-mistakes/internal/testwait"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -417,11 +418,7 @@ func TestExecutor_RevalidationGateRemainsRecoverable(t *testing.T) {
 		t.Fatalf("push status = %s, want %s", results[2].Status, types.StepStatusSkipped)
 	}
 	cancel()
-	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("executor did not stop after cancellation")
-	}
+	testwait.Receive(t, done, "executor did not stop after cancellation")
 }
 
 func TestExecutor_RecoveredRevalidationPreservesSkippedStep(t *testing.T) {

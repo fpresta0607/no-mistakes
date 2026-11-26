@@ -16,6 +16,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testwait"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -607,13 +608,9 @@ func TestManagerCIHandbackCrashRecovery(t *testing.T) {
 					go func() { done <- executor.Resume(ctx, plan.run, plan.repo, plan.workDir) }()
 					defer func() {
 						cancel()
-						select {
-						case <-done:
-						case <-time.After(10 * time.Second):
-							t.Error("fixture executor did not stop")
-						}
+						testwait.Receive(t, done, "fixture executor did not stop")
 					}()
-					deadline := time.Now().Add(15 * time.Second)
+					deadline := time.Now().Add(testwait.Timeout)
 					for {
 						results, err := database.GetStepsByRun(fixture.run.ID)
 						if err != nil {
