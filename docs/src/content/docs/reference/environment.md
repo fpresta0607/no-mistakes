@@ -390,8 +390,8 @@ Apart from the proxy variables and `NO_MISTAKES_TELEMETRY` forwarded on macOS an
 
 The daemon outlives whatever started it, so before that resolution it drops the variables that name its launcher, whichever way it starts: the Claude Code session markers (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_ENTRY_POINT`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_SESSION_ACCESS_TOKEN`) and an orchestration worker terminal's identity (`CFO_ROLE`, `CFO_TASK_ID`, `CFO_SPAWN_GEN`, `CFO_HOST_ID`, `CFO_HOST_PROOF`, `CFO_PARENT_SESSION_ID`, `CFO_PARENT_HARNESS`, `CFO_ROOT_SESSION_ID`, `CFO_SESSION_ID`, `CFO_SESSION_HARNESS`, `CHROME_DEVTOOLS_AXI_SESSION`, `CFO_CODEX_GUARD`).
 The folders `CFO_CODEX_GUARD` names are also removed from the front of `PATH`.
-On Windows, a daemon started from Git Bash (`MSYSTEM` is set) moves that Git install's MSYS folders, such as `mingw64\bin` and `usr\bin`, behind the rest of `PATH`, so its step commands find `bash`, `find`, and `sort` where your Windows terminal does; the install's `cmd` folder keeps its place.
 No agent the daemon starts inherits them, so the worker's hooks never report those agents as that worker.
 `CFO_HOME`, `CFO_STATE_OVERRIDE`, and `CFO_PROJECTS_ROOT` name the harness installation rather than one worker, and stay.
 A gate agent's command can start the daemon on demand, so the daemon also drops the agent-only marks `NO_MISTAKES_GATE` and `COMPACT_ADVISER_DISABLE`: its step commands never carry either, and only the agents it spawns get them.
 On Windows the names match without regard to case.
+On Windows, a daemon started from Git Bash (`MSYSTEM` is set) moves that Git install's MSYS folders, such as `mingw64\bin` and `usr\bin`, behind the rest of `PATH`, so its step commands find `bash`, `find`, and `sort` where your Windows terminal does; the install's `cmd` folder keeps its place.
