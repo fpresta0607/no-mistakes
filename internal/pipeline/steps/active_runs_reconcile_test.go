@@ -170,6 +170,12 @@ type ciGateRun struct {
 // state.sqlite open and Windows refuses to delete it.
 func runToCIGate(t *testing.T, database *db.DB, p *paths.Paths, run *db.Run, repo *db.Repo, dir string, env []string) ciGateRun {
 	t.Helper()
+	return runPRStepToCIGate(t, database, p, run, repo, dir, env, &PRStep{})
+}
+
+// runPRStepToCIGate is runToCIGate with the given PR step.
+func runPRStepToCIGate(t *testing.T, database *db.DB, p *paths.Paths, run *db.Run, repo *db.Repo, dir string, env []string, prStep *PRStep) ciGateRun {
+	t.Helper()
 	parked := make(chan struct{}, 1)
 	emit := func(event ipc.Event) {
 		if event.Type == ipc.EventStepCompleted && event.StepName != nil && *event.StepName == types.StepCI && event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
@@ -180,7 +186,7 @@ func runToCIGate(t *testing.T, database *db.DB, p *paths.Paths, run *db.Run, rep
 		}
 	}
 	exec := pipeline.NewExecutor(database, p, &config.Config{Agent: types.AgentClaude, CITimeout: 80 * time.Millisecond}, &mockAgent{name: "test"}, []pipeline.Step{
-		reconcileEnvStep{step: &PRStep{}, env: env},
+		reconcileEnvStep{step: prStep, env: env},
 		reconcileEnvStep{step: &CIStep{pollIntervalOverride: 10 * time.Millisecond}, env: env},
 	}, emit)
 	exec.SetGateReconcileTimings(20*time.Millisecond, 5*time.Second)

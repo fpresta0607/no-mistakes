@@ -970,6 +970,50 @@ func TestCreatePRAddsDraftFlagWhenConfigured(t *testing.T) {
 	}
 }
 
+// gh exits 1 for a network failure as for any other, so its message is what
+// marks scm.ErrConnection, the error the PR step retries on (issue #291).
+func TestPRCallsMarkOnlyNetworkFailuresAsConnectionErrors(t *testing.T) {
+	t.Parallel()
+	const (
+		createCommand = "gh pr create --head feature --base main --repo test/repo --title t --body-file -"
+		listCommand   = "gh pr list --head feature --repo test/repo --state open --json number,url,baseRefName"
+	)
+	for _, test := range []struct {
+		name           string
+		stderr         string
+		wantConnection bool
+	}{
+		{name: "dns failure", stderr: "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com", wantConnection: true},
+		{name: "connection reset", stderr: `Post "https://api.github.com/graphql": read tcp 10.0.0.2:50000->140.82.112.6:443: read: connection reset by peer`, wantConnection: true},
+		{name: "connection refused", stderr: `Post "https://api.github.com/graphql": dial tcp 140.82.112.6:443: connect: connection refused`, wantConnection: true},
+		{name: "dial timeout", stderr: `Post "https://api.github.com/graphql": dial tcp 140.82.112.6:443: i/o timeout`, wantConnection: true},
+		{name: "tls handshake timeout", stderr: `Post "https://api.github.com/graphql": net/http: TLS handshake timeout`, wantConnection: true},
+		{name: "validation failure", stderr: "pull request create failed: GraphQL: Head sha can't be blank (createPullRequest)"},
+		{name: "authentication failure", stderr: "HTTP 401: Bad credentials (https://api.github.com/graphql)"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			// Arrange
+			failure := githubTestResponse{stderr: test.stderr, code: 1}
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{createCommand: failure, listCommand: failure}), nil, "", "test/repo")
+
+			// Act
+			_, createErr := host.CreatePR(context.Background(), "feature", "main", scm.PRContent{Title: "t", Body: "b"})
+			_, listErr := host.FindPR(context.Background(), "feature", "")
+
+			// Assert
+			for label, err := range map[string]error{"CreatePR": createErr, "FindPR": listErr} {
+				if err == nil {
+					t.Fatalf("%s() error = nil, want gh's failure", label)
+				}
+				if got := errors.Is(err, scm.ErrConnection); got != test.wantConnection {
+					t.Fatalf("%s() error %q: errors.Is(ErrConnection) = %v, want %v", label, err, got, test.wantConnection)
+				}
+			}
+		})
+	}
+}
+
 // A token limited to the repo and workflow scopes cannot run `gh pr edit`: its
 // GraphQL lookup selects Team.organization through reviewRequests, which needs
 // read:org. UpdatePR therefore sends the content as a REST PATCH, streamed on
