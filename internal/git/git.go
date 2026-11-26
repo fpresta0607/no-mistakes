@@ -650,11 +650,16 @@ func pushSourceWithOptions(ctx context.Context, dir, remote, source, ref, expect
 		return nil
 	}
 	args := []string{"push"}
+	if len(pushOptions) > 0 {
+		configPath, err := writePushOptionsConfig(pushOptions)
+		if err != nil {
+			return err
+		}
+		defer os.Remove(configPath)
+		args = []string{"-c", "include.path=" + configPath, "push"}
+	}
 	if skipHooks {
 		args = append(args, "--no-verify")
-	}
-	for _, option := range pushOptions {
-		args = append(args, "-o", option)
 	}
 	args = append(args, remote)
 	if forceWithLease {
@@ -667,6 +672,38 @@ func pushSourceWithOptions(ctx context.Context, dir, remote, source, ref, expect
 	args = append(args, source+":"+ref)
 	_, err := Run(ctx, dir, args...)
 	return err
+}
+
+var pushOptionConfigEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
+
+// writePushOptionsConfig writes pushOptions as push.pushOption values to a
+// private config file. They do not travel as -o arguments because one option
+// can be a whole 65,516-byte pkt-line, past Windows' 32,767-character command
+// line (issue #320). The leading empty value drops any inherited
+// push.pushOption, as -o would. An empty option is left out, since in config
+// it would instead clear the options before it.
+func writePushOptionsConfig(pushOptions []string) (string, error) {
+	var config strings.Builder
+	config.WriteString("[push]\n\tpushOption =\n")
+	for _, option := range pushOptions {
+		if option != "" {
+			config.WriteString("\tpushOption = \"" + pushOptionConfigEscaper.Replace(option) + "\"\n")
+		}
+	}
+	file, err := os.CreateTemp("", "no-mistakes-push-options-*")
+	if err != nil {
+		return "", fmt.Errorf("write push options: %w", err)
+	}
+	if _, err := file.WriteString(config.String()); err != nil {
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+		return "", fmt.Errorf("write push options: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(file.Name())
+		return "", fmt.Errorf("write push options: %w", err)
+	}
+	return file.Name(), nil
 }
 
 // remoteRefAt reports whether remote's exact ref already points at source's

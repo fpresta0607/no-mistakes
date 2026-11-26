@@ -169,18 +169,15 @@ esac
 LOG="$GATE_DIR/notify-push.log"
 nm_ts() { date '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo unknown; }
 notify_failed=0
+# notify-push reads the push options from the GIT_PUSH_OPTION_* environment
+# Git set for this hook. They are not passed as arguments, because one option
+# can exceed Windows' command-line limit.
 while read oldrev newrev refname; do
-	  set -- --gate "$GATE_DIR" \
+	  out=$(NM_HOOK_HELPER=1 "$NM_BIN" daemon notify-push \
+	    --gate "$GATE_DIR" \
 	    --ref "$refname" \
 	    --old "$oldrev" \
-	    --new "$newrev"
-	  i=0
-	  while [ "$i" -lt "${GIT_PUSH_OPTION_COUNT:-0}" ]; do
-	    opt=$(printenv "GIT_PUSH_OPTION_$i" 2>/dev/null || :)
-	    set -- "$@" --push-option "$opt"
-	    i=$((i + 1))
-	  done
-	  out=$(NM_HOOK_HELPER=1 "$NM_BIN" daemon notify-push "$@" 2>&1)
+	    --new "$newrev" 2>&1)
   status=$?
   if [ $status -ne 0 ]; then
     notify_failed=1

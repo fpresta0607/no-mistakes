@@ -1011,11 +1011,8 @@ exit 0
 		t.Fatal(err)
 	}
 	content := string(data)
-	if !strings.Contains(content, "GIT_PUSH_OPTION_COUNT") {
-		t.Fatalf("migrated hook should forward git push options, got:\n%s", content)
-	}
-	if !strings.Contains(content, "--push-option") {
-		t.Fatalf("migrated hook should pass push options to notify-push, got:\n%s", content)
+	if content != gitpkg.PostReceiveHookScript() {
+		t.Fatalf("migrated hook should be the current managed hook, got:\n%s", content)
 	}
 	if strings.Contains(content, ">/dev/null 2>&1 || true") {
 		t.Fatalf("migrated hook should not silently swallow notify-push errors, got:\n%s", content)

@@ -17,6 +17,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/gate"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -335,6 +336,78 @@ func TestNoMistakesBinary_IntentTransport(t *testing.T) {
 		if len(requests) != 0 || cliGit(t, gateDir, "show-ref") != before || cliGit(t, local, "rev-parse", "HEAD") != head {
 			t.Fatalf("invalid input mutated run/custody state: %q", args)
 		}
+	}
+}
+
+// Issue #320: the largest intent and PR description AXI accepts must reach the
+// daemon through a real gate push, the managed post-receive hook and the real
+// notify-push. Each fills a push option past Windows' 32,767-character command
+// line, so neither the push nor the hook may carry one as an argument.
+func TestNoMistakesBinary_LargestIntentReachesTheDaemonThroughTheGateHook(t *testing.T) {
+	bin := buildNoMistakesBinary(t)
+	received := make(chan ipc.PushReceivedParams, 1)
+	olderDaemonFixture(t, nil, func(srv *ipc.Server) {
+		srv.Handle(ipc.MethodPushReceived, func(_ context.Context, raw json.RawMessage) (interface{}, error) {
+			var params ipc.PushReceivedParams
+			if err := json.Unmarshal(raw, &params); err != nil {
+				return nil, err
+			}
+			received <- params
+			return &ipc.PushReceivedResult{RunID: "intent-run"}, nil
+		})
+	})
+	p, err := paths.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := findRepo(d)
+	d.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateDir := p.RepoDir(repo.ID)
+	cliGit(t, local, "init", "--bare", "-q", gateDir)
+	cliGit(t, gateDir, "config", "receive.advertisePushOptions", "true")
+	cliGit(t, local, "remote", "add", gate.RemoteName, gateDir)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook := strings.Replace(git.PostReceiveHookScript(), "NM_BIN='"+exe+"'", "NM_BIN='"+bin+"'", 1)
+	if !strings.Contains(hook, "NM_BIN='"+bin+"'") {
+		t.Fatal("hook script does not point at the built binary")
+	}
+	if err := os.WriteFile(filepath.Join(gateDir, "hooks", "post-receive"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	intent := strings.Repeat("i", maxAxiRunIntentBytes)
+	body := strings.Repeat("b", maxAxiRunPRBodyBytes)
+	options := append([]string{formatIntentPushOption(intent)}, formatPRTextPushOptions(db.RunPRText{Body: body})...)
+	head := cliGit(t, local, "rev-parse", "HEAD")
+	branch := cliGit(t, local, "branch", "--show-current")
+
+	err = git.PushCommitWithOptionsSkippingHooks(t.Context(), local, gate.RemoteName, head, "refs/heads/"+branch, "", false, options)
+
+	if err != nil {
+		t.Fatalf("gate push: %v", err)
+	}
+	select {
+	case params := <-received:
+		if params.Intent != intent || params.PRBody != body || params.New != head || params.Ref != "refs/heads/"+branch {
+			t.Fatalf("daemon received intent %d bytes, PR body %d bytes, ref %q at %q; want %d, %d, %q at %q",
+				len(params.Intent), len(params.PRBody), params.Ref, params.New, len(intent), len(body), "refs/heads/"+branch, head)
+		}
+	default:
+		log, _ := os.ReadFile(filepath.Join(gateDir, "notify-push.log"))
+		t.Fatalf("notify-push never reached the daemon; notify-push.log:\n%.2000s", log)
 	}
 }
 

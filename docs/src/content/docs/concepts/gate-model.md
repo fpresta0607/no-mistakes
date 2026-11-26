@@ -226,8 +226,12 @@ An existing custom `pre-receive` hook is preserved and runs after admission, wit
 When `git push no-mistakes <branch>` lands, the bare repo's `post-receive` hook
 fires. It resolves the gate to an absolute bare-repo path using Git's own view
 of the repository, falling back to the hook location if needed, then calls
-`no-mistakes daemon notify-push` with that gate path, ref name, old/new SHAs,
-and any Git push options such as `no-mistakes.skip=test,lint`.
+`no-mistakes daemon notify-push` with that gate path, ref name, and old/new SHAs.
+`notify-push` reads any Git push options, such as `no-mistakes.skip=test,lint`,
+from the `GIT_PUSH_OPTION_*` environment Git sets for the hook.
+Neither that call nor the CLI's own gate push carries a push option as a
+command-line argument, because one option can fill a whole 65,516-byte Git
+packet, past Windows' 32,767-character command-line limit.
 For compatibility with older managed hooks, `notify-push` also normalizes
 relative gate paths before handing them to the daemon.
 The post-receive hook never blocks an already admitted push - Git ignores its
