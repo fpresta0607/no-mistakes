@@ -385,6 +385,36 @@ func TestParseReviewAnalyzerOutputRefusesAFollowUpFromTheAgent(t *testing.T) {
 	}
 }
 
+// A selected finding with no file sends the rereview over the whole branch,
+// where no closed verdict was asked for, so one the agent offers is dropped.
+func TestReviewLoop_AWholeBranchRereviewRecordsNoClosedVerdict(t *testing.T) {
+	reviewTurn := 0
+	mock := &sessionMockAgent{}
+	mock.respond = func(opts agent.RunOpts) *agent.Result {
+		switch opts.Purpose {
+		case "review":
+			reviewTurn++
+			if reviewTurn == 1 {
+				return &agent.Result{Output: []byte(fmt.Sprintf(`{"findings":[{"id":"f-1","severity":"error","description":"selected defect with no file","action":"auto-fix"}],"reviewed_paths":["feature.txt","feature2.txt"],%s}`, cleanRereview))}
+			}
+			return &agent.Result{Output: []byte(fmt.Sprintf(`{"findings":[],"closed_findings":["f-1"],"reviewed_paths":["feature.txt","feature2.txt"],%s}`, cleanRereview))}
+		case "review-fix":
+			return rewriteFeatureFix(t, opts)
+		default:
+			t.Errorf("unexpected agent purpose %q", opts.Purpose)
+			return &agent.Result{Output: []byte(`{}`)}
+		}
+	}
+	exec, database, run, repo, workDir := fixRoundScopeHarness(t, mock)
+
+	executeWithoutAPark(t, exec, run, repo, workDir)
+
+	_, _, record := lastReviewRound(t, database, run)
+	if len(record.ClosedFindings) != 0 {
+		t.Fatalf("closed findings = %v, want none: only a repair round is asked for a verdict", record.ClosedFindings)
+	}
+}
+
 func TestSanitizedPreviousFindingsKeepTheRepairRecordFromTheFixer(t *testing.T) {
 	t.Parallel()
 	raw, err := types.MarshalFindingsJSON(Findings{
@@ -758,6 +788,19 @@ func TestReviewLoop_AFindingBesideASelectedOneNeedsAClosedVerdict(t *testing.T) 
 		_, _, record := lastReviewRound(t, database, run)
 		if len(record.Items) != 0 || len(record.FollowUps) != 1 {
 			t.Fatalf("record = %+v, want the selected finding cleared and one follow-up", record)
+		}
+	})
+
+	t.Run("named closed beside a no-op note in the repair, the selected finding clears", func(t *testing.T) {
+		note := `{"id":"n-1","severity":"info","file":"feature.txt","line":2,"description":"the new wording reads well","action":"no-op"}`
+		mock := scriptedRepairRound(t, fmt.Sprintf(`{"findings":[%s],"closed_findings":["f-1"],"reviewed_paths":["feature.txt"],%s}`, note, cleanRereview))
+		exec, database, run, repo, workDir := longFeatureHarness(t, mock)
+
+		executeWithoutAPark(t, exec, run, repo, workDir)
+
+		steps, _, _ := lastReviewRound(t, database, run)
+		if steps[0].FindingsJSON != nil && strings.Contains(*steps[0].FindingsJSON, "selected defect") {
+			t.Fatalf("the finding the rereview named closed stayed outstanding: %s", *steps[0].FindingsJSON)
 		}
 	})
 

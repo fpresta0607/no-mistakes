@@ -555,6 +555,10 @@ Risk assessment (after listing all findings):
 	}
 	if repair != nil {
 		repair.split(sctx.Log, &findings)
+	} else {
+		// Only a repair round is asked for a closed verdict, and the verdict
+		// can clear a selected finding beside a no-op note in its file.
+		findings.ClosedFindings = nil
 	}
 
 	// Read the conversation the turn that just ended left behind. Answers
