@@ -179,6 +179,9 @@ func prepareDaemonEnvironment(p *paths.Paths) error {
 	if err := applyLoginShellEnvironment(applyShellEnvToProcess, nmHome); err != nil {
 		return fmt.Errorf("apply login shell environment: %w", err)
 	}
+	if err := demoteLauncherMSYSFolders(); err != nil {
+		return err
+	}
 	// The daemon outlives its launcher, and the login shell can replace its
 	// environment. Pin temporary files to the already-resolved daemon home.
 	tempDir, err := filepath.Abs(filepath.Join(p.Root(), "tmp"))
@@ -225,6 +228,53 @@ func dropLauncherCommandGuard() error {
 	}
 	if err := os.Setenv("PATH", strings.Join(kept, string(os.PathListSeparator))); err != nil {
 		return fmt.Errorf("drop launcher command guard from PATH: %w", err)
+	}
+	return nil
+}
+
+// demoteLauncherMSYSFolders moves the folders of a Git Bash launcher's MSYS
+// install behind the rest of PATH on Windows (#322). Git Bash's profile puts
+// them ahead of the Windows system folders, so a daemon started from it ran
+// every step command with bash, find and sort resolving to MSYS tools rather
+// than to what the user's Windows terminal finds. MSYSTEM marks a launcher
+// inside an MSYS shell, and the install is the folder whose usr\bin holds the
+// MSYS runtime. Its cmd folder stays where it is: it is the one folder Git for
+// Windows puts on the Windows PATH itself, and it carries only Git's own
+// commands.
+func demoteLauncherMSYSFolders() error {
+	if runtime.GOOS != "windows" || os.Getenv("MSYSTEM") == "" {
+		return nil
+	}
+	entries := filepath.SplitList(os.Getenv("PATH"))
+	var installs []string
+	for _, dir := range entries {
+		usr := filepath.Dir(filepath.Clean(dir))
+		if !strings.EqualFold(filepath.Base(dir), "bin") || !strings.EqualFold(filepath.Base(usr), "usr") {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(dir, "msys-2.0.dll")); err == nil {
+			installs = append(installs, filepath.Dir(usr))
+		}
+	}
+	inMSYSInstall := func(dir string) bool {
+		return slices.ContainsFunc(installs, func(install string) bool {
+			rel, err := filepath.Rel(install, filepath.Clean(dir))
+			return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !strings.EqualFold(rel, "cmd")
+		})
+	}
+	var native, msys []string
+	for _, dir := range entries {
+		if inMSYSInstall(dir) {
+			msys = append(msys, dir)
+		} else {
+			native = append(native, dir)
+		}
+	}
+	if len(msys) == 0 {
+		return nil
+	}
+	if err := os.Setenv("PATH", strings.Join(append(native, msys...), string(os.PathListSeparator))); err != nil {
+		return fmt.Errorf("move the launcher's MSYS folders behind PATH: %w", err)
 	}
 	return nil
 }
