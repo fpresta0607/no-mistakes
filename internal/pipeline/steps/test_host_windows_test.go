@@ -80,3 +80,35 @@ func TestTestHostNestedWindowsTempStillGetsAShortOwnedDirectory(t *testing.T) {
 		t.Fatalf("preparation changed the caller's temp: %v", err)
 	}
 }
+
+func TestTestHostNestedWindowsTempCreatesAMissingUserTempFolder(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, strings.Repeat("nested-", 8))
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(root, "cache")
+	if err := os.MkdirAll(cache, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEMP", parent)
+	t.Setenv("TMP", parent)
+	t.Setenv("LocalAppData", cache)
+
+	scratch, err := newTestScratch("", "windows")
+
+	if scratch != "" {
+		t.Cleanup(func() { _ = os.RemoveAll(scratch) })
+	}
+	// A long sandbox root can still exceed the length budget; that refusal is
+	// fine, failing to create the missing Temp folder is not.
+	if err != nil && !strings.Contains(err.Error(), "an agent turn needs a short temporary root") {
+		t.Fatalf("missing user Temp folder was not created: %v", err)
+	}
+	if info, statErr := os.Stat(filepath.Join(cache, "Temp")); statErr != nil || !info.IsDir() {
+		t.Fatalf("user Temp folder = %v, %v", info, statErr)
+	}
+	if err == nil && !strings.HasPrefix(scratch, filepath.Join(cache, "Temp")+string(os.PathSeparator)) {
+		t.Fatalf("scratch %q is not under the user Temp folder", scratch)
+	}
+}

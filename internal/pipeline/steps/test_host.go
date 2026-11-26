@@ -26,13 +26,17 @@ func newTestScratch(parent, goos string) (string, error) {
 	if parent == "" && goos == "windows" {
 		parent = os.TempDir()
 		// A nested Test process inherits its caller's scratch as TEMP. Use the
-		// existing per-user Windows temp directory when nesting exhausts room.
+		// per-user Windows temp directory when nesting exhausts room; a sandboxed
+		// home's cache directory may not have one yet.
 		if len(utf16.Encode([]rune(parent)))+14 > testWindowsScratchMaxChars {
 			cache, err := os.UserCacheDir()
 			if err != nil {
 				return "", fmt.Errorf("resolve short Windows temporary root: %w", err)
 			}
 			parent = filepath.Join(cache, "Temp")
+			if err := os.MkdirAll(parent, 0o700); err != nil {
+				return "", fmt.Errorf("create short Windows temporary root: %w", err)
+			}
 		}
 	}
 	dir, err := os.MkdirTemp(parent, "nm-")
