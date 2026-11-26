@@ -184,11 +184,8 @@ func TestPostReceiveHookScript(t *testing.T) {
 	if !strings.Contains(script, "daemon notify-push") {
 		t.Fatal("hook should invoke the CLI notify subcommand")
 	}
-	if !strings.Contains(script, "GIT_PUSH_OPTION_COUNT") {
-		t.Fatal("hook should forward git push options to notify-push")
-	}
-	if !strings.Contains(script, "--push-option") {
-		t.Fatal("hook should pass each git push option as a notify-push flag")
+	if strings.Contains(script, "--push-option") {
+		t.Fatal("hook must leave push options in notify-push's environment, never its arguments: one can exceed Windows' command line (issue #320)")
 	}
 	if strings.Contains(script, "nc -U") {
 		t.Fatal("hook should not depend on netcat")
