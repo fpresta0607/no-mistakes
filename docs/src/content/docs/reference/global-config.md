@@ -924,7 +924,7 @@ It is told to start every command that runs or inspects the project's interprete
 A wrapper may bind an environment for what it starts, such as a project's `UV_PROJECT_ENVIRONMENT`, which the step never sees, so a command started without the words can resolve a different interpreter than the baseline ran on.
 The agent is told never to report a tool or dependency missing from a command started without them.
 With a `refusal_prefix`, it is told that a refusal means the command never ran, to report each scenario that needed it as untested with the wrapper's line, and never to run the command another way.
-A wrapper that cannot be filled for the run, such as one naming `{test_comparison_sha}` with no resolved comparison, gives the agent no words, and the agent is told to start no build or test run at all.
+A wrapper that cannot be filled for the run, such as one naming `{test_comparison_sha}` with no resolved comparison, gives the agent no words, and the agent is told to start no build or test run and no command that runs or inspects the project's interpreter, package manager or test tools at all, and to report every scenario that needs one as untested.
 The step logs one line saying the agent was given the wrapper.
 These are instructions in the agent's prompt, not starts the step makes, so they hold as far as the agent follows them.
 

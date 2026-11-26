@@ -403,6 +403,9 @@ func TestTestStep_AgentWithAWrapperThatCannotBeFilledStartsNoBuild(t *testing.T)
 	if strings.Contains(prompt, wrapperWordsMarker) || !strings.Contains(prompt, "Start no build, compile or test run") || !strings.Contains(prompt, "test_comparison_sha") {
 		t.Fatalf("prompt = %q, want no wrapper words, the reason named, and no build allowed", prompt)
 	}
+	if !strings.Contains(prompt, "no command that runs or inspects the project's interpreter, package manager or test tools") || !strings.Contains(prompt, "Never report a tool or dependency missing from a command started without the wrapper") {
+		t.Fatalf("prompt = %q, want no interpreter command allowed and no missing tool reported from one started without the wrapper", prompt)
+	}
 }
 
 // The wrapper says it never ran the command. That is no test result, so no

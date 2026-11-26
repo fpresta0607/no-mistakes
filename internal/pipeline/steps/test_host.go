@@ -105,7 +105,7 @@ func testCommandWrapperGuidance(sctx *pipeline.StepContext) string {
 	words, err := commandWrapperWords(sctx, "test")
 	if err != nil {
 		sctx.Log("Test agent gets no test wrapper: " + err.Error())
-		return "\n- This machine runs builds and tests in a test line, and its wrapper could not be prepared for this run (" + err.Error() + "). Start no build, compile or test run; report every scenario that needs one as untested with that reason."
+		return "\n- This machine runs builds and tests in a test line, and its wrapper could not be prepared for this run (" + err.Error() + "). Start no build, compile or test run, and no command that runs or inspects the project's interpreter, package manager or test tools (such as `uv run`, an import check or a tool's version), since without the wrapper it can resolve a different environment than the configured test command would run in. Never report a tool or dependency missing from a command started without the wrapper; report every scenario that needs one of these commands as untested with that reason."
 	}
 	if len(words) == 0 {
 		return ""
