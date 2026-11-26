@@ -27,35 +27,16 @@ func TestMakeE2ERunsTheWrapperInGitBashWhenALauncherLeadsPATH(t *testing.T) {
 	if err != nil {
 		t.Skip("git unavailable to locate Git for Windows' bash")
 	}
-	goPath, err := exec.LookPath("go")
-	if err != nil {
-		t.Skip("go unavailable to build the stand-in launcher")
-	}
 	root, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
+	standIns, launcherMark := buildStandInBashLauncher(t)
 	scratch := t.TempDir()
-	standIns := filepath.Join(scratch, "stand-ins")
-	launcherSource := filepath.Join(scratch, "launcher", "main.go")
-	launcherMark := filepath.Join(scratch, "launcher-ran")
 	goLog := filepath.ToSlash(filepath.Join(scratch, "go.log"))
 	temp := filepath.Join(scratch, "temp")
-	for _, dir := range []string{standIns, filepath.Dir(launcherSource), temp} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	launcher := "package main\n\nimport \"os\"\n\nfunc main() {\n\t_ = os.WriteFile(os.Getenv(\"STAND_IN_LAUNCHER_MARK\"), []byte(\"ran\"), 0o600)\n\tos.Exit(1)\n}\n"
-	if err := os.WriteFile(launcherSource, []byte(launcher), 0o644); err != nil {
+	if err := os.MkdirAll(temp, 0o755); err != nil {
 		t.Fatal(err)
-	}
-	build := exec.Command(goPath, "build", "-o", filepath.Join(standIns, "bash.exe"), "main.go")
-	build.Dir = filepath.Dir(launcherSource)
-	build.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=")
-	winproc.Harden(build)
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build stand-in launcher: %v\n%s", err, output)
 	}
 	// The stand-in for go answers this platform and logs the suite it is asked to run.
 	fakeGo := "#!/bin/sh\nprintf '%s\\n' \"$*\" >>'" + goLog + "'\n[ \"$1 $2\" = 'env GOOS' ] && printf 'windows\\n'\nexit 0\n"
