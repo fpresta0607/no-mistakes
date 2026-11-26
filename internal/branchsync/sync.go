@@ -2460,11 +2460,18 @@ func exactPushedBinding(repo *db.Repo, run *db.Run, branch string) bool {
 // supersededUnpublishedRun proves the narrow rerun relationship needed to
 // ignore an older terminal unpublished head during branch selection. The gate
 // is read-only evidence: its exact branch head must equal the newer push
-// binding, and Git must prove the older preserved head is its ancestor. Any
-// missing or conflicting evidence leaves the older run authoritative.
+// binding, and Git must prove the older preserved head is its ancestor. An
+// older run that ended before its push step with its head still at the
+// submitted head holds no pipeline commits and has no binding to compare, so it
+// qualifies when the newer binding is exact for this branch; one that moved its
+// head or recorded dirty source without push provenance stays authoritative.
+// Any missing or conflicting evidence leaves the older run authoritative.
 func (s *Service) supersededUnpublishedRun(ctx context.Context, older, newer *db.Run, branch string) bool {
 	if older == nil || newer == nil || !terminalRunStatus(older.Status) || !unpublishedPipelineHead(older) ||
-		!samePushTargetBinding(older, newer) || strings.TrimSpace(s.GateDir) == "" || older.HeadSHA == "" || newer.LastPushedSHA == nil {
+		!(samePushTargetBinding(older, newer) || (neverPushed(older) && runHeadUnmoved(older) &&
+			(older.TerminalSourceState == nil || !strings.HasPrefix(*older.TerminalSourceState, "dirty:")) &&
+			exactPushedBinding(s.Repo, newer, branch))) ||
+		strings.TrimSpace(s.GateDir) == "" || older.HeadSHA == "" || newer.LastPushedSHA == nil {
 		return false
 	}
 	pushed := ptr(newer.LastPushedSHA)
@@ -2503,6 +2510,10 @@ func samePushTargetBinding(older, newer *db.Run) bool {
 		older.PushTargetKind != nil && newer.PushTargetKind != nil && ptr(older.PushTargetKind) == ptr(newer.PushTargetKind) &&
 		older.PushTargetFingerprint != nil && newer.PushTargetFingerprint != nil && ptr(older.PushTargetFingerprint) == ptr(newer.PushTargetFingerprint) &&
 		older.PushRef != nil && newer.PushRef != nil && ptr(older.PushRef) == ptr(newer.PushRef)
+}
+
+func neverPushed(run *db.Run) bool {
+	return run.LastPushedSHA == nil && run.PushTargetKind == nil && run.PushTargetFingerprint == nil && run.PushRef == nil && run.PushGeneration == nil
 }
 
 func terminalRunStatus(status types.RunStatus) bool {
