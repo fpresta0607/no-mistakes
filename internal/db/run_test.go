@@ -1376,6 +1376,59 @@ func TestVerifyTerminalRunRecordedHeadIsACompareAndSwap(t *testing.T) {
 	}
 }
 
+func TestVerifyTerminalRunObservedCleanHeadIsACompareAndSwapOnTheSourceObservation(t *testing.T) {
+	unreadable := "unreadable"
+	for _, prior := range []*string{nil, &unreadable} {
+		d := openTestDB(t)
+		repo, err := d.InsertRepo("/tmp/terminal-observed-cas", "https://example.com/terminal-observed-cas", "main")
+		if err != nil {
+			t.Fatal(err)
+		}
+		run, err := d.InsertRun(repo.ID, "feature", "submitted", "base")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := d.UpdateRunErrorStatusWithHead(run.ID, "test failed", types.RunFailed, "recorded"); err != nil {
+			t.Fatal(err)
+		}
+		if prior != nil {
+			if err := d.RecordTerminalSourceState(run.ID, *prior); err != nil {
+				t.Fatal(err)
+			}
+		}
+		other := "clean:other"
+		for name, args := range map[string]struct {
+			status types.RunStatus
+			head   string
+			source *string
+		}{
+			"status": {types.RunCancelled, "recorded", prior},
+			"head":   {types.RunFailed, "other", prior},
+			"source": {types.RunFailed, "recorded", &other},
+		} {
+			if updated, err := d.VerifyTerminalRunObservedCleanHead(run.ID, args.status, args.head, args.source); err != nil || updated {
+				t.Fatalf("prior %v: %s mismatch CAS = %t, %v", prior, name, updated, err)
+			}
+		}
+		got, err := d.GetRun(run.ID)
+		if err != nil || got.TerminalHeadVerifiedAt != nil {
+			t.Fatalf("prior %v: failed CAS changed run = %#v, %v", prior, got, err)
+		}
+
+		if updated, err := d.VerifyTerminalRunObservedCleanHead(run.ID, types.RunFailed, "recorded", prior); err != nil || !updated {
+			t.Fatalf("prior %v: matching CAS = %t, %v", prior, updated, err)
+		}
+
+		got, err = d.GetRun(run.ID)
+		if err != nil || got.HeadSHA != "recorded" || got.TerminalHeadVerifiedAt == nil || got.TerminalSourceState == nil || *got.TerminalSourceState != "clean:recorded" {
+			t.Fatalf("prior %v: successful CAS = %#v, %v, want the recorded head verified with its clean observation", prior, got, err)
+		}
+		if updated, err := d.VerifyTerminalRunObservedCleanHead(run.ID, types.RunFailed, "recorded", got.TerminalSourceState); err != nil || updated {
+			t.Fatalf("prior %v: already-verified CAS = %t, %v", prior, updated, err)
+		}
+	}
+}
+
 func TestRunPushBindingIsForwardOnlyAndLegacyRowsStayNullable(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/tmp/repo-sync-binding", "https://example.com/repo.git", "main")

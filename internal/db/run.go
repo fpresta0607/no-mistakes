@@ -1230,6 +1230,21 @@ func (d *DB) VerifyTerminalRunAnchoredDirtyHead(id string, status types.RunStatu
 	return updated == 1, err
 }
 
+// VerifyTerminalRunObservedCleanHead stamps a terminal run's recorded head as
+// its verified head without moving it and records the clean source observation
+// that proved it, as a compare-and-swap on the status, the recorded head and
+// the source observation the caller's proof read (NULL included), with no
+// earlier stamp and custody not yet returned.
+func (d *DB) VerifyTerminalRunObservedCleanHead(id string, status types.RunStatus, recordedHead string, priorSourceState *string) (bool, error) {
+	ts := now()
+	result, err := d.sql.Exec(`UPDATE runs SET push_active = 0, terminal_source_state = ?, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status = ? AND head_sha = ? AND terminal_source_state IS ? AND terminal_head_verified_at IS NULL AND custody_returned_at IS NULL`, "clean:"+recordedHead, ts, ts, id, status, recordedHead, priorSourceState)
+	if err != nil {
+		return false, fmt.Errorf("verify terminal run observed clean head: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	return updated == 1, err
+}
+
 // RunIntentSourceAgent is the intent_source value stamped when the driving
 // agent supplied the intent explicitly via `axi run --intent`. It marks an
 // authoritative, author-stated goal (score 1) as opposed to a transcript
