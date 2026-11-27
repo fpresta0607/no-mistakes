@@ -485,6 +485,7 @@ Every stage still runs fresh with zero repair authority; replay never implicitly
 It imports the exact candidate object without overwriting an author branch or the gate branch.
 Historical findings, failed checks, automatic and manual spending, and the unknown historical source completeness stay attached to the lineage.
 Cumulative spending counts the predecessor, its validation-only descendants and linked terminal source-adoption predecessors from the native round ledger.
+A fix round that rechecks a repair turn cut at its agent budget records no selection, so it counts as manual spending from the cut notice on the round before it; any other fix round without a recorded selection still refuses admission.
 Older branch runs outside this linked source lineage are excluded from that ledger; they appear only through the controller policy assertion and the unknown historical source completeness.
 Later changes to the repository's registered path, URLs or default branch, and custody-return bookkeeping on the predecessor, do not change its validation history; the live publication target is verified again at admission.
 The output and subsequent status include `authored_validation`, cumulative per-stage spending, zero remaining repair authority and `policy_origin: controller_assertion`.
