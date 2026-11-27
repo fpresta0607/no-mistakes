@@ -54,7 +54,12 @@ func awaitProvider(ctx context.Context, opts RunOpts, name string, probe provide
 		giveUp = deadline.Add(-providerOutageReserve)
 		limit = "the step budget ran out"
 	}
-	for probes := 1; ; probes++ {
+	emitAgentControl(opts, LifecycleEvent{
+		Agent:   name,
+		Phase:   LifecyclePhaseProviderWait,
+		Message: fmt.Sprintf("%s waiting for its model provider to answer before retrying", name),
+	})
+	for {
 		probeDeadline := time.Now().Add(providerProbeTimeout)
 		if giveUp.Before(probeDeadline) {
 			probeDeadline = giveUp
@@ -67,13 +72,6 @@ func awaitProvider(ctx context.Context, opts RunOpts, name string, probe provide
 		}
 		if err := ctx.Err(); err != nil {
 			return err
-		}
-		if probes == 1 {
-			emitAgentControl(opts, LifecycleEvent{
-				Agent:   name,
-				Phase:   LifecyclePhaseProviderWait,
-				Message: fmt.Sprintf("%s waiting for its model provider to answer before retrying: %v", name, probeErr),
-			})
 		}
 		pause := min(providerProbeInterval, time.Until(giveUp))
 		if pause <= 0 {

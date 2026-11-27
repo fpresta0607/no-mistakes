@@ -126,6 +126,42 @@ func TestRunWithRetry_NoRetryStartsWhileTheProviderDoesNotAnswer(t *testing.T) {
 	}
 }
 
+// The stall watcher leaves a declared provider wait alone, so the wait must be
+// declared before the first probe, which can hang until providerProbeTimeout.
+func TestRunWithRetry_ProviderWaitIsDeclaredBeforeTheFirstProbe(t *testing.T) {
+	// Arrange
+	defer withFastBackoff(t)()
+	withFastProviderProbe(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var phases []string
+	var phasesAtFirstProbe []string
+	opts := RunOpts{OnLifecycle: func(event LifecycleEvent) { phases = append(phases, event.Phase) }}
+	calls := 0
+
+	// Act
+	res, err := runWithRetry(ctx, "claude", opts, 3, claudeRetryClassifier, nil, probeResolver(func(context.Context) error {
+		if phasesAtFirstProbe == nil {
+			phasesAtFirstProbe = append([]string{}, phases...)
+		}
+		return nil
+	}), func() (*Result, error) {
+		calls++
+		if calls == 1 {
+			return nil, &claudeAPIError{Message: "Request timed out"}
+		}
+		return &Result{Text: "ok"}, nil
+	})
+
+	// Assert
+	if err != nil || res == nil || res.Text != "ok" {
+		t.Fatalf("res=%+v err=%v, want the retry to pass once the provider answers", res, err)
+	}
+	if got, want := strings.Join(phasesAtFirstProbe, ","), LifecyclePhaseRetry+","+LifecyclePhaseProviderWait; got != want {
+		t.Fatalf("lifecycle phases before the first probe = %s, want %s: an undeclared first probe can be cut as a stall", got, want)
+	}
+}
+
 func TestRunWithRetry_CancellationEndsTheProviderWait(t *testing.T) {
 	// Arrange
 	defer withFastBackoff(t)()
