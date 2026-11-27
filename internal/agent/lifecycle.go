@@ -13,6 +13,11 @@ const (
 	LifecyclePhaseExit = "exit"
 	// LifecyclePhaseRetry marks a transient retry before the next subprocess attempt.
 	LifecyclePhaseRetry = "retry"
+	// LifecyclePhaseProviderWait declares that the adapter holds its next
+	// attempt until the model provider answers again. The wait is bounded by
+	// the invocation's deadline, produces no output, and ends with the next
+	// subprocess start or attempt.
+	LifecyclePhaseProviderWait = "provider_wait"
 	// LifecyclePhaseFallback marks any fallback before a fresh agent attempt,
 	// including provider, session-resume, and structured-output fallbacks.
 	LifecyclePhaseFallback = "fallback"
