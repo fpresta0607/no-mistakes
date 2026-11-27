@@ -730,6 +730,7 @@ Evidence resets whenever a retry or fallback starts a replacement attempt, inclu
 Output means anything observable: streamed assistant text, or raw bytes on the agent subprocess's stdout or stderr.
 Subprocess bytes matter because an agent spends most of a long turn running tools rather than writing prose, so prose alone cannot tell a working agent from a wedged one.
 A live child process of the agent subprocess extends the budget too, because a long tool call writes nothing until it returns, but it is liveness rather than output and is never reported as the agent having produced anything.
+A Claude invocation holding its retry until the model API answers again (see [Agent interface](/no-mistakes/guides/agents/#agent-interface)) is liveness in the same way: with the cap set, that wait continues past this budget until the cap, and the adapter ends it before the cap with an error naming the provider outage.
 The agent's child processes are sampled about once a second, and each output freezes a sample taken before it as the baseline; only a child missing from that baseline counts.
 A tool the agent launches right after announcing it, even in its very first output, therefore still extends the budget.
 Helpers it keeps alive for the whole turn, such as the ACP agent under `acpx` or stdio MCP servers, are in the baseline once a sample taken after they started precedes an output, so they cannot keep a hung turn alive past the stall budget.
