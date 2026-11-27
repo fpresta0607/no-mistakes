@@ -260,7 +260,7 @@ func (m *RunManager) validateAuthored(ctx context.Context, params ipc.ValidateAu
 		}
 		pin := snapshot.Run.PiProfile
 		storedQuota := snapshot.Run.QuotaRouting
-		if request.TerminalGeneration != "" {
+		if request.NamesNewSelection() {
 			pin, storedQuota = nil, ""
 		}
 		enterStage("loading the run configuration and preparing the launch")

@@ -64,6 +64,32 @@ func TestDecodeRejectsAmbiguousAndBroaderAdmissionInputs(t *testing.T) {
 	}
 }
 
+// TestDecodeAcceptsAPredecessorProofBesideACurrentSelection pins issue #492:
+// an authored admission may prove its predecessor's original selection in
+// predecessor_launch_assertion while launch_assertion names the successor's
+// own, and a malformed proof is refused like a malformed selection.
+func TestDecodeAcceptsAPredecessorProofBesideACurrentSelection(t *testing.T) {
+	request := requestFixture()
+	original := *request.LaunchAssertion
+	request.PredecessorLaunchAssertion = &original
+	successor := agentcfg.Selection{Harness: types.AgentPi, Model: "openai/successor", Effort: agentcfg.EffortHigh}
+	request.LaunchAssertion = &launchassert.Expectation{TrustedSHA: strings.Repeat("9", 40), Profiles: map[string][]agentcfg.Selection{"primary": {successor}, "reviewer": {successor}, "fixer": {successor}}, Apply: true}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decoded, err := Decode(payload)
+
+	if err != nil || !decoded.PredecessorLaunchAssertion.Matches(&original) || decoded.LaunchAssertion.Profiles["primary"][0] != successor {
+		t.Fatalf("decoded = %+v, %v; want the proof and the successor selection kept apart", decoded, err)
+	}
+	request.PredecessorLaunchAssertion.TrustedSHA = "short"
+	if err := request.Validate(); err == nil {
+		t.Fatal("accepted a malformed predecessor proof")
+	}
+}
+
 func TestDecodeRejectsNonUTF8InsteadOfChangingTheDeclaredInput(t *testing.T) {
 	payload, err := json.Marshal(requestFixture())
 	if err != nil {
@@ -89,6 +115,10 @@ func TestTerminalRequestBindsAnExplicitIndependentSelectionAndUnknownSourceAccep
 		{"missing selection", func(request *Request) { request.LaunchAssertion = nil }},
 		{"claimed recovery", func(request *Request) { request.HistoricalSourceCompleteness = "clean" }},
 		{"authored acceptance", func(request *Request) { request.TerminalGeneration = "" }},
+		{"predecessor proof", func(request *Request) {
+			original := *request.LaunchAssertion
+			request.PredecessorLaunchAssertion = &original
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			request := requestFixture()

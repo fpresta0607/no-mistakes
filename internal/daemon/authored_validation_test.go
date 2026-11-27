@@ -19,12 +19,14 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
+	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/authoredvalidation"
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/launchassert"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/realpath"
@@ -1323,6 +1325,47 @@ func TestAuthoredAdmissionSchedulesEveryStageFreshWithoutMovingSourceOrPredecess
 	}
 	if _, err := manager.startRun(context.Background(), repo, request.Request.Branch, child.HeadSHA, child.BaseSHA, "fresh", nil, "fresh budget", "", true, "", nil); err == nil {
 		t.Fatal("ordinary fresh launch escaped validation-only lineage")
+	}
+}
+
+// TestAuthoredAdmissionRunsANewSelectionWithThePredecessorProof pins issue
+// #492 through the daemon: once the model a predecessor launched on is gone,
+// its authored successor proves that original selection and is applied, proven
+// against the current trusted commit, recorded and run on its own.
+func TestAuthoredAdmissionRunsANewSelectionWithThePredecessorProof(t *testing.T) {
+	var calls atomic.Int32
+	factory := func() []pipeline.Step {
+		var result []pipeline.Step
+		for _, step := range steps.AllSteps() {
+			result = append(result, &authoredFixtureStep{name: step.Name(), calls: &calls})
+		}
+		return result
+	}
+	manager, database, _, request, _ := authoredAdmissionFixture(t, factory)
+	parent, err := database.GetRun(request.Request.PredecessorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := *parent.LaunchAssertion
+	request.Request.PredecessorLaunchAssertion = &original
+	selection := agentcfg.Selection{Harness: types.AgentCodex, Model: "successor", Effort: agentcfg.EffortXHigh, ServiceTier: "default"}
+	request.Request.LaunchAssertion = &launchassert.Expectation{TrustedSHA: request.Request.LaunchAssertion.TrustedSHA, Profiles: map[string][]agentcfg.Selection{"primary": {selection}, "reviewer": {selection}, "fixer": {selection}}, Apply: true}
+
+	result, err := manager.validateAuthored(context.Background(), request, os.Getpid())
+
+	if err != nil || !result.Started {
+		t.Fatalf("admission with the predecessor proof: %+v %v", result, err)
+	}
+	child := waitForRunTerminalState(t, database, result.Receipt.RunID)
+	if child.Status != types.RunCompleted || calls.Load() != int32(len(steps.AllSteps())) {
+		t.Fatalf("successor: status=%s calls=%d", child.Status, calls.Load())
+	}
+	if !child.LaunchAssertion.Matches(request.Request.LaunchAssertion) || child.LaunchAssertionProof == nil {
+		t.Fatalf("successor selection = %+v, want the proven new selection", child.LaunchAssertion)
+	}
+	replay, err := manager.validateAuthored(context.Background(), request, os.Getpid())
+	if err != nil || replay.Started || replay.Receipt.RunID != child.ID {
+		t.Fatalf("exact replay = %+v %v, want the same child", replay, err)
 	}
 }
 

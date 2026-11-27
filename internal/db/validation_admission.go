@@ -71,10 +71,18 @@ func (snapshot TerminalSnapshot) validateAuthoredRequest(request authoredvalidat
 	if err := parent.LaunchAssertionProof.Check(parent.LaunchAssertion); err != nil {
 		return err
 	}
-	expected := *request.LaunchAssertion
-	expected.TrustedSHA = parent.LaunchAssertion.TrustedSHA
-	if request.TerminalGeneration == "" && !expected.Matches(parent.LaunchAssertion) {
-		return fmt.Errorf("authored admission cannot change the original agent selection")
+	if request.TerminalGeneration == "" {
+		if request.PredecessorLaunchAssertion != nil {
+			if !request.PredecessorLaunchAssertion.Matches(parent.LaunchAssertion) {
+				return fmt.Errorf("authored admission predecessor_launch_assertion does not match the predecessor's original agent selection")
+			}
+		} else {
+			expected := *request.LaunchAssertion
+			expected.TrustedSHA = parent.LaunchAssertion.TrustedSHA
+			if !expected.Matches(parent.LaunchAssertion) {
+				return fmt.Errorf("authored admission without predecessor_launch_assertion cannot change the original agent selection")
+			}
+		}
 	}
 	if parent.LastPushedSHA == nil {
 		_, isInheritedPR := parent.InheritedPRHead()
@@ -235,7 +243,7 @@ func (d *DB) AcceptValidationAdmission(ctx context.Context, proposal ValidationA
 	workDir, nonce := filepath.Join(proposal.WorktreeRoot, childID), "authored-"+childID
 	generation := proposal.Request.SuccessorGeneration()
 	piProfile, quotaRouting := current.Run.PiProfile, current.Run.QuotaRouting
-	if proposal.Request.TerminalGeneration != "" {
+	if proposal.Request.NamesNewSelection() {
 		piProfile, quotaRouting = nil, ""
 	}
 	var evidenceDir *string
