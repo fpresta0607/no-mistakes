@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 
 	"github.com/kunchenguid/no-mistakes/internal/authoredvalidation"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -166,13 +167,14 @@ func readValidationFamily(tx *sql.Tx, runID string) (*authoredvalidation.Family,
 		for index, step := range snapshot.Steps {
 			spending := family.Spending[step.StepName]
 			pending := ""
+			isAfterUndecidedRepairCut := false
 			for _, round := range snapshot.Rounds[index] {
 				if validationChildren[snapshot.Run.ID] && (round.IsFixRound() || round.SelectionSource != nil && (*round.SelectionSource == RoundSelectionSourceAutoFix || *round.SelectionSource == RoundSelectionSourceUser)) {
 					family.HasChildRepairs = true
 				}
 				if round.IsFixRound() {
 					source := pending
-					if source == "" && round.Trigger == "user_fix" {
+					if source == "" && (round.Trigger == "user_fix" || isAfterUndecidedRepairCut) {
 						source = RoundSelectionSourceUser
 					}
 					switch source {
@@ -185,6 +187,7 @@ func readValidationFamily(tx *sql.Tx, runID string) (*authoredvalidation.Family,
 					}
 					pending = ""
 				}
+				isAfterUndecidedRepairCut = isUndecidedRepairCut(round)
 				if round.SelectionSource == nil {
 					continue
 				}
@@ -212,4 +215,19 @@ func readValidationFamily(tx *sql.Tx, runID string) (*authoredvalidation.Family,
 		}
 	}
 	return family, nil
+}
+
+// isUndecidedRepairCut reports whether a round parked on a repair turn cut at
+// its agent budget and recorded no decision. Only an operator's fix response
+// starts a fix round from that gate: the notice is never auto-fixable, and its
+// recheck (a fix selecting only the notice) deliberately records no selection
+// (#418), so that fix round is manual spending.
+func isUndecidedRepairCut(round StepRound) bool {
+	if round.SelectionSource != nil || round.FindingsJSON == nil {
+		return false
+	}
+	findings, err := types.ParseFindingsJSON(*round.FindingsJSON)
+	return err == nil && slices.ContainsFunc(findings.Items, func(item types.Finding) bool {
+		return item.ID == types.FindingIDRepairAgentBudget
+	})
 }
