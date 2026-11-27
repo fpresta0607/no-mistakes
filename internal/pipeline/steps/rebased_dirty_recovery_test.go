@@ -200,10 +200,62 @@ func TestRebasedRunFailingAtReviewWithDirtySourceFailsClosed(t *testing.T) {
 // TestUnmovedRunFailingAtReviewWithDirtySourcePreservesItOnRecovery pins issue
 // #414: with no Rebase the recorded head is the gate branch head, so recovery
 // verified it as the gate head and returned custody without preserving the
-// partial edit, which the next worktree cleanup then deleted.
+// partial edit, which the next worktree cleanup then deleted. A run whose
+// terminalization could not read its managed worktree (recorded "unreadable")
+// leaves the same edit behind, so recovery reads that worktree itself.
 func TestUnmovedRunFailingAtReviewWithDirtySourcePreservesItOnRecovery(t *testing.T) {
 	t.Parallel()
+	for _, observation := range []string{"recorded dirty", "unreadable"} {
+		t.Run(observation, func(t *testing.T) {
+			t.Parallel()
+			f := runDirtyReviewFailure(t, false)
+			if observation == "unreadable" {
+				if err := f.database.RecordTerminalSourceState(f.run.ID, "unreadable"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx := context.Background()
+			if state := f.service.InspectCached(ctx); state.NextAction == nil || state.NextAction.Command != "no-mistakes axi sync --recover" {
+				t.Fatalf("status = %s/%s, want the supported recovery offered", state.State, state.Safety)
+			}
+
+			recovered := f.service.Recover(ctx, false)
+
+			if !recovered.Recovered || recovered.Safety != "custody_returned" {
+				t.Fatalf("recover = %s/%s: %s", recovered.State, recovered.Safety, recovered.Error)
+			}
+			if head := gitCmd(t, f.caller, "rev-parse", "HEAD"); head != f.submitted {
+				t.Fatalf("caller moved to %s, want it left at the unmoved head %s", head, f.submitted)
+			}
+			source := custody.RecoverySourceRef(f.run.ID)
+			if parent := gitCmd(t, f.gate, "rev-parse", source+"^"); parent != f.submitted {
+				t.Fatalf("preserved source parent = %s, want %s", parent, f.submitted)
+			}
+			if edit := gitCmd(t, f.gate, "show", source+":feature.txt"); edit != "partial repair" {
+				t.Fatalf("preserved edit = %q", edit)
+			}
+			recorded, err := f.database.GetRun(f.run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recorded.HeadSHA != f.submitted || recorded.TerminalHeadVerifiedAt == nil || recorded.CustodyReturnedAt == nil {
+				t.Fatalf("run = head %s verified %v returned %v, want custody returned at %s", recorded.HeadSHA, recorded.TerminalHeadVerifiedAt, recorded.CustodyReturnedAt, f.submitted)
+			}
+		})
+	}
+}
+
+// TestUnmovedRunWithUnreadableSourceAndNoManagedWorktreeRecovers pins the other
+// side of reading the managed source live: a managed worktree that no longer
+// exists holds no edit to lose, so it never blocks recovery and nothing is
+// anchored as preserved source.
+func TestUnmovedRunWithUnreadableSourceAndNoManagedWorktreeRecovers(t *testing.T) {
+	t.Parallel()
 	f := runDirtyReviewFailure(t, false)
+	if err := f.database.RecordTerminalSourceState(f.run.ID, "unreadable"); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, f.gate, "worktree", "remove", "--force", f.managed)
 	ctx := context.Background()
 	if state := f.service.InspectCached(ctx); state.NextAction == nil || state.NextAction.Command != "no-mistakes axi sync --recover" {
 		t.Fatalf("status = %s/%s, want the supported recovery offered", state.State, state.Safety)
@@ -217,19 +269,15 @@ func TestUnmovedRunFailingAtReviewWithDirtySourcePreservesItOnRecovery(t *testin
 	if head := gitCmd(t, f.caller, "rev-parse", "HEAD"); head != f.submitted {
 		t.Fatalf("caller moved to %s, want it left at the unmoved head %s", head, f.submitted)
 	}
-	source := custody.RecoverySourceRef(f.run.ID)
-	if parent := gitCmd(t, f.gate, "rev-parse", source+"^"); parent != f.submitted {
-		t.Fatalf("preserved source parent = %s, want %s", parent, f.submitted)
-	}
-	if edit := gitCmd(t, f.gate, "show", source+":feature.txt"); edit != "partial repair" {
-		t.Fatalf("preserved edit = %q", edit)
+	if refs := gitCmd(t, f.gate, "for-each-ref", custody.RecoverySourceRef(f.run.ID)); refs != "" {
+		t.Fatalf("recovery anchored source that no longer exists: %s", refs)
 	}
 	recorded, err := f.database.GetRun(f.run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recorded.HeadSHA != f.submitted || recorded.TerminalHeadVerifiedAt == nil || recorded.CustodyReturnedAt == nil {
-		t.Fatalf("run = head %s verified %v returned %v, want custody returned at %s", recorded.HeadSHA, recorded.TerminalHeadVerifiedAt, recorded.CustodyReturnedAt, f.submitted)
+	if recorded.TerminalHeadVerifiedAt == nil || recorded.CustodyReturnedAt == nil {
+		t.Fatalf("run = verified %v returned %v, want custody returned", recorded.TerminalHeadVerifiedAt, recorded.CustodyReturnedAt)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -113,7 +114,7 @@ func newRecoverFixtureAtSubmittedHead(t *testing.T) *recoverFixture {
 	}
 	return &recoverFixture{
 		t: t, ctx: t.Context(), db: database, repo: repo, run: run,
-		service: &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate},
+		service: &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate, Paths: paths.WithRoot(t.TempDir())},
 		local:   local, gate: gate, remote: remote,
 		base: base, submitted: submitted,
 	}

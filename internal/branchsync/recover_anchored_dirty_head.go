@@ -22,16 +22,17 @@ import (
 // proof can apply: the rebased head is a rewrite of the gate branch, not a
 // descendant, and a run that failed in Review has no review authority.
 //
-// All facts are read fresh: the source observation from the run row, the
-// anchor as an exact, non-symbolic gate ref naming a commit the gate holds, and
-// the managed worktree still holding that dirty source at the recorded head,
-// which is what preserveDirtyManagedSource preserves.
+// All facts are read fresh: the source observation from the run row and the
+// anchor as an exact, non-symbolic gate ref naming a commit the gate holds. The
+// managed worktree still holding that dirty source at the recorded head is
+// read by unverifiedTerminalHeadShape before any shape is chosen
+// (managedSourceToPreserve).
 // This proves only which head the run reached. It is never containment
 // evidence: the operator's local work is still proven present by ancestry or
 // the merge-tree proof before the branch moves.
 func (s *Service) recordedHeadIsTheRunsAnchoredDirtyHead(ctx context.Context, run *db.Run) bool {
 	recorded := strings.TrimSpace(run.HeadSHA)
-	if !s.recordedDirtySourcePreservable(ctx, run) {
+	if recorded == "" || run.TerminalSourceState == nil || *run.TerminalSourceState != "dirty:"+recorded {
 		return false
 	}
 	anchor := custody.RecoveryRef(run.ID)
@@ -42,32 +43,54 @@ func (s *Service) recordedHeadIsTheRunsAnchoredDirtyHead(ctx context.Context, ru
 	return err == nil && exists && anchored == recorded && objectExists(ctx, s.GateDir, recorded)
 }
 
-// sourceObservedDirty reports a terminal run whose source observation recorded
-// dirty managed source, whatever head it names.
-func sourceObservedDirty(run *db.Run) bool {
-	return run.TerminalSourceState != nil && strings.HasPrefix(*run.TerminalSourceState, "dirty:")
-}
-
-// recordedDirtySourcePreservable reports a run whose source observation is
-// exactly "dirty:<recorded head>" and whose own managed worktree, sharing this
-// gate, still sits at that head holding dirty source, so
-// preserveDirtyManagedSource can commit it. Any other dirty observation names
-// source recovery can no longer bind to the head it records (issue #414).
-func (s *Service) recordedDirtySourcePreservable(ctx context.Context, run *db.Run) bool {
+// managedSourceToPreserve is the one read of a terminal run's managed source
+// that every unverified-head shape rests on (issue #414). It reports whether
+// that source holds an edit preserveDirtyManagedSource must commit before
+// custody returns, or why recovery cannot know. A "dirty:<recorded head>"
+// observation needs the run's own managed worktree still at that head and
+// still dirty; a dirty observation of any other head cannot be bound to the
+// recorded one. A source observed clean at the recorded head holds nothing. Any
+// other observation (unreadable, absent, or clean at another head) proves
+// nothing about the source, so the managed worktree is read live: a missing one
+// holds no edit, one at the recorded head is preserved when dirty, and one that
+// exists but cannot be read there refuses.
+func (s *Service) managedSourceToPreserve(ctx context.Context, run *db.Run) (bool, error) {
 	recorded := strings.TrimSpace(run.HeadSHA)
-	if recorded == "" || run.TerminalSourceState == nil || *run.TerminalSourceState != "dirty:"+recorded {
-		return false
+	observed := ""
+	if run.TerminalSourceState != nil {
+		observed = *run.TerminalSourceState
+	}
+	if strings.HasPrefix(observed, "dirty:") {
+		if observed != "dirty:"+recorded {
+			return false, fmt.Errorf("the terminal run recorded dirty managed source (%s) at another head than its recorded head %s, so that source cannot be preserved before custody returns", observed, recorded)
+		}
+		managed, err := s.managedSourceAtRecordedHead(ctx, run)
+		if err != nil {
+			return false, fmt.Errorf("the terminal run recorded dirty managed source (%s), but it cannot be preserved before custody returns: %v", observed, err)
+		}
+		if clean, _ := terminalSourceClean(ctx, managed); clean {
+			return false, fmt.Errorf("the terminal run recorded dirty managed source (%s), but its managed worktree %s no longer holds it", observed, managed)
+		}
+		return true, nil
+	}
+	if recorded != "" && observed == "clean:"+recorded {
+		return false, nil
+	}
+	if s.Paths != nil {
+		if _, err := os.Lstat(worktrees.RecordedDir(s.Paths, run.WorktreePath(), run.RepoID, run.ID)); os.IsNotExist(err) {
+			return false, nil
+		}
 	}
 	managed, err := s.managedSourceAtRecordedHead(ctx, run)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("the terminal run's managed source was never observed clean at its recorded head %s, and its managed worktree still exists but cannot be read there (%v), so an edit it may hold cannot be preserved before custody returns; make that worktree readable at the recorded head, or remove it once anything it holds is saved, then re-run recovery", recorded, err)
 	}
 	clean, _ := terminalSourceClean(ctx, managed)
-	return !clean
+	return !clean, nil
 }
 
 // preserveDirtyManagedSource runs before any unverified-head proof stamps a run
-// whose source observation is dirty (issue #414). The dirty source exists only
+// whose managed source managedSourceToPreserve reads as dirty (issue #414). The dirty source exists only
 // in the managed worktree, which custody return makes eligible for removal, so
 // it is committed on top of the recorded head and anchored create-only at the
 // run's recovery source ref. It returns the refusal to report when either
@@ -75,7 +98,7 @@ func (s *Service) recordedDirtySourcePreservable(ctx context.Context, run *db.Ru
 func (s *Service) preserveDirtyManagedSource(ctx context.Context, state State, run *db.Run) (State, bool) {
 	snapshot, err := s.commitManagedDirtySource(ctx, run)
 	if err != nil {
-		return blockedPlan(state, StatePipelineOwned, "blocked_recover_unverified_head", fmt.Sprintf("the terminal run recorded head %s with dirty managed source that cannot be preserved: %v; no files or refs were changed", run.HeadSHA, err)), false
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_unverified_head", fmt.Sprintf("the dirty managed source of the terminal run at its recorded head %s cannot be preserved: %v; no files or refs were changed", run.HeadSHA, err)), false
 	}
 	sourceRef := custody.RecoverySourceRef(run.ID)
 	if err := custody.PreserveRecoveryAnchor(ctx, s.GateDir, sourceRef, snapshot); err != nil {

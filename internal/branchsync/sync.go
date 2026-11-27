@@ -674,9 +674,12 @@ func (s *Service) BindRecoveryArchive(ctx context.Context, archiveRef string) St
 //     managed worktree must sit exactly at the recorded head and be clean, and
 //     the head is anchored at the run's create-only recovery ref and stamped
 //     with that clean observation. Whichever shape proves the head, a run whose
-//     source observation is dirty first has that managed source committed and
-//     anchored at its recovery source ref (preserveDirtyManagedSource, issue
-//     #414), and a dirty source that can no longer be preserved proves no shape.
+//     managed source is dirty first has it committed and anchored at its
+//     recovery source ref (preserveDirtyManagedSource, issue #414): a recorded
+//     dirty observation must still be preservable, and a source not observed
+//     clean at the recorded head (unreadable or absent) is read live, where a
+//     missing managed worktree holds no edit and one that exists but cannot be
+//     read at the recorded head proves no shape.
 //   - The only possible worktree mutation is a guarded move of a clean checked-out
 //     branch: a strict fast-forward, or an anchored move to a proven-containing
 //     head performed by Git operations that refuse on their own rather than by a
@@ -757,8 +760,11 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 			return blockedPlan(state, StatePipelineOwned, "blocked_recover_unverified_head", "the terminal run has no verified head and the preserved gate head could not be read; no files or refs were changed")
 		}
 		verifiedHead := gateHead
-		shape := s.unverifiedTerminalHeadShape(ctx, state, run, gateHead)
-		if shape != unverifiedHeadUnprovable && sourceObservedDirty(run) {
+		shape, preserveSource, err := s.unverifiedTerminalHeadShape(ctx, state, run, gateHead)
+		if err != nil {
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_unverified_head", err.Error()+"; no files or refs were changed")
+		}
+		if shape != unverifiedHeadUnprovable && preserveSource {
 			if blocked, ok := s.preserveDirtyManagedSource(ctx, state, run); !ok {
 				return blocked
 			}
@@ -792,9 +798,6 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 			}
 			verifiedHead = run.HeadSHA
 		default:
-			if sourceObservedDirty(run) && !s.recordedDirtySourcePreservable(ctx, run) {
-				return blockedPlan(state, StatePipelineOwned, "blocked_recover_unverified_head", fmt.Sprintf("the terminal run recorded dirty managed source (%s), but its managed worktree no longer holds that source at the recorded head %s, so it cannot be preserved before custody returns; no files or refs were changed", *run.TerminalSourceState, run.HeadSHA))
-			}
 			return blockedPlan(state, StatePipelineOwned, "blocked_recover_unverified_head", "the terminal run has no verified head and the gate head does not descend from the recorded reviewed head with identical final content; no files or refs were changed")
 		}
 		run.HeadSHA = verifiedHead
@@ -1029,27 +1032,30 @@ const (
 	unverifiedHeadObservedClean
 )
 
-func (s *Service) unverifiedTerminalHeadShape(ctx context.Context, state State, run *db.Run, gateHead string) unverifiedHeadShape {
-	// Recover preserves a dirty source observation before any shape stamps the
-	// head, so a dirty source it cannot preserve proves no shape (issue #414).
-	if sourceObservedDirty(run) && !s.recordedDirtySourcePreservable(ctx, run) {
-		return unverifiedHeadUnprovable
+// unverifiedTerminalHeadShape also reports whether Recover must preserve the
+// run's dirty managed source before the shape stamps the head, from the one
+// read managedSourceToPreserve makes; a source it cannot read or preserve
+// proves no shape and returns why (issue #414).
+func (s *Service) unverifiedTerminalHeadShape(ctx context.Context, state State, run *db.Run, gateHead string) (unverifiedHeadShape, bool, error) {
+	preserveSource, err := s.managedSourceToPreserve(ctx, run)
+	if err != nil {
+		return unverifiedHeadUnprovable, false, err
 	}
 	switch {
 	case gateHead == run.HeadSHA:
-		return unverifiedHeadIsGateHead
+		return unverifiedHeadIsGateHead, preserveSource, nil
 	case isAncestor(ctx, s.GateDir, run.HeadSHA, gateHead):
-		return unverifiedHeadBehindGateHead
+		return unverifiedHeadBehindGateHead, preserveSource, nil
 	case recordedHeadExtendsLiveGateBranch(ctx, s.GateDir, state, run, gateHead):
-		return unverifiedHeadExtendsGateBranch
+		return unverifiedHeadExtendsGateBranch, preserveSource, nil
 	case s.recordedHeadIsTheRunsAnchoredDirtyHead(ctx, run):
-		return unverifiedHeadAnchoredDirty
+		return unverifiedHeadAnchoredDirty, preserveSource, nil
 	case equalTreeRewriteOfRecordedHead(ctx, s.GateDir, state, run, gateHead):
-		return unverifiedHeadEqualTreeRewrite
+		return unverifiedHeadEqualTreeRewrite, preserveSource, nil
 	case s.recordedHeadIsTheRunsObservedCleanHead(ctx, state, run):
-		return unverifiedHeadObservedClean
+		return unverifiedHeadObservedClean, preserveSource, nil
 	}
-	return unverifiedHeadUnprovable
+	return unverifiedHeadUnprovable, false, nil
 }
 
 // unverifiedTerminalHeadProvable is inspection's read-only view of the same
@@ -1062,7 +1068,8 @@ func (s *Service) unverifiedTerminalHeadProvable(ctx context.Context, state Stat
 	if err != nil {
 		return false
 	}
-	return s.unverifiedTerminalHeadShape(ctx, state, run, gateHead) != unverifiedHeadUnprovable
+	shape, _, err := s.unverifiedTerminalHeadShape(ctx, state, run, gateHead)
+	return err == nil && shape != unverifiedHeadUnprovable
 }
 
 // equalTreeRewriteOfRecordedHead is the first accepted shape of an unverified
