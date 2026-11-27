@@ -36,6 +36,13 @@ jobs:
       - name: Vet formatted string pointers
         run: make vet-stringptr
 
+      # The Nix flake job runs on pull requests only when module or flake
+      # files change, but a new import can change its vendorHash without
+      # them (issue #503). This makes such a pull request edit package.nix,
+      # which runs that job.
+      - name: Vendored package list matches package.nix
+        run: make vendor-check
+
   test:
     name: ${{ matrix.name }}
     strategy:
