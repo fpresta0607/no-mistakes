@@ -1011,6 +1011,7 @@ The successor explicitly inherits the public binding and generation, and a futur
 Acceptance performs no push, attestation update or check approval.
 
 Acceptance atomically appends the source binding and creates a pending successor with its own fresh launch nonce and proof.
+The successor's checkout is created and configured before acceptance, so a checkout that cannot be set up records no successor and leaves the predecessor to a repeated continuation.
 The same model, effort and agent chain are freshly proved against the current trusted default-branch source under the frozen policy.
 No Review, Test, CI-ready or terminal-verification authority is copied.
 Intent, Rebase, full Review, Test and the remaining required gates execute afresh through the normal pipeline.

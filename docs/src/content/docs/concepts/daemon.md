@@ -179,6 +179,7 @@ Clean committed corrections are also retained unless an exact durable preservati
 This includes corrections committed after terminalization and before the first terminal continuation.
 Cleanup rechecks source after terminating escaped workers and immediately before removal, preserving files flushed during shutdown.
 Retention reaping holds the same branch lock as terminal continuation through revalidation, the process sweep, and removal.
+A new continuation successor's checkout exists before the acceptance that records its run, and reaping leaves it alone until that acceptance commits or the refused continuation removes it.
 Source retention supplies no review or terminal validation authority; [terminal continuation](/no-mistakes/reference/cli/#continue-validation-of-preserved-terminal-source) submits eligible source for fresh validation.
 At terminalization, the executor preserves an unpublished head and records a proven descendant as the run's head even when uncommitted repair source remains.
 It records whether the source is clean, dirty, or unreadable and grants a verified terminal-head stamp only after a successful clean-source check.

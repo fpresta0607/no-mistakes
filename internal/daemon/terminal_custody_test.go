@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/oklog/ulid/v2"
+
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/custody"
@@ -1109,6 +1111,140 @@ func TestTerminalRefusedPreflightDoesNotBindAnUnacceptedCandidate(t *testing.T) 
 	unchanged, err := database.ReadContinuationSnapshot(run.ID)
 	if err != nil || !reflect.DeepEqual(unchanged, before) {
 		t.Fatal("preflight/retry changed predecessor")
+	}
+}
+
+// A continuation used to record its successor before creating the successor's
+// checkout, so a failing `git worktree add` left a pending successor that never
+// started and held its branch with no reason recorded (#408). The checkout is
+// now set up before acceptance: the failure records nothing and leaves the
+// predecessor adoptable, so repeating the continuation starts it.
+func TestTerminalContinuationWorktreeFailureLeavesNoPendingSuccessor(t *testing.T) {
+	// Arrange
+	factory := func() []pipeline.Step {
+		var sequence []pipeline.Step
+		for _, name := range types.AllSteps() {
+			if name == types.StepReview {
+				sequence = append(sequence, &mockApprovalStep{name: name})
+			} else {
+				sequence = append(sequence, &mockPassStep{name: name})
+			}
+		}
+		return sequence
+	}
+	manager, p, database, repo, head, _, _ := launchAssertionFixture(t, factory)
+	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature")
+	gate := p.RepoDir(repo.ID)
+	gitCmd(t, gate, "update-ref", "refs/heads/feature", head)
+	assertion := launchExpectation(head)
+	proof, err := assertion.Verify(head, assertion.Profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRunWithLaunchAssertion(repo.ID, "feature", head, head, nil, "nonce", "ordinary2", "intent", "", false, nil, assertion, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := p.WorktreeDir(repo.ID, run.ID)
+	if err := git.WorktreeAdd(context.Background(), gate, managed, head); err != nil {
+		t.Fatal(err)
+	}
+	if err := git.CopyLocalUserIdentity(context.Background(), repo.WorkingPath, managed); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range types.AllSteps() {
+		step, err := database.InsertStepResult(run.ID, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := database.CompleteStepWithStatus(step.ID, types.StepStatusCompleted, 0, 1, "original.log"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.UpdateRunErrorStatusWithVerifiedHead(run.ID, "interrupted", types.RunFailed, head); err != nil {
+		t.Fatal(err)
+	}
+	before, err := database.ReadContinuationSnapshot(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := filepath.Join(gate, "hooks")
+	if err := os.MkdirAll(hooks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hook := filepath.Join(hooks, "post-checkout")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\necho 'checkout refused by fixture' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	request := ipc.RecoverTerminalParams{RepoID: repo.ID, Branch: run.Branch, CallerDir: repo.WorkingPath, SnapshotDigest: before.Digest(), Reason: "validate interrupted source"}
+
+	// Act
+	refused, err := manager.recoverTerminal(context.Background(), request, os.Getpid())
+
+	// Assert
+	if err == nil || !strings.Contains(err.Error(), "successor checkout") {
+		t.Fatalf("continuation with a failing git worktree add = %+v, %v", refused, err)
+	}
+	runs, err := database.GetRunsByRepo(repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, current := range runs {
+		if current.Status == types.RunPending {
+			t.Fatalf("run %s stayed pending after its successor checkout could not be created (#408)", current.ID)
+		}
+	}
+	if len(runs) != 1 {
+		t.Fatalf("a refused continuation recorded a successor: %d runs", len(runs))
+	}
+	if event, err := database.GetTerminalAdoption(run.ID); err != nil || event != nil {
+		t.Fatalf("refused continuation recorded adoption %+v: %v", event, err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(managed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != run.ID {
+		t.Fatalf("refused continuation left a successor checkout behind: %v", entries)
+	}
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := manager.recoverTerminal(context.Background(), request, os.Getpid())
+	if err != nil || accepted.RunID == run.ID || accepted.PredecessorID != run.ID || !accepted.Started {
+		t.Fatalf("repeated continuation after the checkout failure = %+v, %v", accepted, err)
+	}
+	unchanged, err := database.ReadContinuationSnapshot(run.ID)
+	if err != nil || !reflect.DeepEqual(unchanged, before) {
+		t.Fatal("refused and repeated continuation changed the predecessor")
+	}
+}
+
+// A continuation creates its successor's checkout before the acceptance that
+// records the run, so reaping must not take that checkout for an orphan while
+// it is reserved (#408).
+func TestWorktreeReapSkipsAnUnrecordedSuccessorCheckout(t *testing.T) {
+	// Arrange
+	manager, p, _, repo, _, _, _ := launchAssertionFixture(t, nil)
+	successorID := ulid.Make().String()
+	checkout := p.WorktreeDir(repo.ID, successorID)
+	if err := os.MkdirAll(checkout, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manager.unrecordedCheckouts.Store(successorID, struct{}{})
+	policy, later := worktreeReapPolicy{Retention: time.Nanosecond}, time.Now().Add(time.Hour)
+
+	// Act
+	manager.reapWorktrees(policy, later)
+
+	// Assert
+	if _, err := os.Stat(checkout); err != nil {
+		t.Fatalf("reaping removed a reserved successor checkout: %v", err)
+	}
+	manager.unrecordedCheckouts.Delete(successorID)
+	manager.reapWorktrees(policy, later)
+	if _, err := os.Stat(checkout); !os.IsNotExist(err) {
+		t.Fatalf("an unreserved directory no run records was kept: %v", err)
 	}
 }
 
