@@ -84,15 +84,27 @@ func claudeRouteDiverts(name, value string, isSet bool, daemonEnv map[string]str
 	if claudeNetworkRouteEnvVars[name] == claudeRouteNeverFollowed {
 		return value != ""
 	}
-	daemonValue, isDaemonSet := daemonEnv[name]
+	daemonValue, isDaemonSet := daemonEnv[claudeEnvName(name)]
 	return isSet != isDaemonSet || value != daemonValue
 }
 
+// claudeEnvName is the key an environment variable is looked up by. Windows
+// environment names are case-insensitive and a variable keeps the casing it was
+// created with, so there https_proxy and HTTPS_PROXY are one variable.
+func claudeEnvName(name string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToUpper(name)
+	}
+	return name
+}
+
+// claudeEnvMap indexes environment entries by claudeEnvName, the last entry
+// winning as os/exec does.
 func claudeEnvMap(entries []string) map[string]string {
 	env := make(map[string]string, len(entries))
 	for _, entry := range entries {
 		if key, value, ok := strings.Cut(entry, "="); ok {
-			env[key] = value
+			env[claudeEnvName(key)] = value
 		}
 	}
 	return env
@@ -119,7 +131,7 @@ func (h claudeSettingsHost) leaveRoute(env map[string]string, cwd string, readsP
 	}
 	daemonEnv := claudeEnvMap(os.Environ())
 	for name := range claudeNetworkRouteEnvVars {
-		value, isSet := env[name]
+		value, isSet := env[claudeEnvName(name)]
 		if claudeRouteDiverts(name, value, isSet, daemonEnv) {
 			return false
 		}
@@ -210,15 +222,19 @@ func claudeSettingsLeaveRoute(data []byte, managed bool, daemonEnv map[string]st
 	if !ok {
 		return true
 	}
-	var env map[string]json.RawMessage
-	if json.Unmarshal(raw, &env) != nil || env == nil {
+	var block map[string]json.RawMessage
+	if json.Unmarshal(raw, &block) != nil || block == nil {
 		return false
 	}
-	if _, ok := env["ANTHROPIC_BASE_URL"]; ok {
+	env := make(map[string]json.RawMessage, len(block))
+	for name, raw := range block {
+		env[claudeEnvName(name)] = raw
+	}
+	if _, ok := env[claudeEnvName("ANTHROPIC_BASE_URL")]; ok {
 		return false
 	}
 	for _, key := range claudeCloudProviderEnvVars {
-		if _, ok := env[key]; ok {
+		if _, ok := env[claudeEnvName(key)]; ok {
 			return false
 		}
 	}

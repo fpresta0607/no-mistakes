@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -218,6 +219,17 @@ func TestClaudeProviderProbeFollowsTheSettingsSources(t *testing.T) {
 		}},
 		{name: "user settings proxy the daemon shares", wantEndpoint: "https://api.anthropic.com", arrange: func(t *testing.T, f *claudeSettingsFixture) []string {
 			t.Setenv("HTTPS_PROXY", corporateProxy)
+			writeClaudeSettingsFile(t, filepath.Join(f.home, ".claude", "settings.json"), routesToProxy)
+			return nil
+		}},
+		// Windows environment names are case-insensitive, so the daemon's
+		// https_proxy is the settings file's HTTPS_PROXY there and the probe
+		// follows it; elsewhere they are two variables and the CLI's differs.
+		{name: "user settings proxy the daemon holds in lower case", wantEndpoint: map[bool]string{true: "https://api.anthropic.com"}[runtime.GOOS == "windows"], arrange: func(t *testing.T, f *claudeSettingsFixture) []string {
+			if err := os.Unsetenv("HTTPS_PROXY"); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("https_proxy", corporateProxy)
 			writeClaudeSettingsFile(t, filepath.Join(f.home, ".claude", "settings.json"), routesToProxy)
 			return nil
 		}},
