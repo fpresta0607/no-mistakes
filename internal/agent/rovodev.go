@@ -30,7 +30,7 @@ func (a *rovodevAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	if opts.Desktop != "" {
 		return nil, serverDesktopRefusal("rovodev")
 	}
-	return runWithRetry(ctx, "rovodev", opts, claudeMaxRetries, classifyTransient, a.recoverTransientRetry, func() (*Result, error) {
+	return runWithRetry(ctx, "rovodev", opts, claudeMaxRetries, classifyTransient, a.recoverTransientRetry, nil, func() (*Result, error) {
 		return a.runOnce(ctx, opts)
 	})
 }

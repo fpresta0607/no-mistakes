@@ -175,6 +175,10 @@ type agentActivity struct {
 	// exited is set once the launched subprocess reported its exit, so its
 	// PID is never probed for children after the kernel may have reused it.
 	exited bool
+	// providerWait is set while the adapter declared it holds its next attempt
+	// until the model provider answers (agent.LifecyclePhaseProviderWait). It
+	// is not output: the next attempt or launch clears it.
+	providerWait bool
 	// trackChildren is set when a stall budget applies, the only reader of
 	// the child samples below.
 	trackChildren bool
@@ -290,6 +294,7 @@ func (a *agentActivity) beginAttempt() {
 	a.launchedAt = time.Time{}
 	a.launched = false
 	a.exited = false
+	a.providerWait = false
 	a.resetChildren()
 	a.mu.Unlock()
 }
@@ -303,6 +308,7 @@ func (a *agentActivity) observeLaunch(pid int) {
 	a.launchedPID = pid
 	a.launchedAt = time.Now()
 	a.exited = false
+	a.providerWait = false
 	a.resetChildren()
 	sample := a.trackChildren && !a.finished && pid > 1
 	generation := a.generation
@@ -310,6 +316,29 @@ func (a *agentActivity) observeLaunch(pid int) {
 	if sample {
 		go a.sampleChildren(pid, generation)
 	}
+}
+
+func (a *agentActivity) observeProviderWait() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.providerWait = true
+	a.mu.Unlock()
+}
+
+// waitingOnProvider reports whether the adapter declared a wait for its model
+// provider that no attempt or launch has ended yet. The adapter bounds that
+// wait by the invocation's deadline and ends it on the provider outage, so the
+// stall watcher leaves it to that deadline. Like waitingOnChild it is
+// liveness, never output.
+func (a *agentActivity) waitingOnProvider() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.providerWait
 }
 
 func (a *agentActivity) observeExit() {
@@ -406,6 +435,8 @@ func observeAgentActivity(opts *agent.RunOpts) *agentActivity {
 			activity.observe()
 		case agent.LifecyclePhaseRetry, agent.LifecyclePhaseFallback:
 			activity.beginAttempt()
+		case agent.LifecyclePhaseProviderWait:
+			activity.observeProviderWait()
 		case agent.LifecyclePhaseExit:
 			activity.observeExit()
 			// Exit is the deadline's own consequence: cancelling the context
@@ -525,7 +556,7 @@ func watchAgentDeadline(ctx context.Context, stop <-chan struct{}, timeout, idle
 			return
 		case <-timer.C:
 			wait := activity.untilIdle(idle)
-			if wait <= 0 && activity.waitingOnChild() {
+			if wait <= 0 && (activity.waitingOnProvider() || activity.waitingOnChild()) {
 				wait = idle
 			}
 			if wait <= 0 {

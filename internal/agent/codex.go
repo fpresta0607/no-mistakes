@@ -56,7 +56,7 @@ func (a *codexAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 		}
 		return classifyTransient(err)
 	}
-	return runWithRetry(ctx, "codex", opts, claudeMaxRetries, classify, nil, func() (*Result, error) {
+	return runWithRetry(ctx, "codex", opts, claudeMaxRetries, classify, nil, nil, func() (*Result, error) {
 		return a.runOnce(ctx, opts)
 	})
 }

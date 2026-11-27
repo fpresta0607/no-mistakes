@@ -1113,6 +1113,83 @@ func TestRunAgent_LaunchedAgentWithoutAChildIsCutAtTheStallBudget(t *testing.T) 
 	}
 }
 
+// An adapter that declared it is waiting for its model provider ends that wait
+// on its own outage error before the still-working cap, so the stall watcher
+// must not cut it at the silent budget; a quiet adapter that declared no such
+// wait is still cut there.
+func TestRunAgent_DeclaredProviderWaitOutlastsTheStallBudget(t *testing.T) {
+	t.Parallel()
+	const (
+		stall   = 250 * time.Millisecond
+		working = 1500 * time.Millisecond
+		reserve = 100 * time.Millisecond
+	)
+	outage := errors.New("claude retry skipped: provider outage: the model provider did not answer")
+	for _, tc := range []struct {
+		name           string
+		isWaitDeclared bool
+	}{
+		{name: "declared provider wait", isWaitDeclared: true},
+		{name: "no declared wait"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// Arrange
+			ag := &hangingAgent{
+				name: "claude",
+				runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+					opts.OnLifecycle(agent.LifecycleEvent{Agent: "claude", Phase: agent.LifecyclePhaseStart})
+					opts.OnChunk("working\n")
+					opts.OnLifecycle(agent.LifecycleEvent{Agent: "claude", Phase: agent.LifecyclePhaseExit})
+					opts.OnLifecycle(agent.LifecycleEvent{Agent: "claude", Phase: agent.LifecyclePhaseRetry})
+					if tc.isWaitDeclared {
+						opts.OnLifecycle(agent.LifecycleEvent{Agent: "claude", Phase: agent.LifecyclePhaseProviderWait})
+					}
+					deadline, ok := ctx.Deadline()
+					if !ok {
+						return nil, errors.New("no invocation deadline to wait against")
+					}
+					timer := time.NewTimer(time.Until(deadline.Add(-reserve)))
+					defer timer.Stop()
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-timer.C:
+						return nil, outage
+					}
+				},
+			}
+			sctx := &StepContext{
+				Ctx:    context.Background(),
+				Agent:  ag,
+				Config: &config.Config{AgentTimeout: stall, AgentWorkingTimeout: working},
+			}
+
+			// Act
+			start := time.Now()
+			_, err := sctx.RunAgent(agent.RunOpts{Prompt: "work"})
+			elapsed := time.Since(start)
+
+			// Assert
+			if tc.isWaitDeclared {
+				if !errors.Is(err, outage) || errors.Is(err, ErrAgentTimeout) {
+					t.Fatalf("error = %v, want the adapter's provider outage, not a stall cut", err)
+				}
+				if elapsed < 2*stall {
+					t.Fatalf("wait ended after %s, want it to outlast the %s silent budget", elapsed, stall)
+				}
+			} else {
+				if !errors.Is(err, ErrAgentTimeout) || !strings.Contains(err.Error(), "stall budget, then no recent output or live child process") {
+					t.Fatalf("error = %v, want the stall cut", err)
+				}
+				if elapsed >= working-reserve {
+					t.Fatalf("quiet agent ran %s, want a cut at the %s silent budget", elapsed, stall)
+				}
+			}
+		})
+	}
+}
+
 // liveChildScript waits for the go signal, then runs a tool that outlives the
 // stall budget as a real child of the shell. The tool is backgrounded and
 // waited on because a shell that execs its final command (bash as /bin/sh
