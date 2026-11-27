@@ -2,7 +2,9 @@ name: Nix flake
 
 # A path-filtered PR run is safe here: this workflow backs no required check,
 # and the filter omits every release-please output, so release PRs create no
-# run. The push trigger covers what the filter misses after merge.
+# run. The push trigger covers what the filter misses after merge, and
+# ci.yml's vendor check sends a pull request whose imports change the vendored
+# package list through package.nix, so this job runs on it.
 on:
   pull_request:
     branches:
@@ -44,8 +46,9 @@ jobs:
       - name: Evaluate every advertised system
         run: nix flake check --all-systems --no-build
 
-      # vendorHash is fixed-output: a go.mod/go.sum change that does not
-      # recompute it fails here, and the error names the hash to commit.
+      # vendorHash is fixed-output: a go.mod/go.sum or vendored package list
+      # change that does not recompute it fails here, and the error names the
+      # hash to commit.
       - name: Build flake
         run: |
           set -o pipefail
@@ -54,7 +57,7 @@ jobs:
           fi
           got=$(awk '$1 == "got:" { print $2 }' "$RUNNER_TEMP/nix-build.log" | tail -n 1)
           if [ -n "$got" ]; then
-            echo "::error file=package.nix::vendorHash is stale after a go.mod/go.sum change; set it to $got"
+            echo "::error file=package.nix::vendorHash is stale after a go.mod, go.sum or vendored package list change; set it to $got"
           fi
           exit 1
 

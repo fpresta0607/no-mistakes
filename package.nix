@@ -14,7 +14,12 @@ buildGoModule {
   inherit version;
 
   src = lib.cleanSource ./.;
-  vendorHash = "sha256-t7Oa8tU30HPKcgtXwJcj9AaBJGJ1VKn6ayKh4r+jrK8=";
+  # vendorHash covers the `go mod vendor` tree, which also changes when a new
+  # import vendors another package of an already-required module, with no
+  # go.mod or go.sum change. `make vendor-check` (CI's check job) compares the
+  # tree's package list to this digest and fails until both are updated.
+  # vendor-modules-sha256: 09b658da0170600550017bb781d5683752070e2618c31a814a2a34f975a84c23
+  vendorHash = "sha256-Dk9q8mkWBR29OQsT/YXRAEJUlfkq+nxHnP79cvpSlno=";
   subPackages = [ "cmd/no-mistakes" ];
 
   env.CGO_ENABLED = 0;
