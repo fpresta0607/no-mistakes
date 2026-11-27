@@ -120,7 +120,7 @@ func newRecoverFixture(t *testing.T, status types.RunStatus) *recoverFixture {
 	run, _ = database.GetRun(run.ID)
 	return &recoverFixture{
 		t: t, ctx: ctx, db: database, repo: repo, run: run,
-		service: &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate},
+		service: &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate, Paths: paths.WithRoot(t.TempDir())},
 		local:   local, gate: gate, remote: remote,
 		base: base, submitted: submitted, preserved: preserved,
 	}
@@ -229,7 +229,7 @@ func newDivergentArchiveRecoverFixture(t *testing.T) (*recoverFixture, string) {
 	}
 	fixture := &recoverFixture{
 		t: t, ctx: ctx, db: database, repo: repo, run: run,
-		service: &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate},
+		service: &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate, Paths: paths.WithRoot(t.TempDir())},
 		local:   local, gate: gate, remote: remote, base: base, submitted: submitted, preserved: preserved,
 	}
 	return fixture, archiveRef
@@ -1084,7 +1084,7 @@ func newUnmovedRecoverFixture(t *testing.T, status types.RunStatus) *recoverFixt
 	run, _ = database.GetRun(run.ID)
 	return &recoverFixture{
 		t: t, ctx: ctx, db: database, repo: repo, run: run,
-		service: &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate},
+		service: &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate, Paths: paths.WithRoot(t.TempDir())},
 		local:   local, gate: gate, remote: remote,
 		base: base, submitted: submitted, preserved: submitted,
 	}
@@ -2246,7 +2246,7 @@ func newRebasedRecoverRun(t *testing.T, root string, heads recoverHeads, status 
 	run, _ = database.GetRun(run.ID)
 	return &recoverFixture{
 		t: t, ctx: ctx, db: database, repo: repo, run: run,
-		service: &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate},
+		service: &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate, Paths: paths.WithRoot(t.TempDir())},
 		local:   local, gate: gate, remote: remote,
 		base: base, submitted: submitted, preserved: preserved,
 	}
