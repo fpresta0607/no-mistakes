@@ -24,7 +24,7 @@ LDFLAGS := -X github.com/kunchenguid/no-mistakes/internal/buildinfo.Version=$(VE
            -X github.com/kunchenguid/no-mistakes/internal/buildinfo.TelemetryHost=$(UMAMI_HOST) \
            -X github.com/kunchenguid/no-mistakes/internal/buildinfo.TelemetryWebsiteID=$(UMAMI_WEBSITE_ID)
 
-.PHONY: build dist install test e2e e2e-record lint fmt clean docs docs-build docs-preview demo skill skill-check winres winres-check vet-stringptr
+.PHONY: build dist install test e2e e2e-record lint fmt clean docs docs-build docs-preview demo skill skill-check winres winres-check vet-stringptr vendor-check
 
 DIST_DIR ?= dist
 # go build -o writes exactly the name it is given, and Windows shells only find
@@ -127,7 +127,22 @@ winres:
 winres-check:
 	go run ./cmd/genwinres --check
 
-lint: skill-check winres-check vet-stringptr
+# Fail when the vendored package list (`go mod vendor`'s modules.txt) no
+# longer matches the digest package.nix keeps beside vendorHash. A new import
+# of an already-required module's package changes vendorHash with no go.mod or
+# go.sum change (issue #503). Updating the digest edits package.nix, which runs
+# the Nix flake job on the pull request, and that job prints the hash to set.
+vendor-check:
+	@dir=$$(mktemp -d) && trap 'rm -rf "$$dir"' EXIT && \
+	go mod vendor -o "$$dir" && \
+	got=$$( (sha256sum "$$dir/modules.txt" 2>/dev/null || shasum -a 256 "$$dir/modules.txt") | cut -d' ' -f1) && \
+	want=$$(sed -n 's/^ *# vendor-modules-sha256: //p' package.nix | tr -d '\r') && \
+	if [ "$$got" != "$$want" ]; then \
+		echo "vendor-check: the vendored package list changed; set '# vendor-modules-sha256: $$got' in package.nix, then set vendorHash to the hash the Nix flake job prints on the pull request"; \
+		exit 1; \
+	fi
+
+lint: skill-check winres-check vet-stringptr vendor-check
 	go vet ./...
 
 # Fail when a *string reaches a formatting call such as t.Fatalf, which prints

@@ -125,7 +125,7 @@ make build   # 构建 bin/no-mistakes（Windows 上为 bin/no-mistakes.exe；带
 make test    # 运行 go test -race ./...（不含 e2e 套件）
 make e2e     # 运行打了标签的端到端 agent 旅程套件
 make e2e-record # agent 线格式变化时，重新录制 e2e fixtures
-make lint    # 检查生成的 skill 和 Windows 资源是否漂移，跑 go vet ./... 和格式化 *string 检查
+make lint    # 检查生成的 skill、Windows 资源和 vendored 包列表是否漂移，跑 go vet ./... 和格式化 *string 检查
 make skill   # 重新生成已提交的 no-mistakes skill 文件
 make fmt     # 运行 gofmt -w .
 make demo    # 重新生成 demo.gif 和 demo.mp4（需要 vhs 和 ffmpeg）
