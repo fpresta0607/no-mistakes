@@ -39,8 +39,15 @@ func newClaudeSettingsFixture(t *testing.T) *claudeSettingsFixture {
 	for _, key := range append([]string{"ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR", "WSL_DISTRO_NAME"}, claudeCloudProviderEnvVars...) {
 		t.Setenv(key, "")
 	}
+	// Unset rather than set empty: Windows environment names are
+	// case-insensitive and keep the spelling they were created with, so
+	// creating both spellings here would make a later HTTPS_PROXY read back as
+	// whichever spelling map iteration created first.
 	for key := range claudeNetworkRouteEnvVars {
 		t.Setenv(key, "")
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return fixture
 }
