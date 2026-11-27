@@ -16,7 +16,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func admissionFixture(t *testing.T) (*DB, ValidationAdmission) {
+func admissionFixture(t *testing.T, profiles ...*agentcfg.PiProfile) (*DB, ValidationAdmission) {
 	t.Helper()
 	database := openTestDB(t)
 	repository, err := database.InsertRepo(t.TempDir(), "https://example.test/owner/repository.git", "main")
@@ -31,7 +31,7 @@ func admissionFixture(t *testing.T) (*DB, ValidationAdmission) {
 	}
 	intent := RunIntent{Summary: "Validate authored changes", Source: RunIntentSourceAgent, Score: 1}
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(intent.Summary)))
-	parent, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", strings.Repeat("b", 40), strings.Repeat("c", 40), &intent, "original-nonce", "frozen-generation", digest, "", true, nil, assertion, proof)
+	parent, err := database.InsertRunWithLaunchAssertion(repository.ID, "feature", strings.Repeat("b", 40), strings.Repeat("c", 40), &intent, "original-nonce", "frozen-generation", digest, "", true, nil, assertion, proof, profiles...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,6 +116,89 @@ func TestValidationAdmissionPreservesThePredecessorAndStartsWithNoCertification(
 	}
 	if family.PolicyOrigin != "controller_assertion" || family.HistoricalSourceCompleteness != "unknown" {
 		t.Fatalf("provenance = %+v", family)
+	}
+}
+
+// successorSelection is a selection the predecessor in admissionFixture was
+// not launched with, proven fresh against a newer trusted commit.
+func successorSelection(t *testing.T) (*launchassert.Expectation, *launchassert.Proof) {
+	t.Helper()
+	selection := agentcfg.Selection{Harness: types.AgentPi, Model: "openai/successor", Effort: agentcfg.EffortHigh}
+	assertion := &launchassert.Expectation{TrustedSHA: strings.Repeat("9", 40), Profiles: map[string][]agentcfg.Selection{"primary": {selection}, "reviewer": {selection}, "fixer": {selection}}, Apply: true}
+	proof, err := assertion.Verify(assertion.TrustedSHA, assertion.Profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return assertion, proof
+}
+
+// TestValidationAdmissionAdmitsANewSelectionWithThePredecessorProof pins issue
+// #492: once the provider a predecessor launched on is gone, its authored
+// successor proves the original selection and runs on a current one, and the
+// predecessor's Pi pin, which belongs to the old selection, is not inherited.
+func TestValidationAdmissionAdmitsANewSelectionWithThePredecessorProof(t *testing.T) {
+	database, proposal := admissionFixture(t, &agentcfg.PiProfile{Model: "openai/original", Effort: agentcfg.EffortXHigh})
+	if proposal.Snapshot.Run.PiProfile == nil {
+		t.Fatal("the fixture predecessor carries no Pi pin to leave behind")
+	}
+	original := *proposal.Snapshot.Run.LaunchAssertion
+	proposal.Request.PredecessorLaunchAssertion = &original
+	proposal.Request.LaunchAssertion, proposal.AssertionProof = successorSelection(t)
+
+	event, created, err := database.AcceptValidationAdmission(context.Background(), proposal)
+
+	if err != nil || !created {
+		t.Fatalf("accept: created=%v error=%v", created, err)
+	}
+	child, err := database.GetRun(event.ChildID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !child.LaunchAssertion.Matches(proposal.Request.LaunchAssertion) || child.PiProfile != nil {
+		t.Fatalf("child selection = %+v pin %+v, want the successor selection and no inherited pin", child.LaunchAssertion, child.PiProfile)
+	}
+	if _, err := database.ValidationFamily(child.ID); err != nil {
+		t.Fatalf("the family no longer reads with the successor selection: %v", err)
+	}
+	if stored, err := database.GetValidationAdmission(proposal.Request.PredecessorID); err != nil || stored == nil || stored.ChildID != child.ID {
+		t.Fatalf("stored admission = %+v %v, want it to read back and bind this child", stored, err)
+	}
+}
+
+func TestValidationAdmissionNamesTheSelectionRuleItRefuses(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(t *testing.T, proposal *ValidationAdmission)
+		want   string
+	}{
+		{name: "proof differs from the original selection", change: func(t *testing.T, proposal *ValidationAdmission) {
+			forged := *proposal.Request.LaunchAssertion
+			forged.TrustedSHA = strings.Repeat("8", 40)
+			proposal.Request.PredecessorLaunchAssertion = &forged
+			proposal.Request.LaunchAssertion, proposal.AssertionProof = successorSelection(t)
+		}, want: "predecessor_launch_assertion does not match the predecessor's original agent selection"},
+		{name: "changed selection without proof", change: func(t *testing.T, proposal *ValidationAdmission) {
+			proposal.Request.LaunchAssertion, proposal.AssertionProof = successorSelection(t)
+		}, want: "without predecessor_launch_assertion cannot change the original agent selection"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			database, proposal := admissionFixture(t)
+			test.change(t, &proposal)
+			before, err := database.GetRunsByRepo(proposal.Request.RepoID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err = database.AcceptValidationAdmission(context.Background(), proposal)
+
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("refusal = %v, want %q", err, test.want)
+			}
+			after, err := database.GetRunsByRepo(proposal.Request.RepoID)
+			if err != nil || !reflect.DeepEqual(before, after) {
+				t.Fatalf("refusal changed runs: %v", err)
+			}
+		})
 	}
 }
 

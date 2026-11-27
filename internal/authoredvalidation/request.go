@@ -40,6 +40,7 @@ type Request struct {
 	PushTargetFingerprint        string                    `json:"push_target_fingerprint"`
 	ControllerPolicy             ControllerPolicy          `json:"controller_policy"`
 	LaunchAssertion              *launchassert.Expectation `json:"launch_assertion"`
+	PredecessorLaunchAssertion   *launchassert.Expectation `json:"predecessor_launch_assertion,omitempty"`
 	HistoricalSourceCompleteness string                    `json:"historical_source_completeness"`
 	Reason                       string                    `json:"reason"`
 	TerminalGeneration           string                    `json:"terminal_generation,omitempty"`
@@ -51,6 +52,9 @@ func (request Request) Validate() error {
 	if request.TerminalGeneration != "" {
 		if strings.TrimSpace(request.TerminalGeneration) != request.TerminalGeneration || len(request.TerminalGeneration) > 128 || request.TerminalGeneration == request.ValidationGeneration || !request.AcceptUnknownSource || request.LaunchAssertion == nil || !request.LaunchAssertion.Apply {
 			return fmt.Errorf("terminal validation requires a distinct generation, explicit unknown-source acceptance and an explicit launch selection")
+		}
+		if request.PredecessorLaunchAssertion != nil {
+			return fmt.Errorf("terminal validation names its own launch selection and takes no predecessor_launch_assertion")
 		}
 	} else if request.AcceptUnknownSource || len(request.SourceAnchors) != 0 {
 		return fmt.Errorf("terminal source acceptance requires a terminal validation generation")
@@ -76,7 +80,17 @@ func (request Request) Validate() error {
 	if request.ControllerPolicy.Class == "" || len(request.ControllerPolicy.Class) > 64 || request.ControllerPolicy.ReviewCycles < 0 || request.LaunchNonce == "" || request.ValidationGeneration == "" || request.LaunchAssertion == nil {
 		return fmt.Errorf("authored admission requires the controller's frozen policy assertion and original launch binding")
 	}
+	if err := request.PredecessorLaunchAssertion.Validate(); err != nil {
+		return fmt.Errorf("predecessor_launch_assertion: %w", err)
+	}
 	return request.LaunchAssertion.Validate()
+}
+
+// NamesNewSelection reports a successor whose launch_assertion is its own
+// current selection rather than its predecessor's original one, so it inherits
+// none of the predecessor's per-run Pi pin or quota routing.
+func (request Request) NamesNewSelection() bool {
+	return request.TerminalGeneration != "" || request.PredecessorLaunchAssertion != nil
 }
 
 func Decode(data []byte) (*Request, error) {
@@ -102,7 +116,7 @@ func Decode(data []byte) (*Request, error) {
 			return nil, fmt.Errorf("invalid authored admission field")
 		}
 		switch key {
-		case "predecessor_id", "snapshot_digest", "repo_id", "branch", "caller_dir", "candidate_sha", "candidate_tree", "launch_nonce", "validation_generation", "intent_digest", "published_head_sha", "push_generation", "push_target_fingerprint", "controller_policy", "launch_assertion", "historical_source_completeness", "reason", "terminal_generation", "accept_unknown_source", "source_anchors":
+		case "predecessor_id", "snapshot_digest", "repo_id", "branch", "caller_dir", "candidate_sha", "candidate_tree", "launch_nonce", "validation_generation", "intent_digest", "published_head_sha", "push_generation", "push_target_fingerprint", "controller_policy", "launch_assertion", "predecessor_launch_assertion", "historical_source_completeness", "reason", "terminal_generation", "accept_unknown_source", "source_anchors":
 		default:
 			return nil, fmt.Errorf("unknown or non-canonical authored admission field %q", key)
 		}
